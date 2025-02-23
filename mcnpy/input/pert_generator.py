@@ -1,6 +1,5 @@
-import numpy as np
 import sys
-from config import ENERGY_GRIDS
+from mcnpy._grids import ENERGY_GRIDS
 
 def generate_PERTcards(cell, rho, reactions, energies, mat=None, order=2, errors=False, output_path=None):
     """Generates PERT cards for MCNP input files.
@@ -10,21 +9,26 @@ def generate_PERTcards(cell, rho, reactions, energies, mat=None, order=2, errors
     Note that exact uncertainties are usually negligible, so verify their necessity
     before running long calculations.
 
-    Args:
-        cell (Union[int, str, List[int]]): Cell number(s) for PERT card application.
-        rho (float): Density value for the perturbation.
-        reactions (List[str]): List of reaction identifiers.
-        energies (List[float]): Energy values. Used in consecutive pairs for energy bins.
-        mat (Optional[str]): Material identifier. Defaults to None.
-        order (int, optional): Order of PERT card method (1 or 2). Defaults to 2.
-        errors (bool, optional): Whether to include error methods (-2, -3, 1). Defaults to False.
-        output_path (Optional[str]): Path to output file. If None, prints to stdout.
-
-    Returns:
-        None
-
-    Note:
-        Prints PERT cards to either stdout or specified file with sequential numbering.
+    :param cell: Cell number(s) for PERT card application
+    :type cell: int or str or list[int]
+    :param rho: Density value for the perturbation
+    :type rho: float
+    :param reactions: List of reaction identifiers
+    :type reactions: list[str]
+    :param energies: Energy values. Used in consecutive pairs for energy bins
+    :type energies: list[float]
+    :param mat: Material identifier, defaults to None
+    :type mat: str, optional
+    :param order: Order of PERT card method (1 or 2), defaults to 2
+    :type order: int, optional
+    :param errors: Whether to include error methods (-2, -3, 1), defaults to False
+    :type errors: bool, optional
+    :param output_path: Path to output file. If None, prints to stdout
+    :type output_path: str, optional
+    
+    :returns: None
+    
+    :note: Prints PERT cards to either stdout or specified file with sequential numbering
     """
     # Determine output stream
     if output_path:
