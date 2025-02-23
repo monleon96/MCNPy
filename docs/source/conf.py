@@ -9,12 +9,8 @@
 import datetime
 import os
 import sys
-
-# Add the project root and src directory to the Python path
 sys.path.insert(0, os.path.abspath('../..'))
-sys.path.insert(0, os.path.abspath('../../src'))  # Add this line if your package is in a src directory
-
-from _config import LIBRARY_VERSION, AUTHOR
+from mcnpy._config import LIBRARY_VERSION, AUTHOR
 
 project = 'MCNPy'
 copyright = f"{datetime.datetime.now().year}, {AUTHOR}"

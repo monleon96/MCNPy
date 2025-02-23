@@ -9,3 +9,5 @@ docs/build/
 *.code-workspace
 
 # Personal docs
+_config.py
+_README.md

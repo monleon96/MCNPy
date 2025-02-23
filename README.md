@@ -6,7 +6,9 @@ MCNPy is a Python package for working with MCNP input and output files. It serve
 
 ## Documentation
 
-Full documentation is available at [WWINPy Documentation](https://mcnpy.readthedocs.io/en/latest/#).
+Documentation is available at [MCNPy Documentation](https://mcnpy.readthedocs.io/en/latest/#).
+
+*Note:* While this documentation covers the essentials, it may not be the most refined yet. I hope to enhance and expand it in the near future.
 
 ## Installation
 
@@ -21,6 +23,7 @@ import mcnpy
 
 # Read a mctal (.m) file
 mctal = mcnpy.read_mctal("path/to/your/mctal")
+```
 
 ## Contributing
 
