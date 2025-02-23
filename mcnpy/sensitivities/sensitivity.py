@@ -1,6 +1,6 @@
 from dataclasses import dataclass
-from src.input.parse_input import read_mcnp
-from src.mctal.parse_mctal import read_mctal
+from mcnpy.input.parse_input import read_mcnp  # Fix import path
+from mcnpy.mctal.parse_mctal import read_mctal
 from typing import Dict, Union, List
 import numpy as np
 import matplotlib.pyplot as plt
@@ -9,6 +9,19 @@ import math
 
 @dataclass
 class SensitivityData:
+    """Container class for sensitivity analysis data.
+
+    :ivar tally_id: ID of the tally used for sensitivity calculation
+    :type tally_id: int
+    :ivar pert_energies: List of perturbation energy boundaries
+    :type pert_energies: List[float]
+    :ivar label: Label for the sensitivity data set
+    :type label: str
+    :ivar tally_name: Name of the tally
+    :type tally_name: str
+    :ivar data: Nested dictionary containing sensitivity coefficients organized by energy and reaction number
+    :type data: Dict[Union[float,str], Dict[int, Coefficients]]
+    """
     tally_id: int
     pert_energies: list[float]
     label: str
@@ -17,10 +30,25 @@ class SensitivityData:
 
     @property
     def lethargy(self):
+        """Calculate lethargy intervals between perturbation energies.
+
+        Returns:
+            List[float]: List of lethargy intervals.
+        """
         return [np.log(self.pert_energies[i+1]/self.pert_energies[i]) for i in range(len(self.pert_energies)-1)]
         
     def plot(self, energy: Union[float, str, List[float], List[str]] = None, 
              reactions: Union[List[int], int] = None, xlim: tuple = None):
+        """Plot sensitivity coefficients for specified energies and reactions.
+
+        Args:
+            energy (float, str, or list): Energy value(s) to plot. If None, plots all energies.
+            reactions (int or list): Reaction number(s) to plot. If None, plots all reactions.
+            xlim (tuple): Optional x-axis limits as (min, max).
+
+        Raises:
+            ValueError: If specified energies are not found in the data.
+        """
         # If no energy specified, use all energies
         if energy is None:
             energies = list(self.data.keys())
@@ -81,6 +109,15 @@ class SensitivityData:
                       energy: Union[float, str, List[float], List[str]] = None, 
                       reactions: Union[List[int], int] = None, 
                       xlim: tuple = None):
+        """Plot comparison of multiple sensitivity datasets.
+
+        Args:
+            sens_list (List[SensitivityData]): List of sensitivity datasets to compare.
+            energy (float, str, or list): Energy value(s) to plot.
+            reactions (int or list): Reaction number(s) to plot.
+            xlim (tuple): Optional x-axis limits as (min, max).
+            
+        """
         # If no energy specified, use all energies
         if energy is None:
             energy = list(sens_list[0].data.keys())
@@ -155,26 +192,17 @@ class SensitivityData:
             plt.show()
 
     def export_plot_data(self) -> dict:
-        """
-        Exports simplified plot data.
-        Returns a dictionary with the following structure:
+        """Export sensitivity data for plotting.
 
-        {
-          'label': <SensitivityData label>,
-          'tally_name': <tally_name>,
-          'data': {
-              energy1: {
-                  reaction1: { 'x': [...], 'y': [...], 'errors': [...] },
-                  reaction2: { ... },
-                  ...
-              },
-              energy2: { ... },
-              ...
-          }
-        }
+        Returns:
+            dict: A dictionary with keys:
+                label (str): The sensitivity data label.
+                tally_name (str): The tally name.
+                data (dict): Mapping energy values to reaction dictionaries, where each reaction dictionary maps a reaction number to a dict with:
+                data[x] (list): Energy boundaries.
+                data[y] (list): Sensitivity values.
+                data[errors] (list): Error values.
 
-        The x values are the perturbed energies.
-        The y values and error bars are computed using the same logic as in the plot routines.
         """
         export_data = {
             'label': self.label,
@@ -204,6 +232,19 @@ class SensitivityData:
 
 @dataclass
 class Coefficients:
+    """Container for sensitivity coefficients for a specific energy and reaction.
+
+    :ivar energy: Energy value or label
+    :type energy: Union[float, str]
+    :ivar reaction: Reaction number
+    :type reaction: int
+    :ivar pert_energies: Perturbation energy boundaries
+    :type pert_energies: List[float]
+    :ivar values: Raw sensitivity coefficient values
+    :type values: List[float]
+    :ivar errors: Relative errors for the sensitivity coefficients
+    :type errors: List[float]
+    """
     energy: Union[float, str]
     reaction: int
     pert_energies: list[float]
@@ -212,15 +253,31 @@ class Coefficients:
 
     @property
     def lethargy(self):
+        """Calculate lethargy intervals between perturbation energies.
+
+        Returns:
+            List[float]: List of lethargy intervals.
+        """
         return [np.log(self.pert_energies[i+1]/self.pert_energies[i]) for i in range(len(self.pert_energies)-1)]
 
     @property
     def values_per_lethargy(self):
+        """Calculate sensitivity coefficients per unit lethargy.
+
+        Returns:
+            List[float]: Sensitivity coefficients normalized by lethargy intervals.
+        """
         lethargy_vals = self.lethargy
         return [self.values[i]/lethargy_vals[i] for i in range(len(lethargy_vals))]
     
     # New helper method to plot onto a provided axis
-    def plot_on_ax(self, ax, xlim=None):
+    def _plot_on_ax(self, ax, xlim=None):
+        """Plot sensitivity coefficients on a given matplotlib axis.
+
+        Args:
+            ax (matplotlib.axes.Axes): The axis to plot on.
+            xlim (tuple): Optional x-axis limits as (min, max).
+        """
         # Compute values per lethargy and error ratios
         lp = np.array(self.values_per_lethargy)
         leth = np.array(self.lethargy)
@@ -239,13 +296,36 @@ class Coefficients:
             ax.set_xlim(xlim)
         
     def plot(self, ax=None, xlim=None):
+        """Create a new plot of sensitivity coefficients.
+
+        Args:
+            ax (matplotlib.axes.Axes): Optional existing axis to plot on.
+            xlim (tuple): Optional x-axis limits as (min, max).
+
+        Returns:
+            matplotlib.axes.Axes: The axis containing the plot.
+        """
         if ax is None:
             fig, ax = plt.subplots(figsize=(5, 4))
-        self.plot_on_ax(ax, xlim=xlim)
+        self._plot_on_ax(ax, xlim=xlim)
         return ax
     
 
 def compute_senstivity(input_path: str, mctal_path: str, tally: int, label: str) -> SensitivityData:
+    """Compute sensitivity coefficients from MCNP input and output files.
+
+    :param input_path: Path to MCNP input file
+    :type input_path: str
+    :param mctal_path: Path to MCNP MCTAL output file
+    :type mctal_path: str
+    :param tally: Tally number to analyze
+    :type tally: int
+    :param label: Label for the sensitivity data set
+    :type label: str
+
+    :returns: Object containing computed sensitivity coefficients
+    :rtype: SensitivityData
+    """
     input = read_mcnp(input_path)
     mctal = read_mctal(mctal_path)
     

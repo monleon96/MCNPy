@@ -4,6 +4,7 @@ version = "0.1.0"
 description = ""
 authors = ["Juan Antonio Monleon de la Lluvia <juanmonleon96@gmail.com>"]
 license = "GNU General Public License v3.0"
+homepage = "https://github.com/monleon96/MCNPy.git"
 readme = "README.md"
 
 [tool.poetry.dependencies]
@@ -16,6 +17,12 @@ pytest = "^8.3.4"
 ipykernel = "^6.29.5"
 plotly = "^6.0.0"
 nbformat = "^5.10.4"
+
+[tool.poetry.group.docs.dependencies]
+sphinx = "^8.2.1"
+myst-parser = "^4.0.1"
+sphinx-autobuild = "^2024.10.3"
+sphinx-rtd-theme = "^3.0.2"
 
 [build-system]
 requires = ["poetry-core"]

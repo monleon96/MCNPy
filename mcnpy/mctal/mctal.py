@@ -4,6 +4,31 @@ import matplotlib.pyplot as plt
 
 @dataclass
 class Mctal:
+    """Container class for MCNP MCTAL file data.
+
+    :ivar code_name: Name of the MCNP code version
+    :type code_name: str
+    :ivar ver: Version number of MCNP
+    :type ver: str
+    :ivar probid: Problem ID string
+    :type probid: str
+    :ivar knod: Code specific parameter
+    :type knod: int
+    :ivar nps: Number of particle histories
+    :type nps: int
+    :ivar rnr: Random number
+    :type rnr: int
+    :ivar problem_id: Problem identification line
+    :type problem_id: str
+    :ivar ntal: Number of tallies
+    :type ntal: int
+    :ivar npert: Number of perturbations
+    :type npert: int
+    :ivar tally_numbers: List of tally numbers
+    :type tally_numbers: List[int]
+    :ivar tally: Dictionary mapping tally numbers to Tally objects
+    :type tally: Dict[int, Tally]
+    """
     # Header information
     code_name: Optional[str] = None
     ver: Optional[str] = None
@@ -34,6 +59,33 @@ class Mctal:
 
 @dataclass
 class Tally:
+    """Container for MCNP tally data.
+
+    :ivar tally_id: Unique identifier for the tally
+    :type tally_id: int
+    :ivar name: Name/description of the tally
+    :type name: str
+    :ivar energies: Energy bin boundaries
+    :type energies: List[float]
+    :ivar results: Tally results for each bin
+    :type results: List[float]
+    :ivar errors: Relative errors for each bin
+    :type errors: List[float]
+    :ivar integral_result: Integral result over all bins
+    :type integral_result: float
+    :ivar integral_error: Relative error of the integral result
+    :type integral_error: float
+    :ivar tfc_nps: Number of particles for TFC analysis
+    :type tfc_nps: List[int]
+    :ivar tfc_results: Results at each TFC step
+    :type tfc_results: List[float]
+    :ivar tfc_errors: Errors at each TFC step
+    :type tfc_errors: List[float]
+    :ivar tfc_fom: Figure of Merit at each TFC step
+    :type tfc_fom: List[float]
+    :ivar pert_data: Perturbation data keyed by perturbation index
+    :type pert_data: Dict[int, dict]
+    """
     tally_id: int
     name: str = ""
     energies: List[float] = None
@@ -68,11 +120,13 @@ class Tally:
             self.pert_data = {}
 
     def plot_tfc_data(self, figsize=(15, 5)):
-        """
-        Creates a figure with 3 subplots showing TFC results, errors, and FOM.
-        
-        Args:
-            figsize (tuple): Figure size in inches (width, height)
+        """Creates plots showing TFC convergence data.
+
+        :param figsize: Figure size in inches as (width, height)
+        :type figsize: tuple
+        :returns: The created figure containing the plots
+        :rtype: matplotlib.figure.Figure
+        :raises ValueError: If no TFC data is available for plotting
         """
         if not self.tfc_nps:
             raise ValueError("No TFC data available for plotting")
@@ -106,6 +160,10 @@ class Tally:
 
 @dataclass
 class TallyPert(Tally):
+    """Container for perturbed tally data, inheriting from Tally.
+    
+    :ivar: Inherits all attributes from Tally class
+    """
     def __post_init__(self):
         # Call parent post init to initialize lists/dict as needed.
         super().__post_init__()

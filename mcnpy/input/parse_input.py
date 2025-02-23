@@ -1,16 +1,18 @@
 from .input import Input, Perturbation, Pert
 import re
 
-def read_PERT(lines, start_index):
-    """
-    Read and parse a PERT card from the input lines.
-    
-    Args:
-        lines: List of input lines
-        start_index: Starting index of the PERT card
-        
-    Returns:
-        tuple: (perturbation_object, new_index) or (None, new_index) if parsing fails
+def _read_PERT(lines, start_index):
+    """Internal helper function to read and parse a PERT card from MCNP input lines.
+
+    :param lines: List of input lines from the MCNP input file
+    :type lines: List[str]
+    :param start_index: Starting index of the PERT card in the lines list
+    :type start_index: int
+
+    :returns: A tuple containing:
+        - Perturbation object with parsed data, or None if parsing fails
+        - The new index after processing the PERT card
+    :rtype: tuple[Perturbation, int]
     """
     i = start_index
     line = lines[i].strip()
@@ -76,6 +78,17 @@ def read_PERT(lines, start_index):
     return Perturbation(id=pert_num, particle=particle, **pert_attrs), i + 1
 
 def read_mcnp(file_path):
+    """Reads and parses an MCNP input file.
+
+    This function reads an MCNP input file and parses its contents, focusing on
+    PERT cards. It creates an Input object containing all parsed perturbations.
+
+    :param file_path: Path to the MCNP input file
+    :type file_path: str
+
+    :returns: An Input object containing all parsed data
+    :rtype: Input
+    """
     inst = Input()  # instance of the input class
     inst.pert = Pert()
     
@@ -86,7 +99,7 @@ def read_mcnp(file_path):
     while i < len(lines):
         line = lines[i].strip()
         if line.startswith("PERT"):
-            pert_obj, i = read_PERT(lines, i)
+            pert_obj, i = _read_PERT(lines, i)  
             if pert_obj:
                 inst.pert.perturbation[pert_obj.id] = pert_obj
         else:

@@ -1,12 +1,14 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 from .mctal import Mctal, Tally, TallyPert
 
-def parse_fixed_width(line, specs):
-    """
-    Given a line and a list of tuples (field_name, width),
-    slice the line into fields and return a dict.
+def _parse_fixed_width(line, specs):
+    """Internal helper function to parse a fixed-width formatted line into fields.
+
+    :param line: Input line to parse
+    :type line: str
+    :param specs: List of (field_name, width) tuples
+    :type specs: List[Tuple[str, int]]
+    :returns: Dictionary mapping field names to their values
+    :rtype: dict
     """
     fields = {}
     pos = 0
@@ -16,6 +18,20 @@ def parse_fixed_width(line, specs):
     return fields
 
 def read_mctal(filename, tally_ids=None, tfc=True, pert=True):
+    """Read and parse an MCNP MCTAL file.
+
+    :param filename: Path to the MCTAL file
+    :type filename: str
+    :param tally_ids: List of tally IDs to parse. If None, parse all
+    :type tally_ids: List[int] or None
+    :param tfc: Whether to parse TFC (tally fluctuation chart) data
+    :type tfc: bool
+    :param pert: Whether to parse perturbation data
+    :type pert: bool
+    :returns: An Mctal object containing the parsed data
+    :rtype: Mctal
+    :raises ValueError: If the file format is invalid or parsing fails
+    """
     if tally_ids is None:
         tally_ids = []
     mctal = Mctal()
@@ -29,7 +45,7 @@ def read_mctal(filename, tally_ids=None, tfc=True, pert=True):
         else:
             header_specs = [("code_name", 8), ("skip1", 3), ("ver", 5), ("probid", 19),
                             ("knod", 5), ("skip2", 1), ("nps", 15), ("skip3", 1), ("rnr", 15)]
-        header_fields = parse_fixed_width(header_line, header_specs)
+        header_fields = _parse_fixed_width(header_line, header_specs)
         mctal.code_name = header_fields["code_name"]
         mctal.ver = header_fields["ver"]
         mctal.probid = header_fields["probid"]
@@ -111,11 +127,34 @@ def read_mctal(filename, tally_ids=None, tfc=True, pert=True):
 
     return mctal
 
-def parse_scientific_notation(numbers_str):
-    """Parse a string of space-separated scientific notation numbers."""
+def _parse_scientific_notation(numbers_str):
+    """Internal helper function to parse space-separated scientific notation numbers.
+
+    :param numbers_str: String containing space-separated numbers
+    :type numbers_str: str
+    :returns: List of parsed floating point numbers
+    :rtype: List[float]
+    :raises ValueError: If parsing fails for any number
+    """
     return [float(num) for num in numbers_str.split()]
 
 def parse_tally(tally_id, file_obj, start_pos, tfc=True, pert=True):
+    """Parse a single tally section from an MCTAL file.
+
+    :param tally_id: ID number of the tally to parse
+    :type tally_id: int
+    :param file_obj: Open file object positioned at tally start
+    :type file_obj: file
+    :param start_pos: File position where tally section starts
+    :type start_pos: int
+    :param tfc: Whether to parse TFC data
+    :type tfc: bool
+    :param pert: Whether to parse perturbation data
+    :type pert: bool
+    :returns: A Tally object containing the parsed data
+    :rtype: Tally
+    :raises ValueError: If tally format is invalid or parsing fails
+    """
     # Rewind to the start of the tally section
     file_obj.seek(start_pos)
     tally = Tally(tally_id=tally_id)
@@ -183,7 +222,7 @@ def parse_tally(tally_id, file_obj, start_pos, tfc=True, pert=True):
 
             # Parse scientific notation numbers from the line
             try:
-                energies.extend(parse_scientific_notation(line.strip()))
+                energies.extend(_parse_scientific_notation(line.strip()))
             except ValueError as e:
                 raise ValueError(f"Error parsing energy values for tally {tally_id}: {str(e)}")
 
