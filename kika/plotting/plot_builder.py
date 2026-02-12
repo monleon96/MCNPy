@@ -1546,19 +1546,17 @@ class PlotBuilder:
         
         # Plot uncertainty bands first (so they appear behind the lines)
         for band, data_idx in self._uncertainty_bands:
-            # Use the same color as the associated data if not specified
-            fill_kwargs = band.get_fill_kwargs()
-            
-            if band.color is None and data_idx < len(self._data_list):
-                # Get color from associated data or custom styling
-                if 'color' in self._custom_styling[data_idx]:
-                    fill_kwargs['color'] = self._custom_styling[data_idx]['color']
-                elif self._data_list[data_idx].color is not None:
-                    fill_kwargs['color'] = self._data_list[data_idx].color
-            
             # Check if the associated data is a step plot (for multigroup/uncertainty data)
             data = self._data_list[data_idx] if data_idx < len(self._data_list) else None
-            
+
+            # Resolve color from associated data when not set on the band
+            resolved_color = band.color
+            if resolved_color is None and data_idx < len(self._data_list):
+                if 'color' in self._custom_styling[data_idx]:
+                    resolved_color = self._custom_styling[data_idx]['color']
+                elif self._data_list[data_idx].color is not None:
+                    resolved_color = self._data_list[data_idx].color
+
             # Convert relative uncertainties to absolute if needed
             if band.is_relative():
                 if data is None:
@@ -1566,13 +1564,40 @@ class PlotBuilder:
                 y_lower, y_upper = band.to_absolute(data.y)
             else:
                 y_lower, y_upper = band.y_lower, band.y_upper
-            
-            if data and data.plot_type == 'step':
-                # For step plots, use step='post' to make uncertainty bands follow the steps
-                self.ax.fill_between(band.x, y_lower, y_upper, step='post', **fill_kwargs)
+
+            if band.style == 'errorbar':
+                # Render as vertical error bars
+                eb_kwargs = band.get_errorbar_kwargs()
+                if resolved_color is not None and 'ecolor' not in eb_kwargs:
+                    eb_kwargs['ecolor'] = resolved_color
+
+                if data and data.plot_type == 'step':
+                    # For step data the x array has n+1 bin edges and y has
+                    # n+1 values (last repeated).  Place errorbars at bin
+                    # midpoints using only the first n values — matching
+                    # Coefficients._plot_on_ax() behaviour.
+                    x = np.asarray(band.x)
+                    x_mid = (x[:-1] + x[1:]) / 2.0
+                    n = len(x_mid)
+                    y_nom = data.y[:n]
+                    yerr_lo = np.abs(y_nom - y_lower[:n])
+                    yerr_hi = np.abs(y_upper[:n] - y_nom)
+                    self.ax.errorbar(x_mid, y_nom, yerr=[yerr_lo, yerr_hi], **eb_kwargs)
+                else:
+                    y_nom = data.y if data is not None else (y_lower + y_upper) / 2.0
+                    yerr_lo = np.abs(y_nom - y_lower)
+                    yerr_hi = np.abs(y_upper - y_nom)
+                    self.ax.errorbar(band.x, y_nom, yerr=[yerr_lo, yerr_hi], **eb_kwargs)
             else:
-                # Regular smooth fill for line plots
-                self.ax.fill_between(band.x, y_lower, y_upper, **fill_kwargs)
+                # Default: shaded band via fill_between
+                fill_kwargs = band.get_fill_kwargs()
+                if resolved_color is not None and 'color' not in fill_kwargs:
+                    fill_kwargs['color'] = resolved_color
+
+                if data and data.plot_type == 'step':
+                    self.ax.fill_between(band.x, y_lower, y_upper, step='post', **fill_kwargs)
+                else:
+                    self.ax.fill_between(band.x, y_lower, y_upper, **fill_kwargs)
         
         # Plot each data object
         for i, (data, styling_overrides) in enumerate(zip(self._data_list, self._custom_styling)):

@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
-from kika._constants import ATOMIC_NUMBER_TO_SYMBOL
-from typing import Dict, Union, List, Optional
+from kika._constants import ATOMIC_NUMBER_TO_SYMBOL, MT_TO_REACTION
+from typing import Dict, Union, List, Optional, Tuple
 import numpy as np
 import matplotlib.pyplot as plt
 import math
@@ -1154,7 +1154,90 @@ class Coefficients:
         return pd.DataFrame(data, columns=[
             'energy', 'reaction', 'e_lower', 'e_upper', 'sensitivity', 'error'
         ])
-    
+
+    def to_plot_data(
+        self,
+        per_lethargy: bool = True,
+        uncertainty: bool = True,
+        sigma: float = 1.0,
+        uncertainty_style: str = 'errorbar',
+        label: str = None,
+        **styling_kwargs,
+    ) -> Union['MultigroupXSPlotData', Tuple['MultigroupXSPlotData', 'UncertaintyBand']]:
+        """Convert sensitivity coefficients into PlotData objects.
+
+        Returns a :class:`~kika.plotting.MultigroupXSPlotData` (step plot) and,
+        optionally, an :class:`~kika.plotting.UncertaintyBand` suitable for
+        :class:`~kika.plotting.PlotBuilder`.
+
+        :param per_lethargy: If True, normalise sensitivity values by the lethargy
+            width of each bin (matches ``Coefficients.plot()`` behaviour).
+        :type per_lethargy: bool
+        :param uncertainty: If True, return an ``UncertaintyBand`` alongside the
+            nominal data.
+        :type uncertainty: bool
+        :param sigma: Sigma multiplier for the uncertainty band.
+        :type sigma: float
+        :param uncertainty_style: Rendering style for the uncertainty band:
+            ``'errorbar'`` (default) or ``'band'``.
+        :type uncertainty_style: str
+        :param label: Legend label. Auto-generated as
+            ``"<reaction_name> (MT<reaction>)"`` when *None*.
+        :type label: str, optional
+        :param styling_kwargs: Forwarded to ``MultigroupXSPlotData``
+            (``color``, ``linestyle``, ``linewidth``, etc.).
+        :returns: ``MultigroupXSPlotData`` when *uncertainty=False*,
+            or ``(MultigroupXSPlotData, UncertaintyBand)`` when *uncertainty=True*.
+        :rtype: MultigroupXSPlotData or Tuple[MultigroupXSPlotData, UncertaintyBand]
+        """
+        from kika.plotting import MultigroupXSPlotData, UncertaintyBand
+
+        energies = np.asarray(self.pert_energies, dtype=float)
+        sens = np.asarray(self.values, dtype=float)
+
+        if per_lethargy:
+            lethargy = np.log(energies[1:] / energies[:-1])
+            y_vals = sens / lethargy
+        else:
+            y_vals = sens.copy()
+
+        # Step plot: n+1 x-points, repeat last y value
+        x = energies
+        y = np.append(y_vals, y_vals[-1])
+
+        if label is None:
+            reaction_name = MT_TO_REACTION.get(self.reaction, f"MT{self.reaction}")
+            label = f"{reaction_name} (MT{self.reaction})"
+
+        plot_data = MultigroupXSPlotData(
+            x=x,
+            y=y,
+            label=label,
+            plot_type='step',
+            step_where='post',
+            energy_bins=energies,
+            **styling_kwargs,
+        )
+
+        if not uncertainty:
+            return plot_data
+
+        # Build UncertaintyBand from relative errors.
+        # self.errors stores relative errors (fractional) on the raw sensitivity.
+        # Per-lethargy divides by a constant per bin so the relative error is unchanged.
+        rel_err = np.asarray(self.errors, dtype=float)
+        rel_err_extended = np.append(rel_err, rel_err[-1])
+
+        band = UncertaintyBand(
+            x=x,
+            relative_uncertainty=rel_err_extended,
+            sigma=sigma,
+            label=f"{label} ({sigma}\u03c3)" if sigma != 1.0 else None,
+            style=uncertainty_style,
+        )
+
+        return plot_data, band
+
     def __repr__(self):
         """Returns a formatted string representation of the coefficients.
         
@@ -1240,6 +1323,7 @@ class Coefficients:
         add_method(".lethargy", "Get lethargy intervals as property")
         add_method(".values_per_lethargy", "Get sensitivity per lethargy as property")
         add_method(".plot(...)", "Plot sensitivity coefficients")
+        add_method(".to_plot_data(...)", "Get PlotData for use with PlotBuilder")
         add_method(".to_dataframe()", "Export data as pandas DataFrame")
         
         methods_section += "-" * header_width + "\n"

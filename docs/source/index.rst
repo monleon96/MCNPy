@@ -1,7 +1,7 @@
 KIKA Documentation
 ===================
 
-.. image:: https://img.shields.io/badge/version-0.1.0-blue.svg
+.. image:: https://img.shields.io/badge/version-0.1.2-blue.svg
    :target: https://github.com/monleon96/kika
    :alt: Version
 

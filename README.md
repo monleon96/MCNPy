@@ -1,10 +1,10 @@
 # KIKA
 
-[![Version](https://img.shields.io/badge/version-0.1.1-blue.svg)](https://github.com/monleon96/kika)
+[![Version](https://img.shields.io/badge/version-0.1.2-blue.svg)](https://github.com/monleon96/kika)
 [![Documentation Status](https://readthedocs.org/projects/kika/badge/?version=latest)](https://kika.readthedocs.io/en/latest/?badge=latest)
 [![PyPI](https://img.shields.io/pypi/v/kika-nd)](https://pypi.org/project/kika-nd/)
 [![Python](https://img.shields.io/pypi/pyversions/kika-nd)](https://pypi.org/project/kika-nd/)
-[![License](https://img.shields.io/badge/license-GPLv3-green.svg)](https://github.com/monleon96/kika/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-BSD--3--Clause-green.svg)](https://github.com/monleon96/kika/blob/main/LICENSE)
 
 A comprehensive Python toolkit for nuclear data analysis, Monte Carlo simulation support, and uncertainty quantification. KIKA provides tools for working with MCNP, ENDF, ACE files, covariance matrices, and sensitivity analysis.
 

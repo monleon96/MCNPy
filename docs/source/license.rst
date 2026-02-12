@@ -1,15 +1,24 @@
 License
 =======
 
-**GNU General Public License v3.0**
+**BSD 3-Clause License**
 
-KIKA is licensed under the GNU General Public License v3.0 (GPL-3.0)
+KIKA is licensed under the BSD 3-Clause License.
 
-The full text of the license can be found in the `LICENSE` file in the root directory of the project, or at `<https://www.gnu.org/licenses/gpl-3.0.html>`_.
+The full text of the license can be found in the `LICENSE` file in the root directory of the project.
 
-Copyright (C) 2025 Juan Antonio Monleon de la Lluvia
+Copyright (c) 2025, Juan Antonio Monleon de la Lluvia
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.

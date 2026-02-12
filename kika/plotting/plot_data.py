@@ -314,6 +314,15 @@ class UncertaintyBand:
         Transparency (default: 0.2)
     label : str, optional
         Label for legend
+    style : str
+        Rendering style: ``'band'`` for ``fill_between`` (default) or
+        ``'errorbar'`` for vertical error bars via ``ax.errorbar()``.
+    capsize : float
+        Cap size for error bars (default: 2.5). Only used when
+        ``style='errorbar'``.
+    elinewidth : float
+        Line width for error bars (default: 1.5). Only used when
+        ``style='errorbar'``.
     """
     
     def __init__(
@@ -326,13 +335,22 @@ class UncertaintyBand:
         color: Optional[Union[str, Tuple]] = None,
         alpha: float = 0.2,
         label: Optional[str] = None,
+        style: str = 'band',
+        capsize: float = 2.5,
+        elinewidth: float = 1.5,
     ):
         self.x = np.asarray(x)
         self.sigma = sigma
         self.color = color
         self.alpha = alpha
         self.label = label
-        
+
+        if style not in ('band', 'errorbar'):
+            raise ValueError(f"style must be 'band' or 'errorbar', got '{style}'")
+        self.style = style
+        self.capsize = capsize
+        self.elinewidth = elinewidth
+
         # Store either absolute or relative uncertainties
         if relative_uncertainty is not None:
             if y_lower is not None or y_upper is not None:
@@ -386,12 +404,25 @@ class UncertaintyBand:
     def get_fill_kwargs(self) -> Dict[str, Any]:
         """Get kwargs for ax.fill_between()."""
         kwargs = {'alpha': self.alpha}
-        
+
         if self.color is not None:
             kwargs['color'] = self.color
         if self.label is not None:
             kwargs['label'] = self.label
-            
+
+        return kwargs
+
+    def get_errorbar_kwargs(self) -> Dict[str, Any]:
+        """Get kwargs for ax.errorbar() when style='errorbar'."""
+        kwargs = {
+            'fmt': ' ',
+            'capsize': self.capsize,
+            'elinewidth': self.elinewidth,
+        }
+        if self.color is not None:
+            kwargs['ecolor'] = self.color
+        if self.label is not None:
+            kwargs['label'] = self.label
         return kwargs
 
 

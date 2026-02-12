@@ -1,9 +1,9 @@
 [tool.poetry]
 name = "kika-nd"
-version = "0.1.1"
+version = "0.1.2"
 description = "A comprehensive Python toolkit for nuclear data analysis, including MCNP input/output processing, sensitivity analysis, covariance handling, ACE file parsing, and ENDF data manipulation."
 authors = ["Juan Antonio Monleon de la Lluvia <juanmonleon96@gmail.com>"]
-license = "GPL-3.0-only"
+license = "BSD-3-Clause"
 homepage = "https://github.com/monleon96/kika"
 repository = "https://github.com/monleon96/kika"
 documentation = "https://kika.readthedocs.io"
@@ -13,7 +13,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Physics",
-    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "License :: OSI Approved :: BSD License",
     "Programming Language :: Python :: 3.12",
     "Operating System :: OS Independent",
 ]

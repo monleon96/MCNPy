@@ -1,9 +1,11 @@
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Union
 import os
+import numpy as np
 from kika._constants import MT_TO_REACTION, ATOMIC_NUMBER_TO_SYMBOL
 from kika.sensitivities.sensitivity import SensitivityData
 from kika.energy_grids.utils import _identify_energy_grid
+from kika.plotting import MultigroupXSPlotData, UncertaintyBand
 
 
 @dataclass
@@ -105,6 +107,93 @@ class SDFReactionData:
                 data_preview += f"  {i+1:<5d}    {self.sensitivity[i]:14.6e}    {self.error[i]:12.6e}\n"
         
         return header + stats + data_preview
+
+    def to_plot_data(
+        self,
+        pert_energies,
+        per_lethargy: bool = True,
+        uncertainty: bool = True,
+        sigma: float = 1.0,
+        uncertainty_style: str = 'errorbar',
+        label: str = None,
+        **styling_kwargs
+    ) -> Union['MultigroupXSPlotData', Tuple['MultigroupXSPlotData', 'UncertaintyBand']]:
+        """Convert sensitivity data for this reaction into PlotData objects.
+
+        Returns a :class:`~kika.plotting.MultigroupXSPlotData` (step plot) and,
+        optionally, an :class:`~kika.plotting.UncertaintyBand` suitable for
+        :class:`~kika.plotting.PlotBuilder`.
+
+        :param pert_energies: Energy bin boundaries (n+1 values, ascending order in MeV).
+        :type pert_energies: array-like
+        :param per_lethargy: If True, normalise sensitivity values by the lethargy
+            width of each bin (matches ``Coefficients.plot()`` behaviour).
+        :type per_lethargy: bool
+        :param uncertainty: If True, return an ``UncertaintyBand`` alongside the
+            nominal data.
+        :type uncertainty: bool
+        :param sigma: Sigma multiplier for the uncertainty band.
+        :type sigma: float
+        :param uncertainty_style: Rendering style for the uncertainty band:
+            ``'errorbar'`` (default for sensitivity data) or ``'band'``.
+        :type uncertainty_style: str
+        :param label: Legend label. Auto-generated as ``"<nuclide> <reaction_name>"``
+            (e.g. ``"Fe-56 (n,el)"``) when *None*.
+        :type label: str, optional
+        :param styling_kwargs: Forwarded to ``MultigroupXSPlotData``
+            (``color``, ``linestyle``, ``linewidth``, etc.).
+        :returns: ``MultigroupXSPlotData`` when *uncertainty=False*,
+            or ``(MultigroupXSPlotData, UncertaintyBand)`` when *uncertainty=True*.
+        :rtype: MultigroupXSPlotData or Tuple[MultigroupXSPlotData, UncertaintyBand]
+        """
+        energies = np.asarray(pert_energies, dtype=float)
+        sens = np.asarray(self.sensitivity, dtype=float)
+        n = len(sens)
+
+        if per_lethargy:
+            lethargy = np.log(energies[1:] / energies[:-1])
+            y_vals = sens / lethargy
+        else:
+            y_vals = sens.copy()
+
+        # Step plot: n+1 x-points, repeat last y value
+        x = energies
+        y = np.append(y_vals, y_vals[-1])
+
+        if label is None:
+            label = f"{self.nuclide} {self.reaction_name}"
+
+        plot_data = MultigroupXSPlotData(
+            x=x,
+            y=y,
+            label=label,
+            plot_type='step',
+            step_where='post',
+            zaid=self.zaid,
+            mt=self.mt,
+            energy_bins=energies,
+            **styling_kwargs,
+        )
+
+        if not uncertainty:
+            return plot_data
+
+        # Build UncertaintyBand from relative errors.
+        # self.error stores relative errors (fractional) on the raw sensitivity.
+        # We need relative errors on the plotted y values. Since per-lethargy
+        # divides by a constant per bin, the *relative* error is unchanged.
+        rel_err = np.asarray(self.error, dtype=float)
+        rel_err_extended = np.append(rel_err, rel_err[-1])
+
+        band = UncertaintyBand(
+            x=x,
+            relative_uncertainty=rel_err_extended,
+            sigma=sigma,
+            label=f"{label} ({sigma}\u03c3)" if sigma != 1.0 else None,
+            style=uncertainty_style,
+        )
+
+        return plot_data, band
 
 
 @dataclass
@@ -221,12 +310,85 @@ class SDFData:
         
         # Footer with available methods
         footer = "\n\nAvailable methods:\n"
+        footer += "- .to_plot_data() - Get PlotData for use with PlotBuilder\n"
         footer += "- .write_file() - Write SDF data to a file\n"
         footer += "- .group_inelastic_reactions() - Group MT 51-91 into MT 4\n"
         footer += "- SDFData.merge() - Merge multiple SDF objects\n"
         footer += "- SDFData.can_merge() - Check if SDF objects can be merged\n"
-        
+
         return header + stats + energy_preview + data_summary + footer
+
+    def to_plot_data(
+        self,
+        index: int = None,
+        zaid: int = None,
+        mt: int = None,
+        per_lethargy: bool = True,
+        uncertainty: bool = True,
+        sigma: float = 1.0,
+        uncertainty_style: str = 'errorbar',
+        label: str = None,
+        **styling_kwargs
+    ) -> Union['MultigroupXSPlotData', Tuple['MultigroupXSPlotData', 'UncertaintyBand']]:
+        """Convert a reaction's sensitivity data into PlotData objects.
+
+        Look up a reaction either by *index* into :attr:`data` or by
+        *(zaid, mt)* pair, then delegate to
+        :meth:`SDFReactionData.to_plot_data`.
+
+        :param index: Direct index into ``self.data``.
+        :type index: int, optional
+        :param zaid: ZAID of the nuclide (requires *mt* as well).
+        :type zaid: int, optional
+        :param mt: MT reaction number (requires *zaid* as well).
+        :type mt: int, optional
+        :param per_lethargy: Normalise by lethargy width (default ``True``).
+        :type per_lethargy: bool
+        :param uncertainty: Include an ``UncertaintyBand`` (default ``True``).
+        :type uncertainty: bool
+        :param sigma: Sigma multiplier for the uncertainty band.
+        :type sigma: float
+        :param uncertainty_style: Rendering style for the uncertainty band:
+            ``'errorbar'`` (default for sensitivity data) or ``'band'``.
+        :type uncertainty_style: str
+        :param label: Legend label (auto-generated if *None*).
+        :type label: str, optional
+        :param styling_kwargs: Forwarded to ``MultigroupXSPlotData``.
+        :returns: See :meth:`SDFReactionData.to_plot_data`.
+        :rtype: MultigroupXSPlotData or Tuple[MultigroupXSPlotData, UncertaintyBand]
+        :raises ValueError: If neither *index* nor *(zaid, mt)* is given, or if
+            the requested reaction is not found.
+        """
+        if index is not None:
+            if index < 0 or index >= len(self.data):
+                raise ValueError(
+                    f"index {index} out of range (0..{len(self.data) - 1})"
+                )
+            reaction = self.data[index]
+        elif zaid is not None and mt is not None:
+            reaction = None
+            for rd in self.data:
+                if rd.zaid == zaid and rd.mt == mt:
+                    reaction = rd
+                    break
+            if reaction is None:
+                raise ValueError(
+                    f"No reaction found with ZAID={zaid}, MT={mt}"
+                )
+        else:
+            raise ValueError(
+                "Provide either 'index' or both 'zaid' and 'mt'"
+            )
+
+        return reaction.to_plot_data(
+            self.pert_energies,
+            per_lethargy=per_lethargy,
+            uncertainty=uncertainty,
+            sigma=sigma,
+            uncertainty_style=uncertainty_style,
+            label=label,
+            **styling_kwargs,
+        )
 
     @classmethod
     def merge(cls, sdf_list: List['SDFData'],
