@@ -1,0 +1,287 @@
+{
+  "name": "ACER",
+  "description": "<b>ACER</b><br><br>The ACER module prepares libraries in ACE format (A Compact ENDF) for the MCNP continuous-energy neutron-photon Monte Carlo code.<br>One of the design goals for MCNP has been to use the most detailed representation of the physics of a problem that is practical.<br>Therefore, the ACE format has evolved to include all the details of the ENDF representations for neutron and photon data.<br>However, for the sake of efficiency, the representation of data in ACE is quite different from that in ENDF.<br>The fundamental difference is the use of random access with pointers to the various parts of the data.<br>Other key differences include the use of union energy grids, equal-probability bins, and cumulative probability distributions.",
+  "tooltip": "Create ACE format libraries for Monte Carlo simulations",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "nendf",
+          "display_name": "endf input tape",
+          "type": "int",
+          "default": -30,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nendf'</b><br><br>Unit for input endf tape."
+        },
+        {
+          "name": "npend",
+          "display_name": "pendf input tape",
+          "type": "int",
+          "default": -22,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'npend'</b><br><br>Unit for input pendf tape."
+        },
+        {
+          "name": "ngend",
+          "display_name": "gendf input tape",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'ngend'</b><br><br>Unit for input multigroup photon data."
+        },
+        {
+          "name": "nace",
+          "display_name": "ace output tape",
+          "type": "int",
+          "default": 70,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nace'</b><br><br>Unit for output ace tape."
+        },
+        {
+          "name": "ndir",
+          "display_name": "ndir output tape",
+          "type": "int",
+          "default": 71,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'ndir'</b><br><br>Unit for output mcnp directory."
+        },
+        {
+          "name": "iopt",
+          "display_name": "acer run type",
+          "type": "option",
+          "default": "1",
+          "constraints": {
+            "options": ["1", "2", "3", "4", "5", "7", "8", "-1", "-2", "-3", "-4", "-5"]
+          },
+          "help": "<b>'iopt'</b><br><br>Run type for acer<br><ul><li>1 Fast data</li><li>2 Thermal data</li><li>3 Dosimetry data</li><li>4 Photo-atomic data</li><li>5 Photo-nuclear data</li><li>7 Read type 1 ace files to print or edit</li><li>8 Read type 2 ace files to print or edit</li></ul>Use negative values (-1 to -5) for MCNPX extended format output."
+        },
+        {
+          "name": "matd",
+          "display_name": "Isotope",
+          "type": "isotope",
+          "default": "U235",
+          "help": "<b>'matd'</b><br><br>Material to be processed. Select the isotope and the MAT number will be chosen automatically."
+        },
+        {
+          "name": "tempd",
+          "display_name": "Temperature",
+          "type": "float",
+          "default": 300,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'tempd'</b><br><br>Temperature desired (Kelvin)<br><br>(default=300)"
+        },
+        {
+          "name": "suff",
+          "display_name": "ID suffix",
+          "type": "float",
+          "default": 0.0,
+          "constraints": {
+            "max": 0.99
+          },
+          "help": "<b>'suff'</b><br><br>ID suffix for zaid. Use suff &lt; 0 to leave the old zaid unchanged.<br><br>(default=.00)"
+        }
+      ]
+    },
+    {
+      "name": "Advanced",
+      "parameters": [
+        {
+          "name": "iprint",
+          "display_name": "Print",
+          "type": "option",
+          "default": null,
+          "constraints": {
+          "options": ["min", "max"]
+          },
+          "help": "<b>'iprint'</b><br><br>Print flag<br><br>(default=max)"
+        },
+        {
+          "name": "itype",
+          "display_name": "ace output type",
+          "type": "option",
+          "default": null,
+          "constraints": {
+          "options": ["1", "2", "3"]
+          },
+          "help": "<b>'itype'</b><br><br>ACE output type<br><br>(default=1)"
+        }
+      ]
+    },
+    {
+      "name": "Fast (iopt=1)",
+      "parameters": [
+        {
+          "name": "newfor",
+          "display_name": "New format",
+          "type": "option",
+          "default": null,
+          "constraints": {
+            "options": ["0", "1"]
+          },
+          "help": "<b>'newfor'</b><br><br>New cumulative angle distribution format flag:<br><ul><li>0 Old format</li><li>1 New format (recommended for modern MCNP)</li></ul>(default=1)"
+        },
+        {
+          "name": "iopp",
+          "display_name": "Photon production",
+          "type": "option",
+          "default": null,
+          "constraints": {
+            "options": ["0", "1"]
+          },
+          "help": "<b>'iopp'</b><br><br>Photon production option:<br><ul><li>0 No photon data</li><li>1 Include detailed photon production</li></ul>(default=1)"
+        },
+        {
+          "name": "ismooth",
+          "display_name": "Smoothing",
+          "type": "option",
+          "default": null,
+          "constraints": {
+            "options": ["0", "1"]
+          },
+          "help": "<b>'ismooth'</b><br><br>Smoothing option for heating kerma:<br><ul><li>0 No smoothing</li><li>1 Smooth heating kerma</li></ul>(default=1)"
+        },
+        {
+          "name": "thin1",
+          "display_name": "Thin start energy",
+          "type": "float",
+          "default": null,
+          "help": "<b>'thin1'</b><br><br>Start energy for thinning. Leave empty for no thinning."
+        },
+        {
+          "name": "thin2",
+          "display_name": "Thin end energy",
+          "type": "float",
+          "default": null,
+          "help": "<b>'thin2'</b><br><br>End energy for thinning."
+        },
+        {
+          "name": "thin3",
+          "display_name": "Thin factor",
+          "type": "float",
+          "default": null,
+          "help": "<b>'thin3'</b><br><br>Thinning factor (tolerance)."
+        }
+      ]
+    },
+    {
+      "name": "Thermal (iopt=2)",
+      "parameters": [
+        {
+          "name": "tname",
+          "display_name": "Thermal ZAID name",
+          "type": "string",
+          "default": "lwtr",
+          "help": "<b>'tname'</b><br><br>Thermal ZAID name, 6 characters max (e.g. lwtr, graph, hh2o, benz, dd2o, ouo2)."
+        },
+        {
+          "name": "iza",
+          "display_name": "Moderator ZA values",
+          "type": "multi",
+          "default": "1001",
+          "help": "<b>'iza'</b><br><br>ZA values for moderator components (e.g. 1001 for H in H2O, 6000 for graphite). Space-separated list."
+        },
+        {
+          "name": "mti",
+          "display_name": "Inelastic MT",
+          "type": "int",
+          "default": 222,
+          "help": "<b>'mti'</b><br><br>MT number for thermal inelastic scattering (e.g. 222 for H in H2O, 229 for graphite)."
+        },
+        {
+          "name": "nbint",
+          "display_name": "Number of bins",
+          "type": "int",
+          "default": 16,
+          "constraints": {
+            "min": 1
+          },
+          "help": "<b>'nbint'</b><br><br>Number of equi-probable cosine bins for inelastic scattering.<br><br>(default=16)"
+        },
+        {
+          "name": "mte",
+          "display_name": "Elastic MT",
+          "type": "int",
+          "default": 0,
+          "help": "<b>'mte'</b><br><br>MT number for thermal elastic scattering. 0 means no elastic data (e.g. 230 for graphite coherent elastic).<br><br>(default=0)"
+        },
+        {
+          "name": "ielas",
+          "display_name": "Elastic type",
+          "type": "option",
+          "default": null,
+          "constraints": {
+            "options": ["0", "1"]
+          },
+          "help": "<b>'ielas'</b><br><br>Elastic type flag:<br><ul><li>0 Coherent elastic</li><li>1 Incoherent elastic</li></ul>(default=0)"
+        },
+        {
+          "name": "nmix",
+          "display_name": "Atom types in mix",
+          "type": "int",
+          "default": null,
+          "help": "<b>'nmix'</b><br><br>Number of atom types in mixed moderator.<br><br>(default=1)"
+        },
+        {
+          "name": "emax",
+          "display_name": "Max thermal energy",
+          "type": "float",
+          "default": null,
+          "help": "<b>'emax'</b><br><br>Maximum energy for thermal treatment (eV). Default of 1000 lets NJOY determine from data.<br><br>(default=1000.0)"
+        },
+        {
+          "name": "iwt",
+          "display_name": "Bin weighting",
+          "type": "option",
+          "default": null,
+          "constraints": {
+            "options": ["0", "1", "2"]
+          },
+          "help": "<b>'iwt'</b><br><br>Bin weighting scheme:<br><ul><li>0 Variable</li><li>1 Equal</li><li>2 Tabulated continuous (recommended for modern MCNP)</li></ul>(default=2)"
+        }
+      ]
+    },
+    {
+      "name": "Extra (nxtra)",
+      "parameters": [
+        {
+          "name": "nxtra",
+          "display_name": "Extra iz,aw pairs",
+          "type": "multi",
+          "default": null,
+          "help": "<b>'nxtra'</b><br><br>Extra iz,aw pairs for new nuclides not in the ENDF file. Enter as a list of (iz, aw) tuples where iz is the charge number and aw is the atomic weight ratio."
+        }
+      ]
+    },
+    {
+      "name": "Automatic",
+      "parameters": [
+        {
+          "name": "hk",
+          "type": "auto"
+        },
+        {
+          "name": "nza",
+          "type": "auto"
+        }
+      ]
+    }
+  ]
+}

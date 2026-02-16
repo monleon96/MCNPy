@@ -23,6 +23,7 @@ scripts/*.md
 myworkspace/
 kika/files/
 files/
+resources/
 kika/ace/files/
 kika/cov/files/
 kika/sampling/perturbed_ace_files/

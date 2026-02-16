@@ -1,0 +1,141 @@
+{
+  "name": "GAMINR",
+  "description": "<b>GAMINR</b><br><br>GAMINR produces multigroup photoatomic cross sections from ENDF/B photon interaction data. It reads an ENDF tape and a PENDF tape (from RECONR) and produces a GENDF-style output tape containing multigroup photon cross sections.<br><br>Key features:<br><ul><li>Predefined or custom gamma energy group structures</li><li>Built-in weight functions (constant or 1/E + roll-offs)</li><li>Legendre expansion of scattering matrices</li><li>Support for all standard photon interaction reaction types</li></ul>",
+  "tooltip": "Compute multigroup photoatomic cross sections from ENDF/PENDF photon interaction data.",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "nendf",
+          "display_name": "endf input tape",
+          "type": "int",
+          "default": -25,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nendf'</b><br><br>Unit for endf tape."
+        },
+        {
+          "name": "npend",
+          "display_name": "pendf input tape",
+          "type": "int",
+          "default": -22,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'npend'</b><br><br>Unit for input pendf tape."
+        },
+        {
+          "name": "ngam2",
+          "display_name": "gaminr output tape",
+          "type": "int",
+          "default": -30,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'ngam2'</b><br><br>Unit for output gaminr tape (always required)."
+        },
+        {
+          "name": "matb",
+          "display_name": "Isotope",
+          "type": "isotope",
+          "default": "U235",
+          "help": "<b>'matb'</b><br><br>Material to be processed. Select the isotope and the MAT number will be chosen automatically."
+        },
+        {
+          "name": "igg",
+          "display_name": "Gamma group structure",
+          "type": "option",
+          "default": 7,
+          "constraints": {
+            "options": [
+              {"value": 1, "label": "Custom (read Card 4)"},
+              {"value": 2, "label": "CSEWG 94-group"},
+              {"value": 3, "label": "LANL 12-group"},
+              {"value": 4, "label": "Steiner 21-group"},
+              {"value": 5, "label": "Straker 22-group"},
+              {"value": 6, "label": "LANL 48-group"},
+              {"value": 7, "label": "LANL 24-group"},
+              {"value": 8, "label": "VITAMIN-C 36-group"},
+              {"value": 9, "label": "VITAMIN-E 38-group"},
+              {"value": 10, "label": "VITAMIN-J 42-group"}
+            ]
+          },
+          "help": "<b>'igg'</b><br><br>Gamma energy group structure option. Use 1 for custom group boundaries (requires egg parameter)."
+        },
+        {
+          "name": "iwt",
+          "display_name": "Weight function",
+          "type": "option",
+          "default": 3,
+          "constraints": {
+            "options": [
+              {"value": 2, "label": "Constant"},
+              {"value": 3, "label": "1/E + roll-offs"}
+            ]
+          },
+          "help": "<b>'iwt'</b><br><br>Weight function option. iwt=1 (TAB1 tabulated) is not supported."
+        },
+        {
+          "name": "lord",
+          "display_name": "Legendre order",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'lord'</b><br><br>Legendre order for scattering matrices."
+        }
+      ]
+    },
+    {
+      "name": "Advanced",
+      "parameters": [
+        {
+          "name": "ngam1",
+          "display_name": "gaminr input tape",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'ngam1'</b><br><br>Unit for input gaminr tape (0=none). Used for adding to an existing output tape."
+        },
+        {
+          "name": "iprint",
+          "display_name": "Print",
+          "type": "option",
+          "default": null,
+          "constraints": {
+            "options": ["min", "max"]
+          },
+          "help": "<b>'iprint'</b><br><br>Print flag (0=min, 1=max).<br><br>(default=min)"
+        },
+        {
+          "name": "egg",
+          "display_name": "Gamma group boundaries",
+          "type": "multi",
+          "default": null,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'egg'</b><br><br>Custom gamma energy group boundaries (eV, ascending). Required when igg=1. The number of groups ngg = len(egg) - 1."
+        }
+      ]
+    },
+    {
+      "name": "Automatic",
+      "parameters": [
+        {
+          "name": "title",
+          "type": "auto"
+        }
+      ]
+    }
+  ]
+}

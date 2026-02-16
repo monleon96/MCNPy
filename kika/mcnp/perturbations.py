@@ -73,7 +73,12 @@ class PertCollection(dict):
         methods = set(pert.method for pert in self.values() if pert.method is not None)
         if methods:
             info_lines.append(f"{'Methods available:':{label_width}} {', '.join(map(str, sorted(methods)))}")
-        
+
+        # Get unique ZAIDs
+        zaids = sorted({pert.zaid for pert in self.values() if pert.zaid is not None})
+        if zaids:
+            info_lines.append(f"{'ZAIDs detected:':{label_width}} {', '.join(map(str, zaids))}")
+
         # Get energy ranges if available
         energy_values = set()
         for pert in self.values():
@@ -123,6 +128,15 @@ class Perturbation:
         """
         return sorted(list({pert.reaction for pert in self.pert.values()}))
     
+    @property
+    def zaids(self) -> List[int]:
+        """Get unique ZAIDs from all perturbations.
+
+        :returns: Sorted list of unique ZAIDs across all perturbations
+        :rtype: List[int]
+        """
+        return sorted({p.zaid for p in self.pert.values() if p.zaid is not None})
+
     @property
     def pert_energies(self) -> List[float]:
         """Get unique energy values from all perturbation energy ranges.
@@ -194,7 +208,8 @@ class Perturbation:
                 'method': pert.method,
                 'reaction': pert.reaction,
                 'e_min': e_min,
-                'e_max': e_max
+                'e_max': e_max,
+                'zaid': pert.zaid,
             })
         
         # Create DataFrame with perturbation ID as index
@@ -269,7 +284,12 @@ class Perturbation:
             methods = set(pert.method for pert in self.pert.values() if pert.method is not None)
             if methods:
                 info_lines.append(f"{'Methods available:':{label_width}} {', '.join(map(str, sorted(methods)))}")
-            
+
+            # Show detected ZAIDs
+            zaids = self.zaids
+            if zaids:
+                info_lines.append(f"{'ZAIDs detected:':{label_width}} {', '.join(map(str, zaids))}")
+
             # Show energy ranges if available
             energies = self.pert_energies
             if energies and len(energies) > 0:
@@ -319,7 +339,8 @@ class Pert:
     method: Optional[int] = None
     reaction: Optional[int] = None
     energy: Optional[Tuple[float, float]] = None
-    
+    zaid: Optional[int] = None
+
     def __repr__(self):
         """Returns a formatted string representation of the perturbation.
         
@@ -363,7 +384,10 @@ class Pert:
         
         if self.energy:
             info_lines.append(f"{'Energy range:':{label_width}} {self.energy[0]:.6e} - {self.energy[1]:.6e} MeV")
-        
+
+        if self.zaid is not None:
+            info_lines.append(f"{'ZAID:':{label_width}} {self.zaid}")
+
         # Join all information lines
         content = "\n".join(info_lines)
         

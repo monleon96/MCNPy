@@ -1,0 +1,231 @@
+{
+  "name": "DTFR",
+  "description": "<b>DTFR</b><br><br>DTFR prepares libraries for discrete-ordinates transport codes in DTF-IV format. It reads multigroup data from GROUPR (GENDF tape) and produces DTF transport tables containing cross sections and scattering matrices.<br><br>Key features:<br><ul><li>Reads GENDF tapes produced by GROUPR</li><li>Produces DTF-IV formatted transport tables</li><li>Supports both in-table (iedit=0) and CLAW separate (iedit=1) edit modes</li><li>Handles thermal upscatter corrections</li><li>Optional gamma-ray transport tables</li><li>Multiple materials in a single run</li></ul>",
+  "tooltip": "Prepare DTF-IV transport tables from GROUPR multigroup data.",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "nin",
+          "display_name": "gendf input tape",
+          "type": "int",
+          "default": -30,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nin'</b><br><br>Unit for input gendf tape (from GROUPR)."
+        },
+        {
+          "name": "nout",
+          "display_name": "DTF output tape",
+          "type": "int",
+          "default": 50,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nout'</b><br><br>Unit for output DTF-IV tape (positive = coded/ASCII)."
+        },
+        {
+          "name": "iedit",
+          "display_name": "Edit mode",
+          "type": "option",
+          "default": 0,
+          "constraints": {
+            "options": [
+              {"value": 0, "label": "DTF in-table edits"},
+              {"value": 1, "label": "CLAW separate edits"}
+            ]
+          },
+          "help": "<b>'iedit'</b><br><br>Edit mode: 0 = DTF in-table edits (Cards 3-5), 1 = CLAW separate edits (Card 6)."
+        },
+        {
+          "name": "nlmax",
+          "display_name": "Legendre components",
+          "type": "int",
+          "default": 1,
+          "constraints": {
+            "min": 1
+          },
+          "help": "<b>'nlmax'</b><br><br>Number of Legendre components to include in the table (nlmax = Legendre order + 1)."
+        },
+        {
+          "name": "ng",
+          "display_name": "Number of groups",
+          "type": "int",
+          "default": 30,
+          "constraints": {
+            "min": 1
+          },
+          "help": "<b>'ng'</b><br><br>Number of neutron energy groups."
+        }
+      ]
+    },
+    {
+      "name": "DTF Table (iedit=0)",
+      "parameters": [
+        {
+          "name": "iptotl",
+          "display_name": "Total XS position",
+          "type": "int",
+          "default": 4,
+          "constraints": {
+            "min": 3
+          },
+          "help": "<b>'iptotl'</b><br><br>Table position of total cross section. Positions 1-2 are absorption and nu*fission; positions 3 to iptotl-1 hold user-defined edits; position iptotl holds the total."
+        },
+        {
+          "name": "ipingp",
+          "display_name": "In-group scatter position",
+          "type": "int",
+          "default": null,
+          "constraints": {
+            "min": 1
+          },
+          "help": "<b>'ipingp'</b><br><br>Table position of in-group (self-scatter) cross section. Default is iptotl + 1."
+        },
+        {
+          "name": "itabl",
+          "display_name": "Table length per group",
+          "type": "int",
+          "default": null,
+          "constraints": {
+            "min": 1
+          },
+          "help": "<b>'itabl'</b><br><br>Total table length per group. Default is iptotl + nlmax * ng."
+        },
+        {
+          "name": "edit_names",
+          "display_name": "Edit names",
+          "type": "multi_text",
+          "default": null,
+          "help": "<b>'edit_names'</b><br><br>Names for extra edit positions (iptotl - 3 entries). Each name labels an edit position in the DTF table."
+        },
+        {
+          "name": "edits",
+          "display_name": "Extra 1-D edits",
+          "type": "triplets",
+          "default": null,
+          "help": "<b>'edits'</b><br><br>Extra 1-D edit specifications. Each entry is a triplet [jpos, mt, mult] where jpos is the table position, mt is the ENDF reaction number, and mult is a multiplier."
+        }
+      ]
+    },
+    {
+      "name": "Thermal (ntherm>0)",
+      "parameters": [
+        {
+          "name": "ntherm",
+          "display_name": "Thermal groups",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'ntherm'</b><br><br>Number of thermal groups with upscatter. Set to 0 for no thermal treatment."
+        },
+        {
+          "name": "mti",
+          "display_name": "Incoherent thermal MT",
+          "type": "int",
+          "default": null,
+          "constraints": {
+            "min": 1
+          },
+          "help": "<b>'mti'</b><br><br>MT number for incoherent thermal scattering matrix. Required when ntherm > 0."
+        },
+        {
+          "name": "mtc",
+          "display_name": "Coherent thermal MT",
+          "type": "int",
+          "default": 0,
+          "help": "<b>'mtc'</b><br><br>MT number for coherent thermal scattering. Use 0 if not needed."
+        },
+        {
+          "name": "nlc",
+          "display_name": "Coherent Legendre order",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'nlc'</b><br><br>Maximum Legendre order for coherent thermal scattering. Use 0 for isotropic."
+        }
+      ]
+    },
+    {
+      "name": "Gamma",
+      "parameters": [
+        {
+          "name": "nptabl",
+          "display_name": "Gamma Legendre components",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'nptabl'</b><br><br>Number of Legendre components for gamma transport tables. Use 0 for no gamma tables."
+        },
+        {
+          "name": "ngp",
+          "display_name": "Gamma groups",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'ngp'</b><br><br>Number of gamma energy groups. Use 0 for no gamma groups."
+        }
+      ]
+    },
+    {
+      "name": "Advanced",
+      "parameters": [
+        {
+          "name": "npend",
+          "display_name": "pendf tape (for plots)",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'npend'</b><br><br>Unit for PENDF tape (used for point-data plots only, 0=none)."
+        },
+        {
+          "name": "nplot",
+          "display_name": "Plot output tape",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nplot'</b><br><br>Unit for graphical output tape (0=none)."
+        },
+        {
+          "name": "iprint",
+          "display_name": "Print",
+          "type": "option",
+          "default": null,
+          "constraints": {
+            "options": ["min", "max"]
+          },
+          "help": "<b>'iprint'</b><br><br>Print flag (0=min, 1=max).<br><br>(default=min)"
+        },
+        {
+          "name": "ifilm",
+          "display_name": "Film output",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0,
+            "max": 1
+          },
+          "help": "<b>'ifilm'</b><br><br>Film output flag (0=none, 1=produce film output)."
+        }
+      ]
+    }
+  ]
+}

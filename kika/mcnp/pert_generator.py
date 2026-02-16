@@ -216,8 +216,8 @@ def _calculate_perturbed_density(original_material: Material, perturbed_material
     print(f"Density change: {mass_density:.4e} → {new_mass_density:.4e} g/cm³")
 
 
-def generate_PERTcards(inputfile, cell, reactions, material, energies=None, density=None, 
-                       order=2, errors=False, in_place=True):
+def generate_PERTcards(inputfile, cell, reactions, material, energies=None, density=None,
+                       order=2, errors=False, in_place=True, nuclide=None):
     """Generate PERT cards for MCNP sensitivity analysis.
 
     Creates PERT cards based on the provided parameters for first and/or second order
@@ -475,7 +475,26 @@ def generate_PERTcards(inputfile, cell, reactions, material, energies=None, dens
     # Write header - always include it
     content_to_write.append(MCNPY_HEADER)
     content_to_write.append("c \n")
-    
+
+    # Emit ZAID comment if nuclide is provided
+    if nuclide is not None:
+        if isinstance(nuclide, int):
+            zaid_value = nuclide
+        elif isinstance(nuclide, str):
+            # Try to resolve from material's nuclide accessor
+            first_mat = material_list[0]
+            if first_mat in input_data.materials.by_id:
+                mat_obj = input_data.materials.by_id[first_mat]
+                if nuclide in mat_obj.nuclide:
+                    zaid_value = mat_obj.nuclide[nuclide].zaid
+                else:
+                    raise ValueError(f"Nuclide '{nuclide}' not found in material {first_mat}")
+            else:
+                raise ValueError(f"Material {first_mat} not found for nuclide lookup")
+        else:
+            zaid_value = int(nuclide)
+        content_to_write.append(f"c kika:pert_zaid={zaid_value}\n")
+
     # Loop over each material
     for mat_idx in range(num_materials):
         cell_iter = cell_list[mat_idx]

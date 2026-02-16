@@ -1,0 +1,34 @@
+{
+  "name": "MODER",
+  "description": "<b>MODER</b><br><br>The MODER module is used to convert ENDF, PENDF, and GENDF tapes from the NJOY blocked-binary mode to formatted mode (ASCII on modern computers), and vice versa. It can also be used to copy data from one logical unit to another without change of mode, or to make a new tape containing selected materials from one or more ENDF, PENDF, or GENDF tapes. MODER handles ENDF-4 through ENDF-6 formats, plus special-purpose formats developed for NJOY, such as the GROUPR and ERRORR output formats.",
+  "tooltip": "Convert between binary and ASCII formats or copy selected materials between tapes.",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "nin",
+          "display_name": "Input tape",
+          "type": "int",
+          "default": 20,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nin'</b><br><br>Input unit number. Positive for formatted, negative for binary."
+        },
+        {
+          "name": "nout",
+          "display_name": "Output tape",
+          "type": "int",
+          "default": -30,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>nout</b><br><br>Output unit number. Positive for formatted, negative for binary."
+        }
+      ]
+    }
+  ]
+}

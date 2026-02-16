@@ -1,0 +1,100 @@
+{
+  "name": "RECONR",
+  "description": "<b>RECONR</b><br><br>The RECONR module is used to reconstruct resonance cross sections from resonance parameters and to reconstruct cross sections from ENDF nonlinear interpolation schemes. The output is written as a pointwise-ENDF (PENDF) file with all cross sections on a unionized energy grid suitable for linear interpolation to within a specified tolerance. Redundant reactions (for example, total inelastic, charged-particle reactions) are reconstructed to be exactly equal to the sum of their reconstructed and linearized parts at all energies. The resonance parameters are removed from File 2, and the material directory is corrected to reflect all changes. RECONR has the following features:<br><ul><li>Efficient use of dynamic storage allocation and a special stack structure allow very large problems to be run.</li><li>The unionized grid improves the accuracy, usefulness, and ENDF compatibility of the output. All summation cross sections are preserved on the union grid. Up to nine significant figures are allowed.</li><li>A correct directory of the output tape is provided.</li><li>Approximate Doppler broadening may be used in some cases to speed up reconstruction.</li><li>A resonance-integral criterion is added to the normal linearization criterion in order to reduce the number of points added to the tabulation to represent 'unimportant' resonances.</li><li>All ENDF-6 resonance formats currently active are handled, including the calculation of angular distributions from resonance parameters in some cases.</li></ul>",
+  "tooltip": "Reconstruct resonance cross sections into pointwise-ENDF format for accurate linear interpolation.",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "nendf",
+          "display_name": "endf input tape",
+          "type": "int",
+          "default": -30,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nendf'</b><br><br>Unit for endf tape."
+        },
+        {
+          "name": "npend",
+          "display_name": "pendf output tape",
+          "type": "int",
+          "default": -21,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nendf'</b><br><br>Unit for pendf tape."
+        },
+        {
+          "name": "mat",
+          "display_name": "Isotope",
+          "type": "isotope",
+          "default": "U235",
+          "help": "<b>'mat'</b><br><br>Material to be reconstructed. Select the isotope and the MAT number will be chosen automatically."
+        },
+        {
+          "name": "err",
+          "display_name": "Tolerance",
+          "type": "float",
+          "default": 0.001,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'errmax'</b><br><br>Fractional reconstruction tolerance used when resonance-integral error criterion ('errint') is not satisfied."
+        }
+      ]
+    },
+    {
+      "name": "Advanced",
+      "parameters": [
+        {
+          "name": "errmax",
+          "display_name": "Errmax",
+          "type": "float",
+          "default": null,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'errmax'</b><br><br>Fractional reconstruction tolerance used when resonance-integral error criterion ('errint') is satisfied.<br><br>(default=10*err)"
+        },
+        {
+          "name": "errint",
+          "display_name": "Errint",
+          "type": "float",
+          "default": null,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'errint'</b><br><br>Maximum resonance-integral error (in barns) per grid point.<br><br>(default=err/20000)"
+        }
+      ]
+    },
+    {
+      "name": "Advanced",
+      "parameters": [
+        {
+          "name": "tempr",
+          "display_name": "Tempr",
+          "type": "float",
+          "default": null,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'tempr'</b><br><br>Reconstruction temperature (K).<br><br>(default=0)"
+        }
+      ]
+    },
+    {
+      "name": "Automatic",
+      "parameters": [
+        {
+          "name": "tlabel",
+          "type": "auto"
+        }
+      ]
+    }
+  ]
+}

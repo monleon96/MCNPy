@@ -1,0 +1,305 @@
+{
+  "name": "WIMSR",
+  "description": "<b>WIMSR</b><br><br>WIMSR prepares nuclear data libraries for the WIMS-D and WIMS-E thermal reactor assembly codes. It reads a GENDF tape (output from GROUPR) and produces a formatted WIMS library containing multigroup cross sections, scattering matrices, resonance integrals, and fission product data.<br><br>Key features:<br><ul><li>Supports WIMS-D (iverw=4) and WIMS-E (iverw=5) library formats</li><li>Predefined 69-group WIMS structure or custom group structures</li><li>Goldstein lambda factors for intermediate resonance treatment</li><li>Burnup chain data for transmutation and depletion</li><li>Current (P1) weighting spectrum option</li></ul>",
+  "tooltip": "Prepare WIMS-D/WIMS-E library data from multigroup GENDF tapes.",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "ngendf",
+          "display_name": "GENDF input tape",
+          "type": "int",
+          "default": -30,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'ngendf'</b><br><br>Unit for input GENDF tape (from GROUPR)."
+        },
+        {
+          "name": "nout",
+          "display_name": "WIMS output tape",
+          "type": "int",
+          "default": 50,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nout'</b><br><br>Unit for output WIMS library."
+        },
+        {
+          "name": "mat",
+          "display_name": "Isotope",
+          "type": "isotope",
+          "default": "U235",
+          "help": "<b>'mat'</b><br><br>Material to be processed. Select the isotope and the MAT number will be chosen automatically."
+        },
+        {
+          "name": "iverw",
+          "display_name": "WIMS version",
+          "type": "option",
+          "default": 4,
+          "constraints": {
+            "options": [
+              {"value": 4, "label": "WIMS-D"},
+              {"value": 5, "label": "WIMS-E"}
+            ]
+          },
+          "help": "<b>'iverw'</b><br><br>WIMS library version: 4 for WIMS-D format, 5 for WIMS-E format."
+        },
+        {
+          "name": "igroup",
+          "display_name": "Group structure",
+          "type": "option",
+          "default": 0,
+          "constraints": {
+            "options": [
+              {"value": 0, "label": "69-group (standard WIMS)"},
+              {"value": 9, "label": "Custom (read Card 2a)"}
+            ]
+          },
+          "help": "<b>'igroup'</b><br><br>Group structure option. 0 for standard 69-group WIMS structure, 9 for custom group structure."
+        }
+      ]
+    },
+    {
+      "name": "Cross Section Options",
+      "parameters": [
+        {
+          "name": "ntemp",
+          "display_name": "Number of temperatures",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'ntemp'</b><br><br>Number of temperatures to process (0=all on GENDF tape)."
+        },
+        {
+          "name": "nsigz",
+          "display_name": "Number of sigma-zero values",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'nsigz'</b><br><br>Number of sigma-zero values to process (0=all on GENDF tape)."
+        },
+        {
+          "name": "sgref",
+          "display_name": "Reference sigma-zero",
+          "type": "float",
+          "default": 1e10,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'sgref'</b><br><br>Reference sigma-zero value (barns). Infinite dilution = 1e10."
+        },
+        {
+          "name": "ires",
+          "display_name": "Resonance option",
+          "type": "option",
+          "default": 0,
+          "constraints": {
+            "options": [
+              {"value": 0, "label": "All groups"},
+              {"value": 1, "label": "Resonance groups only"}
+            ]
+          },
+          "help": "<b>'ires'</b><br><br>Resonance data option. 0=process all groups, 1=resonance groups only."
+        },
+        {
+          "name": "sigp",
+          "display_name": "Potential scattering XS",
+          "type": "float",
+          "default": 0.0,
+          "help": "<b>'sigp'</b><br><br>Potential scattering cross section (barns). Used when ires=1."
+        },
+        {
+          "name": "mti",
+          "display_name": "Inelastic MT",
+          "type": "int",
+          "default": 0,
+          "help": "<b>'mti'</b><br><br>MT number for incoherent inelastic thermal scattering (0=none)."
+        },
+        {
+          "name": "mtc",
+          "display_name": "Coherent elastic MT",
+          "type": "int",
+          "default": 0,
+          "help": "<b>'mtc'</b><br><br>MT number for coherent elastic thermal scattering (0=none)."
+        },
+        {
+          "name": "ip1opt",
+          "display_name": "P1 scatter option",
+          "type": "option",
+          "default": 1,
+          "constraints": {
+            "options": [
+              {"value": 0, "label": "P1 matrices from GENDF"},
+              {"value": 1, "label": "Transport correction"}
+            ]
+          },
+          "help": "<b>'ip1opt'</b><br><br>P1 scattering option: 0=use P1 matrices from GENDF tape, 1=use transport correction."
+        },
+        {
+          "name": "inorf",
+          "display_name": "Resonance fission",
+          "type": "option",
+          "default": 0,
+          "constraints": {
+            "options": [
+              {"value": 0, "label": "Include"},
+              {"value": 1, "label": "Exclude"}
+            ]
+          },
+          "help": "<b>'inorf'</b><br><br>Resonance fission option: 0=include resonance fission, 1=exclude."
+        },
+        {
+          "name": "isof",
+          "display_name": "Fission spectrum",
+          "type": "option",
+          "default": 0,
+          "constraints": {
+            "options": [
+              {"value": 0, "label": "From GENDF tape"},
+              {"value": 1, "label": "Use MAT-specific chi"}
+            ]
+          },
+          "help": "<b>'isof'</b><br><br>Fission spectrum source: 0=from GENDF tape, 1=use material-specific chi."
+        },
+        {
+          "name": "ifprod",
+          "display_name": "Fission product flag",
+          "type": "option",
+          "default": 0,
+          "constraints": {
+            "options": [
+              {"value": 0, "label": "Not a fission product"},
+              {"value": 1, "label": "Fission product"}
+            ]
+          },
+          "help": "<b>'ifprod'</b><br><br>Fission product flag: 0=not a fission product, 1=fission product."
+        },
+        {
+          "name": "jp1",
+          "display_name": "P1 flux entries",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'jp1'</b><br><br>Number of current (P1 flux) spectrum values. 0=no current weighting."
+        }
+      ]
+    },
+    {
+      "name": "Lambdas",
+      "parameters": [
+        {
+          "name": "lambdas",
+          "display_name": "Goldstein lambdas",
+          "type": "multi",
+          "default": null,
+          "help": "<b>'lambdas'</b><br><br>Goldstein intermediate-resonance lambda factors. For the 69-group structure, 13 values are needed (for resonance groups 14-26). For custom structures, nrg values are needed."
+        }
+      ]
+    },
+    {
+      "name": "Burnup",
+      "parameters": [
+        {
+          "name": "iburn",
+          "display_name": "Burnup flag",
+          "type": "option",
+          "default": 0,
+          "constraints": {
+            "options": [
+              {"value": 0, "label": "No burnup data"},
+              {"value": 1, "label": "Include burnup chain"}
+            ]
+          },
+          "help": "<b>'iburn'</b><br><br>Burnup data flag: 0=no burnup data, 1=include burnup chain data."
+        }
+      ]
+    },
+    {
+      "name": "Custom Group Structure",
+      "parameters": [
+        {
+          "name": "ngnd",
+          "display_name": "Total groups",
+          "type": "int",
+          "default": null,
+          "constraints": {
+            "min": 1
+          },
+          "help": "<b>'ngnd'</b><br><br>Total number of energy groups (required when igroup=9)."
+        },
+        {
+          "name": "nfg",
+          "display_name": "Fast groups",
+          "type": "int",
+          "default": null,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'nfg'</b><br><br>Number of fast groups (required when igroup=9)."
+        },
+        {
+          "name": "nrg",
+          "display_name": "Resonance groups",
+          "type": "int",
+          "default": null,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'nrg'</b><br><br>Number of resonance groups (required when igroup=9)."
+        },
+        {
+          "name": "igref",
+          "display_name": "Reference group",
+          "type": "int",
+          "default": null,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'igref'</b><br><br>Reference group for flux ratio (optional, only when igroup=9)."
+        }
+      ]
+    },
+    {
+      "name": "Advanced",
+      "parameters": [
+        {
+          "name": "iprint",
+          "display_name": "Print",
+          "type": "option",
+          "default": null,
+          "constraints": {
+            "options": ["min", "max"]
+          },
+          "help": "<b>'iprint'</b><br><br>Print flag (0=min, 1=max).<br><br>(default=min)"
+        },
+        {
+          "name": "rdfid",
+          "display_name": "Real identifier",
+          "type": "float",
+          "default": null,
+          "help": "<b>'rdfid'</b><br><br>Real (floating-point) material identifier for WIMS library. Defaults to MAT number."
+        }
+      ]
+    },
+    {
+      "name": "Automatic",
+      "parameters": [
+        {
+          "name": "nfid",
+          "default": 0,
+          "type": "auto"
+        }
+      ]
+    }
+  ]
+}

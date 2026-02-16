@@ -1,0 +1,291 @@
+{
+  "name": "GROUPR",
+  "description": "<b>GROUPR</b><br><br>GROUPR generates multigroup cross sections from pointwise ENDF or PENDF data. It reads an ENDF tape and a PENDF tape (from RECONR/BROADR) and produces a GENDF (Grouped ENDF) tape containing multigroup cross sections, group-to-group scattering matrices, and other multigroup quantities needed by reactor physics codes.<br><br>Key features:<br><ul><li>Self-shielded cross sections using the Bondarenko method with user-specified sigma-zero values</li><li>Predefined or custom neutron and photon energy group structures</li><li>Built-in weight functions or analytic flux spectra</li><li>Legendre expansion of scattering matrices to arbitrary order</li><li>Support for all standard reaction types and photon production</li></ul>",
+  "tooltip": "Compute multigroup cross sections and group-to-group scattering matrices from ENDF/PENDF data.",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "nendf",
+          "display_name": "endf input tape",
+          "type": "int",
+          "default": -25,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nendf'</b><br><br>Unit for endf tape."
+        },
+        {
+          "name": "npend",
+          "display_name": "pendf input tape",
+          "type": "int",
+          "default": -22,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'npend'</b><br><br>Unit for input pendf tape."
+        },
+        {
+          "name": "ngout2",
+          "display_name": "gendf output tape",
+          "type": "int",
+          "default": -30,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'ngout2'</b><br><br>Unit for output gendf tape (new style, always required)."
+        },
+        {
+          "name": "matb",
+          "display_name": "Isotope",
+          "type": "isotope",
+          "default": "U235",
+          "help": "<b>'matb'</b><br><br>Material to be processed. Select the isotope and the MAT number will be chosen automatically."
+        },
+        {
+          "name": "ign",
+          "display_name": "Neutron group structure",
+          "type": "option",
+          "default": 3,
+          "constraints": {
+            "options": [
+              {"value": 1, "label": "Custom (read Card 6)"},
+              {"value": 2, "label": "CSEWG 239-group"},
+              {"value": 3, "label": "LANL 30-group"},
+              {"value": 4, "label": "ANL 27-group"},
+              {"value": 5, "label": "RRD 50-group"},
+              {"value": 6, "label": "GAM-II 68-group"},
+              {"value": 7, "label": "CLAW-IV 89-group"},
+              {"value": 8, "label": "LANL 70-group"},
+              {"value": 9, "label": "CLAW 187-group"},
+              {"value": 10, "label": "EPRI-CPM 69-group"},
+              {"value": 11, "label": "LANL 618-group"},
+              {"value": 12, "label": "SAND-II 640-group"},
+              {"value": 13, "label": "LANL 80-group"},
+              {"value": 14, "label": "EURLIB 100-group"},
+              {"value": 15, "label": "SAND-IIA 640-group"},
+              {"value": 16, "label": "VITAMIN-E 174-group"},
+              {"value": 17, "label": "VITAMIN-J 175-group"},
+              {"value": 19, "label": "SAND-III 89-group"},
+              {"value": 20, "label": "UKNDL 69-group"},
+              {"value": 21, "label": "TRIPOLI 315-group"},
+              {"value": 22, "label": "XMAS 172-group"},
+              {"value": 23, "label": "ECCO 1968-group"},
+              {"value": 24, "label": "ECCO 33-group"},
+              {"value": 25, "label": "ECCO 1968-group (mod)"},
+              {"value": 26, "label": "SHEM-CEA 281-group"},
+              {"value": 27, "label": "SHEM-CEA/LANL 361-group"},
+              {"value": 28, "label": "WIMS 69-group"},
+              {"value": 29, "label": "WIMS 172-group"},
+              {"value": 30, "label": "SAND-IIa 725-group"},
+              {"value": 31, "label": "MPACT 47-group"},
+              {"value": 32, "label": "MPACT 51-group"},
+              {"value": 33, "label": "MPACT 252-group"},
+              {"value": 34, "label": "VITAMIN-J+ 199-group"}
+            ]
+          },
+          "help": "<b>'ign'</b><br><br>Neutron energy group structure option. Use 1 for custom group boundaries (requires egn parameter)."
+        },
+        {
+          "name": "iwt",
+          "display_name": "Weight function",
+          "type": "option",
+          "default": 3,
+          "constraints": {
+            "options": [
+              {"value": 2, "label": "Constant"},
+              {"value": 3, "label": "1/E"},
+              {"value": 4, "label": "Composite analytic (Card 8c)"},
+              {"value": 5, "label": "Prompt fission + 1/E + Maxwellian"},
+              {"value": 6, "label": "CLAW weight function"},
+              {"value": 7, "label": "CLAW smooth weight"},
+              {"value": 8, "label": "VITAMIN-E + CLAW"},
+              {"value": 9, "label": "Cλ/v + 1/E + C'Maxwellian"},
+              {"value": 10, "label": "VITAMIN-E"},
+              {"value": 11, "label": "VITAMIN-E + ENDF-B/VI fission"},
+              {"value": 12, "label": "VITAMIN-E + JENDL fission"}
+            ]
+          },
+          "help": "<b>'iwt'</b><br><br>Weight function option. iwt=4 requires additional Card 8c parameters (eb, tb, ec, tc). iwt=0 (read from tape) and iwt=1 (TAB1 tabulated) are not supported."
+        },
+        {
+          "name": "lord",
+          "display_name": "Legendre order",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'lord'</b><br><br>Legendre order for scattering matrices."
+        },
+        {
+          "name": "temperatures",
+          "display_name": "Temperatures",
+          "type": "multi",
+          "default": 293.6,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'temperatures'</b><br><br>Temperatures in Kelvin (ascending order)."
+        },
+        {
+          "name": "sigz",
+          "display_name": "Sigma-zero values",
+          "type": "multi",
+          "default": "1e+10",
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'sigz'</b><br><br>Sigma-zero (background cross section) values in barns (descending order, include infinity=1e10)."
+        }
+      ]
+    },
+    {
+      "name": "Advanced",
+      "parameters": [
+        {
+          "name": "ngout1",
+          "display_name": "gendf input tape",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'ngout1'</b><br><br>Unit for input gendf tape (0=none). Used for adding to an existing GENDF tape."
+        },
+        {
+          "name": "igg",
+          "display_name": "Photon group structure",
+          "type": "option",
+          "default": 0,
+          "constraints": {
+            "options": [
+              {"value": 0, "label": "None"},
+              {"value": 1, "label": "Custom (read Card 7)"},
+              {"value": 2, "label": "CSEWG 94-group"},
+              {"value": 3, "label": "LANL 12-group"},
+              {"value": 4, "label": "Steiner 21-group"},
+              {"value": 5, "label": "Straker 22-group"},
+              {"value": 6, "label": "LANL 48-group"},
+              {"value": 7, "label": "LANL 24-group"},
+              {"value": 8, "label": "VITAMIN-C 36-group"},
+              {"value": 9, "label": "VITAMIN-E 38-group"},
+              {"value": 10, "label": "VITAMIN-J 42-group"}
+            ]
+          },
+          "help": "<b>'igg'</b><br><br>Photon energy group structure option. Use 1 for custom group boundaries (requires egg parameter), 0 for no photon groups."
+        },
+        {
+          "name": "iprint",
+          "display_name": "Print",
+          "type": "option",
+          "default": null,
+          "constraints": {
+            "options": ["min", "max"]
+          },
+          "help": "<b>'iprint'</b><br><br>Print flag (0=min, 1=max).<br><br>(default=min)"
+        },
+        {
+          "name": "ismooth",
+          "display_name": "Smooth option",
+          "type": "int",
+          "default": null,
+          "constraints": {
+            "min": 0,
+            "max": 1
+          },
+          "help": "<b>'ismooth'</b><br><br>Smoothing option for flux calculator (0=no, 1=yes).<br><br>(default=1)"
+        },
+        {
+          "name": "eb",
+          "display_name": "Break energy Eb",
+          "type": "float",
+          "default": null,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'eb'</b><br><br>Thermal break energy (eV) for composite analytic weight function (iwt=4)."
+        },
+        {
+          "name": "tb",
+          "display_name": "Temperature Tb",
+          "type": "float",
+          "default": null,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'tb'</b><br><br>Thermal temperature (K) for composite analytic weight function (iwt=4)."
+        },
+        {
+          "name": "ec",
+          "display_name": "Fission break energy Ec",
+          "type": "float",
+          "default": null,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'ec'</b><br><br>Fission break energy (eV) for composite analytic weight function (iwt=4)."
+        },
+        {
+          "name": "tc",
+          "display_name": "Fission temperature Tc",
+          "type": "float",
+          "default": null,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'tc'</b><br><br>Fission temperature (K) for composite analytic weight function (iwt=4)."
+        }
+      ]
+    },
+    {
+      "name": "Custom Group Boundaries",
+      "parameters": [
+        {
+          "name": "egn",
+          "display_name": "Neutron group boundaries",
+          "type": "multi",
+          "default": null,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'egn'</b><br><br>Custom neutron energy group boundaries (eV, ascending). Required when ign=1. The number of groups ngn = len(egn) - 1."
+        },
+        {
+          "name": "egg",
+          "display_name": "Photon group boundaries",
+          "type": "multi",
+          "default": null,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'egg'</b><br><br>Custom photon energy group boundaries (eV, ascending). Required when igg=1. The number of groups ngg = len(egg) - 1."
+        }
+      ]
+    },
+    {
+      "name": "Automatic",
+      "parameters": [
+        {
+          "name": "ntemp",
+          "default": 1,
+          "type": "auto"
+        },
+        {
+          "name": "nsigz",
+          "default": 1,
+          "type": "auto"
+        },
+        {
+          "name": "title",
+          "type": "auto"
+        }
+      ]
+    }
+  ]
+}

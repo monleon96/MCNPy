@@ -1,0 +1,196 @@
+{
+  "name": "PLOTR",
+  "description": "<b>PLOTR</b><br><br>The PLOTR module generates plot commands by reading cross-section data directly from ENDF, PENDF, or GENDF tapes. The output is a plot-command tape that VIEWR can render to PostScript. PLOTR supports:<br><ul><li>2-D plots of cross sections, spectra, and other nuclear data with log/linear axis combinations.</li><li>Multiple curves per plot from different tapes, materials, or reactions.</li><li>Curve styling with colors, dash patterns, and symbols.</li><li>Legend boxes or tag labels for curve identification.</li><li>User-supplied data points with error bars (iverf=0 mode).</li><li>Multiple plots per page with window positioning.</li></ul>",
+  "tooltip": "Generate plot commands from ENDF/PENDF/GENDF tape data.",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "nplt",
+          "display_name": "Output plot tape",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>nplt</b><br><br>Output unit number for plot-command tape. This tape is read by VIEWR to produce PostScript output."
+        },
+        {
+          "name": "nplt0",
+          "display_name": "Input plot tape",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>nplt0</b><br><br>Input unit number for an existing plot-command tape (0 = none). Used to append new plots to an existing set."
+        }
+      ]
+    },
+    {
+      "name": "Page Setup",
+      "description": "Card 1 — Global page settings (emitted once).",
+      "parameters": [
+        {
+          "name": "lori",
+          "display_name": "Orientation",
+          "type": "int",
+          "default": 0,
+          "constraints": { "min": 0, "max": 1 },
+          "help": "<b>lori</b><br><br>Page orientation. 0=portrait, 1=landscape."
+        },
+        {
+          "name": "istyle",
+          "display_name": "Font style",
+          "type": "int",
+          "default": 2,
+          "constraints": { "min": 1, "max": 2 },
+          "help": "<b>istyle</b><br><br>Font style. 1=roman, 2=swiss."
+        },
+        {
+          "name": "size",
+          "display_name": "Character size",
+          "type": "float",
+          "default": 1.0,
+          "constraints": { "min": 0.1, "max": 10.0 },
+          "help": "<b>size</b><br><br>Character size scaling factor (default 1.0)."
+        },
+        {
+          "name": "ipcol",
+          "display_name": "Page color",
+          "type": "int",
+          "default": 0,
+          "constraints": { "min": 0, "max": 7 },
+          "help": "<b>ipcol</b><br><br>Page background color. 0=white, 1=very pale green, 2=very pale cyan, 3=very pale yellow, 4=very pale magenta, 5=very pale salmon, 6=very pale grey, 7=very pale blue."
+        }
+      ]
+    },
+    {
+      "name": "ENDF Source",
+      "description": "Card 8 — ENDF/PENDF/GENDF tape source (repeating per curve).",
+      "repeating": true,
+      "parameters": [
+        {
+          "name": "iverf",
+          "display_name": "ENDF version",
+          "type": "int",
+          "default": 1,
+          "help": "<b>iverf</b><br><br>ENDF format version. 0=user-supplied data, 1=ENDF-6 format."
+        },
+        {
+          "name": "nin",
+          "display_name": "Input tape",
+          "type": "int",
+          "default": 0,
+          "constraints": { "min": -99, "max": 99 },
+          "help": "<b>nin</b><br><br>Input tape unit number for nuclear data (negative = binary)."
+        },
+        {
+          "name": "matd",
+          "display_name": "MAT number",
+          "type": "int",
+          "default": 0,
+          "help": "<b>matd</b><br><br>Material number (ENDF MAT)."
+        },
+        {
+          "name": "mfd",
+          "display_name": "MF number",
+          "type": "int",
+          "default": 0,
+          "help": "<b>mfd</b><br><br>File number (ENDF MF)."
+        },
+        {
+          "name": "mtd",
+          "display_name": "MT number",
+          "type": "int",
+          "default": 0,
+          "help": "<b>mtd</b><br><br>Reaction type number (ENDF MT)."
+        },
+        {
+          "name": "temper",
+          "display_name": "Temperature",
+          "type": "float",
+          "default": 0.0,
+          "help": "<b>temper</b><br><br>Temperature in Kelvin for Doppler-broadened data. 0 = use first temperature on tape."
+        },
+        {
+          "name": "nth",
+          "display_name": "Thermal index",
+          "type": "int",
+          "default": 0,
+          "help": "<b>nth</b><br><br>Thermal scattering index (0 = default)."
+        },
+        {
+          "name": "ntp",
+          "display_name": "Sub-particle index",
+          "type": "int",
+          "default": 0,
+          "help": "<b>ntp</b><br><br>Sub-particle index (0 = default)."
+        },
+        {
+          "name": "nkh",
+          "display_name": "Hollerith index",
+          "type": "int",
+          "default": 0,
+          "help": "<b>nkh</b><br><br>Hollerith index (0 = default)."
+        }
+      ]
+    },
+    {
+      "name": "Curve Style",
+      "description": "Card 9 — Per-curve visual style (2D only, repeating per curve).",
+      "repeating": true,
+      "parameters": [
+        {
+          "name": "icon",
+          "display_name": "Symbol/line mode",
+          "type": "int",
+          "default": 0,
+          "help": "<b>icon</b><br><br>0=line only, >0=symbol+line (value is symbol spacing), <0=symbol only."
+        },
+        {
+          "name": "isym",
+          "display_name": "Symbol type",
+          "type": "int",
+          "default": 0,
+          "constraints": { "min": 0, "max": 24 },
+          "help": "<b>isym</b><br><br>Symbol type. 0=square, 1=octagon, 2=triangle up, etc."
+        },
+        {
+          "name": "idash",
+          "display_name": "Dash type",
+          "type": "int",
+          "default": 0,
+          "constraints": { "min": 0, "max": 5 },
+          "help": "<b>idash</b><br><br>Line dash pattern. 0=solid, 1=dashed, 2=chain dash, 3=chain dot, 4=dot, 5=invisible."
+        },
+        {
+          "name": "iccol",
+          "display_name": "Curve color",
+          "type": "int",
+          "default": 0,
+          "constraints": { "min": 0, "max": 8 },
+          "help": "<b>iccol</b><br><br>Curve color. 0=black, 1=red, 2=green, 3=blue, 4=magenta, 5=cyan, 6=brown, 7=purple, 8=orange."
+        },
+        {
+          "name": "ithick",
+          "display_name": "Line thickness",
+          "type": "int",
+          "default": 1,
+          "constraints": { "min": 1 },
+          "help": "<b>ithick</b><br><br>Line thickness multiplier (default 1)."
+        },
+        {
+          "name": "ishade",
+          "display_name": "Shading",
+          "type": "int",
+          "default": 0,
+          "help": "<b>ishade</b><br><br>0=open, 1-7=cross-hatch patterns, 100+=color fill."
+        }
+      ]
+    }
+  ]
+}

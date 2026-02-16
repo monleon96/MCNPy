@@ -1,0 +1,352 @@
+{
+  "name": "VIEWR",
+  "description": "<b>VIEWR</b><br><br>The VIEWR module provides a general-purpose plotting capability for NJOY. It reads in user commands that define a variety of 2-D and 3-D graphs, and then it writes a Postscript file to display the graphs with high quality. Some of the capabilities of VIEWR include:<br><ul><li>Conventional 2-D plots (for example, cross section vs energy) with the normal combinations of linear and log scales, automatic or user-specified ranges and labels, an optional alternate right-hand axis, and with one or two title lines.</li><li>Curves of various line patterns, labeled with tags and arrows or described in a legend block.</li><li>Data points given with a variety of symbols with error bars (they can be identified in a legend block).</li><li>The superposition of several plots on a given set of axes.</li><li>Detailed 3-D perspective plots for data such as angular distributions or energy distributions, with a choice of linear or log axes, with a choice of working area and viewpoint, and with one or two title lines.</li><li>Color can be used to distinguish between different curves, and the graphics window area and page background can also have selected colors.</li><li>Closed regions can be displayed with various kinds of cross hatching for filled with selected colors.</li><li>Multiple plots can be put on each page.</li></ul>",
+  "tooltip": "Plot NJOY data in 2-D and 3-D graphs.",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "infile",
+          "display_name": "Input tape",
+          "type": "int",
+          "default": 90,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'infile'</b><br><br>Input unit number. Set to 5 for inline plot commands (stdin)."
+        },
+        {
+          "name": "nps",
+          "display_name": "Postscript output tape",
+          "type": "int",
+          "default": 91,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>nps</b><br><br>Output unit number for Postscript file. If you need the plots in PDF format, you can use a Postscript viewer or converter (e.g., Ghostscript or an online tool) to convert the Postscript file to a PDF."
+        }
+      ]
+    },
+    {
+      "name": "Page Setup",
+      "description": "Card 1 — Global page settings (emitted once).",
+      "parameters": [
+        {
+          "name": "lori",
+          "display_name": "Orientation",
+          "type": "int",
+          "default": 0,
+          "constraints": { "min": 0, "max": 1 },
+          "help": "<b>lori</b><br><br>Page orientation. 0=portrait, 1=landscape."
+        },
+        {
+          "name": "istyle",
+          "display_name": "Font style",
+          "type": "int",
+          "default": 2,
+          "constraints": { "min": 1, "max": 2 },
+          "help": "<b>istyle</b><br><br>Font style. 1=roman, 2=swiss."
+        },
+        {
+          "name": "size",
+          "display_name": "Character size",
+          "type": "float",
+          "default": 1.0,
+          "constraints": { "min": 0.1, "max": 10.0 },
+          "help": "<b>size</b><br><br>Character size scaling factor (default 1.0)."
+        },
+        {
+          "name": "ipcol",
+          "display_name": "Page color",
+          "type": "int",
+          "default": 0,
+          "constraints": { "min": 0, "max": 7 },
+          "help": "<b>ipcol</b><br><br>Page background color. 0=white, 1=very pale green, 2=very pale cyan, 3=very pale yellow, 4=very pale magenta, 5=very pale salmon, 6=very pale grey, 7=very pale blue."
+        }
+      ]
+    },
+    {
+      "name": "Plot Axes",
+      "description": "Cards 2–7 — Axis and window setup (emitted for first curve of each plot).",
+      "repeating": true,
+      "parameters": [
+        {
+          "name": "iplot",
+          "display_name": "Plot command",
+          "type": "int",
+          "default": 1,
+          "help": "<b>iplot</b><br><br>1=new page, -1=subplot on same page, n>1=additional curve on same axes, 99=terminate."
+        },
+        {
+          "name": "iwcol",
+          "display_name": "Window color",
+          "type": "int",
+          "default": 0,
+          "constraints": { "min": 0, "max": 7 },
+          "help": "<b>iwcol</b><br><br>Window background color (same palette as page color)."
+        },
+        {
+          "name": "factx",
+          "display_name": "X scale factor",
+          "type": "float",
+          "default": 1.0,
+          "help": "<b>factx</b><br><br>Scale factor for x-axis."
+        },
+        {
+          "name": "facty",
+          "display_name": "Y scale factor",
+          "type": "float",
+          "default": 1.0,
+          "help": "<b>facty</b><br><br>Scale factor for y-axis."
+        },
+        {
+          "name": "xll",
+          "display_name": "Window X origin",
+          "type": "float",
+          "default": 0.0,
+          "help": "<b>xll</b><br><br>X coordinate of lower-left corner of window (inches)."
+        },
+        {
+          "name": "yll",
+          "display_name": "Window Y origin",
+          "type": "float",
+          "default": 0.0,
+          "help": "<b>yll</b><br><br>Y coordinate of lower-left corner of window (inches)."
+        },
+        {
+          "name": "ww",
+          "display_name": "Window width",
+          "type": "float",
+          "default": 0.0,
+          "help": "<b>ww</b><br><br>Window width (inches). 0=automatic."
+        },
+        {
+          "name": "wh",
+          "display_name": "Window height",
+          "type": "float",
+          "default": 0.0,
+          "help": "<b>wh</b><br><br>Window height (inches). 0=automatic."
+        },
+        {
+          "name": "t1",
+          "display_name": "Title line 1",
+          "type": "string",
+          "default": "",
+          "help": "<b>t1</b><br><br>First title line (Card 3)."
+        },
+        {
+          "name": "t2",
+          "display_name": "Title line 2",
+          "type": "string",
+          "default": "",
+          "help": "<b>t2</b><br><br>Second title line (Card 3a)."
+        },
+        {
+          "name": "itype",
+          "display_name": "X-Y axis type",
+          "type": "int",
+          "default": 1,
+          "help": "<b>itype</b><br><br>Axis type. 1=lin-lin, 2=lin-log, 3=log-lin, 4=log-log. Negative values select 3D plots."
+        },
+        {
+          "name": "jtype",
+          "display_name": "Alternate axis type",
+          "type": "int",
+          "default": 0,
+          "help": "<b>jtype</b><br><br>0=no alternate axis. 1=linear alt-y, 2=log alt-y. Negative for 3D z-axis."
+        },
+        {
+          "name": "igrid",
+          "display_name": "Grid style",
+          "type": "int",
+          "default": 3,
+          "constraints": { "min": 0, "max": 3 },
+          "help": "<b>igrid</b><br><br>0=none, 1=grid lines, 2=tic marks outside, 3=tic marks inside."
+        },
+        {
+          "name": "ileg",
+          "display_name": "Legend style",
+          "type": "int",
+          "default": 0,
+          "constraints": { "min": 0, "max": 2 },
+          "help": "<b>ileg</b><br><br>0=none, 1=legend block, 2=tag labels."
+        },
+        {
+          "name": "xmin",
+          "display_name": "X min",
+          "type": "float",
+          "default": 0.0,
+          "help": "<b>xmin</b><br><br>Minimum x value. 0=automatic."
+        },
+        {
+          "name": "xmax",
+          "display_name": "X max",
+          "type": "float",
+          "default": 0.0,
+          "help": "<b>xmax</b><br><br>Maximum x value. 0=automatic."
+        },
+        {
+          "name": "xstep",
+          "display_name": "X step",
+          "type": "float",
+          "default": 0.0,
+          "help": "<b>xstep</b><br><br>Step size for x-axis tic marks. 0=automatic."
+        },
+        {
+          "name": "xlabel",
+          "display_name": "X axis label",
+          "type": "string",
+          "default": "",
+          "help": "<b>xlabel</b><br><br>Label for the x-axis (Card 5a)."
+        },
+        {
+          "name": "ymin",
+          "display_name": "Y min",
+          "type": "float",
+          "default": 0.0,
+          "help": "<b>ymin</b><br><br>Minimum y value. 0=automatic."
+        },
+        {
+          "name": "ymax",
+          "display_name": "Y max",
+          "type": "float",
+          "default": 0.0,
+          "help": "<b>ymax</b><br><br>Maximum y value. 0=automatic."
+        },
+        {
+          "name": "ystep",
+          "display_name": "Y step",
+          "type": "float",
+          "default": 0.0,
+          "help": "<b>ystep</b><br><br>Step size for y-axis tic marks. 0=automatic."
+        },
+        {
+          "name": "ylabel",
+          "display_name": "Y axis label",
+          "type": "string",
+          "default": "",
+          "help": "<b>ylabel</b><br><br>Label for the y-axis (Card 6a)."
+        }
+      ]
+    },
+    {
+      "name": "Curve Style",
+      "description": "Card 9 — Per-curve visual style (2D only, repeating per curve).",
+      "repeating": true,
+      "parameters": [
+        {
+          "name": "icon",
+          "display_name": "Symbol/line mode",
+          "type": "int",
+          "default": 0,
+          "help": "<b>icon</b><br><br>0=line only, >0=symbol+line (value is symbol spacing), <0=symbol only."
+        },
+        {
+          "name": "isym",
+          "display_name": "Symbol type",
+          "type": "int",
+          "default": 0,
+          "constraints": { "min": 0, "max": 24 },
+          "help": "<b>isym</b><br><br>Symbol type. 0=square, 1=octagon, 2=triangle up, 3=triangle down, 4=diamond, 5=cross, 6=X, 7-8=stars, 9-13=filled versions, 14-18=plus inside, 19-24=hourglass/bowtie variants."
+        },
+        {
+          "name": "idash",
+          "display_name": "Dash type",
+          "type": "int",
+          "default": 0,
+          "constraints": { "min": 0, "max": 5 },
+          "help": "<b>idash</b><br><br>Line dash pattern. 0=solid, 1=dashed, 2=chain dash, 3=chain dot, 4=dot, 5=invisible."
+        },
+        {
+          "name": "iccol",
+          "display_name": "Curve color",
+          "type": "int",
+          "default": 0,
+          "constraints": { "min": 0, "max": 8 },
+          "help": "<b>iccol</b><br><br>Curve color. 0=black, 1=red, 2=green, 3=blue, 4=magenta, 5=cyan, 6=brown, 7=purple, 8=orange."
+        },
+        {
+          "name": "ithick",
+          "display_name": "Line thickness",
+          "type": "int",
+          "default": 1,
+          "constraints": { "min": 1 },
+          "help": "<b>ithick</b><br><br>Line thickness multiplier (default 1)."
+        },
+        {
+          "name": "ishade",
+          "display_name": "Shading",
+          "type": "int",
+          "default": 0,
+          "help": "<b>ishade</b><br><br>0=open, 1-7=cross-hatch patterns, 100+=color fill."
+        }
+      ]
+    },
+    {
+      "name": "3D Viewpoint",
+      "description": "Card 11 — 3D perspective viewpoint (only for 3D plots).",
+      "parameters": [
+        {
+          "name": "xv",
+          "display_name": "Viewpoint X",
+          "type": "float",
+          "default": 15.0,
+          "help": "<b>xv</b><br><br>X coordinate of the viewpoint."
+        },
+        {
+          "name": "yv",
+          "display_name": "Viewpoint Y",
+          "type": "float",
+          "default": -15.0,
+          "help": "<b>yv</b><br><br>Y coordinate of the viewpoint."
+        },
+        {
+          "name": "zv",
+          "display_name": "Viewpoint Z",
+          "type": "float",
+          "default": 15.0,
+          "help": "<b>zv</b><br><br>Z coordinate of the viewpoint."
+        },
+        {
+          "name": "x3",
+          "display_name": "Origin X",
+          "type": "float",
+          "default": 2.5,
+          "help": "<b>x3</b><br><br>X coordinate of the 3D origin on the page."
+        },
+        {
+          "name": "y3",
+          "display_name": "Origin Y",
+          "type": "float",
+          "default": 6.5,
+          "help": "<b>y3</b><br><br>Y coordinate of the 3D origin on the page."
+        },
+        {
+          "name": "z3",
+          "display_name": "Origin Z scale",
+          "type": "float",
+          "default": 2.5,
+          "help": "<b>z3</b><br><br>Z-axis scale factor for 3D plots."
+        }
+      ]
+    },
+    {
+      "name": "Data Format",
+      "description": "Card 12 — data input format.",
+      "repeating": true,
+      "parameters": [
+        {
+          "name": "nform",
+          "display_name": "Data format",
+          "type": "int",
+          "default": 0,
+          "constraints": { "min": 0, "max": 1 },
+          "help": "<b>nform</b><br><br>0=free-format 2D x,y data (Card 13), 1=3D family data (Cards 14/14a)."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,237 @@
+{
+  "name": "CCCCR",
+  "description": "<b>CCCCR</b><br><br>CCCCR produces CCCC (Committee for Computer Code Coordination) standard interface files from GROUPR output (GENDF tapes). It can generate ISOTXS (isotope-ordered cross sections), BRKOXS (Bondarenko self-shielding data), and DLAYXS (delayed neutron data) files used by deterministic transport codes such as PARTISN, DIF3D, and ONEDANT.<br><br>Key features:<br><ul><li>Produces ISOTXS binary files with multigroup cross sections and scattering matrices</li><li>Produces BRKOXS files with Bondarenko self-shielding factors</li><li>Produces DLAYXS files with delayed neutron spectra and precursor data</li><li>Supports multiple isotopes in a single run</li><li>Flexible chi (fission spectrum) representation options</li></ul>",
+  "tooltip": "Produce CCCC standard interface files (ISOTXS, BRKOXS, DLAYXS) from GENDF data.",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "nin",
+          "display_name": "GENDF input tape",
+          "type": "int",
+          "default": -30,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nin'</b><br><br>Unit for input GENDF tape (from GROUPR)."
+        },
+        {
+          "name": "nisot",
+          "display_name": "ISOTXS output unit",
+          "type": "int",
+          "default": 50,
+          "constraints": {
+            "min": 0,
+            "max": 99
+          },
+          "help": "<b>'nisot'</b><br><br>Unit for ISOTXS output (0 to skip ISOTXS production)."
+        },
+        {
+          "name": "nbrks",
+          "display_name": "BRKOXS output unit",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0,
+            "max": 99
+          },
+          "help": "<b>'nbrks'</b><br><br>Unit for BRKOXS output (0 to skip BRKOXS production)."
+        },
+        {
+          "name": "ndlay",
+          "display_name": "DLAYXS output unit",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0,
+            "max": 99
+          },
+          "help": "<b>'ndlay'</b><br><br>Unit for DLAYXS output (0 to skip DLAYXS production)."
+        },
+        {
+          "name": "ngroup",
+          "display_name": "Neutron energy groups",
+          "type": "int",
+          "default": 30,
+          "constraints": {
+            "min": 1
+          },
+          "help": "<b>'ngroup'</b><br><br>Number of neutron energy groups (must match GROUPR)."
+        },
+        {
+          "name": "maxord",
+          "display_name": "Max Legendre order",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'maxord'</b><br><br>Maximum Legendre order for scattering matrices."
+        },
+        {
+          "name": "ifopt",
+          "display_name": "File ordering",
+          "type": "option",
+          "default": 1,
+          "constraints": {
+            "options": [
+              {"value": 1, "label": "By reaction type"},
+              {"value": 2, "label": "By Legendre order"}
+            ]
+          },
+          "help": "<b>'ifopt'</b><br><br>ISOTXS file ordering option: 1 = ordered by reaction type, 2 = ordered by Legendre order."
+        }
+      ]
+    },
+    {
+      "name": "Identification",
+      "parameters": [
+        {
+          "name": "lprint",
+          "display_name": "Print flag",
+          "type": "option",
+          "default": 0,
+          "constraints": {
+            "options": [
+              {"value": 0, "label": "Minimum"},
+              {"value": 1, "label": "Maximum"}
+            ]
+          },
+          "help": "<b>'lprint'</b><br><br>Print control: 0 = minimum, 1 = maximum."
+        },
+        {
+          "name": "ivers",
+          "display_name": "File version",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'ivers'</b><br><br>File version number (0 = use NJOY default)."
+        },
+        {
+          "name": "huse",
+          "display_name": "User ID",
+          "type": "string",
+          "default": "",
+          "constraints": {
+            "maxLength": 12
+          },
+          "help": "<b>'huse'</b><br><br>Hollerith user identification (up to 12 characters)."
+        },
+        {
+          "name": "hsetid",
+          "display_name": "Set ID",
+          "type": "string",
+          "default": "",
+          "constraints": {
+            "maxLength": 72
+          },
+          "help": "<b>'hsetid'</b><br><br>Hollerith set identification (up to 72 characters)."
+        }
+      ]
+    },
+    {
+      "name": "ISOTXS",
+      "parameters": [
+        {
+          "name": "nsblok",
+          "display_name": "Scattering sub-blocks",
+          "type": "int",
+          "default": 1,
+          "constraints": {
+            "min": 1
+          },
+          "help": "<b>'nsblok'</b><br><br>Number of scattering sub-blocks (1 or ngroup)."
+        },
+        {
+          "name": "maxup",
+          "display_name": "Max upscatter groups",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'maxup'</b><br><br>Maximum number of upscatter groups (always 0)."
+        },
+        {
+          "name": "maxdn",
+          "display_name": "Max downscatter groups",
+          "type": "int",
+          "default": null,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'maxdn'</b><br><br>Maximum number of downscatter groups (default = ngroup)."
+        },
+        {
+          "name": "ichix",
+          "display_name": "Chi representation",
+          "type": "option",
+          "default": -1,
+          "constraints": {
+            "options": [
+              {"value": -1, "label": "Vector (from GENDF)"},
+              {"value": 0, "label": "No fission spectrum"},
+              {"value": 1, "label": "Vector (user input)"}
+            ]
+          },
+          "help": "<b>'ichix'</b><br><br>Fission spectrum (chi) representation: -1 = vector from GENDF, 0 = none, 1 = user-input vector, >1 = subspace assignment."
+        }
+      ]
+    },
+    {
+      "name": "BRKOXS",
+      "parameters": [
+        {
+          "name": "nti",
+          "display_name": "Num temperatures",
+          "type": "int",
+          "default": -1,
+          "help": "<b>'nti'</b><br><br>Number of temperatures for BRKOXS. Negative means accept first |nti| from GENDF."
+        },
+        {
+          "name": "nzi",
+          "display_name": "Num sigma-zero values",
+          "type": "int",
+          "default": -1,
+          "help": "<b>'nzi'</b><br><br>Number of sigma-zero values for BRKOXS. Negative means accept first |nzi| from GENDF."
+        },
+        {
+          "name": "atem",
+          "display_name": "Temperatures",
+          "type": "multi",
+          "default": null,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'atem'</b><br><br>Temperature values (K) for BRKOXS (only when nti > 0)."
+        },
+        {
+          "name": "asig",
+          "display_name": "Sigma-zero values",
+          "type": "multi",
+          "default": null,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'asig'</b><br><br>Sigma-zero values (barns) for BRKOXS (only when nzi > 0)."
+        }
+      ]
+    },
+    {
+      "name": "Automatic",
+      "parameters": [
+        {
+          "name": "nggrup",
+          "display_name": "Gamma groups",
+          "type": "int",
+          "default": 0,
+          "help": "<b>'nggrup'</b><br><br>Number of gamma energy groups (usually 0)."
+        }
+      ]
+    }
+  ]
+}

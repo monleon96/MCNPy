@@ -1,0 +1,179 @@
+{
+    "name": "THERMR",
+    "description": "<b>THERMR</b><br><br>THERMR generates pointwise neutron scattering cross sections in the thermal energy range and adds them to an existing PENDF file. It reads S(&alpha;,&beta;) data from a LEAPR output tape or computes free-gas scattering when no thermal data are available. THERMR handles three types of scattering:<br><ul><li>Incoherent inelastic scattering</li><li>Incoherent elastic scattering</li><li>Coherent elastic scattering (for crystalline materials like graphite, Be, BeO)</li></ul>",
+    "tooltip": "Generate thermal scattering cross sections from S(alpha,beta) or free-gas models.",
+    "cards": [
+      {
+        "name": "Mandatory",
+        "parameters": [
+          {
+            "name": "nendf",
+            "display_name": "thermal endf tape",
+            "type": "int",
+            "default": 0,
+            "constraints": {
+              "min": -99,
+              "max": 99
+            },
+            "help": "<b>'nendf'</b><br><br>Unit for S(&alpha;,&beta;) input tape from LEAPR. Use 0 for free-gas thermal treatment."
+          },
+          {
+            "name": "nin",
+            "display_name": "pendf input tape",
+            "type": "int",
+            "default": -22,
+            "constraints": {
+              "min": -99,
+              "max": 99
+            },
+            "help": "<b>'nin'</b><br><br>Unit for input PENDF tape."
+          },
+          {
+            "name": "nout",
+            "display_name": "pendf output tape",
+            "type": "int",
+            "default": -23,
+            "constraints": {
+              "min": -99,
+              "max": 99
+            },
+            "help": "<b>'nout'</b><br><br>Unit for output PENDF tape."
+          },
+          {
+            "name": "matde",
+            "display_name": "thermal MAT",
+            "type": "int",
+            "default": 0,
+            "constraints": {
+              "min": 0
+            },
+            "help": "<b>'matde'</b><br><br>Material number on the thermal ENDF/LEAPR tape. Use 0 for free-gas thermal treatment."
+          },
+          {
+            "name": "matdp",
+            "display_name": "Isotope",
+            "type": "isotope",
+            "default": "U235",
+            "help": "<b>'matdp'</b><br><br>Material to be processed on the PENDF tape. Select the isotope and the MAT number will be chosen automatically."
+          },
+          {
+            "name": "nbin",
+            "display_name": "equi-probable angles",
+            "type": "int",
+            "default": 8,
+            "constraints": {
+              "min": 2,
+              "max": 256
+            },
+            "help": "<b>'nbin'</b><br><br>Number of equi-probable cosine bins for angular distributions."
+          },
+          {
+            "name": "iin",
+            "display_name": "inelastic option",
+            "type": "option",
+            "default": "S(a,b)",
+            "constraints": {
+              "options": ["None", "Free gas", "S(a,b)"]
+            },
+            "help": "<b>'iin'</b><br><br>Inelastic scattering option:<br>None = no inelastic scattering<br>Free gas = free-gas scattering<br>S(&alpha;,&beta;) = read S(&alpha;,&beta;) from thermal ENDF tape"
+          },
+          {
+            "name": "icoh",
+            "display_name": "elastic option",
+            "type": "option",
+            "default": "None",
+            "constraints": {
+              "options": ["None", "Graphite", "Be", "BeO", "Poly / ZrH", "Al / Fe", "SiC"]
+            },
+            "help": "<b>'icoh'</b><br><br>Coherent/incoherent elastic option:<br>None = no elastic<br>Graphite = coherent elastic for graphite<br>Be = coherent elastic for beryllium<br>BeO = coherent elastic for BeO<br>Poly / ZrH = incoherent elastic (H in ZrH, polyethylene)<br>Al / Fe = coherent elastic for aluminium or iron<br>SiC = coherent elastic for SiC"
+          },
+          {
+            "name": "natom",
+            "display_name": "atoms per molecule",
+            "type": "int",
+            "default": 1,
+            "constraints": {
+              "min": 1
+            },
+            "help": "<b>'natom'</b><br><br>Number of principal atoms in the compound. Used for normalization of the thermal cross sections."
+          },
+          {
+            "name": "mtref",
+            "display_name": "MT for inelastic",
+            "type": "int",
+            "default": 222,
+            "constraints": {
+              "min": 221,
+              "max": 250
+            },
+            "help": "<b>'mtref'</b><br><br>MT number for the inelastic reaction on the thermal ENDF tape. Values range from 221 to 250 corresponding to different thermal scattering law evaluations."
+          },
+          {
+            "name": "temperatures",
+            "display_name": "Temperature",
+            "type": "multi",
+            "default": 293.6,
+            "constraints": {
+              "min": 0.0
+            },
+            "help": "<b>'tempr'</b><br><br>Temperatures (K) for the thermal scattering calculation. Must match temperatures available on the LEAPR/thermal tape."
+          },
+          {
+            "name": "tol",
+            "display_name": "Tolerance",
+            "type": "float",
+            "default": 0.01,
+            "constraints": {
+              "min": 0.0
+            },
+            "help": "<b>'tol'</b><br><br>Fractional tolerance for linearization of the thermal cross sections."
+          },
+          {
+            "name": "emax",
+            "display_name": "Max energy (eV)",
+            "type": "float",
+            "default": 4.0,
+            "constraints": {
+              "min": 0.0
+            },
+            "help": "<b>'emax'</b><br><br>Maximum energy for thermal treatment (eV). Cross sections above this energy are not modified."
+          }
+        ]
+      },
+      {
+        "name": "Advanced",
+        "parameters": [
+          {
+            "name": "iform",
+            "display_name": "Angular format",
+            "type": "option",
+            "default": null,
+            "constraints": {
+              "options": ["E-E'-mu", "E-mu-E'"]
+            },
+            "help": "<b>'iform'</b><br><br>Output format for inelastic angular distributions:<br>E-E'-&mu; = (E,E',&mu;) ordering<br>E-&mu;-E' = (E,&mu;,E') ordering<br><br>(default=E-E'-mu)"
+          },
+          {
+            "name": "iprint",
+            "display_name": "Print",
+            "type": "option",
+            "default": null,
+            "constraints": {
+              "options": ["min", "max"]
+            },
+            "help": "<b>'iprint'</b><br><br>Print control flag:<br>min = minimum output<br>max = extended output<br><br>(default=min)"
+          }
+        ]
+      },
+      {
+        "name": "Automatic",
+        "parameters": [
+          {
+            "name": "ntemp",
+            "default": 1,
+            "type": "auto"
+          }
+        ]
+      }
+    ]
+  }

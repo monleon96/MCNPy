@@ -1,0 +1,183 @@
+{
+  "name": "COVR",
+  "description": "<b>COVR</b><br><br>COVR post-processes ERRORR output to produce either a compressed BOXER-format covariance library or publication-quality correlation matrix plots via VIEWR.<br><br>Key features:<br><ul><li>Library mode (nout &gt; 0): produces compressed covariance or correlation matrices in BOXER format</li><li>Plot mode (nout = 0): generates correlation matrix plots for VIEWR rendering</li><li>Supports both absolute and relative covariance display</li><li>Configurable color schemes for plot output</li></ul>",
+  "tooltip": "Post-process ERRORR output into covariance libraries or correlation matrix plots.",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "nin",
+          "display_name": "ERRORR input tape",
+          "type": "int",
+          "default": -33,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nin'</b><br><br>Unit for ERRORR output tape (input to COVR)."
+        },
+        {
+          "name": "nout",
+          "display_name": "Library output tape",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nout'</b><br><br>Unit for output library tape. Use nout &gt; 0 for library mode, nout = 0 for plot mode."
+        },
+        {
+          "name": "cases",
+          "display_name": "Reaction pairs",
+          "type": "multi-type",
+          "default": null,
+          "help": "<b>'cases'</b><br><br>List of reaction pairs as [mat, mt, mat1, mt1] tuples. Each entry selects a covariance block to process."
+        }
+      ]
+    },
+    {
+      "name": "Plot Mode",
+      "parameters": [
+        {
+          "name": "nplot",
+          "display_name": "VIEWR output tape",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nplot'</b><br><br>Unit for VIEWR plot output tape (plot mode only)."
+        },
+        {
+          "name": "icolor",
+          "display_name": "Color option",
+          "type": "option",
+          "default": 0,
+          "constraints": {
+            "options": [
+              {"value": 0, "label": "Monochrome"},
+              {"value": 1, "label": "Color (default levels)"},
+              {"value": 2, "label": "Color (custom levels)"}
+            ]
+          },
+          "help": "<b>'icolor'</b><br><br>Color option for correlation plots. 0=monochrome, 1=color with default levels, 2=color with custom levels (requires tlev)."
+        },
+        {
+          "name": "tlev",
+          "display_name": "Custom color boundaries",
+          "type": "multi",
+          "default": null,
+          "constraints": {
+            "min": -1.0,
+            "max": 1.0
+          },
+          "help": "<b>'tlev'</b><br><br>Custom color boundary values for correlation plots (only used when icolor=2). Values should be between -1 and 1."
+        },
+        {
+          "name": "epmin",
+          "display_name": "Minimum energy",
+          "type": "float",
+          "default": 0.0,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'epmin'</b><br><br>Minimum energy for plot display (eV). Energies below this value are excluded from the plot."
+        },
+        {
+          "name": "irelco",
+          "display_name": "Covariance type",
+          "type": "option",
+          "default": 1,
+          "constraints": {
+            "options": [
+              {"value": 0, "label": "Absolute covariances"},
+              {"value": 1, "label": "Relative covariances"}
+            ]
+          },
+          "help": "<b>'irelco'</b><br><br>Type of covariance data to plot. 0=absolute, 1=relative."
+        },
+        {
+          "name": "noleg",
+          "display_name": "Legend option",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'noleg'</b><br><br>Legend option for plots (0=include legend)."
+        },
+        {
+          "name": "nstart",
+          "display_name": "First figure number",
+          "type": "int",
+          "default": 1,
+          "constraints": {
+            "min": 1
+          },
+          "help": "<b>'nstart'</b><br><br>Starting figure number for output plots."
+        },
+        {
+          "name": "ndiv",
+          "display_name": "Gray shade subdivisions",
+          "type": "int",
+          "default": 1,
+          "constraints": {
+            "min": 1
+          },
+          "help": "<b>'ndiv'</b><br><br>Number of subdivisions for gray shades in monochrome plots."
+        }
+      ]
+    },
+    {
+      "name": "Library Mode",
+      "parameters": [
+        {
+          "name": "matype",
+          "display_name": "Matrix type",
+          "type": "option",
+          "default": 3,
+          "constraints": {
+            "options": [
+              {"value": 3, "label": "Covariance matrices"},
+              {"value": 4, "label": "Correlation matrices"}
+            ]
+          },
+          "help": "<b>'matype'</b><br><br>Type of matrix to produce. 3=covariance, 4=correlation."
+        },
+        {
+          "name": "hlibid",
+          "display_name": "Library ID",
+          "type": "string",
+          "default": "",
+          "constraints": {
+            "maxLength": 6
+          },
+          "help": "<b>'hlibid'</b><br><br>Library identifier string (max 6 characters)."
+        },
+        {
+          "name": "hdescr",
+          "display_name": "Description",
+          "type": "string",
+          "default": "",
+          "constraints": {
+            "maxLength": 21
+          },
+          "help": "<b>'hdescr'</b><br><br>Library description string (max 21 characters)."
+        }
+      ]
+    },
+    {
+      "name": "Automatic",
+      "parameters": [
+        {
+          "name": "ncase",
+          "default": 0,
+          "type": "auto"
+        }
+      ]
+    }
+  ]
+}

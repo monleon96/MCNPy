@@ -1,0 +1,102 @@
+{
+  "name": "UNRESR",
+  "description": "<b>UNRESR</b><br><br>The UNRESR module is used to produce effective self-shielded cross sections for resonance reactions in the unresolved energy range. In ENDF-format evaluations, the unresolved range begins at an energy where it is difficult to measure individual resonances and extends to an energy where the effects of fluctuations in the resonance cross sections become unimportant for practical calculations. Resonance information for this energy range is given as average values for resonance widths and spacings together with distribution functions for the widths and spacings. This representation can be converted into effective cross sections suitable for codes that use the background cross section method, often called the Bondarenko method. This unresolved-resonance method has the following features:<br><ul><li>Flux-weighted cross sections are produced for the total, elastic, fission, and capture cross sections, including competition with inelastic scattering.</li><li>A current-weighted total cross section is produced for calculating the effective self-shielded transport cross section.</li><li>The energy grid used is consistent with the grid used by RECONR.</li><li>The computed effective cross sections are written on the PENDF tape in a specially defined section (MF2, MT152) for use by other modules.</li><li>An accurate quadrature scheme is used for computing averages over the ENDF statistical distribution functions.</li></ul>",
+  "tooltip": "Produce effective self-shielded cross sections for resonance reactions in the unresolved energy range (used for deterministic codes).",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "nendf",
+          "display_name": "endf input tape",
+          "type": "int",
+          "default": -25,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nendf'</b><br><br>Unit for endf tape."
+        },
+        {
+          "name": "nin",
+          "display_name": "pendf input tape",
+          "type": "int",
+          "default": -22,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nin'</b><br><br>Unit for input pendf tape."
+        },
+        {
+          "name": "nout",
+          "display_name": "pendf output tape",
+          "type": "int",
+          "default": -23,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nout'</b><br><br>Unit for output pendf tape."
+        },
+        {
+          "name": "matd",
+          "display_name": "Isotope",
+          "type": "isotope",
+          "default": "U235",
+          "help": "<b>'matd'</b><br><br>Material to be processed. Select the isotope and the MAT number will be chosen automatically."
+        },
+        {
+          "name": "temp",
+          "display_name": "Temperature",
+          "type": "multi",
+          "default": 293.6,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'temp'</b><br><br>Temperatures in Kelvin (including zero)."
+        },
+        {
+          "name": "sigz",
+          "display_name": "Dilution values",
+          "type": "multi",
+          "default": "1e+10",
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'sigz'</b><br><br>Dilution values (including infinity)"
+        }
+      ]
+    },
+    {
+      "name": "Advanced",
+      "parameters": [
+        {
+          "name": "iprint",
+          "display_name": "Print",
+          "type": "option",
+          "default": null,
+          "constraints": {
+            "options": ["min", "max"]
+          },
+          "help": "<b>'iprint'</b><br><br>Print flag<br><br>(default=min)"
+        }
+      ]
+    },
+    {
+      "name": "Automatic",
+      "parameters": [
+        {
+          "name": "ntemp",
+          "default": 1,
+          "type": "auto"
+        },
+        {
+          "name": "nsigz",
+          "default": 1,
+          "type": "auto"
+        }
+      ]
+    }
+  ]
+}

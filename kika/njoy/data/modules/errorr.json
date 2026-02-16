@@ -1,0 +1,225 @@
+{
+  "name": "ERRORR",
+  "description": "<b>ERRORR</b><br><br>ERRORR produces multigroup covariance data from ENDF error files (MF30-MF40). It processes covariance information to generate multigroup covariance matrices that can be used for uncertainty quantification and sensitivity analysis.<br><br>Key features:<br><ul><li>Processes covariance data from ENDF/B evaluations (MF31, MF33, MF34, MF35, MF40)</li><li>Supports both relative and absolute covariance output</li><li>Handles resonance parameter covariance contributions</li><li>Uses the same energy group structures and weight functions as GROUPR</li></ul>",
+  "tooltip": "Produce multigroup covariance data from ENDF error files.",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "nendf",
+          "display_name": "endf input tape",
+          "type": "int",
+          "default": -25,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nendf'</b><br><br>Unit for endf tape."
+        },
+        {
+          "name": "npend",
+          "display_name": "pendf input tape",
+          "type": "int",
+          "default": -22,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'npend'</b><br><br>Unit for input pendf tape."
+        },
+        {
+          "name": "nout",
+          "display_name": "covariance output tape",
+          "type": "int",
+          "default": -30,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nout'</b><br><br>Unit for output covariance tape."
+        },
+        {
+          "name": "matd",
+          "display_name": "Isotope",
+          "type": "isotope",
+          "default": "U235",
+          "help": "<b>'matd'</b><br><br>Material to be processed. Select the isotope and the MAT number will be chosen automatically."
+        },
+        {
+          "name": "ign",
+          "display_name": "Neutron group structure",
+          "type": "option",
+          "default": 1,
+          "constraints": {
+            "options": [
+              {"value": 1, "label": "Custom (read Card 12)"},
+              {"value": 2, "label": "CSEWG 239-group"},
+              {"value": 3, "label": "LANL 30-group"},
+              {"value": 4, "label": "ANL 27-group"},
+              {"value": 5, "label": "RRD 50-group"},
+              {"value": 6, "label": "GAM-II 68-group"},
+              {"value": 7, "label": "CLAW-IV 89-group"},
+              {"value": 8, "label": "LANL 70-group"},
+              {"value": 9, "label": "CLAW 187-group"},
+              {"value": 10, "label": "EPRI-CPM 69-group"},
+              {"value": 11, "label": "LANL 618-group"},
+              {"value": 12, "label": "SAND-II 640-group"},
+              {"value": 13, "label": "LANL 80-group"},
+              {"value": 14, "label": "EURLIB 100-group"},
+              {"value": 15, "label": "SAND-IIA 640-group"},
+              {"value": 16, "label": "VITAMIN-E 174-group"},
+              {"value": 17, "label": "VITAMIN-J 175-group"},
+              {"value": 19, "label": "Custom (read Card 12, alt)"}
+            ]
+          },
+          "help": "<b>'ign'</b><br><br>Neutron energy group structure option. Use 1 or 19 for custom group boundaries (requires egn parameter)."
+        },
+        {
+          "name": "iwt",
+          "display_name": "Weight function",
+          "type": "option",
+          "default": 6,
+          "constraints": {
+            "options": [
+              {"value": 2, "label": "Constant"},
+              {"value": 3, "label": "1/E"},
+              {"value": 5, "label": "Prompt fission + 1/E + Maxwellian"},
+              {"value": 6, "label": "CLAW weight function"},
+              {"value": 7, "label": "CLAW smooth weight"},
+              {"value": 8, "label": "VITAMIN-E + CLAW"},
+              {"value": 9, "label": "Cv/E + 1/E + C'Maxwellian"},
+              {"value": 10, "label": "VITAMIN-E"},
+              {"value": 11, "label": "VITAMIN-E + ENDF-B/VI fission"},
+              {"value": 12, "label": "VITAMIN-E + JENDL fission"}
+            ]
+          },
+          "help": "<b>'iwt'</b><br><br>Weight function option for group averaging."
+        },
+        {
+          "name": "irelco",
+          "display_name": "Covariance form",
+          "type": "option",
+          "default": 1,
+          "constraints": {
+            "options": [
+              {"value": 0, "label": "Absolute"},
+              {"value": 1, "label": "Relative"}
+            ]
+          },
+          "help": "<b>'irelco'</b><br><br>Covariance form: 0=absolute, 1=relative."
+        }
+      ]
+    },
+    {
+      "name": "Advanced",
+      "parameters": [
+        {
+          "name": "ngout",
+          "display_name": "gendf input tape",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'ngout'</b><br><br>Unit for input gendf tape (0=none). Needed for processing group cross sections from GROUPR."
+        },
+        {
+          "name": "mfcov",
+          "display_name": "Covariance data type",
+          "type": "option",
+          "default": 33,
+          "constraints": {
+            "options": [
+              {"value": 31, "label": "MF31 - nubar"},
+              {"value": 33, "label": "MF33 - cross sections"},
+              {"value": 34, "label": "MF34 - angular distributions"},
+              {"value": 35, "label": "MF35 - fission spectra"},
+              {"value": 40, "label": "MF40 - activation"}
+            ]
+          },
+          "help": "<b>'mfcov'</b><br><br>ENDF covariance file to process."
+        },
+        {
+          "name": "irespr",
+          "display_name": "Resonance parameter",
+          "type": "option",
+          "default": null,
+          "constraints": {
+            "options": [
+              {"value": 0, "label": "No resonance contribution"},
+              {"value": 1, "label": "Include resonance contribution"}
+            ]
+          },
+          "help": "<b>'irespr'</b><br><br>Processing option for resonance parameter covariances.<br><br>(default=1)"
+        },
+        {
+          "name": "tempin",
+          "display_name": "Temperature",
+          "type": "float",
+          "default": 300.0,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'tempin'</b><br><br>Temperature for Doppler broadening of cross sections (K).<br><br>(default=300)"
+        },
+        {
+          "name": "mprint",
+          "display_name": "MT print option",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'mprint'</b><br><br>MT number to print (0=all).<br><br>(default=0)"
+        },
+        {
+          "name": "iprint",
+          "display_name": "Print",
+          "type": "option",
+          "default": null,
+          "constraints": {
+            "options": ["min", "max"]
+          },
+          "help": "<b>'iprint'</b><br><br>Print flag (0=min, 1=max).<br><br>(default=max)"
+        },
+        {
+          "name": "dap",
+          "display_name": "Scattering radius uncertainty",
+          "type": "float",
+          "default": null,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'dap'</b><br><br>Scattering radius uncertainty (fm). Overrides the value from ENDF file when specified."
+        }
+      ]
+    },
+    {
+      "name": "Custom Group Boundaries",
+      "parameters": [
+        {
+          "name": "egn",
+          "display_name": "Neutron group boundaries",
+          "type": "multi",
+          "default": null,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'egn'</b><br><br>Custom neutron energy group boundaries (eV, ascending). Required when ign=1 or 19. The number of groups ngn = len(egn) - 1."
+        }
+      ]
+    },
+    {
+      "name": "Automatic",
+      "parameters": [
+        {
+          "name": "ngn",
+          "default": null,
+          "type": "auto"
+        }
+      ]
+    }
+  ]
+}

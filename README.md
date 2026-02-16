@@ -8,6 +8,9 @@
 
 A comprehensive Python toolkit for nuclear data analysis, Monte Carlo simulation support, and uncertainty quantification. KIKA provides tools for working with MCNP, ENDF, ACE files, covariance matrices, and sensitivity analysis.
 
+> **Looking for the desktop application?** KIKA is also available as a standalone GUI — no Python required.
+> Download the latest installer from [**kika-release**](https://github.com/monleon96/kika-release).
+
 ## Features
 
 ### MCNP Processing
@@ -80,10 +83,6 @@ cov = kika.read_scale_covmat("path/to/covmat_file")
 
 For complete documentation, examples, and API reference, visit:
 [KIKA Documentation](https://kika.readthedocs.io/en/latest/)
-
-## GUI Application
-
-A standalone GUI application for KIKA is available at [kika-app](https://github.com/monleon96/kika-app).
 
 ## Contributing
 

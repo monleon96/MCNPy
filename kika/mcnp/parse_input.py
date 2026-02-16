@@ -101,11 +101,19 @@ def read_mcnp(file_path):
         lines = f.readlines()
     
     i = 0
+    current_zaid = None
     while i < len(lines):
         line = lines[i].strip()
-        if line.startswith("PERT"):
-            pert_obj, i = _read_PERT(lines, i)  
+        # Detect kika:pert_zaid comment
+        zaid_match = re.search(r'kika:pert_zaid=(\d+)', line)
+        if zaid_match:
+            current_zaid = int(zaid_match.group(1))
+            i += 1
+        elif line.startswith("PERT"):
+            pert_obj, i = _read_PERT(lines, i)
             if pert_obj:
+                if current_zaid is not None:
+                    pert_obj.zaid = current_zaid
                 inst.perturbation.pert[pert_obj.id] = pert_obj
         elif line.startswith("m"):
             material_obj, i = read_material(lines, i)

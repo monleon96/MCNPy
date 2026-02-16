@@ -1,0 +1,133 @@
+{
+  "name": "HEATR",
+  "description": "<b>HEATR</b><br><br>HEATR module generates pointwise heat production cross sections and radiation damage energy production for specified reactions and adds them to an existing PENDF file. The heating and damage numbers can then be easily group averaged, plotted, or reformatted for other purposes.\nAn option of use to evaluators checks ENDF/B files for neutron/photon energy-balance consistency.\nThe advantages of HEATR include:<br>\n<ul>\n<li>Heating and damage are computed in a consistent way.</li>\n<li>All ENDF/B neutron and photon data are used.</li>\n<li>ENDF/B-6 charged-particle distributions are used when available.</li>\n<li>Kinematic checks are available to improve future evaluations.</li>\n<li>Both energy-balance and kinematic KERMA factors can be produced.</li>\n</ul>",
+  "tooltip": "Generate pointwise heat production cross sections and radiation damage energy production for specified reactions.",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "nendf",
+          "display_name": "endf input tape",
+          "type": "int",
+          "default": -25,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nendf'</b><br><br>Unit for endf tape."
+        },
+        {
+          "name": "nin",
+          "display_name": "pendf input tape",
+          "type": "int",
+          "default": -22,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nin'</b><br><br>Unit for input pendf tape."
+        },
+        {
+          "name": "nout",
+          "display_name": "pendf output tape",
+          "type": "int",
+          "default": -23,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nout'</b><br><br>Unit for output pendf tape."
+        },
+        {
+          "name": "matd",
+          "display_name": "Isotope",
+          "type": "isotope",
+          "default": "U235",
+          "help": "<b>'matd'</b><br><br>Material to be processed. Select the isotope and the MAT number will be chosen automatically."
+        },
+        {
+          "name": "mtk",
+          "display_name": "Kermas",
+          "type": "multi",
+          "default": 302,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'mtk'</b><br><br>MT numbers for partial kermas desired. MT=301 will be provided automatically. Partial kerma for reaction MT is MT+300 and may not be properly defined unless a gamma file for MT is on the endf tape.<br><br>(for more info see manual)."
+        }
+      ]
+    },
+    {
+      "name": "Advanced",
+      "parameters": [
+        {
+          "name": "nplot",
+          "display_name": "Graph output tape",
+          "type": "int",
+          "default": null,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nplot'</b><br><br>Unit for graphical output tape."
+        },
+        {
+          "name": "iprint",
+          "display_name": "Print",
+          "type": "option",
+          "default": null,
+          "constraints": {
+            "options": ["min", "max", "check"]
+          },
+          "help": "<b>'iprint'</b><br><br>Print flag<br><br>(default=min)"
+        },
+        {
+          "name": "local",
+          "display_name": "Gamma Ray Behavior",
+          "type": "option",
+          "default": null,
+          "constraints": {
+            "options": ["Transported", "Deposited"]
+          },
+          "help": "<b>'local'</b><br><br>Gamma rays transported or deposited locally<br><br>(default=transported)"
+        },
+        {
+          "name": "ed",
+          "display_name": "Displacement energy",
+          "type": "float",
+          "default": null,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'ed'</b><br><br>Displacement energy for damage.<br><br>(default from built-in table)"
+        },
+        {
+          "name": "ntemp",
+          "display_name": "Number of temperatures",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'ntemp'</b><br><br>Number of temperatures to process. 0=all temperatures on PENDF. Use 1 for kinematic check runs."
+        }
+      ]
+    },
+    {
+      "name": "Automatic",
+      "parameters": [
+        {
+          "name": "npk",
+          "default": 0,
+          "type": "auto"
+        },
+        {
+          "name": "nqa",
+          "default": 0,
+          "type": "auto"
+        }
+      ]
+    }
+  ]
+}

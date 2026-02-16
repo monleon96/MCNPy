@@ -1,0 +1,45 @@
+{
+  "name": "GASPR",
+  "description": "<b>GASPR</b><br><br>The GASPR module will add gas production reactions (MT=203-207) to the PENDF file.<br>Any existing gas-production sections on the input PENDF file are removed, and the file directory is updated to show the new reactions.<br>This module can be run anywhere in the PENDF preparation sequence, but as a practical matter it should follow BROADR.",
+  "tooltip": "Add gas production reactions to the PENDF file.",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "nendf",
+          "display_name": "endf input tape",
+          "type": "int",
+          "default": -30,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nendf'</b><br><br>Unit for endf tape."
+        },
+        {
+          "name": "nin",
+          "display_name": "pendf input tape",
+          "type": "int",
+          "default": -22,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nin'</b><br><br>Unit for input pendf tape."
+        },
+        {
+          "name": "nout",
+          "display_name": "pendf output tape",
+          "type": "int",
+          "default": -23,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nout'</b><br><br>Unit for output pendf tape."
+        }
+      ]
+    }
+  ]
+}

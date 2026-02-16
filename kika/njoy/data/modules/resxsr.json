@@ -1,0 +1,93 @@
+{
+  "name": "RESXSR",
+  "description": "<b>RESXSR</b><br><br>The RESXSR module generates resonance cross section files in RESXS format from PENDF tapes. It provides pointwise cross sections for the resonance energy range for use with codes like TRANSX.",
+  "tooltip": "Generate resonance cross section files (RESXS format) from PENDF tapes.",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "nout",
+          "display_name": "RESXS output tape",
+          "type": "int",
+          "default": -30,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nout'</b><br><br>Unit for output RESXS file."
+        },
+        {
+          "name": "maxt",
+          "display_name": "Max temperature points",
+          "type": "int",
+          "default": 1,
+          "constraints": {
+            "min": 1
+          },
+          "help": "<b>'maxt'</b><br><br>Maximum number of temperature points."
+        },
+        {
+          "name": "efirst",
+          "display_name": "First energy",
+          "type": "float",
+          "default": 4.0,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'efirst'</b><br><br>Lower energy limit of the resonance range (eV)."
+        },
+        {
+          "name": "elast",
+          "display_name": "Last energy",
+          "type": "float",
+          "default": 500.0,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'elast'</b><br><br>Upper energy limit of the resonance range (eV)."
+        },
+        {
+          "name": "eps",
+          "display_name": "Thinning tolerance",
+          "type": "float",
+          "default": 0.001,
+          "constraints": {
+            "min": 0.0,
+            "max": 1.0
+          },
+          "help": "<b>'eps'</b><br><br>Thinning tolerance for energy grid."
+        },
+        {
+          "name": "huse",
+          "display_name": "User ID",
+          "type": "string",
+          "default": "NJOY",
+          "help": "<b>'huse'</b><br><br>User identification string."
+        },
+        {
+          "name": "ivers",
+          "display_name": "Version number",
+          "type": "int",
+          "default": 0,
+          "help": "<b>'ivers'</b><br><br>File version number (default=0)."
+        }
+      ]
+    },
+    {
+      "name": "Automatic",
+      "parameters": [
+        {
+          "name": "nmat",
+          "default": 0,
+          "type": "auto"
+        },
+        {
+          "name": "nholl",
+          "default": 0,
+          "type": "auto"
+        }
+      ]
+    }
+  ]
+}

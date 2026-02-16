@@ -1,0 +1,239 @@
+{
+  "name": "LEAPR",
+  "description": "<b>LEAPR</b><br><br>The LEAPR module prepares the thermal scattering law S(α,β) in ENDF-6 format.<br>It generates a complete File 7 (thermal neutron scattering law) that can be used by THERMR/ACER to produce thermal scattering data for transport codes.<br>LEAPR is a standalone generator — it takes no input tapes and produces an output ENDF tape containing the scattering law.<br>The module supports continuous frequency spectra, discrete oscillators, translational modes, and optionally a secondary scatterer and pair-correlation function (coherent elastic).",
+  "tooltip": "Prepare thermal scattering law S(α,β) in ENDF-6 format",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "nout",
+          "display_name": "Output tape",
+          "type": "int",
+          "default": 24,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nout'</b><br><br>Unit for output ENDF tape containing the thermal scattering law."
+        },
+        {
+          "name": "mat",
+          "display_name": "MAT number",
+          "type": "int",
+          "default": 1,
+          "constraints": {
+            "min": 1
+          },
+          "help": "<b>'mat'</b><br><br>Material number for the output ENDF file. LEAPR uses non-standard MAT numbers (e.g. 1 for H in H2O, 31 for graphite)."
+        },
+        {
+          "name": "za",
+          "display_name": "ZA number",
+          "type": "int",
+          "default": 1001,
+          "help": "<b>'za'</b><br><br>1000*Z + A for the principal scatterer (e.g. 1001 for H, 6012 for C-12)."
+        },
+        {
+          "name": "awr",
+          "display_name": "Atomic weight ratio",
+          "type": "float",
+          "default": 0.99917,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'awr'</b><br><br>Atomic weight ratio of the principal scatterer (mass relative to the neutron)."
+        },
+        {
+          "name": "spr",
+          "display_name": "Free-atom σ",
+          "type": "float",
+          "default": 20.478,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'spr'</b><br><br>Free-atom cross section (barns) of the principal scatterer."
+        }
+      ]
+    },
+    {
+      "name": "Principal Scatterer",
+      "parameters": [
+        {
+          "name": "npr",
+          "display_name": "Atom count",
+          "type": "int",
+          "default": 1,
+          "constraints": {
+            "min": 1
+          },
+          "help": "<b>'npr'</b><br><br>Number of principal scattering atoms in the compound (e.g. 2 for H in H2O).<br><br>(default=1)"
+        },
+        {
+          "name": "iel",
+          "display_name": "Elastic option",
+          "type": "option",
+          "default": "0",
+          "constraints": {
+            "options": ["0", "1", "2"]
+          },
+          "help": "<b>'iel'</b><br><br>Coherent elastic option:<br><ul><li>0 None (default for hydrogenous moderators)</li><li>1 Graphite</li><li>2 Beryllium / BeO</li></ul>(default=0)"
+        },
+        {
+          "name": "ncold",
+          "display_name": "Cold moderator",
+          "type": "option",
+          "default": "0",
+          "constraints": {
+            "options": ["0", "1", "2", "3", "4"]
+          },
+          "help": "<b>'ncold'</b><br><br>Cold hydrogen/deuterium moderator flag:<br><ul><li>0 None</li><li>1 Ortho hydrogen</li><li>2 Para hydrogen</li><li>3 Ortho deuterium</li><li>4 Para deuterium</li></ul>(default=0)"
+        },
+        {
+          "name": "nsk",
+          "display_name": "Pair correlation",
+          "type": "option",
+          "default": "0",
+          "constraints": {
+            "options": ["0", "1", "2"]
+          },
+          "help": "<b>'nsk'</b><br><br>Skold approximation control for pair-correlation function:<br><ul><li>0 None</li><li>1 Vineyard approximation</li><li>2 Skold approximation</li></ul>(default=0)"
+        }
+      ]
+    },
+    {
+      "name": "Secondary Scatterer",
+      "parameters": [
+        {
+          "name": "nss",
+          "display_name": "Scatterer type",
+          "type": "option",
+          "default": "0",
+          "constraints": {
+            "options": ["0", "1", "2"]
+          },
+          "help": "<b>'nss'</b><br><br>Number of secondary scatterer types:<br><ul><li>0 None</li><li>1 SCT approximation</li><li>2 Free gas</li></ul>(default=0)"
+        },
+        {
+          "name": "b7",
+          "display_name": "Secondary option",
+          "type": "option",
+          "default": "0",
+          "constraints": {
+            "options": ["0", "1"]
+          },
+          "help": "<b>'b7'</b><br><br>Secondary scatterer calculation control:<br><ul><li>0 Compute S(α,β) from input spectrum (detailed)</li><li>1 Use SCT/free-gas approximation only</li></ul>(default=0)"
+        },
+        {
+          "name": "aws",
+          "display_name": "Atomic weight ratio",
+          "type": "float",
+          "default": 0.0,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'aws'</b><br><br>Atomic weight ratio of the secondary scatterer."
+        },
+        {
+          "name": "sps",
+          "display_name": "Free-atom σ",
+          "type": "float",
+          "default": 0.0,
+          "constraints": {
+            "min": 0.0
+          },
+          "help": "<b>'sps'</b><br><br>Free-atom cross section (barns) of the secondary scatterer."
+        },
+        {
+          "name": "mss",
+          "display_name": "Atom count",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": 0
+          },
+          "help": "<b>'mss'</b><br><br>Number of secondary scattering atoms in the compound (e.g. 1 for O in H2O)."
+        }
+      ]
+    },
+    {
+      "name": "Advanced",
+      "parameters": [
+        {
+          "name": "lat",
+          "display_name": "α,β scaling",
+          "type": "option",
+          "default": "1",
+          "constraints": {
+            "options": ["0", "1"]
+          },
+          "help": "<b>'lat'</b><br><br>Alpha/beta lattice flag:<br><ul><li>0 α and β values are unscaled</li><li>1 α and β values are scaled by 0.0253/kT</li></ul>(default=1)"
+        },
+        {
+          "name": "isabt",
+          "display_name": "S(α,β) type",
+          "type": "option",
+          "default": "0",
+          "constraints": {
+            "options": ["0", "1"]
+          },
+          "help": "<b>'isabt'</b><br><br>S(α,β) output type:<br><ul><li>0 S(α,β) (symmetric)</li><li>1 S(α,β)·exp(−β/2) (asymmetric)</li></ul>(default=0)"
+        },
+        {
+          "name": "ilog",
+          "display_name": "Log S flag",
+          "type": "option",
+          "default": "0",
+          "constraints": {
+            "options": ["0", "1"]
+          },
+          "help": "<b>'ilog'</b><br><br>Log flag for S storage:<br><ul><li>0 Store S directly</li><li>1 Store log(S)</li></ul>(default=0)"
+        },
+        {
+          "name": "smin",
+          "display_name": "Minimum S value",
+          "type": "float",
+          "default": null,
+          "help": "<b>'smin'</b><br><br>Minimum value of S(α,β) to store. Values below this are set to zero.<br><br>(default=1e-75)"
+        },
+        {
+          "name": "nphon",
+          "display_name": "Phonon expansion order",
+          "type": "int",
+          "default": 100,
+          "constraints": {
+            "min": 1
+          },
+          "help": "<b>'nphon'</b><br><br>Maximum number of terms in the phonon expansion.<br><br>(default=100)"
+        },
+        {
+          "name": "iprint",
+          "display_name": "Print control",
+          "type": "option",
+          "default": null,
+          "constraints": {
+            "options": ["min", "max"]
+          },
+          "help": "<b>'iprint'</b><br><br>Print flag:<br><ul><li>min: Minimum output (0)</li><li>max: Extended output (1)</li></ul>(default=min)"
+        }
+      ]
+    },
+    {
+      "name": "Automatic",
+      "parameters": [
+        {
+          "name": "ntempr",
+          "type": "auto"
+        },
+        {
+          "name": "nalpha",
+          "type": "auto"
+        },
+        {
+          "name": "nbeta",
+          "type": "auto"
+        }
+      ]
+    }
+  ]
+}

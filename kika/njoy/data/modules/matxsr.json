@@ -1,0 +1,183 @@
+{
+  "name": "MATXSR",
+  "description": "<b>MATXSR</b><br><br>MATXSR formats multigroup cross-section data from GENDF tapes (produced by GROUPR) into a MATXS library file. The MATXS format is used by deterministic transport codes such as TRANSX and PARTISN. MATXSR can combine neutron, photon, and charged-particle data for multiple materials into a single unified library.<br><br>Key features:<br><ul><li>Reads one or more GENDF tapes from GROUPR/GAMINR</li><li>Produces a single MATXS-format library</li><li>Supports multiple particle types (neutrons, photons, protons, etc.)</li><li>Handles multiple data types (total, scatter, gamma production, etc.)</li><li>Combines multiple materials into one library file</li></ul>",
+  "tooltip": "Format multigroup cross sections from GENDF tapes into a MATXS library for deterministic transport codes.",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "ngen1",
+          "display_name": "neutron GENDF input tape",
+          "type": "int",
+          "default": -22,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'ngen1'</b><br><br>Unit for neutron GENDF input tape (from GROUPR)."
+        },
+        {
+          "name": "nmatx",
+          "display_name": "MATXS output tape",
+          "type": "int",
+          "default": -30,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nmatx'</b><br><br>Unit for MATXS output tape."
+        },
+        {
+          "name": "hsetid",
+          "display_name": "Hollerith ID lines",
+          "type": "list",
+          "default": ["matxs library"],
+          "help": "<b>'hsetid'</b><br><br>One or more Hollerith identification lines for the MATXS library."
+        },
+        {
+          "name": "particles",
+          "display_name": "Particle definitions",
+          "type": "list",
+          "default": null,
+          "help": "<b>'particles'</b><br><br>List of particle definitions, each with 'name' (e.g. 'n', 'g') and 'ngrp' (number of energy groups)."
+        },
+        {
+          "name": "data_types",
+          "display_name": "Data type definitions",
+          "type": "list",
+          "default": null,
+          "help": "<b>'data_types'</b><br><br>List of data type definitions, each with 'name' (e.g. 'nscat'), 'jinp' (input particle index), and 'joutp' (output particle index)."
+        },
+        {
+          "name": "materials",
+          "display_name": "Materials",
+          "type": "list",
+          "default": null,
+          "help": "<b>'materials'</b><br><br>List of material definitions, each with 'hmat' (material name), 'matno' (MAT number or isotope name), and optional 'matgg' (secondary GENDF unit)."
+        }
+      ]
+    },
+    {
+      "name": "Advanced",
+      "parameters": [
+        {
+          "name": "ngen2",
+          "display_name": "photon GENDF input tape",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'ngen2'</b><br><br>Unit for photon GENDF input tape (0=none)."
+        },
+        {
+          "name": "ngen3",
+          "display_name": "GENDF input tape 3",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'ngen3'</b><br><br>Unit for additional particle GENDF input tape (0=none)."
+        },
+        {
+          "name": "ngen4",
+          "display_name": "GENDF input tape 4",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'ngen4'</b><br><br>Unit for additional particle GENDF input tape (0=none)."
+        },
+        {
+          "name": "ngen5",
+          "display_name": "GENDF input tape 5",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'ngen5'</b><br><br>Unit for additional particle GENDF input tape (0=none)."
+        },
+        {
+          "name": "ngen6",
+          "display_name": "GENDF input tape 6",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'ngen6'</b><br><br>Unit for additional particle GENDF input tape (0=none)."
+        },
+        {
+          "name": "ngen7",
+          "display_name": "GENDF input tape 7",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'ngen7'</b><br><br>Unit for additional particle GENDF input tape (0=none)."
+        },
+        {
+          "name": "ngen8",
+          "display_name": "GENDF input tape 8",
+          "type": "int",
+          "default": 0,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'ngen8'</b><br><br>Unit for additional particle GENDF input tape (0=none)."
+        },
+        {
+          "name": "ivers",
+          "display_name": "File version",
+          "type": "int",
+          "default": 0,
+          "help": "<b>'ivers'</b><br><br>File version number (0=use current default)."
+        },
+        {
+          "name": "huse",
+          "display_name": "User ID",
+          "type": "string",
+          "default": "",
+          "help": "<b>'huse'</b><br><br>User identification string (up to 8 characters)."
+        }
+      ]
+    },
+    {
+      "name": "Automatic",
+      "parameters": [
+        {
+          "name": "npart",
+          "default": 1,
+          "type": "auto"
+        },
+        {
+          "name": "ntype",
+          "default": 1,
+          "type": "auto"
+        },
+        {
+          "name": "nholl",
+          "default": 1,
+          "type": "auto"
+        },
+        {
+          "name": "nmat",
+          "default": 1,
+          "type": "auto"
+        }
+      ]
+    }
+  ]
+}

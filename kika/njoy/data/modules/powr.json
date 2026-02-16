@@ -1,0 +1,240 @@
+{
+  "name": "POWR",
+  "description": "<b>POWR</b><br><br>POWR formats multigroup cross sections from GROUPR for the EPRI reactor analysis codes EPRI-CELL and EPRI-CPM. It reads from a GENDF tape and supports three library modes:<br><ul><li><b>lib=1</b> — Fast library for EPRI-CELL</li><li><b>lib=2</b> — Thermal library for EPRI-CELL</li><li><b>lib=3</b> — CPM library for EPRI-CPM</li></ul>Each mode has a different card sequence for defining materials and nuclide parameters.",
+  "tooltip": "Format multigroup data from GENDF for EPRI-CELL and EPRI-CPM codes.",
+  "cards": [
+    {
+      "name": "Mandatory",
+      "parameters": [
+        {
+          "name": "ngendf",
+          "display_name": "GENDF input tape",
+          "type": "int",
+          "default": -30,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'ngendf'</b><br><br>Unit for input GENDF tape (from GROUPR)."
+        },
+        {
+          "name": "nout",
+          "display_name": "Output tape",
+          "type": "int",
+          "default": 50,
+          "constraints": {
+            "min": -99,
+            "max": 99
+          },
+          "help": "<b>'nout'</b><br><br>Unit for output EPRI library."
+        },
+        {
+          "name": "lib",
+          "display_name": "Library type",
+          "type": "option",
+          "default": 1,
+          "constraints": {
+            "options": [
+              {"value": 1, "label": "Fast (EPRI-CELL)"},
+              {"value": 2, "label": "Thermal (EPRI-CELL)"},
+              {"value": 3, "label": "CPM (EPRI-CPM)"}
+            ]
+          },
+          "help": "<b>'lib'</b><br><br>Library type: 1=fast, 2=thermal, 3=CPM."
+        }
+      ]
+    },
+    {
+      "name": "Advanced",
+      "parameters": [
+        {
+          "name": "iprint",
+          "display_name": "Print",
+          "type": "option",
+          "default": null,
+          "constraints": {
+            "options": ["min", "max"]
+          },
+          "help": "<b>'iprint'</b><br><br>Print flag (0=min, 1=max).<br><br>(default=min)"
+        },
+        {
+          "name": "iclaps",
+          "display_name": "CLAPS option",
+          "type": "option",
+          "default": 0,
+          "constraints": {
+            "options": [
+              {"value": 0, "label": "Normal"},
+              {"value": 1, "label": "CLAPS format"}
+            ]
+          },
+          "help": "<b>'iclaps'</b><br><br>CLAPS format option: 0=normal EPRI format, 1=CLAPS format."
+        }
+      ]
+    },
+    {
+      "name": "Fast Materials (lib=1)",
+      "parameters": [
+        {
+          "name": "matd",
+          "display_name": "Isotope",
+          "type": "isotope",
+          "default": "U235",
+          "help": "<b>'matd'</b><br><br>Material to process. Positive for normal nuclide, negative for absorption data only."
+        },
+        {
+          "name": "rtemp",
+          "display_name": "Reference temperature",
+          "type": "float",
+          "default": null,
+          "help": "<b>'rtemp'</b><br><br>Reference temperature (K). Default is first temperature on GENDF tape."
+        },
+        {
+          "name": "iff",
+          "display_name": "Fission flag",
+          "type": "int",
+          "default": null,
+          "help": "<b>'iff'</b><br><br>Fission flag (default=0)."
+        },
+        {
+          "name": "nsgz",
+          "display_name": "Number of sigma-zero",
+          "type": "int",
+          "default": null,
+          "help": "<b>'nsgz'</b><br><br>Number of sigma-zero values to process (default=all)."
+        },
+        {
+          "name": "izref",
+          "display_name": "Sigma-zero ref index",
+          "type": "int",
+          "default": null,
+          "help": "<b>'izref'</b><br><br>Index of reference sigma-zero value (default=1)."
+        },
+        {
+          "name": "word",
+          "display_name": "Nuclide description",
+          "type": "string",
+          "default": "",
+          "help": "<b>'word'</b><br><br>Nuclide description string (delimited by asterisks in NJOY input)."
+        },
+        {
+          "name": "fsn",
+          "display_name": "Fission spectrum title",
+          "type": "string",
+          "default": "",
+          "help": "<b>'fsn'</b><br><br>Fission spectrum title (delimited by asterisks in NJOY input)."
+        }
+      ]
+    },
+    {
+      "name": "Thermal Materials (lib=2)",
+      "parameters": [
+        {
+          "name": "matd",
+          "display_name": "Isotope",
+          "type": "isotope",
+          "default": "U235",
+          "help": "<b>'matd'</b><br><br>Material to process."
+        },
+        {
+          "name": "idtemp",
+          "display_name": "Temperature index",
+          "type": "int",
+          "default": null,
+          "help": "<b>'idtemp'</b><br><br>Temperature index on GENDF tape (default=1)."
+        },
+        {
+          "name": "name",
+          "display_name": "Nuclide name",
+          "type": "string",
+          "default": "",
+          "help": "<b>'name'</b><br><br>Nuclide name (delimited by asterisks in NJOY input)."
+        },
+        {
+          "name": "itrc",
+          "display_name": "Transport correction",
+          "type": "int",
+          "default": 0,
+          "help": "<b>'itrc'</b><br><br>Transport correction option."
+        },
+        {
+          "name": "mti",
+          "display_name": "Inelastic MT",
+          "type": "int",
+          "default": 0,
+          "help": "<b>'mti'</b><br><br>MT number for incoherent inelastic thermal scattering (0=none)."
+        },
+        {
+          "name": "mtc",
+          "display_name": "Coherent elastic MT",
+          "type": "int",
+          "default": 0,
+          "help": "<b>'mtc'</b><br><br>MT number for coherent elastic thermal scattering (0=none)."
+        }
+      ]
+    },
+    {
+      "name": "CPM Library (lib=3)",
+      "parameters": [
+        {
+          "name": "nlib",
+          "display_name": "Library number",
+          "type": "int",
+          "default": 1,
+          "help": "<b>'nlib'</b><br><br>Library number on output tape."
+        },
+        {
+          "name": "idat",
+          "display_name": "Date",
+          "type": "int",
+          "default": 0,
+          "help": "<b>'idat'</b><br><br>Date identifier for the library."
+        },
+        {
+          "name": "iopt",
+          "display_name": "MAT option",
+          "type": "option",
+          "default": 0,
+          "constraints": {
+            "options": [
+              {"value": 0, "label": "Read MAT list from input"},
+              {"value": 1, "label": "Add to existing library"}
+            ]
+          },
+          "help": "<b>'iopt'</b><br><br>Option for MAT specification: 0=read list, 1=add to existing."
+        },
+        {
+          "name": "mode",
+          "display_name": "Mode",
+          "type": "int",
+          "default": 0,
+          "help": "<b>'mode'</b><br><br>Processing mode."
+        },
+        {
+          "name": "if5",
+          "display_name": "Burnup data flag",
+          "type": "int",
+          "default": 0,
+          "help": "<b>'if5'</b><br><br>Burnup data flag (0=no burnup data)."
+        },
+        {
+          "name": "if4",
+          "display_name": "Format flag",
+          "type": "int",
+          "default": 0,
+          "help": "<b>'if4'</b><br><br>Format flag."
+        }
+      ]
+    },
+    {
+      "name": "Automatic",
+      "parameters": [
+        {
+          "name": "newmat",
+          "default": 1,
+          "type": "auto"
+        }
+      ]
+    }
+  ]
+}
