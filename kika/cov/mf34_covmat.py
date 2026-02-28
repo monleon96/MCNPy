@@ -1114,7 +1114,11 @@ class MF34CovMat:
             filtered_mf34.l_cols.append(self.l_cols[i])
             filtered_mf34.energy_grids.append(self.energy_grids[i])
             filtered_mf34.matrices.append(self.matrices[i])
-        
+            filtered_mf34.is_relative.append(self.is_relative[i])
+            filtered_mf34.frame.append(self.frame[i])
+
+        filtered_mf34.energy_unit = self.energy_unit
+
         return filtered_mf34
 
     def get_uncertainties_for_legendre_coefficient(

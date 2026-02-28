@@ -505,7 +505,6 @@ class MF34MT(MT):
 
         native_m = native_ne - 1
         union_m = union_ne - 1
-        projected_matrix = np.zeros((union_m, union_m))
 
         native_col_ne = len(native_col_point_grid) if is_lb6 and native_col_point_grid else native_ne
         native_col_m = native_col_ne - 1
@@ -517,65 +516,48 @@ class MF34MT(MT):
         elif not is_lb6 and component_matrix.shape != (native_m, native_m):
              raise ValueError(f"Projection: Component matrix shape {component_matrix.shape} doesn't match expected ({native_m}, {native_m})")
 
-        # Iterate through each cell (k_union, l_union) of the target projected matrix
-        # This part is computationally expensive for large matrices
-        for k_union in range(union_m):
-            # Define the energy bounds for the target row interval k_union
-            e_k_union_low = union_point_grid[k_union]
-            e_k_union_high = union_point_grid[k_union + 1]
-            delta_e_k_union = e_k_union_high - e_k_union_low
-            if delta_e_k_union <= 0: continue # Skip zero-width intervals
+        # Build row transfer matrix T_row[i,k] = overlap fraction of union bin i with native row bin k
+        union_arr = np.asarray(union_point_grid, dtype=float)
+        native_row_arr = np.asarray(native_point_grid, dtype=float)
 
-            for l_union in range(union_m):
-                # Define the energy bounds for the target column interval l_union
-                e_l_union_low = union_point_grid[l_union]
-                e_l_union_high = union_point_grid[l_union + 1]
-                delta_e_l_union = e_l_union_high - e_l_union_low
-                if delta_e_l_union <= 0: continue # Skip zero-width intervals
+        u_low = union_arr[:-1, None]   # (union_m, 1)
+        u_high = union_arr[1:, None]   # (union_m, 1)
+        delta_u = u_high - u_low       # (union_m, 1)
 
-                # Find the contribution from the source component matrix
-                sum_contribution = 0.0
+        nr_low = native_row_arr[:-1][None, :]   # (1, native_m)
+        nr_high = native_row_arr[1:][None, :]   # (1, native_m)
 
-                # Iterate through source row intervals k_native
-                for k_native in range(native_m):
-                    e_k_native_low = native_point_grid[k_native]
-                    e_k_native_high = native_point_grid[k_native + 1]
+        overlap_low = np.maximum(u_low, nr_low)
+        overlap_high = np.minimum(u_high, nr_high)
+        overlap_width = np.maximum(0.0, overlap_high - overlap_low)
+        # Avoid division by zero for zero-width union bins
+        with np.errstate(divide='ignore', invalid='ignore'):
+            T_row = np.where(delta_u > 0, overlap_width / delta_u, 0.0)
 
-                    # Calculate overlap fraction for row interval k
-                    overlap_k_low = max(e_k_union_low, e_k_native_low)
-                    overlap_k_high = min(e_k_union_high, e_k_native_high)
-                    overlap_k_width = max(0.0, overlap_k_high - overlap_k_low)
-                    frac_k = overlap_k_width / delta_e_k_union if delta_e_k_union > 0 else 0.0
+        # Build column transfer matrix (same as row for non-LB6, different grid for LB6)
+        if is_lb6 and native_col_point_grid is not None:
+            native_col_arr = np.asarray(native_col_point_grid, dtype=float)
+        else:
+            native_col_arr = native_row_arr
 
-                    if frac_k == 0: continue # No overlap in this row interval
+        nc_low = native_col_arr[:-1][None, :]
+        nc_high = native_col_arr[1:][None, :]
 
-                    # Iterate through source column intervals l_native
-                    native_l_grid = native_col_point_grid if is_lb6 and native_col_point_grid else native_point_grid
-                    for l_native in range(native_col_m):
-                        e_l_native_low = native_l_grid[l_native]
-                        e_l_native_high = native_l_grid[l_native + 1]
+        overlap_low_c = np.maximum(u_low, nc_low)
+        overlap_high_c = np.minimum(u_high, nc_high)
+        overlap_width_c = np.maximum(0.0, overlap_high_c - overlap_low_c)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            T_col = np.where(delta_u > 0, overlap_width_c / delta_u, 0.0)
 
-                        # Calculate overlap fraction for column interval l
-                        overlap_l_low = max(e_l_union_low, e_l_native_low)
-                        overlap_l_high = min(e_l_union_high, e_l_native_high)
-                        overlap_l_width = max(0.0, overlap_l_high - overlap_l_low)
-                        frac_l = overlap_l_width / delta_e_l_union if delta_e_l_union > 0 else 0.0
-
-                        if frac_l == 0: continue # No overlap in this column interval
-
-                        # Add contribution: C_native(k,l) * frac_k * frac_l (piecewise constant)
-                        # Note: This assumes C is constant over the native bin.
-                        # More sophisticated methods might weight differently.
-                        sum_contribution += component_matrix[k_native, l_native] * frac_k * frac_l
-
-                projected_matrix[k_union, l_union] = sum_contribution
+        # Projected = T_row @ component_matrix @ T_col.T
+        projected_matrix = T_row @ component_matrix @ T_col.T
 
         end_proj = time.time()
         logger.debug(f"Projection time (calculated): {end_proj - start_proj:.4f}s")
         return projected_matrix
 
 
-    def to_ang_covmat(self, energy_unit: str = 'eV') -> 'MF34CovMat': 
+    def to_ang_covmat(self, energy_unit: str = 'eV') -> 'MF34CovMat':
         """
         Convert the MF34MT data to an MF34CovMat object, aggregating LIST records
         per sub-subsection (L, L1 pair) according to ENDF rules for relative covariance.
@@ -590,6 +572,12 @@ class MF34MT(MT):
         MF34CovMat
             Angular distribution covariance matrix object containing MxM relative matrices.
         """
+        # Return cached result if available (avoids expensive recomputation)
+        if not hasattr(self, '_ang_covmat_cache'):
+            self._ang_covmat_cache = {}
+        if energy_unit in self._ang_covmat_cache:
+            return self._ang_covmat_cache[energy_unit]
+
         logger.debug(f"Starting to_ang_covmat for MF34 MT={self.number}")
         from kika.cov.mf34_covmat import MF34CovMat # Local import
 
@@ -857,8 +845,9 @@ class MF34MT(MT):
                 )
 
 
+        self._ang_covmat_cache[energy_unit] = ang_covmat
         return ang_covmat
-    
+
     def to_plot_data(
         self,
         order: int,

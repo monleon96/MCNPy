@@ -11,6 +11,7 @@ from .plot_data import (
     LegendreUncertaintyPlotData,
     AngularDistributionPlotData,
     CrossSectionPlotData,
+    DifferencePlotData,
     MultigroupXSPlotData,
     MultigroupUncertaintyPlotData,
     UncertaintyBand,
@@ -20,6 +21,12 @@ from .plot_data import (
 )
 from .plot_builder import PlotBuilder
 from .heatmap_builder import HeatmapBuilder
+from .comparison import (
+    ComparisonBuilder,
+    ComparisonResult,
+    compute_difference,
+    interpolate_to_grid,
+)
 
 __all__ = [
     'PlotData',
@@ -27,6 +34,7 @@ __all__ = [
     'LegendreUncertaintyPlotData',
     'AngularDistributionPlotData',
     'CrossSectionPlotData',
+    'DifferencePlotData',
     'MultigroupXSPlotData',
     'MultigroupUncertaintyPlotData',
     'UncertaintyBand',
@@ -35,4 +43,8 @@ __all__ = [
     'MF34HeatmapData',
     'PlotBuilder',
     'HeatmapBuilder',
+    'ComparisonBuilder',
+    'ComparisonResult',
+    'compute_difference',
+    'interpolate_to_grid',
 ]

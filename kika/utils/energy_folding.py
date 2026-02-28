@@ -283,8 +283,8 @@ def fold_angular_distribution(
         Tuple of (mu_grid, folded_pdf, unfolded_pdf)
     """
     # Get energy bounds from ACE
-    e_min_ace = ace_data.energy.min_energy
-    e_max_ace = ace_data.energy.max_energy
+    e_min_ace = np.min(ace_data.energies)
+    e_max_ace = np.max(ace_data.energies)
     
     # Define window
     E_lo = max(target_energy_mev - n_sigma * sigma_E_mev, e_min_ace)

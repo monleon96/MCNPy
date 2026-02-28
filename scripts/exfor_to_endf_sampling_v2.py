@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import sys
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Any, Union
@@ -77,6 +78,7 @@ from scripts.exfor_utils import (
     log_bin_jump_diagnostics,
     # Covariance
     compute_covariance_from_samples,
+    cap_covariance_relative_uncertainty,
     save_all_legendre_coefficients,
     # ENDF writing
     write_nominal_endf,
@@ -139,7 +141,7 @@ EXFOR_DIRECTORY = "/share_snc/snc/JuanMonleon/EXFOR/data_v1/"
 EXFOR_DB_PATH = '/share_snc/snc/JuanMonleon/EXFOR/x4_iron_angular.db'
 
 # Output directory (all generated files go here)
-OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/EXFOR_FIT_JEFF_V2_ENERGYBIN/"
+OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/EXFOR_FIT_JEFF_V14_ENERGYBIN/"
 
 # -----------------------------------------------------------------------------
 # 2. DATA SOURCE CONFIGURATION
@@ -165,7 +167,7 @@ SUPPLEMENTARY_JSON_FILES = [
 # -----------------------------------------------------------------------------
 GENERATE_NOMINAL_ENDF = True                     # Best-fit coefficients ENDF
 GENERATE_MC_MEAN_ENDF = True                     # MC mean coefficients ENDF
-GENERATE_SAMPLES_ENDF = False                    # Individual MC sample ENDFs
+GENERATE_SAMPLES_ENDF = True                    # Individual MC sample ENDFs
 GENERATE_COVARIANCE = True                      # Covariance matrix (.npy)
 GENERATE_MF34 = True                            # MF34 covariance section in ENDF
 N_SAMPLES = 25                                   # Number of MC samples
@@ -186,12 +188,27 @@ MF34_COVARIANCE_TYPE = "both"                    # "fine", "multigroup", or "bot
 # - 100 = maximum fine variance in group (most conservative)
 MULTIGROUP_VARIANCE_PERCENTILE = 90.0
 
+# --- Layer 1: Covariance diagonal cap ---
+# Caps excessive relative uncertainties in the covariance matrix.
+# Set APPLY_COVARIANCE_CAP = False to disable (preserves existing behavior).
+APPLY_COVARIANCE_CAP = True
+MAX_RELATIVE_STD_CAP = 1.0  # 100% relative uncertainty cap
+
+# --- File output options ---
+SAVE_CORRELATION_MATRICES = False       # Save correlation alongside covariance
+
+# --- Layer 2: Positivity-constrained projection ---
+# Projects MC samples to ensure non-negative angular distributions.
+# Set APPLY_POSITIVITY_PROJECTION = False to disable (preserves existing behavior).
+APPLY_POSITIVITY_PROJECTION = True
+POSITIVITY_CHECK_POINTS = 50  # Number of mu points in [-1, 1]
+
 # -----------------------------------------------------------------------------
 # 4. GENERAL PARAMETERS (Apply to ALL methods)
 # -----------------------------------------------------------------------------
 # Energy range to process (in MeV)
-ENERGY_MIN_MEV = 1.0
-ENERGY_MAX_MEV = 3.0
+ENERGY_MIN_MEV = 0.847
+ENERGY_MAX_MEV = 4
 
 # MT reaction number (2 = elastic scattering)
 MT_NUMBER = 2
@@ -201,14 +218,14 @@ M_PROJ_U = 1.008665                              # Projectile mass in u (neutron
 M_TARG_U = 55.93494                              # Target mass in u (Fe-56)
 
 # Legendre fitting parameters
-MAX_LEGENDRE_DEGREE = 8                          # Maximum Legendre order (capped at 8)
+MAX_LEGENDRE_DEGREE = 6                          # Maximum Legendre order (capped at 8)
 SELECT_DEGREE = "aicc"                           # "aicc", "bic", or None (use max)
 RIDGE_LAMBDA = 1e-6                              # Ridge regularization parameter
 RIDGE_POWER = 4                                  # Power for ridge penalty (l^ridge_power)
 DF_METHOD = "hat"                                # Degrees of freedom method: "hat" or "naive"
 
 # Processing options
-N_PROCS = 5                                      # Parallel processes (1 = sequential)
+N_PROCS = 12                                      # Parallel processes (1 = sequential)
 BASE_SEED = 42                                   # Random seed for reproducibility
 
 # -----------------------------------------------------------------------------
@@ -216,7 +233,7 @@ BASE_SEED = 42                                   # Random seed for reproducibili
 # -----------------------------------------------------------------------------
 # Available methods:
 #
-# "global_convolution" (RECOMMENDED)
+# "global_convolution"
 #     Fits ALL energy points simultaneously using Tikhonov regularization.
 #     Properly accounts for energy resolution smearing across energy bins.
 #     Each EXFOR measurement contributes to multiple ENDF energies according
@@ -350,6 +367,8 @@ def _mc_one_bin(args):
         freeze_c0,
         normalization_sigma,
         norm_dist,
+        _apply_positivity_projection,
+        _positivity_check_points,
     ) = args
 
     energy_idx = nr_energy_idx
@@ -375,6 +394,11 @@ def _mc_one_bin(args):
             degrees = list(nr_degree_weights.keys())
             probs = np.array(list(nr_degree_weights.values()))
             probs = probs / probs.sum()
+
+            from scripts.resample_AD import (
+                check_angular_distribution_positivity,
+                project_to_positive_distribution,
+            )
 
             for s_idx in range(n_samples):
                 sample_degree = rng.choice(degrees, p=probs)
@@ -404,9 +428,17 @@ def _mc_one_bin(args):
                 sample_coeffs = coef_df_single.iloc[0].to_numpy()
                 if len(sample_coeffs) < max_degree + 1:
                     sample_coeffs = np.pad(sample_coeffs, (0, max_degree + 1 - len(sample_coeffs)))
+                if _apply_positivity_projection:
+                    if not check_angular_distribution_positivity(sample_coeffs, _positivity_check_points):
+                        sample_coeffs = project_to_positive_distribution(sample_coeffs, _positivity_check_points)
                 endf_coeffs = endf_normalize_legendre_coeffs(sample_coeffs, include_a0=False)
                 results[s_idx] = endf_coeffs
         else:
+            from scripts.resample_AD import (
+                check_angular_distribution_positivity,
+                project_to_positive_distribution,
+            )
+
             coef_df, _ = sample_legendre_coefficients(
                 nr_mc_df,
                 value_col="value",
@@ -431,6 +463,9 @@ def _mc_one_bin(args):
             )
             for s_idx in range(n_samples):
                 sample_coeffs = coef_df.iloc[s_idx].to_numpy()
+                if _apply_positivity_projection:
+                    if not check_angular_distribution_positivity(sample_coeffs, _positivity_check_points):
+                        sample_coeffs = project_to_positive_distribution(sample_coeffs, _positivity_check_points)
                 endf_coeffs = endf_normalize_legendre_coeffs(sample_coeffs, include_a0=False)
                 results[s_idx] = endf_coeffs
 
@@ -1299,6 +1334,13 @@ def run_exfor_to_endf_sampling_v2(
     # Experiment exclusion and uncertainty floor
     exclude_experiments: Optional[List[str]] = None,
     min_relative_uncertainty: float = 0.0,
+    # Covariance cap (Layer 1) and positivity projection (Layer 2)
+    apply_covariance_cap: bool = False,
+    max_relative_std_cap: float = 1.0,
+    apply_positivity_projection: bool = False,
+    positivity_check_points: int = 50,
+    # File output options
+    save_correlation_matrices: bool = False,
 ):
     """
     Main function to generate ENDF samples from EXFOR angular distribution data.
@@ -1738,6 +1780,8 @@ def run_exfor_to_endf_sampling_v2(
                 l_dependent_power=L_DEPENDENT_POWER,
                 seed=base_seed,
                 logger=_logger,
+                apply_positivity_projection=apply_positivity_projection,
+                positivity_check_points=positivity_check_points,
             )
         else:
             _logger.info(f"  Method: Global convolution MC (all energies sampled jointly)")
@@ -1750,6 +1794,8 @@ def run_exfor_to_endf_sampling_v2(
                 sigma_norm=sigma_norm,
                 seed=base_seed,
                 logger=_logger,
+                apply_positivity_projection=apply_positivity_projection,
+                positivity_check_points=positivity_check_points,
             )
 
         # Convert to the expected format: Dict[sample_idx, Dict[energy_idx, coeffs]]
@@ -1860,6 +1906,8 @@ def run_exfor_to_endf_sampling_v2(
                 max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
                 n_procs=N_PROCS,
                 logger=_logger,
+                apply_positivity_projection=apply_positivity_projection,
+                positivity_check_points=positivity_check_points,
             )
 
             # Log bin jump diagnostics
@@ -1908,6 +1956,8 @@ def run_exfor_to_endf_sampling_v2(
                     FREEZE_C0,
                     NORMALIZATION_SIGMA,
                     NORM_DIST,
+                    apply_positivity_projection,
+                    positivity_check_points,
                 ))
 
             if N_PROCS > 1:
@@ -1966,6 +2016,8 @@ def run_exfor_to_endf_sampling_v2(
                 FREEZE_C0,
                 NORMALIZATION_SIGMA,
                 NORM_DIST,
+                apply_positivity_projection,
+                positivity_check_points,
             ))
 
         # Run per-bin MC (parallel or sequential)
@@ -1995,16 +2047,16 @@ def run_exfor_to_endf_sampling_v2(
     _logger.info("[STEP 6] Saving Legendre coefficients")
 
     try:
-        npz_file, csv_file = save_all_legendre_coefficients(
+        parquet_file = save_all_legendre_coefficients(
             nominal_results=nominal_results,
             all_samples=all_samples,
             output_dir=str(output_path),
             max_degree=max_degree,
         )
-        _logger.info(f"  Saved to: {csv_file}")
+        _logger.info(f"  Saved to: {parquet_file}")
     except Exception as e:
         _logger.error(f"Failed to save coefficients: {str(e)}", console=True)
-        npz_file, csv_file = None, None
+        parquet_file = None
 
     # Step 7: Covariance
     cov_matrix = None
@@ -2049,50 +2101,98 @@ def run_exfor_to_endf_sampling_v2(
         else:
             _logger.warning("  WARNING: No positive diagonal elements in covariance matrix!")
 
-        np.save(output_path / "legendre_covariance.npy", cov_matrix)
-        np.save(output_path / "legendre_correlation.npy", corr_matrix)
         _logger.info(f"  Covariance matrix shape: {cov_matrix.shape}")
 
-    # Step 7b: Multigroup covariance (optional)
-    multigroup_result = None
-    if generate_multigroup_covariance and generate_covariance and cov_matrix is not None:
-        _logger.info("")
-        _logger.info("[STEP 7b] Computing adaptive multigroup covariance")
-        _logger.info(f"  Using l=1 correlation for grouping (same grid for all orders)")
+        # Step 7a: Apply covariance cap (Layer 1) if enabled
+        if apply_covariance_cap:
+            _logger.info("")
+            _logger.info("[STEP 7a] Applying covariance diagonal cap (Layer 1)")
 
-        try:
-            multigroup_result = perform_adaptive_multigroup_collapse(
+            # Build energy MeV lookup for logging
+            energy_mev_lookup = {
+                nr.energy_index: nr.energy_mev
+                for nr in nominal_results if nr.has_data
+            }
+
+            cov_matrix, cap_diagnostics = cap_covariance_relative_uncertainty(
                 cov_matrix=cov_matrix,
-                corr_matrix=corr_matrix,
-                nominal_results=nominal_results,
-                energy_bins=energy_bins,
-                max_order=max_degree,
-                rho_min=multigroup_rho_min,
-                sigma_ratio_max=multigroup_sigma_ratio_max,
-                min_width_factor=multigroup_min_width_factor,
-                variance_percentile=multigroup_variance_percentile,
+                max_relative_std=max_relative_std_cap,
+                param_labels=param_labels,
+                energy_mev_lookup=energy_mev_lookup,
                 logger=_logger,
             )
 
-            # Log and save results
-            n_fine = len([nr for nr in nominal_results if not nr.interpolated and nr.has_data])
-            n_groups = len(multigroup_result.groups)
-            _logger.info(f"  Fine bins: {n_fine} -> Multigroups: {n_groups}")
-            _logger.info(f"  Compression: {n_fine/n_groups:.1f}x")
+            n_capped = cap_diagnostics['n_capped']
+            if n_capped > 0:
+                _logger.warning(
+                    f"  Covariance capping was applied to {n_capped} entries. "
+                    f"Set APPLY_COVARIANCE_CAP=False and re-run to obtain the uncapped covariance matrix.",
+                    console=True,
+                )
+            else:
+                _logger.info("  No entries exceeded the cap — no capping applied, output is unchanged.")
 
-            np.save(output_path / "legendre_covariance_multigroup.npy",
-                    multigroup_result.cov_grouped)
-            np.save(output_path / "legendre_correlation_multigroup.npy",
-                    multigroup_result.corr_grouped)
-            np.save(output_path / "multigroup_boundaries_ev.npy",
-                    multigroup_result.group_boundaries_ev)
-            np.save(output_path / "multigroup_mean_coeffs.npy",
-                    multigroup_result.mean_grouped)
-            _logger.info(f"  Saved multigroup covariance and boundaries")
+            # Recompute correlation from capped covariance
+            std_capped = np.sqrt(np.maximum(np.diag(cov_matrix), 0.0))
+            std_capped[std_capped == 0] = 1.0
+            corr_matrix = cov_matrix / np.outer(std_capped, std_capped)
 
-        except Exception as e:
-            _logger.error(f"Failed to compute multigroup covariance: {str(e)}", console=True)
-            multigroup_result = None
+        # Save final covariance (capped if capping was applied, raw otherwise)
+        np.save(output_path / "legendre_covariance.npy", cov_matrix)
+        if save_correlation_matrices:
+            np.save(output_path / "legendre_correlation.npy", corr_matrix)
+
+    # Step 7b: Multigroup covariance (optional)
+    multigroup_result = None
+    multigroup_failure_reason = None
+    if generate_multigroup_covariance:
+        if not generate_covariance:
+            multigroup_failure_reason = "generate_covariance is disabled"
+        elif cov_matrix is None:
+            multigroup_failure_reason = "covariance matrix is None (computation may have failed)"
+        else:
+            _logger.info("")
+            _logger.info("[STEP 7b] Computing adaptive multigroup covariance")
+            _logger.info(f"  Using l=1 correlation for grouping (same grid for all orders)")
+
+            try:
+                multigroup_result = perform_adaptive_multigroup_collapse(
+                    cov_matrix=cov_matrix,
+                    corr_matrix=corr_matrix,
+                    nominal_results=nominal_results,
+                    energy_bins=energy_bins,
+                    max_order=max_degree,
+                    rho_min=multigroup_rho_min,
+                    sigma_ratio_max=multigroup_sigma_ratio_max,
+                    min_width_factor=multigroup_min_width_factor,
+                    variance_percentile=multigroup_variance_percentile,
+                    logger=_logger,
+                    apply_covariance_cap=apply_covariance_cap,
+                    max_relative_std_cap=max_relative_std_cap,
+                )
+
+                # Log and save results
+                n_fine = len([nr for nr in nominal_results if not nr.interpolated and nr.has_data])
+                n_groups = len(multigroup_result.groups)
+                _logger.info(f"  Fine bins: {n_fine} -> Multigroups: {n_groups}")
+                _logger.info(f"  Compression: {n_fine/n_groups:.1f}x")
+
+                np.save(output_path / "legendre_covariance_multigroup.npy",
+                        multigroup_result.cov_grouped)
+                if save_correlation_matrices:
+                    np.save(output_path / "legendre_correlation_multigroup.npy",
+                            multigroup_result.corr_grouped)
+                np.save(output_path / "multigroup_boundaries_ev.npy",
+                        multigroup_result.group_boundaries_ev)
+                np.save(output_path / "multigroup_mean_coeffs.npy",
+                        multigroup_result.mean_grouped)
+                _logger.info(f"  Saved multigroup covariance and boundaries")
+
+            except Exception as e:
+                multigroup_failure_reason = f"{str(e)}\n{traceback.format_exc()}"
+                _logger.error(f"Failed to compute multigroup covariance: {str(e)}", console=True)
+                _logger.error(f"  Traceback:\n{traceback.format_exc()}")
+                multigroup_result = None
 
     # Step 8: Write ENDF files
     average_file = None
@@ -2259,7 +2359,12 @@ def run_exfor_to_endf_sampling_v2(
                     _logger.info(f"  Multigroup MF34 written to: {mg_nom_file}")
 
             elif mf34_covariance_type in ("multigroup", "both") and multigroup_result is None:
-                _logger.warning("  Multigroup covariance requested but not computed (enable GENERATE_MULTIGROUP_COVARIANCE)")
+                if multigroup_failure_reason:
+                    _logger.warning(f"  Multigroup covariance requested but failed: {multigroup_failure_reason}", console=True)
+                elif not generate_multigroup_covariance:
+                    _logger.warning("  Multigroup covariance requested but not computed (enable GENERATE_MULTIGROUP_COVARIANCE)")
+                else:
+                    _logger.warning("  Multigroup covariance requested but not computed (unknown reason)")
 
         except Exception as e:
             _logger.error(f"Failed to write MF34: {str(e)}", console=True)
@@ -2335,4 +2440,11 @@ if __name__ == "__main__":
         # Experiment exclusion and uncertainty floor
         exclude_experiments=EXCLUDE_EXPERIMENTS,
         min_relative_uncertainty=MIN_RELATIVE_UNCERTAINTY,
+        # Covariance cap (Layer 1) and positivity projection (Layer 2)
+        apply_covariance_cap=APPLY_COVARIANCE_CAP,
+        max_relative_std_cap=MAX_RELATIVE_STD_CAP,
+        apply_positivity_projection=APPLY_POSITIVITY_PROJECTION,
+        positivity_check_points=POSITIVITY_CHECK_POINTS,
+        # File output options
+        save_correlation_matrices=SAVE_CORRELATION_MATRICES,
     )

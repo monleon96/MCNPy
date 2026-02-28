@@ -1719,7 +1719,11 @@ def _run_one_jitter_sample(args):
         (s_idx, sample_coeffs, local_jump_stats)
     """
     from .tof_parameters import find_bin_for_energy
-    from .resample_AD import sample_legendre_coefficients
+    from .resample_AD import (
+        sample_legendre_coefficients,
+        check_angular_distribution_positivity,
+        project_to_positive_distribution,
+    )
 
     (
         s_idx,
@@ -1743,6 +1747,8 @@ def _run_one_jitter_sample(args):
         norm_dist,
         normalize_by_n_points,
         max_experiment_weight_fraction,
+        _apply_positivity_projection,
+        _positivity_check_points,
     ) = args
 
     rng = np.random.default_rng(base_seed + s_idx * 1000)
@@ -1927,6 +1933,9 @@ def _run_one_jitter_sample(args):
             )
 
             fit_coeffs = coef_df.iloc[0].to_numpy()
+            if _apply_positivity_projection:
+                if not check_angular_distribution_positivity(fit_coeffs, _positivity_check_points):
+                    fit_coeffs = project_to_positive_distribution(fit_coeffs, _positivity_check_points)
             endf_coeffs = endf_normalize_legendre_coeffs(fit_coeffs, include_a0=False)
 
         except Exception:
@@ -2004,6 +2013,8 @@ def run_mc_with_energy_jitter(
     max_experiment_weight_fraction: float = 1.0,
     n_procs: int = 1,
     logger=None,
+    apply_positivity_projection: bool = False,
+    positivity_check_points: int = 50,
 ) -> Tuple[Dict[int, Dict[int, np.ndarray]], BinJumpDiagnostics]:
     """
     Run MC sampling with energy jitter for cross-bin correlation.
@@ -2126,6 +2137,8 @@ def run_mc_with_energy_jitter(
         norm_dist,
         normalize_by_n_points,
         max_experiment_weight_fraction,
+        apply_positivity_projection,
+        positivity_check_points,
     )
 
     args_list = [(s_idx,) + shared_args for s_idx in range(n_samples)]
@@ -2412,18 +2425,119 @@ def compute_covariance_from_samples(
     return cov_matrix, corr_matrix, param_labels
 
 
+def cap_covariance_relative_uncertainty(
+    cov_matrix: np.ndarray,
+    max_relative_std: float,
+    param_labels: List[Tuple[int, int]],
+    energy_mev_lookup: Optional[Dict[int, float]] = None,
+    logger=None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Cap diagonal variances of the relative covariance matrix, preserving correlations.
+
+    Applies a congruence transformation cov_capped = diag(s) @ cov @ diag(s)
+    where s[i] = min(max_std, std[i]) / std[i]. This preserves the correlation
+    structure exactly and maintains positive semi-definiteness.
+
+    Parameters
+    ----------
+    cov_matrix : np.ndarray
+        Covariance matrix of ENDF-normalized Legendre coefficients.
+        Since coefficients are already normalized (a_l = c_l/c0/(2l+1)),
+        the variances are inherently relative.
+    max_relative_std : float
+        Maximum allowed standard deviation (e.g. 1.0 for 100% cap).
+    param_labels : List[Tuple[int, int]]
+        List of (energy_index, order) tuples identifying each parameter.
+    energy_mev_lookup : Dict[int, float], optional
+        Mapping energy_index -> energy in MeV for logging.
+    logger : optional
+        Logger instance for diagnostic output.
+
+    Returns
+    -------
+    Tuple[np.ndarray, Dict[str, Any]]
+        - capped covariance matrix
+        - diagnostics dict with keys: 'n_capped', 'n_total', 'max_original_std',
+          'capped_entries' (list of dicts with entry details)
+    """
+    diag = np.diag(cov_matrix).copy()
+    std = np.sqrt(np.maximum(diag, 0.0))
+    n_total = len(std)
+    max_std_sq = max_relative_std ** 2
+
+    # Compute scale factors: s[i] = min(max_relative_std, std[i]) / std[i]
+    s = np.ones(n_total)
+    capped_entries = []
+
+    for i in range(n_total):
+        if std[i] > max_relative_std:
+            s[i] = max_relative_std / std[i]
+            e_idx, order = param_labels[i]
+            entry_info = {
+                'param_index': i,
+                'energy_index': e_idx,
+                'order': order,
+                'original_std': float(std[i]),
+                'capped_std': float(max_relative_std),
+            }
+            if energy_mev_lookup and e_idx in energy_mev_lookup:
+                entry_info['energy_mev'] = energy_mev_lookup[e_idx]
+            capped_entries.append(entry_info)
+
+    n_capped = len(capped_entries)
+
+    # Apply congruence transformation: cov_capped = diag(s) @ cov @ diag(s)
+    cov_capped = cov_matrix * np.outer(s, s)
+
+    # Build diagnostics
+    max_original_std = float(np.max(std)) if n_total > 0 else 0.0
+    diagnostics = {
+        'n_capped': n_capped,
+        'n_total': n_total,
+        'max_original_std': max_original_std,
+        'capped_entries': capped_entries,
+    }
+
+    # Logging
+    if logger:
+        logger.info(f"[Covariance Cap] Applying max relative std cap = {max_relative_std*100:.1f}%")
+        if n_capped > 0:
+            logger.info(f"[Covariance Cap] Capped {n_capped}/{n_total} diagonal entries ({100*n_capped/n_total:.1f}%)")
+            for entry in capped_entries:
+                e_idx = entry['energy_index']
+                order = entry['order']
+                orig = entry['original_std'] * 100
+                capped = entry['capped_std'] * 100
+                if 'energy_mev' in entry:
+                    logger.info(
+                        f"[Covariance Cap]   E_idx={e_idx}  ({entry['energy_mev']:.2f} MeV), "
+                        f"L={order}: {orig:.1f}% -> {capped:.1f}%"
+                    )
+                else:
+                    logger.info(
+                        f"[Covariance Cap]   E_idx={e_idx}, L={order}: {orig:.1f}% -> {capped:.1f}%"
+                    )
+            # Find max original entry
+            max_entry = max(capped_entries, key=lambda e: e['original_std'])
+            logger.info(
+                f"[Covariance Cap] Max original relative std: {max_entry['original_std']*100:.1f}% "
+                f"(E_idx={max_entry['energy_index']}, L={max_entry['order']})"
+            )
+        else:
+            logger.info(f"[Covariance Cap] No entries exceed cap — covariance unchanged")
+
+    return cov_capped, diagnostics
+
+
 def save_all_legendre_coefficients(
     nominal_results: List,  # List[NominalFitResult] - avoid circular import
     all_samples: Dict[int, Dict[int, np.ndarray]],
     output_dir: str,
     max_degree: int,
-) -> Tuple[str, str]:
+) -> str:
     """
-    Save all Legendre coefficients (nominal + all MC samples) to file.
-
-    Saves in two formats:
-    1. NPZ file (fast loading with numpy)
-    2. CSV file (human-readable, easy to import)
+    Save all Legendre coefficients (nominal + all MC samples) to Parquet.
 
     Parameters
     ----------
@@ -2438,8 +2552,8 @@ def save_all_legendre_coefficients(
 
     Returns
     -------
-    Tuple[str, str]
-        Paths to (npz_file, csv_file)
+    str
+        Path to saved Parquet file
     """
     output_path = Path(output_dir)
 
@@ -2494,22 +2608,11 @@ def save_all_legendre_coefficients(
     # Sort by sample_idx, then energy_index
     df = df.sort_values(['sample_idx', 'energy_index']).reset_index(drop=True)
 
-    # Save as CSV
-    csv_file = output_path / 'legendre_coefficients_all_samples.csv'
-    df.to_csv(csv_file, index=False, float_format='%.6e')
+    # Save as Parquet (compact binary columnar format)
+    parquet_file = output_path / 'legendre_coefficients_all_samples.parquet'
+    df.to_parquet(parquet_file, engine='pyarrow', index=False)
 
-    # Save as NPZ (more compact and faster to load)
-    npz_file = output_path / 'legendre_coefficients_all_samples.npz'
-    np.savez_compressed(
-        npz_file,
-        sample_idx=df['sample_idx'].values,
-        energy_index=df['energy_index'].values,
-        energy_mev=df['energy_mev'].values,
-        coefficients=df[[f'a_{l+1}' for l in range(max_degree)]].values,
-        max_degree=max_degree,
-    )
-
-    return str(npz_file), str(csv_file)
+    return str(parquet_file)
 
 
 # =============================================================================

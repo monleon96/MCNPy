@@ -154,7 +154,7 @@ class PlotBuilder:
         self._y_label: Optional[str] = None
         self._title = _NOT_SET  # Use sentinel to distinguish "not set" from "explicitly None"
         self._legend_loc: str = 'best'
-        self._legend_outside: bool = False
+        self._legend_ncol: Optional[int] = None
         self._use_log_x: bool = False
         self._use_log_y: bool = False
         self._x_lim: Optional[Tuple[float, float]] = None
@@ -386,24 +386,45 @@ class PlotBuilder:
         self._y_lim = y_lim
         return self
     
-    def set_legend(self, loc: str = 'best', outside: bool = False) -> 'PlotBuilder':
+    def set_legend(self, loc: str = 'best', ncol: Optional[int] = None) -> 'PlotBuilder':
         """
-        Set legend location.
+        Set legend location and layout.
 
         Parameters
         ----------
         loc : str
-            Legend location
-        outside : bool
-            If True, place legend outside the plot area to the right
+            Legend location. Accepts standard matplotlib locations for
+            inside placement (e.g. ``'best'``, ``'upper right'``,
+            ``'lower left'``) or ``'outside <direction>'`` for outside
+            placement where direction is one of ``right``,
+            ``left``, ``top``, ``bottom``.
+        ncol : int, optional
+            Number of columns in the legend. If ``None``, matplotlib's
+            default (1 column) is used.
 
         Returns
         -------
         PlotBuilder
             Self for method chaining
+
+        Raises
+        ------
+        ValueError
+            If ``loc`` starts with ``'outside'`` but the direction is
+            not one of ``right``, ``left``, ``top``, ``bottom``.
         """
+        _VALID_OUTSIDE = {'right', 'left', 'top', 'bottom'}
+        if loc.startswith('outside'):
+            parts = loc.split(maxsplit=1)
+            direction = parts[1] if len(parts) > 1 else ''
+            if direction not in _VALID_OUTSIDE:
+                raise ValueError(
+                    f"Legend location '{loc}' is not valid. "
+                    f"Use 'outside <direction>' where direction is one of "
+                    f"{sorted(_VALID_OUTSIDE)}."
+                )
         self._legend_loc = loc
-        self._legend_outside = outside
+        self._legend_ncol = ncol
         return self
     
     def set_grid(
@@ -1820,32 +1841,73 @@ class PlotBuilder:
             self.ax.tick_params(axis='both', which='major', labelsize=self._tick_labelsize)
         
         # Add legend if there are labeled artists
+        _outside_legend_layout = False
         handles, labels = self.ax.get_legend_handles_labels()
         if handles:
             legend_kwargs = {'loc': self._legend_loc, 'framealpha': 0.9}
 
-            if self._legend_outside:
-                legend_kwargs['bbox_to_anchor'] = (1.02, 1)
-                legend_kwargs['loc'] = 'upper left'
+            if self._legend_ncol is not None:
+                legend_kwargs['ncol'] = self._legend_ncol
 
             if self.style == 'light':
-                # For light style, use framed legend with black edge (publication style)
                 legend_kwargs.update({
                     'frameon': True,
                     'fancybox': False,
                     'edgecolor': 'black'
                 })
             else:
-                # For dark style, use default fancybox
                 legend_kwargs['fancybox'] = True
 
             if self._legend_fontsize is not None:
                 legend_kwargs['fontsize'] = self._legend_fontsize
 
+            # Handle outside legend placement
+            _outside_dir = None
+            if self._legend_loc.startswith('outside'):
+                _outside_dir = self._legend_loc.split(maxsplit=1)[1]
+                # Right/left: anchor relative to axes (no clash with title/xlabel)
+                # Top/bottom: anchor to figure edge so legend doesn't overlap title/xlabel
+                _OUTSIDE_LEGEND = {
+                    'right':  {'bbox_to_anchor': (1.02, 1),   'loc': 'upper left'},
+                    'left':   {'bbox_to_anchor': (-0.02, 1),  'loc': 'upper right'},
+                    'top':    {'bbox_to_anchor': (0.5, 0.99), 'loc': 'upper center',
+                               'bbox_transform': self.fig.transFigure},
+                    'bottom': {'bbox_to_anchor': (0.5, 0.01), 'loc': 'lower center',
+                               'bbox_transform': self.fig.transFigure},
+                }
+                legend_kwargs.update(_OUTSIDE_LEGEND[_outside_dir])
+
             self.ax.legend(**legend_kwargs)
 
-            if self._legend_outside:
-                self.fig.subplots_adjust(right=0.78)
+            # Adjust layout to prevent legend-content overlap
+            if _outside_dir is not None:
+                _outside_legend_layout = True
+                if _outside_dir in ('top', 'bottom'):
+                    # Legend is pinned to figure edge; measure it, then
+                    # constrain axes into the remaining space.
+                    try:
+                        self.fig.canvas.draw()
+                        renderer = self.fig.canvas.get_renderer()
+                        leg_bb = self.ax.get_legend().get_window_extent(renderer) \
+                            .transformed(self.fig.transFigure.inverted())
+                        if _outside_dir == 'top':
+                            self.fig.tight_layout(rect=[0, 0, 1, leg_bb.y0 - 0.01])
+                        else:
+                            self.fig.tight_layout(rect=[0, leg_bb.y1 + 0.01, 1, 1])
+                    except Exception:
+                        rect = [0, 0, 1, 0.82] if _outside_dir == 'top' \
+                            else [0, 0.18, 1, 1]
+                        try:
+                            self.fig.tight_layout(rect=rect)
+                        except Exception:
+                            pass
+                else:  # right / left
+                    _LR_RECT = {'right': [0, 0, 0.78, 1],
+                                'left':  [0.22, 0, 1, 1]}
+                    try:
+                        self.fig.tight_layout(rect=_LR_RECT[_outside_dir])
+                    except Exception:
+                        pass
         
         # Apply tick parameters if specified
         if hasattr(self, '_tick_params') and self._tick_params:
@@ -1887,18 +1949,16 @@ class PlotBuilder:
                     label.set_rotation(rotation)
         
         # Apply tight layout to prevent label cutoff (especially after rotation)
-        # Only if constrained_layout is not already being used
-        if hasattr(self, '_tick_params') and self._tick_params:
+        # Skip if an outside legend already set a custom tight_layout rect.
+        if hasattr(self, '_tick_params') and self._tick_params and not _outside_legend_layout:
             try:
-                # Check if constrained_layout is active
                 if not self.fig.get_constrained_layout():
                     self.fig.tight_layout()
-            except:
-                # Fallback if constrained_layout check fails
+            except Exception:
                 try:
                     self.fig.tight_layout()
-                except:
-                    pass  # If tight_layout fails, just continue
+                except Exception:
+                    pass
         
         # Apply grid configuration
         if self._grid:

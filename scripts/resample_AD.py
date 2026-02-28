@@ -1877,6 +1877,8 @@ def sample_global_convolution_mc(
     sigma_norm: float = 0.05,
     seed: Optional[int] = None,
     logger=None,
+    apply_positivity_projection: bool = False,
+    positivity_check_points: int = 50,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
     Generate MC samples from the global convolution system.
@@ -1941,6 +1943,51 @@ def sample_global_convolution_mc(
         coeffs_s = solve_global_convolution(system, y_vec=y_s)
         all_samples[s_idx, :] = coeffs_s
 
+    # Apply positivity projection per energy bin if enabled
+    positivity_diagnostics = {}
+    if apply_positivity_projection:
+        if logger:
+            logger.info(f"[Positivity Projection] Enabled with {positivity_check_points} check points")
+
+        n_coeffs = system.n_coeffs
+        bins_affected = 0
+        total_bins = 0
+
+        for energy_idx, param_start in system.energy_idx_to_param_start.items():
+            total_bins += 1
+            n_projected = 0
+            max_rel_correction = 0.0
+
+            for s_idx in range(n_samples):
+                raw_coeffs = all_samples[s_idx, param_start:param_start + n_coeffs]
+                if not check_angular_distribution_positivity(raw_coeffs, positivity_check_points):
+                    projected = project_to_positive_distribution(raw_coeffs, positivity_check_points)
+                    delta = np.linalg.norm(projected - raw_coeffs)
+                    norm_c = np.linalg.norm(raw_coeffs)
+                    rel = delta / norm_c if norm_c > 0 else 0.0
+                    max_rel_correction = max(max_rel_correction, rel)
+                    all_samples[s_idx, param_start:param_start + n_coeffs] = projected
+                    n_projected += 1
+
+            if n_projected > 0:
+                bins_affected += 1
+                if logger:
+                    logger.info(
+                        f"[Positivity Projection] E_idx {energy_idx}: "
+                        f"{n_projected}/{n_samples} samples projected, "
+                        f"max ||delta_c||/||c|| = {max_rel_correction*100:.1f}%"
+                    )
+
+        if logger:
+            logger.info(
+                f"[Positivity Projection] Summary: {bins_affected}/{total_bins} bins required projection"
+            )
+
+        positivity_diagnostics = {
+            'bins_affected': bins_affected,
+            'total_bins': total_bins,
+        }
+
     # Compute diagnostics
     diagnostics = {
         'n_samples': n_samples,
@@ -1948,6 +1995,7 @@ def sample_global_convolution_mc(
         'n_experiments': len(system.experiment_groups),
         'n_data_points': n_data,
     }
+    diagnostics.update(positivity_diagnostics)
 
     # Compute coefficient statistics
     coeffs_mean = np.mean(all_samples, axis=0)
@@ -1970,6 +2018,8 @@ def sample_global_convolution_mc_shape_only(
     l_dependent_power: float = 2.0,
     seed: Optional[int] = None,
     logger=None,
+    apply_positivity_projection: bool = False,
+    positivity_check_points: int = 50,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
     MC sampling with frozen c0: only c1..cL are sampled.
@@ -2140,6 +2190,51 @@ def sample_global_convolution_mc_shape_only(
             all_samples[s_idx, param_start + 1:param_start + n_coeffs] = \
                 coeffs_shape[shape_start:shape_start + n_coeffs_shape]
 
+    # Apply positivity projection per energy bin if enabled
+    positivity_diagnostics = {}
+    if apply_positivity_projection:
+        if logger:
+            logger.info(f"[Positivity Projection] Enabled with {positivity_check_points} check points")
+
+        n_coeffs_full = system.n_coeffs
+        bins_affected = 0
+        total_bins = 0
+
+        for energy_idx, param_start in system.energy_idx_to_param_start.items():
+            total_bins += 1
+            n_projected = 0
+            max_rel_correction = 0.0
+
+            for s_idx in range(n_samples):
+                raw_coeffs = all_samples[s_idx, param_start:param_start + n_coeffs_full]
+                if not check_angular_distribution_positivity(raw_coeffs, positivity_check_points):
+                    projected = project_to_positive_distribution(raw_coeffs, positivity_check_points)
+                    delta = np.linalg.norm(projected - raw_coeffs)
+                    norm_c = np.linalg.norm(raw_coeffs)
+                    rel = delta / norm_c if norm_c > 0 else 0.0
+                    max_rel_correction = max(max_rel_correction, rel)
+                    all_samples[s_idx, param_start:param_start + n_coeffs_full] = projected
+                    n_projected += 1
+
+            if n_projected > 0:
+                bins_affected += 1
+                if logger:
+                    logger.info(
+                        f"[Positivity Projection] E_idx {energy_idx}: "
+                        f"{n_projected}/{n_samples} samples projected, "
+                        f"max ||delta_c||/||c|| = {max_rel_correction*100:.1f}%"
+                    )
+
+        if logger:
+            logger.info(
+                f"[Positivity Projection] Summary: {bins_affected}/{total_bins} bins required projection"
+            )
+
+        positivity_diagnostics = {
+            'bins_affected': bins_affected,
+            'total_bins': total_bins,
+        }
+
     # Compute diagnostics
     diagnostics = {
         'n_samples': n_samples,
@@ -2149,6 +2244,7 @@ def sample_global_convolution_mc_shape_only(
         'shape_only': True,
         'c0_frozen': True,
     }
+    diagnostics.update(positivity_diagnostics)
 
     # Compute coefficient statistics
     coeffs_mean = np.mean(all_samples, axis=0)
@@ -2738,3 +2834,98 @@ def plot_sampled_angular_distributions(
     
     fig.tight_layout()
     return fig
+
+
+# =============================================================================
+# POSITIVITY-CONSTRAINED PROJECTION FOR ANGULAR DISTRIBUTIONS
+# =============================================================================
+
+def check_angular_distribution_positivity(
+    coeffs: np.ndarray,
+    n_points: int = 50,
+) -> bool:
+    """
+    Check whether a Legendre expansion produces non-negative σ(θ) everywhere.
+
+    Evaluates σ(μ) = Σ_l c_l P_l(μ) at n_points evenly spaced in [-1, 1].
+
+    Parameters
+    ----------
+    coeffs : np.ndarray
+        Legendre coefficients c_0, c_1, ..., c_L (raw, not ENDF-normalized).
+    n_points : int
+        Number of check points in [-1, 1].
+
+    Returns
+    -------
+    bool
+        True if σ(μ) >= 0 for all check points, False otherwise.
+    """
+    mu_grid = np.linspace(-1, 1, n_points)
+    sigma = legval(mu_grid, coeffs)
+    return bool(np.all(sigma >= 0))
+
+
+def project_to_positive_distribution(
+    coeffs: np.ndarray,
+    n_points: int = 50,
+) -> np.ndarray:
+    """
+    Project Legendre coefficients to the nearest set producing non-negative σ(θ).
+
+    Solves: minimize ||c* - c||² subject to Σ c*_l P_l(μ_j) >= 0 for all j.
+
+    Uses SLSQP constrained optimization. Returns original coefficients unchanged
+    if the distribution is already non-negative everywhere.
+
+    Parameters
+    ----------
+    coeffs : np.ndarray
+        Legendre coefficients c_0, c_1, ..., c_L.
+    n_points : int
+        Number of constraint points in [-1, 1].
+
+    Returns
+    -------
+    np.ndarray
+        Projected coefficients (same shape as input).
+    """
+    from scipy.optimize import minimize
+
+    mu_grid = np.linspace(-1, 1, n_points)
+    sigma = legval(mu_grid, coeffs)
+
+    # Already non-negative — return as-is
+    if np.all(sigma >= 0):
+        return coeffs
+
+    n_coeffs = len(coeffs)
+
+    # Build Legendre Vandermonde-like matrix: P[j, l] = P_l(μ_j)
+    # legvander returns shape (n_points, n_coeffs) with columns P_0, P_1, ...
+    P_matrix = legvander(mu_grid, n_coeffs - 1)
+
+    def objective(c):
+        diff = c - coeffs
+        return 0.5 * np.dot(diff, diff)
+
+    def grad(c):
+        return c - coeffs
+
+    # Constraints: P_matrix @ c >= 0 for all rows
+    constraints = {
+        'type': 'ineq',
+        'fun': lambda c: P_matrix @ c,  # >= 0
+        'jac': lambda c: P_matrix,
+    }
+
+    result = minimize(
+        objective,
+        x0=coeffs.copy(),
+        jac=grad,
+        method='SLSQP',
+        constraints=constraints,
+        options={'ftol': 1e-12, 'maxiter': 500},
+    )
+
+    return result.x

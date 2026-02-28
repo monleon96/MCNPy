@@ -617,6 +617,8 @@ def perform_adaptive_multigroup_collapse(
     min_width_factor: float = 2.0,
     variance_percentile: float = 50.0,
     logger=None,
+    apply_covariance_cap: bool = False,
+    max_relative_std_cap: float = 1.0,
 ) -> MultigroupResult:
     """
     Main entry point for adaptive multigroup covariance collapse.
@@ -673,6 +675,28 @@ def perform_adaptive_multigroup_collapse(
         raise ValueError("No valid (non-interpolated) nominal results found")
 
     n_fine = len(valid_indices)
+
+    # The covariance matrix may include interpolated bins (all has_data bins).
+    # We need to slice it down to only the non-interpolated bins.
+    all_data_indices = [i for i, nr in enumerate(nominal_results) if nr.has_data]
+    if len(all_data_indices) != n_fine:
+        # Build index mapping: position of each valid bin in the full cov matrix
+        all_data_set = {v: pos for pos, v in enumerate(all_data_indices)}
+        valid_positions = [all_data_set[vi] for vi in valid_indices]
+
+        # Build flat parameter indices to extract from cov/corr
+        flat_indices = []
+        for pos in valid_positions:
+            for l in range(max_order):
+                flat_indices.append(pos * max_order + l)
+        flat_indices = np.array(flat_indices)
+
+        if logger:
+            n_interp = len(all_data_indices) - n_fine
+            logger.info(f"  Slicing covariance: {len(all_data_indices)} total bins -> {n_fine} non-interpolated ({n_interp} interpolated excluded)")
+
+        cov_matrix = cov_matrix[np.ix_(flat_indices, flat_indices)]
+        corr_matrix = corr_matrix[np.ix_(flat_indices, flat_indices)]
 
     # Map from valid index to energy bin
     valid_energy_bins = [energy_bins[i] for i in valid_indices]
@@ -738,6 +762,32 @@ def perform_adaptive_multigroup_collapse(
         variance_percentile=variance_percentile,
         logger=logger,
     )
+
+    # Apply covariance cap to grouped matrix if enabled
+    if apply_covariance_cap:
+        from scripts.exfor_utils import cap_covariance_relative_uncertainty
+
+        n_groups = len(groups)
+        mg_param_labels = [
+            (g_idx, l + 1) for g_idx in range(n_groups) for l in range(max_order)
+        ]
+
+        # Build energy MeV lookup: group index -> midpoint energy
+        energy_mev_lookup = {
+            gi.group_index: 0.5 * (gi.energy_lower_mev + gi.energy_upper_mev)
+            for gi in group_info
+        }
+
+        if logger:
+            logger.info(f"  Applying covariance cap to multigroup matrix (max std = {max_relative_std_cap*100:.0f}%)")
+
+        cov_grouped, cap_diag = cap_covariance_relative_uncertainty(
+            cov_matrix=cov_grouped,
+            max_relative_std=max_relative_std_cap,
+            param_labels=mg_param_labels,
+            energy_mev_lookup=energy_mev_lookup,
+            logger=logger,
+        )
 
     # Check and fix PSD if needed
     cov_grouped, was_psd = check_positive_semidefinite(

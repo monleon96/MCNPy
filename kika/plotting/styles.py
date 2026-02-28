@@ -104,7 +104,7 @@ def _apply_style_to_rcparams(
         'figure.figsize': figsize,
         'figure.dpi': dpi,
         'axes.linewidth': 1.0 if notebook_mode else 1.2,
-        'lines.linewidth': 2.0 if notebook_mode else 2.5,
+        'lines.linewidth': 1.0 if notebook_mode else 1.2,
         'lines.markersize': 6 if notebook_mode else 8,
         'axes.grid': True,
         'grid.alpha': 0.3,

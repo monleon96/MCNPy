@@ -287,6 +287,39 @@ class CrossSectionPlotData(PlotData):
             self.label = f"MT={self.mt}"
 
 
+@dataclass
+class DifferencePlotData(PlotData):
+    """
+    Plottable data representing a difference or ratio between two datasets.
+
+    Additional Attributes
+    ---------------------
+    difference_type : str
+        'relative' (percentage) or 'absolute' (same units as original)
+    reference_label : str, optional
+        Label of the reference dataset
+    comparison_label : str, optional
+        Label of the comparison dataset
+    """
+    difference_type: str = 'relative'
+    reference_label: Optional[str] = None
+    comparison_label: Optional[str] = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.metadata['difference_type'] = self.difference_type
+        self.metadata['reference_label'] = self.reference_label
+        self.metadata['comparison_label'] = self.comparison_label
+
+        if self.label is None:
+            ref = self.reference_label or 'ref'
+            comp = self.comparison_label or 'comp'
+            if self.difference_type == 'relative':
+                self.label = f"({comp} \u2212 {ref}) / {ref}"
+            else:
+                self.label = f"{comp} \u2212 {ref}"
+
+
 class UncertaintyBand:
     """
     Represents an uncertainty band for a plot.

@@ -704,7 +704,7 @@ class AngularDistributionContainer:
         ...     cross_section_unit='b/sr', energy_folding=True,
         ...     tof=(40.0, 8.0), label='ACE (ORELA folding)')
         """
-        from kika.plotting import PlotData
+        from kika.plotting import AngularDistributionPlotData
         import numpy as np
 
         # Additional parameters for to_dataframe
@@ -748,7 +748,7 @@ class AngularDistributionContainer:
             # Create default label
             label = f"MT={mt} @ {energy} MeV"
 
-        return PlotData(
+        return AngularDistributionPlotData(
             x=np.array(mu),
             y=np.array(y_values),
             label=label,
@@ -757,7 +757,9 @@ class AngularDistributionContainer:
             linewidth=kwargs.get('linewidth', None),
             marker=kwargs.get('marker', None),
             markersize=kwargs.get('markersize', None),
-            plot_type='line'
+            plot_type='line',
+            energy=energy,
+            mt=mt,
         )
     
     def __repr__(self) -> str:

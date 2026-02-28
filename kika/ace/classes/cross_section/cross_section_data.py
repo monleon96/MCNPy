@@ -559,12 +559,12 @@ class CrossSectionData:
         ...        .set_scales(log_x=True, log_y=True)
         ...        .build())
         """
-        from kika.plotting import PlotData
+        from kika.plotting import CrossSectionPlotData
         import numpy as np
-        
+
         if not self.has_data:
             raise ValueError("No cross section data available")
-        
+
         reaction = self._get_or_compute_reaction(mt)
         if reaction is None:
             available_mts = self.mt_numbers
@@ -577,14 +577,14 @@ class CrossSectionData:
             raise ValueError(f"MT={mt} not found{grouped_info}. Available MT numbers: {available_mts}")
         energies = reaction.energies  # In MeV
         xs_values = reaction.xs_values  # In barns
-        
+
         # Get label
         label = kwargs.get('label', None)
         if label is None:
             # Create default label from MT number
             label = f"MT={mt}"
-        
-        return PlotData(
+
+        return CrossSectionPlotData(
             x=np.array(energies),
             y=np.array(xs_values),
             label=label,
@@ -593,7 +593,9 @@ class CrossSectionData:
             linewidth=kwargs.get('linewidth', None),
             marker=kwargs.get('marker', None),
             markersize=kwargs.get('markersize', None),
-            plot_type='line'
+            plot_type='line',
+            mt=mt,
+            data_source='ace',
         )
     
     def to_bulk_plot_data(self, mt_list: List[int] = None) -> Dict[str, Union[List[float], Dict[int, List[float]], List[int]]]:
