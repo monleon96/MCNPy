@@ -1,24 +1,30 @@
+import re
+
 from kika._constants import ATOMIC_NUMBER_TO_SYMBOL, BOLTZMANN_CONSTANT, K_TO_SUFFIX, SYMBOL_TO_ATOMIC_NUMBER
 
 def symbol_to_zaid(symbol: str) -> int:
     """
     Convert an element-mass symbol to ZAID (e.g., Fe56 -> 26056, Fe -> 26000 for natural)
-    
+
+    Supports metastable suffixes: "Co58m" -> 1027058, "Co58m2" -> 2027058.
+    The returned ZAID uses extended IZZZAAA format when isomeric_state > 0.
+
     Parameters
     ----------
     symbol : str
-        Element symbol with optional mass number (e.g., "Fe56", "Fe", "U235", "H")
-    
+        Element symbol with optional mass number and metastable suffix
+        (e.g., "Fe56", "Fe", "U235", "H", "Co58m", "Co58m2")
+
     Returns
     -------
     int
-        ZAID identifier (ZZAAA format)
-        
+        ZAID identifier (ZZAAA or IZZZAAA format)
+
     Raises
     ------
     ValueError
         If the element symbol is not recognized or format is invalid
-        
+
     Examples
     --------
     >>> symbol_to_zaid("Fe56")
@@ -27,16 +33,24 @@ def symbol_to_zaid(symbol: str) -> int:
     26000
     >>> symbol_to_zaid("U235")
     92235
+    >>> symbol_to_zaid("Co58m")
+    1027058
     """
-    # Extract element symbol and mass number from the input
-    # Symbol can be 1-2 characters, followed by optional mass number
     if not symbol or len(symbol) < 1:
         raise ValueError(f"Invalid symbol: '{symbol}'. Must be at least 1 character.")
-    
+
+    # Extract metastable suffix (e.g., "Co58m" or "Co58m2")
+    # Lookbehind ensures 'm' follows a digit, avoiding false matches on element names like "Am"
+    meta_match = re.search(r'(?<=\d)m(\d*)$', symbol)
+    isomeric_state = 0
+    if meta_match:
+        isomeric_state = int(meta_match.group(1)) if meta_match.group(1) else 1
+        symbol = symbol[:meta_match.start()]
+
     # Try to extract element symbol (1-2 characters, case-insensitive)
     element_symbol = None
     mass_number = None
-    
+
     for elem_len in (2, 1):  # Try 2-char first, then 1-char
         potential_symbol = symbol[:elem_len]
         # Check if it matches a known element (case-insensitive)
@@ -52,23 +66,25 @@ def symbol_to_zaid(symbol: str) -> int:
                 else:
                     mass_number = 0  # Natural element
                 break
-        
+
         if element_symbol:
             break
-    
+
     if element_symbol is None:
         raise ValueError(f"Unknown element symbol: '{symbol}'")
-    
+
     atomic_number = SYMBOL_TO_ATOMIC_NUMBER[element_symbol]
-    
-    # Construct ZAID: ZZAAA format
+
+    # Construct ZAID: ZZAAA format (or IZZZAAA for metastable)
     if mass_number is None:
         mass_number = 0  # Natural element
-    
+
     if mass_number < 0 or mass_number > 999:
         raise ValueError(f"Mass number must be between 0 and 999, got {mass_number}")
-    
+
     zaid = atomic_number * 1000 + mass_number
+    if isomeric_state > 0:
+        zaid = isomeric_state * 1000000 + zaid
     return zaid
 
 
@@ -76,27 +92,40 @@ def zaid_to_symbol(zaid: int) -> str:
     """
     Convert a ZAID to element-mass symbol (e.g., 26056 -> Fe56)
     For natural elements (mass number 0), returns just the element symbol (e.g., 26000 -> Fe)
-    
+
+    Supports extended IZZZAAA format used in SCALE COVERX files, where I is the
+    isomeric state (0=ground, 1=1st metastable, etc.). Example: 1027058 -> Co58m.
+
     Parameters
     ----------
     zaid : int
-        ZAID identifier (ZZAAA format)
-    
+        ZAID identifier (ZZAAA or IZZZAAA format)
+
     Returns
     -------
     str
-        Element symbol with mass number (e.g., "Fe56") or just element (e.g., "Fe" for natural)
+        Element symbol with mass number (e.g., "Fe56", "Co58m") or just element (e.g., "Fe" for natural)
     """
     z = zaid // 1000
     a = zaid % 1000
-        
+
+    # Handle extended ZAID with isomeric state prefix (IZZZAAA)
+    # SCALE COVERX files use this format: e.g. 1027058 = Co-58m
+    isomeric_state = 0
+    if z > 118:
+        isomeric_state = zaid // 1000000
+        z = (zaid % 1000000) // 1000
+        a = zaid % 1000
+
     if z in ATOMIC_NUMBER_TO_SYMBOL:
         symbol = ATOMIC_NUMBER_TO_SYMBOL[z]
-        # For natural elements (mass number 0), return just the element symbol
         if a == 0:
-            return symbol
+            base = symbol
         else:
-            return f"{symbol}{a}"
+            base = f"{symbol}{a}"
+        if isomeric_state > 0:
+            base += "m" if isomeric_state == 1 else f"m{isomeric_state}"
+        return base
     return f"{zaid}"  # Fallback if conversion fails
 
 def kelvin_to_MeV(temp: float) -> float:
