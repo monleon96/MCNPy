@@ -167,6 +167,8 @@ class PlotBuilder:
         # Font size configuration (will override style defaults if set)
         self._title_fontsize: Optional[float] = None
         self._label_fontsize: Optional[float] = None
+        self._xlabel_fontsize: Optional[float] = None
+        self._ylabel_fontsize: Optional[float] = None
         self._tick_labelsize: Optional[float] = None
         self._legend_fontsize: Optional[float] = None
         
@@ -525,31 +527,37 @@ class PlotBuilder:
         self,
         title: Optional[float] = None,
         labels: Optional[float] = None,
+        xlabel: Optional[float] = None,
+        ylabel: Optional[float] = None,
         ticks: Optional[float] = None,
         legend: Optional[float] = None
     ) -> 'PlotBuilder':
         """
         Set font sizes for plot elements.
-        
+
         This method allows fine-grained control over font sizes, overriding
         the defaults set by the style parameter.
-        
+
         Parameters
         ----------
         title : float, optional
             Font size for the plot title
         labels : float, optional
             Font size for axis labels (x and y)
+        xlabel : float, optional
+            Font size for x-axis label (overrides ``labels`` for x)
+        ylabel : float, optional
+            Font size for y-axis label (overrides ``labels`` for y)
         ticks : float, optional
             Font size for tick labels
         legend : float, optional
             Font size for legend text
-            
+
         Returns
         -------
         PlotBuilder
             Self for method chaining
-            
+
         Examples
         --------
         >>> builder = PlotBuilder(style='paper')
@@ -562,11 +570,15 @@ class PlotBuilder:
             self._title_fontsize = title
         if labels is not None:
             self._label_fontsize = labels
+        if xlabel is not None:
+            self._xlabel_fontsize = xlabel
+        if ylabel is not None:
+            self._ylabel_fontsize = ylabel
         if ticks is not None:
             self._tick_labelsize = ticks
         if legend is not None:
             self._legend_fontsize = legend
-        
+
         return self
     
     def add_heatmap(
@@ -1803,9 +1815,11 @@ class PlotBuilder:
                 self.ax.set_ylim(y_lim)
 
         # Apply axis labels
+        x_fs = self._xlabel_fontsize or self._label_fontsize
+        y_fs = self._ylabel_fontsize or self._label_fontsize
         if self._x_label is not None:
-            if self._label_fontsize is not None:
-                self.ax.set_xlabel(self._x_label, fontsize=self._label_fontsize)
+            if x_fs is not None:
+                self.ax.set_xlabel(self._x_label, fontsize=x_fs)
             else:
                 self.ax.set_xlabel(self._x_label)
         elif self._use_log_x:
@@ -1818,10 +1832,10 @@ class PlotBuilder:
             if self._x_label is None:
                 self.ax.set_xlabel("Energy-group index")
                 self.ax.xaxis.set_major_locator(mpl.ticker.MaxNLocator(integer=True))
-        
+
         if self._y_label is not None:
-            if self._label_fontsize is not None:
-                self.ax.set_ylabel(self._y_label, fontsize=self._label_fontsize)
+            if y_fs is not None:
+                self.ax.set_ylabel(self._y_label, fontsize=y_fs)
             else:
                 self.ax.set_ylabel(self._y_label)
         

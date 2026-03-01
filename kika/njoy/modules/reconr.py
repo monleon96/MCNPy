@@ -5,6 +5,14 @@ from __future__ import annotations
 from ._base import Lines, parse_card_values, parse_quoted_string
 
 
+def _fmt(v) -> str:
+    """Format a numeric value, using integer notation for whole numbers."""
+    f = float(v)
+    if f == int(f) and abs(f) < 1e15:
+        return str(int(f))
+    return str(f)
+
+
 def generate(p: dict) -> Lines:
     from ..isotopes import get_mat_number
 
@@ -19,31 +27,35 @@ def generate(p: dict) -> Lines:
     except (ValueError, TypeError):
         tempr = 0.0
 
-    label = f"reconstructed data for {isotope} @ {tempr} K"
+    label = f"reconstructed data for {isotope} @ {_fmt(tempr)} K"
 
     tolerance = float(p.get("err", "0.001"))
     user_errmax = p.get("errmax")
     user_errint = p.get("errint")
 
     # Build Card 4 with dependencies
-    card4_parts = [str(tolerance)]
+    card4_parts = [_fmt(tolerance)]
+    all_specified = False
     if user_errint is not None:
         if user_errmax is None:
             user_errmax = 10 * tolerance
-        card4_parts.extend([str(p.get("tempr", 0.0)), str(user_errmax), str(user_errint)])
+        card4_parts.extend([_fmt(tempr), _fmt(user_errmax), _fmt(user_errint)])
+        all_specified = True
     elif user_errmax is not None:
-        card4_parts.extend([str(p.get("tempr", 0.0)), str(user_errmax)])
+        card4_parts.extend([_fmt(tempr), _fmt(user_errmax)])
     elif p.get("tempr") is not None:
-        card4_parts.append(str(tempr))
+        card4_parts.append(_fmt(tempr))
 
-    card4_line = " ".join(card4_parts) + " /"
+    card4_line = " ".join(card4_parts)
+    if not all_specified:
+        card4_line += " /"
 
     return [
         "-- reconstruct, linearise and unionize data",
         "reconr",
         f"{nendf} {npend}",
         f"'{label}'/",
-        f"{mat} /",
+        f"{mat} 0 0",
         card4_line,
         "0 /",
     ]

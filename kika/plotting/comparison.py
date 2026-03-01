@@ -374,6 +374,7 @@ class ComparisonBuilder:
         self._relative_in_percent: bool = True
         self._height_ratios: Tuple[float, float] = (3.0, 1.0)
         self._zero_line: bool = True
+        self._diff_log_y: bool = False
 
         # Shared settings forwarded to PlotBuilder instances
         self._title = _NOT_SET
@@ -409,6 +410,7 @@ class ComparisonBuilder:
         relative_in_percent: bool = _NOT_SET,
         zero_line: bool = _NOT_SET,
         only: bool = _NOT_SET,
+        log_y: bool = _NOT_SET,
     ) -> 'ComparisonBuilder':
         """
         Enable and configure the difference sub-panel.
@@ -432,6 +434,8 @@ class ComparisonBuilder:
             Draw a dashed zero reference line (default ``True``).
         only : bool
             If ``True``, show *only* the difference panel (no main overlay).
+        log_y : bool
+            Use logarithmic y-axis on the difference panel (default ``False``).
         """
         self._show_diff_panel = True
         if mode is not _NOT_SET:
@@ -448,6 +452,8 @@ class ComparisonBuilder:
             self._zero_line = zero_line
         if only is not _NOT_SET:
             self._diff_only = only
+        if log_y is not _NOT_SET:
+            self._diff_log_y = log_y
         return self
 
     def set_labels(
@@ -590,7 +596,7 @@ class ComparisonBuilder:
             x_label=self._x_label,
             y_label=self._resolve_diff_y_label(),
         )
-        builder.set_scales(log_x=self._use_log_x, log_y=False)
+        builder.set_scales(log_x=self._use_log_x, log_y=self._diff_log_y)
         builder.set_limits(x_lim=self._x_lim, y_lim=self._diff_y_lim)
         builder.set_legend(loc=self._legend_loc, ncol=self._legend_ncol)
         builder.set_grid(grid=self._grid)
@@ -719,7 +725,7 @@ class ComparisonBuilder:
         diff_builder.set_labels(
             y_label=self._resolve_diff_y_label(), x_label=self._x_label,
         )
-        diff_builder.set_scales(log_x=self._use_log_x, log_y=False)
+        diff_builder.set_scales(log_x=self._use_log_x, log_y=self._diff_log_y)
         diff_builder.set_limits(x_lim=self._x_lim, y_lim=self._diff_y_lim)
         diff_builder.set_grid(grid=self._grid)
         diff_builder.build()

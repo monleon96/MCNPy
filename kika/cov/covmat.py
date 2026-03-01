@@ -131,16 +131,46 @@ class CovMat:
         
         See Also
         --------
-        read_njoy_covmat : Underlying function that performs the parsing
+        read_covfil : Underlying function that performs the parsing
         """
         from pathlib import Path
-        from kika.cov.parse_covmat import read_njoy_covmat
-        
+        from kika.cov.parse_covmat import read_covfil
+
         # Convert to Path object for consistent handling
         file_path = Path(file_path)
-        
-        return read_njoy_covmat(file_path, energy_unit=energy_unit)
-    
+
+        return read_covfil(str(file_path), energy_unit=energy_unit)
+
+    @classmethod
+    def from_coverx(cls, file_path: Union[str, 'Path'], ascending: bool = True, energy_unit: str = 'eV') -> "CovMat":
+        """
+        Create a CovMat instance from a COVERX covariance file (text or binary).
+
+        Parameters
+        ----------
+        file_path : str or Path
+            Path to the COVERX covariance file
+        ascending : bool, optional
+            If True, energies ordered ascending (default True)
+        energy_unit : str, optional
+            Energy unit for the energy grid: 'eV' (default) or 'MeV'
+
+        Returns
+        -------
+        CovMat
+            CovMat instance loaded from the file
+
+        See Also
+        --------
+        read_coverx : Underlying function that performs the parsing
+        """
+        from pathlib import Path
+        from kika.cov.parse_covmat import read_coverx
+
+        file_path = Path(file_path)
+
+        return read_coverx(str(file_path), ascending=ascending, energy_unit=energy_unit)
+
     def remove_matrix(
         self,
         isotope: int,

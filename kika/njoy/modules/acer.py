@@ -30,6 +30,7 @@ def generate(p: dict) -> Lines:
     print(f"[ACER DEBUG] abs_iopt={abs_iopt}, type={type(abs_iopt)}", file=sys.stderr, flush=True)
 
     suff_trunc = int(suff * 100) / 100 if suff > 0 else suff
+    suff_str = f"{suff_trunc:g}"
 
     # nxtra iz,aw pairs
     nxtra_pairs = p.get("nxtra", [])
@@ -56,9 +57,9 @@ def generate(p: dict) -> Lines:
 
     # Card 2: iopt iprint itype suff [nxtra]
     if nxtra_count > 0:
-        lines.append(f"{iopt} {iprint} {itype} {suff_trunc:.2f} {nxtra_count} /")
+        lines.append(f"{iopt} {iprint} {itype} {suff_str} {nxtra_count} /")
     else:
-        lines.append(f"{iopt} {iprint} {itype} {suff_trunc:.2f} /")
+        lines.append(f"{iopt} {iprint} {itype} {suff_str} /")
 
     # Card 3: hk
     lines.append(f"'{hk}' /")
@@ -100,14 +101,7 @@ def _emit_fast(lines: Lines, p: dict, mat_num: int, tempd) -> None:
     iopp = _get(p, "iopp", 1)
     ismooth = _get(p, "ismooth", 1)
 
-    if ismooth != 1:
-        lines.append(f"{newfor} {iopp} {ismooth} /")
-    elif iopp != 1:
-        lines.append(f"{newfor} {iopp} /")
-    elif newfor != 1:
-        lines.append(f"{newfor} /")
-    else:
-        lines.append("/")
+    lines.append(f"{newfor} {iopp} {ismooth} /")
 
     # Card 7: thin1 [thin2] [thin3]
     thin1 = p.get("thin1")

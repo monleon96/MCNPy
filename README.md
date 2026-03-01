@@ -76,7 +76,7 @@ sens_data = kika.compute_sensitivity(
 ace_data = kika.read_ace("path/to/ace_file")
 
 # Read covariance matrices
-cov = kika.read_scale_covmat("path/to/covmat_file")
+cov = kika.read_coverx("path/to/covmat_file")  # text or binary, auto-detected
 ```
 
 ## Documentation

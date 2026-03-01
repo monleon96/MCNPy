@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from typing import List, Optional
 
-from kika.cov.parse_covmat import read_scale_covmat, read_njoy_covmat
+from kika.cov.parse_covmat import read_coverx, read_covfil, read_scale_covmat, read_njoy_covmat
 from kika._utils import zaid_to_symbol
 
 
@@ -138,11 +138,11 @@ def load_covariance(path):
     
     # Map readers to format names for logging
     reader_formats = {
-        read_njoy_covmat: "NJOY",
-        read_scale_covmat: "SCALE"
+        read_covfil: "NJOY COVFIL",
+        read_coverx: "COVERX"
     }
-    
-    for reader in (read_njoy_covmat, read_scale_covmat):
+
+    for reader in (read_covfil, read_coverx):
         try:
             cov = reader(path)
             if logger:

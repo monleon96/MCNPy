@@ -1,10 +1,14 @@
+import struct
+
 import numpy as np
-from typing import Dict, Tuple, List, Optional  
+import pandas as pd
+import re
+from typing import Dict, Tuple, List, Optional
+
 from kika._constants import MT_TO_REACTION, ENDF_MAT_TO_ZAID
 from kika.cov.covmat import CovMat
 from kika.energy_grids.grids import SCALE44, SCALE56, SCALE238, SCALE252
-import re
-import pandas as pd
+
 
 class EmptyParsingError(Exception):
     """Raised when no data was extracted during parsing."""
@@ -14,10 +18,137 @@ class InvalidDataFormatError(Exception):
     """Raised when the data format is invalid or corrupted."""
     pass
 
-def read_scale_covmat(file_path: str, ascending: bool = True, energy_unit: str = 'eV'):
+
+# ---------------------------------------------------------------------------
+# COVERX format helpers
+# ---------------------------------------------------------------------------
+
+def _read_fortran_record(f, endian: str) -> bytes:
     """
-    Read a SCALE covariance matrix file and convert it to a CovMat object.
-    
+    Read a single Fortran unformatted sequential record.
+
+    Parameters
+    ----------
+    f : file object
+        Open binary file handle
+    endian : str
+        Struct endian prefix: '>' for big-endian, '<' for little-endian
+
+    Returns
+    -------
+    bytes
+        The record payload (without markers), or None at EOF.
+
+    Raises
+    ------
+    InvalidDataFormatError
+        If record markers do not match.
+    """
+    marker_fmt = endian + 'i'
+    head = f.read(4)
+    if len(head) < 4:
+        return None
+    rec_len = struct.unpack(marker_fmt, head)[0]
+    data = f.read(rec_len)
+    tail = struct.unpack(marker_fmt, f.read(4))[0]
+    if rec_len != tail:
+        raise InvalidDataFormatError(
+            f"Fortran record marker mismatch: header={rec_len}, trailer={tail}"
+        )
+    return data
+
+
+def _detect_coverx_format(file_path: str) -> str:
+    """
+    Detect whether a COVERX file is text or binary.
+
+    Returns
+    -------
+    str
+        ``'text'`` or ``'binary'``
+    """
+    with open(file_path, 'rb') as f:
+        header = f.read(4)
+    if len(header) < 4:
+        raise InvalidDataFormatError(f"File too small: {file_path}")
+    if all(b == 0x09 or b == 0x0A or b == 0x0D or (0x20 <= b <= 0x7E)
+           for b in header):
+        return 'text'
+    return 'binary'
+
+
+def _detect_endianness(file_path: str) -> str:
+    """
+    Detect endianness of a binary COVERX file.
+
+    The first Fortran record marker encodes the byte-length of Record 1
+    (typically 22 bytes).
+
+    Returns
+    -------
+    str
+        ``'>'`` for big-endian, ``'<'`` for little-endian.
+    """
+    with open(file_path, 'rb') as f:
+        raw = f.read(4)
+    big = struct.unpack('>i', raw)[0]
+    little = struct.unpack('<i', raw)[0]
+    if 4 <= big <= 1000:
+        return '>'
+    elif 4 <= little <= 1000:
+        return '<'
+    raise InvalidDataFormatError(
+        f"Cannot determine endianness from first 4 bytes: {raw.hex()}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public API — COVERX (text or binary, auto-detected)
+# ---------------------------------------------------------------------------
+
+def read_coverx(file_path: str, ascending: bool = True, energy_unit: str = 'eV') -> CovMat:
+    """
+    Read a COVERX covariance file (text or binary) and return a CovMat object.
+
+    The format is auto-detected: if the first bytes are printable ASCII the
+    file is treated as text; otherwise it is parsed as a Fortran unformatted
+    binary COVERX file.
+
+    Parameters
+    ----------
+    file_path : str
+        Path to the COVERX covariance file
+    ascending : bool, optional
+        If True, energies are reordered in ascending order (default True)
+    energy_unit : str, optional
+        Energy unit for the energy grid: ``'eV'`` (default) or ``'MeV'``
+
+    Returns
+    -------
+    CovMat
+        Parsed covariance data
+
+    Raises
+    ------
+    EmptyParsingError
+        If no valid covariance matrices were found in the file
+    InvalidDataFormatError
+        If the binary structure is corrupted
+    """
+    fmt = _detect_coverx_format(file_path)
+    if fmt == 'binary':
+        return _read_coverx_binary(file_path, ascending, energy_unit)
+    return _read_coverx_text(file_path, ascending, energy_unit)
+
+
+# ---------------------------------------------------------------------------
+# COVERX text parser (formerly read_scale_covmat)
+# ---------------------------------------------------------------------------
+
+def _read_coverx_text(file_path: str, ascending: bool = True, energy_unit: str = 'eV') -> CovMat:
+    """
+    Read a SCALE covariance matrix text file and convert it to a CovMat object.
+
     Parameters
     ----------
     file_path : str
@@ -26,12 +157,12 @@ def read_scale_covmat(file_path: str, ascending: bool = True, energy_unit: str =
         If True, the energies will be ordered in ascending order (default is True)
     energy_unit : str, optional
         Energy unit for the energy grid: 'eV' (default) or 'MeV'
-        
+
     Returns
     -------
     CovMat
         CovMat object containing the parsed covariance data
-    
+
     Raises
     ------
     EmptyParsingError
@@ -45,7 +176,7 @@ def read_scale_covmat(file_path: str, ascending: bool = True, energy_unit: str =
 
     # Parse the group number from the second line
     num_groups = int(file_lines[1].split()[0])
-    
+
     # Create CovMat object
     covmat = CovMat(num_groups, energy_unit=energy_unit)
 
@@ -56,7 +187,7 @@ def read_scale_covmat(file_path: str, ascending: bool = True, energy_unit: str =
         len(SCALE238) - 1: SCALE238,
         len(SCALE252) - 1: SCALE252,
     }
-    
+
     if num_groups in potential_grids:
         covmat.energy_grid = potential_grids[num_groups]
 
@@ -67,13 +198,13 @@ def read_scale_covmat(file_path: str, ascending: bool = True, energy_unit: str =
                 # Parse isotope and reaction numbers
                 reaction_row = int(line.split()[1])
                 reaction_col = int(line.split()[3])
-                
-                if (reaction_row != 1 and reaction_col != 1 and 
+
+                if (reaction_row != 1 and reaction_col != 1 and
                     reaction_row in MT_TO_REACTION and reaction_col in MT_TO_REACTION):
-                    
+
                     isotope_row = int(line.split()[0])
                     isotope_col = int(line.split()[2])
-                    
+
                     # Read matrix values
                     matrix_values = []
                     values_read = 0
@@ -86,7 +217,7 @@ def read_scale_covmat(file_path: str, ascending: bool = True, energy_unit: str =
 
                     # Convert to numpy array and reshape
                     matrix = np.array(matrix_values).reshape(num_groups, num_groups)
-                    
+
                     if ascending:
                         matrix = np.flipud(np.fliplr(matrix))
 
@@ -102,19 +233,159 @@ def read_scale_covmat(file_path: str, ascending: bool = True, energy_unit: str =
 
     return covmat
 
-def read_njoy_covmat(file_path: str, energy_unit: str = 'eV') -> CovMat:
+
+# ---------------------------------------------------------------------------
+# COVERX binary parser
+# ---------------------------------------------------------------------------
+
+def _read_coverx_binary(file_path: str, ascending: bool = True, energy_unit: str = 'eV') -> CovMat:
     """
-    Parse an NJOY-generated covariance file and return a CovMat instance.
-    The routine now stores MF3 cross sections in `CovMat.cross_sections`
+    Read a binary COVERX covariance file and return a CovMat object.
+
+    Supports both big-endian and little-endian Fortran unformatted files
+    (endianness is auto-detected).
+
+    Parameters
+    ----------
+    file_path : str
+        Path to the binary COVERX file
+    ascending : bool, optional
+        If True, reorder energies and matrices to ascending order (default True)
+    energy_unit : str, optional
+        Energy unit: ``'eV'`` (default) or ``'MeV'``
+
+    Returns
+    -------
+    CovMat
+        Parsed covariance data
+
+    Raises
+    ------
+    EmptyParsingError
+        If no valid covariance matrices were found
+    InvalidDataFormatError
+        If record markers are inconsistent
+    """
+    endian = _detect_endianness(file_path)
+
+    with open(file_path, 'rb') as f:
+        # Record 1: File identification (hname + huse + ivers)
+        _read_fortran_record(f, endian)
+
+        # Record 2: File control — 7 integers
+        rec2 = _read_fortran_record(f, endian)
+        ngroup, nngrup, _nggrup, _ntype, nmmp, nmtrix, nholl = struct.unpack(
+            endian + '7i', rec2
+        )
+
+        # Record 3: File description
+        _read_fortran_record(f, endian)
+
+        # Record 4: Energy group boundaries — (nngrup + 1) floats
+        rec4 = _read_fortran_record(f, endian)
+        n_energies = nngrup + 1
+        energy_grid = list(struct.unpack(endian + f'{n_energies}f',
+                                         rec4[:n_energies * 4]))
+
+        # Record 5: Material-reaction pair metadata — nmmp × (matid, mtid, mwgt)
+        rec5 = _read_fortran_record(f, endian)
+        triplets = struct.unpack(endian + f'{nmmp * 3}i', rec5)
+
+        # Records 6 … 6+nmmp-1: cross-section / error data per pair (skip)
+        for _ in range(nmmp):
+            _read_fortran_record(f, endian)
+
+        # --- Covariance matrix blocks (nmtrix total) ----------------------
+        covmat = CovMat(num_groups=ngroup, energy_unit=energy_unit)
+
+        # Use predefined SCALE grids when available (consistent with text parser)
+        potential_grids = {
+            len(SCALE44) - 1: SCALE44,
+            len(SCALE56) - 1: SCALE56,
+            len(SCALE238) - 1: SCALE238,
+            len(SCALE252) - 1: SCALE252,
+        }
+        if ngroup in potential_grids:
+            covmat.energy_grid = potential_grids[ngroup]
+        else:
+            covmat.energy_grid = energy_grid
+
+        for _ in range(nmtrix):
+            # Control record: mat1, mt1, mat2, mt2, nblock
+            rec_ctrl = _read_fortran_record(f, endian)
+            mat1, mt1, mat2, mt2, nblock = struct.unpack(endian + '5i', rec_ctrl)
+
+            # Band + Legendre record: ngroup×(jband,ijj) + nblock×lgpr
+            rec_band = _read_fortran_record(f, endian)
+            n_ints = 2 * ngroup + nblock
+            ints = struct.unpack(endian + f'{n_ints}i', rec_band[:n_ints * 4])
+
+            jband = [ints[i * 2] for i in range(ngroup)]
+            ijj = [ints[i * 2 + 1] for i in range(ngroup)]
+
+            # Data record(s) — one per Legendre block; use only P0 (first)
+            total_vals = sum(jband)
+            rec_data = _read_fortran_record(f, endian)
+            vals = struct.unpack(endian + f'{total_vals}f', rec_data[:total_vals * 4])
+
+            # Skip remaining Legendre blocks if nblock > 1
+            for _ in range(1, nblock):
+                _read_fortran_record(f, endian)
+
+            # Unpack banded sparse into dense matrix
+            matrix = np.zeros((ngroup, ngroup))
+            offset = 0
+            for j in range(ngroup):
+                if jband[j] > 0:
+                    start_col = j - ijj[j] + 1
+                    matrix[j, start_col:start_col + jband[j]] = vals[offset:offset + jband[j]]
+                    offset += jband[j]
+
+            # Skip zero-sum matrices
+            if np.isclose(matrix.sum(), 0.0):
+                continue
+
+            # Apply same MT filters as the text parser
+            if (mt1 == 1 or mt2 == 1 or
+                    mt1 not in MT_TO_REACTION or mt2 not in MT_TO_REACTION):
+                continue
+
+            if ascending:
+                matrix = np.flipud(np.fliplr(matrix))
+
+            covmat.add_matrix(mat1, mt1, mat2, mt2, matrix)
+
+        # Flip energy grid if ascending (only needed for file-read grids;
+        # predefined SCALE grids are already in ascending order)
+        if ascending and ngroup not in potential_grids:
+            covmat.energy_grid = list(reversed(covmat.energy_grid))
+
+    if covmat.num_matrices == 0:
+        raise EmptyParsingError(
+            f"No valid data was extracted from the binary COVERX file: {file_path}"
+        )
+
+    return covmat
+
+
+# ---------------------------------------------------------------------------
+# Public API — COVFIL / GENDF (NJOY format)
+# ---------------------------------------------------------------------------
+
+def read_covfil(file_path: str, energy_unit: str = 'eV') -> CovMat:
+    """
+    Parse an NJOY-generated COVFIL/GENDF covariance file and return a CovMat instance.
+
+    The routine stores MF3 cross sections in ``CovMat.cross_sections``
     instead of treating them as pseudo-matrices with REAC_V = 0.
-    
+
     Parameters
     ----------
     file_path : str
         Path to the NJOY-generated covariance file
     energy_unit : str, optional
-        Energy unit for the energy grid: 'eV' (default) or 'MeV'
-        
+        Energy unit for the energy grid: ``'eV'`` (default) or ``'MeV'``
+
     Returns
     -------
     CovMat
@@ -293,7 +564,9 @@ def read_njoy_covmat(file_path: str, energy_unit: str = 'eV') -> CovMat:
     return covmat
 
 
-
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
 
 def _map_mat(mat_str: str) -> str:
     """
@@ -314,5 +587,12 @@ def _map_mat(mat_str: str) -> str:
     try:
         mat_int = int(mat_str.strip())
     except ValueError:
-        return mat_str 
+        return mat_str
     return str(ENDF_MAT_TO_ZAID.get(mat_int, mat_int))
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatible aliases
+# ---------------------------------------------------------------------------
+read_scale_covmat = read_coverx
+read_njoy_covmat = read_covfil

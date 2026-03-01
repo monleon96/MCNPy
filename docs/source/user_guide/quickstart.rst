@@ -178,13 +178,13 @@ Read and process covariance matrices from SCALE or NJOY:
 
 .. code-block:: python
 
-   from kika import read_scale_covmat, read_njoy_covmat
-   
-   # Read a SCALE covariance matrix
-   covmat = read_scale_covmat('path/to/scale_covmat')
-   
-   # Read an NJOY covariance matrix
-   covmat = read_njoy_covmat('path/to/njoy_covmat')
+   from kika import read_coverx, read_covfil
+
+   # Read a COVERX covariance matrix (text or binary, auto-detected)
+   covmat = read_coverx('path/to/coverx_file')
+
+   # Read an NJOY COVFIL/GENDF covariance matrix
+   covmat = read_covfil('path/to/njoy_covmat')
 
 
 Working with ENDF Files
