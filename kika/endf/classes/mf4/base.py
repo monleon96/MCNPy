@@ -2,7 +2,9 @@
 Classes for MT sections within MF4 (Angular Distributions) in ENDF files.
 """
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
+
+import numpy as np
 
 from ..mt import MT
 
@@ -66,7 +68,69 @@ class MF4MT(MT):
         else:
             raise ValueError(f"Invalid value for LCT: {self._lct}. Expected 1 or 2.")
     
-    
+    def to_dense_plot_data(
+        self,
+        order: int,
+        energy_range: Tuple[float, float],
+        num_points: int = 1000,
+        label: Optional[str] = None,
+        **styling_kwargs,
+    ):
+        """
+        Evaluate Legendre coefficients on a dense log-spaced grid and return plot data.
+
+        This method works on any MF4MT subclass that implements
+        ``extract_legendre_coefficients()``.
+
+        Parameters
+        ----------
+        order : int
+            Legendre polynomial order to extract.
+        energy_range : tuple of float
+            ``(e_min, e_max)`` in eV for the dense evaluation grid.
+        num_points : int, default 1000
+            Number of log-spaced evaluation points.
+        label : str, optional
+            Plot label.  Auto-generated if *None*.
+        **styling_kwargs
+            Passed through to ``LegendreCoeffPlotData`` (color, linestyle, …).
+
+        Returns
+        -------
+        LegendreCoeffPlotData
+        """
+        from kika.plotting import LegendreCoeffPlotData
+
+        e_min, e_max = energy_range
+        dense_e = np.logspace(np.log10(e_min), np.log10(e_max), num_points)
+
+        coeffs_dict = self.extract_legendre_coefficients(
+            energy=dense_e,
+            max_legendre_order=order,
+            out_of_range="zero",
+        )
+        coeff_vals = coeffs_dict[order]
+
+        isotope = getattr(self, "isotope", None)
+        if isotope is None and hasattr(self, "zaid"):
+            isotope = str(self.zaid)
+        mt = getattr(self, "number", None)
+
+        if label is None:
+            label = f"ENDF L={order}"
+
+        return LegendreCoeffPlotData(
+            x=dense_e,
+            y=coeff_vals,
+            order=order,
+            isotope=isotope,
+            mt=mt,
+            energy_range=energy_range,
+            label=label,
+            plot_type="line",
+            **styling_kwargs,
+        )
+
     def __str__(self) -> str:
         """
         Convert the MF4MT object back to ENDF format string.

@@ -17,6 +17,181 @@ from kika.plotting.plot_builder import PlotBuilder
 from kika.plotting.heatmap_builder import HeatmapBuilder
 
 
+def endf_uncertainty_band(
+    endf_cov: MF34CovMat,
+    mf4_mt,
+    isotope: int,
+    mt: int,
+    order: int,
+    sigma: float,
+    nominal_data,
+    color: Optional[str] = None,
+) -> Optional["UncertaintyBand"]:
+    """
+    Build an ``UncertaintyBand`` from MF34 piecewise-constant relative uncertainties
+    mapped onto a dense nominal curve.
+
+    Parameters
+    ----------
+    endf_cov : MF34CovMat
+        Continuous-energy covariance matrix (from ``MF34MT.to_ang_covmat()``).
+    mf4_mt : MF4MT
+        MF4 angular-distribution object (any concrete subclass).
+    isotope : int
+        ZAID of the isotope.
+    mt : int
+        Reaction MT number.
+    order : int
+        Legendre order.
+    sigma : float
+        Number of sigma levels for the band width.
+    nominal_data : LegendreCoeffPlotData
+        Dense nominal curve (x = energies, y = coefficient values).
+    color : str, optional
+        Band fill colour.
+
+    Returns
+    -------
+    UncertaintyBand or None
+    """
+    from kika.plotting import UncertaintyBand
+
+    if endf_cov is None or not hasattr(endf_cov, "get_uncertainties_for_legendre_coefficient"):
+        return None
+    unc_info = endf_cov.get_uncertainties_for_legendre_coefficient(isotope, mt, order)
+    if not unc_info:
+        return None
+
+    energies_unc = np.asarray(unc_info["energies"], dtype=float)
+    rel_unc = np.asarray(unc_info["uncertainties"], dtype=float)
+    is_relative = unc_info.get("is_relative", True)
+
+    if not is_relative:
+        if nominal_data is None:
+            return None
+        coeff_x = np.asarray(nominal_data.x, dtype=float)
+        coeff_y = np.asarray(nominal_data.y, dtype=float)
+        if len(coeff_y) == len(coeff_x) + 1:
+            coeff_y = coeff_y[:-1]
+        centers_unc = np.sqrt(energies_unc[:-1] * energies_unc[1:])
+        coeff_interp = np.interp(centers_unc, coeff_x, coeff_y)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rel_unc = np.where(coeff_interp != 0, rel_unc / np.abs(coeff_interp), np.nan)
+
+    if rel_unc.size == 0 or nominal_data is None:
+        return None
+
+    nom_x = np.asarray(nominal_data.x, dtype=float)
+    nom_y = np.asarray(nominal_data.y, dtype=float)
+    if len(nom_y) == len(nom_x) + 1:
+        nom_y = nom_y[:-1]
+
+    mask = (nom_x >= energies_unc[0]) & (nom_x <= energies_unc[-1])
+    if not np.any(mask):
+        return None
+    band_x = nom_x[mask]
+    band_y = nom_y[mask]
+
+    bin_idx = np.searchsorted(energies_unc, band_x, side="right") - 1
+    bin_idx = np.clip(bin_idx, 0, len(rel_unc) - 1)
+    rel_unc_dense = rel_unc[bin_idx]
+
+    y_lower = band_y * (1.0 - sigma * rel_unc_dense)
+    y_upper = band_y * (1.0 + sigma * rel_unc_dense)
+
+    return UncertaintyBand(
+        x=band_x,
+        y_lower=y_lower,
+        y_upper=y_upper,
+        sigma=sigma,
+        color=color,
+    )
+
+
+def endf_uncertainty_step_data(
+    endf_cov: MF34CovMat,
+    mf4_mt,
+    isotope: int,
+    mt: int,
+    order: int,
+    sigma: float = 1.0,
+    label: Optional[str] = None,
+    **styling_kwargs,
+) -> Optional["LegendreUncertaintyPlotData"]:
+    """
+    Build a step-plot of ENDF relative uncertainties (%) for overlay comparison.
+
+    Parameters
+    ----------
+    endf_cov : MF34CovMat
+        Continuous-energy covariance matrix.
+    mf4_mt : MF4MT or None
+        MF4 angular-distribution object (needed when uncertainties are absolute).
+    isotope : int
+        ZAID of the isotope.
+    mt : int
+        Reaction MT number.
+    order : int
+        Legendre order.
+    sigma : float, default 1.0
+        Sigma multiplier.
+    label : str, optional
+        Plot label.  Defaults to ``"ENDF L={order}"``.
+    **styling_kwargs
+        Passed through to ``LegendreUncertaintyPlotData`` (color, linestyle, …).
+
+    Returns
+    -------
+    LegendreUncertaintyPlotData or None
+    """
+    from kika._utils import zaid_to_symbol
+    from kika.plotting import LegendreUncertaintyPlotData
+
+    if endf_cov is None:
+        return None
+    unc_info = endf_cov.get_uncertainties_for_legendre_coefficient(isotope, mt, order)
+    if not unc_info:
+        return None
+
+    energies = np.asarray(unc_info["energies"], dtype=float)
+    unc_values = np.asarray(unc_info["uncertainties"], dtype=float) * sigma
+    is_relative = unc_info.get("is_relative", True)
+
+    centers = np.sqrt(energies[:-1] * energies[1:])
+
+    if is_relative:
+        rel_unc_pct = unc_values * 100.0
+    else:
+        if mf4_mt is None or not hasattr(mf4_mt, "extract_legendre_coefficients"):
+            return None
+        coeffs = mf4_mt.extract_legendre_coefficients(
+            energy=centers,
+            max_legendre_order=order,
+            out_of_range="zero",
+        ).get(order)
+        if coeffs is None:
+            return None
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rel_unc_pct = np.where(coeffs != 0, (unc_values / np.abs(coeffs)) * 100.0, np.nan)
+
+    if label is None:
+        label = f"ENDF L={order}"
+
+    # Pop keys that LegendreUncertaintyPlotData does not accept as **kwargs
+    # but that are part of its explicit fields — let them go through normally.
+    return LegendreUncertaintyPlotData(
+        x=energies,
+        y=np.append(rel_unc_pct, rel_unc_pct[-1]),
+        label=label,
+        order=order,
+        isotope=zaid_to_symbol(isotope) if isinstance(isotope, int) else isotope,
+        mt=mt,
+        uncertainty_type="relative",
+        plot_type="step",
+        **styling_kwargs,
+    )
+
+
 def plot_mg_legendre_coefficients(
     mg_covmat: MGMF34CovMat,
     nuclide: Union[int, str],
@@ -230,11 +405,13 @@ def plot_mg_vs_endf_comparison(
     uncertainty_sigma: float = 1.0,
     endf_native: bool = False,
     title: Optional[str] = "default",
+    mg_style: Optional[dict] = None,
+    endf_style: Optional[dict] = None,
     **styling_kwargs
 ) -> plt.Figure:
     """
     Compare multigroup Legendre coefficients with continuous ENDF data.
-    
+
     This modern implementation uses PlotBuilder to overlay multigroup step plots
     with continuous ENDF coefficient curves and optional ±σ bands.
 
@@ -278,6 +455,11 @@ def plot_mg_vs_endf_comparison(
     title : str or None, default "default"
         Plot title. If "default", generates a title from nuclide and MT.
         If None, no title is displayed. If a string, uses that as the title.
+    mg_style : dict, optional
+        Style overrides for the MG series. Keys are PlotData attributes:
+        ``color``, ``linestyle``, ``linewidth``, ``label``, ``alpha``, etc.
+    endf_style : dict, optional
+        Style overrides for the ENDF series (same keys as *mg_style*).
     **styling_kwargs
         Additional styling arguments
 
@@ -429,16 +611,41 @@ def plot_mg_vs_endf_comparison(
         if rel_unc.size == 0:
             return None
 
-        rel_unc_extended = np.append(rel_unc, rel_unc[-1])
+        # Build the band on the dense nominal curve grid so it follows
+        # the pointwise shape instead of looking blocky/stepped.
+        if nominal is None:
+            return None
+
+        nom_x = np.asarray(nominal.x, dtype=float)
+        nom_y = np.asarray(nominal.y, dtype=float)
+        if len(nom_y) == len(nom_x) + 1:
+            nom_y = nom_y[:-1]
+
+        # Restrict to MF34 energy range
+        mask = (nom_x >= energies_unc[0]) & (nom_x <= energies_unc[-1])
+        if not np.any(mask):
+            return None
+        band_x = nom_x[mask]
+        band_y = nom_y[mask]
+
+        # Piecewise-constant lookup: map each dense point to its MF34 bin
+        bin_idx = np.searchsorted(energies_unc, band_x, side='right') - 1
+        bin_idx = np.clip(bin_idx, 0, len(rel_unc) - 1)
+        rel_unc_dense = rel_unc[bin_idx]
+
+        y_lower = band_y * (1.0 - uncertainty_sigma * rel_unc_dense)
+        y_upper = band_y * (1.0 + uncertainty_sigma * rel_unc_dense)
+
         band = UncertaintyBand(
-            x=energies_unc,
-            relative_uncertainty=rel_unc_extended,
+            x=band_x,
+            y_lower=y_lower,
+            y_upper=y_upper,
             sigma=uncertainty_sigma,
             color=color,
         )
         return band
 
-    # Add data for each order from both sources
+    # Add data for each order from both sources (ENDF first so MG draws on top)
     for idx, order in enumerate(orders):
         try:
             mg_label = f"MG L={order}"
@@ -449,13 +656,34 @@ def plot_mg_vs_endf_comparison(
                 sigma=uncertainty_sigma,
                 label=mg_label,
             )
-            color = getattr(mg_data, "color", None) if mg_data is not None else None
-            if color is None and color_cycle:
-                color = color_cycle[idx % len(color_cycle)]
+            base_color = getattr(mg_data, "color", None) if mg_data is not None else None
+            if base_color is None and color_cycle:
+                base_color = color_cycle[idx % len(color_cycle)]
+
+            # --- ENDF (background layer) ---
+            endf_data = _build_endf_coeff_data(order, base_color)
+            if endf_data is not None and endf_style:
+                for attr, val in endf_style.items():
+                    if val is not None and hasattr(endf_data, attr):
+                        setattr(endf_data, attr, val)
+            endf_color = endf_data.color if endf_data is not None else base_color
+            endf_band = _build_endf_uncertainty_band(order, endf_color, endf_data) if show_uncertainties else None
+            if endf_data is not None:
+                builder.add_data(
+                    endf_data,
+                    uncertainty=endf_band,
+                )
+
+            # --- MG (foreground layer) ---
             if mg_data is not None:
-                mg_data.color = color
+                mg_data.color = base_color
+                if mg_style:
+                    for attr, val in mg_style.items():
+                        if val is not None and hasattr(mg_data, attr):
+                            setattr(mg_data, attr, val)
+                mg_color = mg_data.color
                 if mg_unc is not None and getattr(mg_unc, "color", None) is None:
-                    mg_unc.color = color
+                    mg_unc.color = mg_color
                 builder.add_data(
                     mg_data,
                     uncertainty=mg_unc if show_uncertainties else None,
@@ -470,21 +698,13 @@ def plot_mg_vs_endf_comparison(
                             plot_type="scatter",
                             marker="o",
                             markersize=4,
-                            color=color,
+                            color=mg_color,
                             label=None,
                             alpha=getattr(mg_data, "alpha", None),
                         )
                         builder.add_data(scatter)
                     except Exception:
                         pass
-
-            endf_data = _build_endf_coeff_data(order, color)
-            endf_band = _build_endf_uncertainty_band(order, color, endf_data) if show_uncertainties else None
-            if endf_data is not None:
-                builder.add_data(
-                    endf_data,
-                    uncertainty=endf_band,
-                )
 
         except (ValueError, KeyError) as e:
             print(f"Warning: Could not compare L={order}: {e}")
@@ -531,11 +751,13 @@ def plot_mg_vs_endf_uncertainties_comparison(
     uncertainty_type: str = "relative",
     mg_marker: bool = True,
     title: Optional[str] = "default",
+    mg_style: Optional[dict] = None,
+    endf_style: Optional[dict] = None,
     **styling_kwargs
 ) -> plt.Figure:
     """
     Compare uncertainties between multigroup and continuous ENDF data.
-    
+
     This modern implementation uses PlotBuilder to compare uncertainty profiles.
 
     Parameters
@@ -575,6 +797,11 @@ def plot_mg_vs_endf_uncertainties_comparison(
     title : str or None, default "default"
         Plot title. If "default", generates a title from nuclide and MT.
         If None, no title is displayed. If a string, uses that as the title.
+    mg_style : dict, optional
+        Style overrides for the MG series. Keys are PlotData attributes:
+        ``color``, ``linestyle``, ``linewidth``, ``label``, ``alpha``, etc.
+    endf_style : dict, optional
+        Style overrides for the ENDF series (same keys as *mg_style*).
     **styling_kwargs
         Additional styling arguments
 
@@ -705,20 +932,31 @@ def plot_mg_vs_endf_uncertainties_comparison(
                 label=f"MG L={order}",
                 **styling_kwargs,
             )
-            color = getattr(mg_unc, "color", None) if mg_unc is not None else None
-            if color is None and color_cycle:
-                color = color_cycle[idx % len(color_cycle)]
+            base_color = getattr(mg_unc, "color", None) if mg_unc is not None else None
+            if base_color is None and color_cycle:
+                base_color = color_cycle[idx % len(color_cycle)]
+
+            # --- ENDF (background layer) ---
+            endf_unc = _build_endf_uncertainty(order, base_color)
+            if endf_unc is not None and endf_style:
+                for attr, val in endf_style.items():
+                    if val is not None and hasattr(endf_unc, attr):
+                        setattr(endf_unc, attr, val)
+            if endf_unc is not None:
+                builder.add_data(endf_unc)
+
+            # --- MG (foreground layer) ---
             if mg_unc is not None:
-                mg_unc.color = color
+                mg_unc.color = base_color
                 mg_unc.plot_type = "step"
                 if mg_marker:
                     mg_unc.marker = 'o'
                     mg_unc.markersize = 4
+                if mg_style:
+                    for attr, val in mg_style.items():
+                        if val is not None and hasattr(mg_unc, attr):
+                            setattr(mg_unc, attr, val)
                 builder.add_data(mg_unc)
-
-            endf_unc = _build_endf_uncertainty(order, color)
-            if endf_unc is not None:
-                builder.add_data(endf_unc)
 
         except (ValueError, KeyError) as e:
             print(f"Warning: Could not compare uncertainties for L={order}: {e}")
