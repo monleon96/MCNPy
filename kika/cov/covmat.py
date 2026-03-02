@@ -136,10 +136,131 @@ class CovMat:
         from pathlib import Path
         from kika.cov.parse_covmat import read_covfil
 
-        # Convert to Path object for consistent handling
         file_path = Path(file_path)
+        result = read_covfil(str(file_path), energy_unit=energy_unit)
+        if not isinstance(result, cls):
+            raise TypeError(
+                "File contains MF34 data. Use MF34CovMat.from_covfil() instead."
+            )
+        return result
 
-        return read_covfil(str(file_path), energy_unit=energy_unit)
+    @classmethod
+    def from_covfil(cls, file_path: Union[str, 'Path'], energy_unit: str = 'eV') -> "CovMat":
+        """
+        Create a CovMat instance from an NJOY-generated COVFIL/GENDF file.
+
+        Parameters
+        ----------
+        file_path : str or Path
+            Path to the COVFIL/GENDF covariance file
+        energy_unit : str, optional
+            Energy unit for the energy grid: 'eV' (default) or 'MeV'
+
+        Returns
+        -------
+        CovMat
+            CovMat instance loaded from the file
+
+        Raises
+        ------
+        TypeError
+            If the file contains MF34 data instead of MF33
+
+        See Also
+        --------
+        read_covfil : Underlying function that performs the parsing
+        """
+        from pathlib import Path
+        from kika.cov.parse_covmat import read_covfil
+
+        file_path = Path(file_path)
+        result = read_covfil(str(file_path), energy_unit=energy_unit)
+        if not isinstance(result, cls):
+            raise TypeError(
+                "File contains MF34 data. Use MF34CovMat.from_covfil() instead."
+            )
+        return result
+
+    def to_covfil(self, file_path: Union[str, 'Path'], tape_label: str = '', temperature: float = 0.0) -> None:
+        """
+        Write this CovMat to an NJOY COVFIL/GENDF text file.
+
+        Parameters
+        ----------
+        file_path : str or Path
+            Output file path
+        tape_label : str, optional
+            Label for the tape header line (max 66 chars)
+        temperature : float, optional
+            Temperature in K for MF1 MT451 CONT record
+        """
+        from kika.cov.parse_covmat import write_covfil
+        write_covfil(self, str(file_path), tape_label=tape_label, temperature=temperature)
+
+    @classmethod
+    def from_boxer(cls, file_path: Union[str, 'Path'], energy_unit: str = 'eV') -> "CovMat":
+        """
+        Create a CovMat instance from a BOXER card-image covariance file.
+
+        Parameters
+        ----------
+        file_path : str or Path
+            Path to the BOXER file
+        energy_unit : str, optional
+            Energy unit for the energy grid: 'eV' (default) or 'MeV'
+
+        Returns
+        -------
+        CovMat
+            CovMat instance loaded from the file
+
+        See Also
+        --------
+        read_boxer : Underlying function that performs the parsing
+        """
+        from pathlib import Path
+        from kika.cov.parse_covmat import read_boxer
+
+        return read_boxer(str(Path(file_path)), energy_unit=energy_unit)
+
+    def to_boxer(
+        self, file_path: Union[str, 'Path'],
+        hlibid: str = '', hdescr: str = '', nvf: int = 10,
+    ) -> None:
+        """
+        Write this CovMat to a BOXER card-image (ASCII) file.
+
+        Parameters
+        ----------
+        file_path : str or Path
+            Output file path
+        hlibid : str, optional
+            Library identifier (3 chars max)
+        hdescr : str, optional
+            Description (32 chars max)
+        nvf : int, optional
+            Value format code (7-14). Default 10 (1P8E10.3).
+        """
+        from kika.cov.parse_covmat import write_boxer
+        write_boxer(self, str(file_path), hlibid=hlibid, hdescr=hdescr, nvf=nvf)
+
+    def to_coverx(
+        self, file_path: Union[str, 'Path'], fmt: str = 'binary', title: str = '',
+    ) -> None:
+        """
+        Write this CovMat to a COVERX covariance file (text or binary).
+
+        Parameters
+        ----------
+        file_path : str or Path
+            Output file path
+        fmt : str, optional
+            ``'binary'`` (default) or ``'text'``
+        title : str, optional
+            File title / description
+        """
+        from kika.cov.parse_covmat import write_coverx
+        write_coverx(self, str(file_path), fmt=fmt, title=title)
 
     @classmethod
     def from_coverx(cls, file_path: Union[str, 'Path'], ascending: bool = True, energy_unit: str = 'eV') -> "CovMat":

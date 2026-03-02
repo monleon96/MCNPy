@@ -181,6 +181,55 @@ class MF34CovMat:
         # Convert MF34 to MF34CovMat
         return mf34.to_ang_covmat(energy_unit=energy_unit)
 
+    @classmethod
+    def from_covfil(cls, file_path: Union[str, 'Path'], energy_unit: str = 'eV') -> "MF34CovMat":
+        """
+        Create an MF34CovMat instance from an NJOY-generated COVFIL/GENDF file.
+
+        Parameters
+        ----------
+        file_path : str or Path
+            Path to the COVFIL/GENDF covariance file
+        energy_unit : str, optional
+            Energy unit for the energy grid: 'eV' (default) or 'MeV'
+
+        Returns
+        -------
+        MF34CovMat
+            MF34CovMat instance loaded from the file
+
+        Raises
+        ------
+        TypeError
+            If the file contains MF33 data instead of MF34
+        """
+        from pathlib import Path
+        from kika.cov.parse_covmat import read_covfil
+
+        file_path = Path(file_path)
+        result = read_covfil(str(file_path), energy_unit=energy_unit)
+        if not isinstance(result, cls):
+            raise TypeError(
+                "File contains MF33 data. Use CovMat.from_covfil() instead."
+            )
+        return result
+
+    def to_covfil(self, file_path: Union[str, 'Path'], tape_label: str = '', temperature: float = 0.0) -> None:
+        """
+        Write this MF34CovMat to an NJOY COVFIL/GENDF text file.
+
+        Parameters
+        ----------
+        file_path : str or Path
+            Output file path
+        tape_label : str, optional
+            Label for the tape header line (max 66 chars)
+        temperature : float, optional
+            Temperature in K for MF1 MT451 CONT record
+        """
+        from kika.cov.parse_covmat import write_covfil
+        write_covfil(self, str(file_path), tape_label=tape_label, temperature=temperature)
+
     # ------------------------------------------------------------------
     # User-friendly methods
     # ------------------------------------------------------------------
