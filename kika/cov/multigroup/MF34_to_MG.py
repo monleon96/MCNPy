@@ -232,11 +232,9 @@ def convert_absolute_to_relative_covariance(absolute_matrix: np.ndarray,
     mask_row = np.abs(means_row) <= epsilon
     mask_col = np.abs(means_col) <= epsilon
     
-    for i in range(relative.shape[0]):
-        for j in range(relative.shape[1]):
-            if mask_row[i] or mask_col[j]:
-                relative[i, j] = np.nan
-                
+    bad_mask = mask_row[:, None] | mask_col[None, :]
+    relative[bad_mask] = np.nan
+
     return relative
 
 
@@ -293,29 +291,24 @@ def compute_overlap_weights(base_energy_grid: np.ndarray,
     np.ndarray
         Overlap weights matrix of shape (N_base_cells, N_mg_groups)
     """
-    N_base = len(base_energy_grid) - 1  # Number of base cells
-    N_mg = len(mg_energy_grid) - 1      # Number of MG groups
-    
-    weights = np.zeros((N_base, N_mg))
-    
-    for i in range(N_base):
-        E_i = base_energy_grid[i]
-        E_i_plus_1 = base_energy_grid[i + 1]
-        
-        for g in range(N_mg):
-            G_g = mg_energy_grid[g]
-            G_g_plus_1 = mg_energy_grid[g + 1]
-            
-            # Compute overlap interval
-            lower_bound = max(E_i, G_g)
-            upper_bound = min(E_i_plus_1, G_g_plus_1)
-            
-            # Only proceed if there's actual overlap
-            if upper_bound > lower_bound:
-                # Compute weight using antiderivative
-                weight = phi_antiderivative(upper_bound) - phi_antiderivative(lower_bound)
-                weights[i, g] = max(0.0, weight)  # Ensure non-negative
-    
+    # Vectorized overlap computation using broadcasting
+    E_lo = base_energy_grid[:-1, None]   # (N_base, 1)
+    E_hi = base_energy_grid[1:, None]    # (N_base, 1)
+    G_lo = mg_energy_grid[None, :-1]     # (1, N_mg)
+    G_hi = mg_energy_grid[None, 1:]      # (1, N_mg)
+
+    lower = np.maximum(E_lo, G_lo)       # (N_base, N_mg)
+    upper = np.minimum(E_hi, G_hi)       # (N_base, N_mg)
+    has_overlap = upper > lower
+
+    # Evaluate antiderivative on the overlap bounds (only where needed)
+    weights = np.zeros_like(lower)
+    if np.any(has_overlap):
+        weights[has_overlap] = np.maximum(
+            phi_antiderivative(upper[has_overlap]) - phi_antiderivative(lower[has_overlap]),
+            0.0
+        )
+
     return weights
 
 
@@ -496,17 +489,9 @@ def compute_mg_means(base_means: Dict[int, np.ndarray],
     W_g = np.sum(overlap_weights, axis=0)
     
     for l, A_l_i in base_means.items():
-        bar_a_l_g = np.zeros(N_mg)
-        
-        for g in range(N_mg):
-            if W_g[g] > 1e-15:  # Avoid division by zero
-                weighted_sum = np.sum(overlap_weights[:, g] * A_l_i)
-                bar_a_l_g[g] = weighted_sum / W_g[g]
-            else:
-                bar_a_l_g[g] = 0.0
-        
-        mg_means[l] = bar_a_l_g
-    
+        weighted = overlap_weights.T @ A_l_i       # (N_mg,)
+        mg_means[l] = np.where(W_g > 1e-15, weighted / W_g, 0.0)
+
     return mg_means
 
 
@@ -542,31 +527,18 @@ def collapse_relative_covariance(relative_base_matrix: np.ndarray,
     np.ndarray
         Multigroup relative covariance matrix
     """
-    N_mg = overlap_weights.shape[1]
-    mg_relative = np.zeros((N_mg, N_mg))
-    
     # Compute group totals W_g
     W_g = np.sum(overlap_weights, axis=0)
-    
-    for g in range(N_mg):
-        for g_prime in range(N_mg):
-            # Check for near-isotropy (denominator near zero)
-            denominator = W_g[g] * W_g[g_prime] * mg_means_row[g] * mg_means_col[g_prime]
-            
-            if abs(denominator) < 1e-15:
-                mg_relative[g, g_prime] = np.nan  # Undefined due to near-isotropy
-                continue
-            
-            # Compute weighted sum
-            weighted_sum = 0.0
-            for i in range(len(base_means_row)):
-                for j in range(len(base_means_col)):
-                    weighted_sum += (overlap_weights[i, g] * base_means_row[i] * 
-                                   relative_base_matrix[i, j] * base_means_col[j] * 
-                                   overlap_weights[j, g_prime])
-            
-            mg_relative[g, g_prime] = weighted_sum / denominator
-    
+
+    # Vectorized: pre-multiply base matrix by means, then matrix product
+    # weighted_base[i,j] = A_row[i] * R[i,j] * A_col[j]
+    weighted_base = (base_means_row[:, None] * relative_base_matrix * base_means_col[None, :])
+    numerator = overlap_weights.T @ weighted_base @ overlap_weights
+    denom = np.outer(W_g * mg_means_row, W_g * mg_means_col)
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        mg_relative = np.where(np.abs(denom) > 1e-15, numerator / denom, np.nan)
+
     return mg_relative
 
 
@@ -589,29 +561,16 @@ def collapse_absolute_covariance(absolute_base_matrix: np.ndarray,
     np.ndarray
         Multigroup absolute covariance matrix
     """
-    N_mg = overlap_weights.shape[1]
-    mg_absolute = np.zeros((N_mg, N_mg))
-    
     # Compute group totals W_g
     W_g = np.sum(overlap_weights, axis=0)
-    
-    for g in range(N_mg):
-        for g_prime in range(N_mg):
-            denominator = W_g[g] * W_g[g_prime]
-            
-            if abs(denominator) < 1e-15:
-                mg_absolute[g, g_prime] = 0.0
-                continue
-            
-            # Compute weighted sum
-            weighted_sum = 0.0
-            for i in range(absolute_base_matrix.shape[0]):
-                for j in range(absolute_base_matrix.shape[1]):
-                    weighted_sum += (overlap_weights[i, g] * absolute_base_matrix[i, j] * 
-                                   overlap_weights[j, g_prime])
-            
-            mg_absolute[g, g_prime] = weighted_sum / denominator
-    
+
+    # Vectorized: numerator[g,g'] = sum_{ij} w[i,g] * C[i,j] * w[j,g']
+    numerator = overlap_weights.T @ absolute_base_matrix @ overlap_weights
+    denom = np.outer(W_g, W_g)
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        mg_absolute = np.where(np.abs(denom) > 1e-15, numerator / denom, 0.0)
+
     return mg_absolute
 
 
@@ -669,6 +628,69 @@ def enforce_matrix_quality(matrix: np.ndarray,
     return result
 
 
+def build_union_grid(mf34_grid: np.ndarray, mg_grid: np.ndarray) -> np.ndarray:
+    """
+    Build a union energy grid from MF34 and multigroup boundaries.
+
+    The union grid ensures that each resulting cell falls entirely within
+    exactly one MF34 cell AND one MG group, enabling accurate sub-cell
+    averaging during covariance collapse.
+
+    Parameters
+    ----------
+    mf34_grid : np.ndarray
+        MF34 covariance energy grid edges
+    mg_grid : np.ndarray
+        Multigroup energy grid edges
+
+    Returns
+    -------
+    np.ndarray
+        Sorted unique union of both grids
+    """
+    return np.unique(np.concatenate([mf34_grid, mg_grid]))
+
+
+def expand_matrix_to_union_grid(mf34_matrix: np.ndarray,
+                                mf34_grid: np.ndarray,
+                                union_grid: np.ndarray) -> np.ndarray:
+    """
+    Expand an MF34 covariance matrix from the MF34 grid to the union grid.
+
+    Each union cell is mapped to its parent MF34 cell. If union cell k belongs
+    to MF34 cell i and union cell l belongs to MF34 cell j, then
+    R_union[k,l] = R_mf34[i,j].
+
+    Parameters
+    ----------
+    mf34_matrix : np.ndarray
+        Covariance matrix on MF34 grid, shape (N_mf34, N_mf34)
+    mf34_grid : np.ndarray
+        MF34 energy grid edges
+    union_grid : np.ndarray
+        Union energy grid edges (superset of mf34_grid)
+
+    Returns
+    -------
+    np.ndarray
+        Expanded covariance matrix on union grid, shape (N_union, N_union)
+    """
+    N_mf34 = len(mf34_grid) - 1
+    N_union = len(union_grid) - 1
+
+    # Map each union cell to its parent MF34 cell index
+    # Use midpoints of union cells to determine which MF34 cell they belong to
+    union_midpoints = 0.5 * (union_grid[:-1] + union_grid[1:])
+    parent_idx = np.searchsorted(mf34_grid, union_midpoints, side='right') - 1
+    # Clip to valid range
+    parent_idx = np.clip(parent_idx, 0, N_mf34 - 1)
+
+    # Build expanded matrix using vectorized fancy indexing
+    expanded = mf34_matrix[np.ix_(parent_idx, parent_idx)]
+
+    return expanded
+
+
 def MF34_to_MG(endf_object,
                energy_grid: Union[str, List[float], np.ndarray],
                weighting_function: Union[str, Callable] = "constant",
@@ -722,9 +744,9 @@ def MF34_to_MG(endf_object,
     if not hasattr(endf_object, 'mf') or 4 not in endf_object.mf or 34 not in endf_object.mf:
         raise ValueError("ENDF object must contain both MF4 and MF34 data")
     
-    # Get MF34 covariance data
-    mf34_covmat = endf_object.mf[34].to_ang_covmat()
+    # Get MF34 covariance data (pass MF4 to populate Legendre coefficients)
     mf4_data = endf_object.mf[4]
+    mf34_covmat = endf_object.mf[34].to_ang_covmat(mf4_data=mf4_data)
     
     # Process energy grid
     if isinstance(energy_grid, str):
@@ -777,6 +799,10 @@ def MF34_to_MG(endf_object,
     result.relative_normalization = relative_normalization
     result.energy_unit = mf34_covmat.energy_unit  # Propagate energy unit from source data
     
+    # Cache for MG-grid base-cell means: keyed by (id(mf4_mt_data), l_order)
+    # These are constant across iterations since the MG grid never changes.
+    _mg_means_cache: Dict[Tuple[int, int], Dict[int, np.ndarray]] = {}
+
     # Process each matrix in the MF34 covariance data
     for i in range(mf34_covmat.num_matrices):
         # Get matrix information
@@ -830,95 +856,100 @@ def MF34_to_MG(endf_object,
         validate_frame_consistency(mf4_frame_row, frame)
         validate_frame_consistency(mf4_frame_col, frame)
         
-        # Compute MG means directly on the MG grid (not via intermediate physics grid)
-        # This avoids the issue where coarse MF4/MF34 grids assign the same value to multiple MG bins
+        # Compute MG means directly on the MG grid (cached across iterations)
         legendre_orders_row = [l_row]
         legendre_orders_col = [l_col] if (l_col != l_row or reaction_col != reaction_row) else []
 
-        mg_base_means_row = compute_base_cell_means(
-            mg_energy_edges, mf4_mt_data_row, legendre_orders_row, phi_func, phi_antiderivative
-        )
-        if legendre_orders_col:
-            mg_base_means_col = compute_base_cell_means(
-                mg_energy_edges, mf4_mt_data_col, legendre_orders_col, phi_func, phi_antiderivative
+        cache_key_row = (id(mf4_mt_data_row), l_row)
+        if cache_key_row not in _mg_means_cache:
+            _mg_means_cache[cache_key_row] = compute_base_cell_means(
+                mg_energy_edges, mf4_mt_data_row, legendre_orders_row, phi_func, phi_antiderivative
             )
+        mg_base_means_row = _mg_means_cache[cache_key_row]
+
+        if legendre_orders_col:
+            cache_key_col = (id(mf4_mt_data_col), l_col)
+            if cache_key_col not in _mg_means_cache:
+                _mg_means_cache[cache_key_col] = compute_base_cell_means(
+                    mg_energy_edges, mf4_mt_data_col, legendre_orders_col, phi_func, phi_antiderivative
+                )
+            mg_base_means_col = _mg_means_cache[cache_key_col]
         else:
             mg_base_means_col = mg_base_means_row
         
         mg_means_row_vals = mg_base_means_row[l_row]
         mg_means_col_vals = mg_base_means_col[l_col] if mg_base_means_col is not mg_base_means_row else mg_means_row_vals
 
-        # Compute MF34-grid means for covariance conversion
-        mf34_overlap_weights = compute_overlap_weights(
-            mf34_energy_grid, mg_energy_edges, phi_func, phi_antiderivative
-        )
-        
-        mf34_base_means_row = compute_base_cell_means(
-            mf34_energy_grid, mf4_mt_data_row, legendre_orders_row, phi_func, phi_antiderivative
-        )
-        
-        if mg_base_means_col is mg_base_means_row:
-            mf34_base_means_col = mf34_base_means_row
-        else:
-            mf34_base_means_col = compute_base_cell_means(
-                mf34_energy_grid, mf4_mt_data_col, legendre_orders_col or [l_col], phi_func, phi_antiderivative
-            )
-        
-        mf34_means_row_vals = mf34_base_means_row[l_row]
-        mf34_means_col_vals = mf34_base_means_col[l_col] if mf34_base_means_col is not mf34_base_means_row else mf34_means_row_vals
-        
-        # Use MF34-cell *averaged* Legendre coefficients to de-normalize relative → absolute
-        # This is consistent with how MF34 covariances are defined and avoids bias.
-        # (Previously used midpoint values, which caused systematic under/over-estimation)
-        point_row_vals = mf34_means_row_vals
-        point_col_vals = mf34_means_col_vals
-        
-        rebin_operator = compute_energy_rebin_operator(
-            mf34_energy_grid, mg_energy_edges, phi_func, phi_antiderivative
-        )
-        
         # Process covariance matrix
         base_matrix = mf34_covmat.matrices[i]
-        
+
         if is_relative:
-            # Robust path: convert relative MF34 covariance to absolute on MF34 grid,
-            # collapse absolute covariance to MG, then compute relative matrices using
-            # the selected normalization scheme.
-            # 1) Absolute on MF34 grid using MF34 cell-averaged Legendre coefficients
-            absolute_mf34 = convert_relative_to_absolute_covariance(
-                base_matrix, point_row_vals, point_col_vals
+            # Union-grid path: build a union of MF34 + MG boundaries so each
+            # sub-cell falls entirely within one MF34 cell AND one MG group.
+            # This gives accurate sub-cell averaging of a_l(E) when an MF34
+            # cell straddles an MG boundary, matching NJOY's errorr approach.
+
+            # 1) Build union grid
+            union_grid = build_union_grid(mf34_energy_grid, mg_energy_edges)
+
+            # 2) Compute cell-averaged Legendre coefficients on the union grid
+            union_base_means_row = compute_base_cell_means(
+                union_grid, mf4_mt_data_row, legendre_orders_row, phi_func, phi_antiderivative
             )
-            # 2) Collapse absolute covariance to MG using MF34→MG overlap weights
-            absolute_fine = collapse_absolute_covariance(
-                absolute_mf34, mf34_overlap_weights
-            )
-            # 3a) Relative using MF34-derived MG means (ENDF-preserving normalization)
-            mf34_mg_means_row = compute_mg_means(mf34_base_means_row, mf34_overlap_weights)[l_row]
-            if mf34_base_means_col is mf34_base_means_row:
-                mf34_mg_means_col = mf34_mg_means_row
+            if legendre_orders_col:
+                union_base_means_col = compute_base_cell_means(
+                    union_grid, mf4_mt_data_col, legendre_orders_col, phi_func, phi_antiderivative
+                )
             else:
-                mf34_mg_means_col = compute_mg_means(mf34_base_means_col, mf34_overlap_weights)[l_col]
-            relative_fine_endf_norm = convert_absolute_to_relative_covariance(
-                absolute_fine, mf34_mg_means_row, mf34_mg_means_col
-            )
-            # 3b) Relative using MG-grid means from MF4 (physics-preserving normalization)
-            relative_fine_phys = convert_absolute_to_relative_covariance(
-                absolute_fine,
-                mg_means_row_vals,
-                mg_means_col_vals if mg_base_means_col is not mg_base_means_row else mg_means_row_vals
+                union_base_means_col = union_base_means_row
+
+            union_means_row_vals = union_base_means_row[l_row]
+            union_means_col_vals = union_base_means_col[l_col] if union_base_means_col is not union_base_means_row else union_means_row_vals
+
+            # 3) Expand relative MF34 matrix to union grid
+            R_union = expand_matrix_to_union_grid(base_matrix, mf34_energy_grid, union_grid)
+
+            # 4) Convert relative → absolute on union grid
+            absolute_union = convert_relative_to_absolute_covariance(
+                R_union, union_means_row_vals, union_means_col_vals
             )
 
-            # Select normalization scheme based on user choice
+            # 5) Compute overlap weights from union grid → MG grid
+            #    (trivial: each union cell falls entirely within one MG group)
+            union_overlap_weights = compute_overlap_weights(
+                union_grid, mg_energy_edges, phi_func, phi_antiderivative
+            )
+
+            # 6) Collapse absolute covariance from union grid → MG
+            absolute_fine = collapse_absolute_covariance(
+                absolute_union, union_overlap_weights
+            )
+
+            # 7) Compute MG means for normalization via union grid path
+            #    (ENDF-preserving: collapse union-grid means to MG)
+            mf34_mg_means_row = compute_mg_means(union_base_means_row, union_overlap_weights)[l_row]
+            if union_base_means_col is union_base_means_row:
+                mf34_mg_means_col = mf34_mg_means_row
+            else:
+                mf34_mg_means_col = compute_mg_means(union_base_means_col, union_overlap_weights)[l_col]
+
+            # Compute only the requested normalization (avoid doing both)
+            col_vals_symmetric = mg_means_col_vals if mg_base_means_col is not mg_base_means_row else mg_means_row_vals
             if relative_normalization.lower() == "mg_cell":
-                relative_fine = relative_fine_phys
-                mg_means_row_vals_to_store = mg_means_row_vals
-                mg_means_col_vals_to_store = mg_means_col_vals if mg_base_means_col is not mg_base_means_row else mg_means_row_vals
+                relative_fine = convert_absolute_to_relative_covariance(
+                    absolute_fine, mg_means_row_vals, col_vals_symmetric
+                )
             else:  # "mf34_cell" (default, ENDF-preserving)
-                relative_fine = relative_fine_endf_norm
-                mg_means_row_vals_to_store = mg_means_row_vals
-                mg_means_col_vals_to_store = mg_means_col_vals if mg_base_means_col is not mg_base_means_row else mg_means_row_vals
+                relative_fine = convert_absolute_to_relative_covariance(
+                    absolute_fine, mf34_mg_means_row, mf34_mg_means_col
+                )
+            mg_means_row_vals_to_store = mg_means_row_vals
+            mg_means_col_vals_to_store = col_vals_symmetric
         else:
             # For absolute input: map to MG grid then derive relative using physics-grid means
+            rebin_operator = compute_energy_rebin_operator(
+                mf34_energy_grid, mg_energy_edges, phi_func, phi_antiderivative
+            )
             absolute_fine = map_covariance_matrix(base_matrix, rebin_operator)
             relative_fine = convert_absolute_to_relative_covariance(
                 absolute_fine, mg_means_row_vals, mg_means_col_vals

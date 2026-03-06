@@ -1749,6 +1749,7 @@ def _run_one_jitter_sample(args):
         max_experiment_weight_fraction,
         _apply_positivity_projection,
         _positivity_check_points,
+        _stochastic_flag,
     ) = args
 
     rng = np.random.default_rng(base_seed + s_idx * 1000)
@@ -1784,6 +1785,17 @@ def _run_one_jitter_sample(args):
             local_jump_counts[jump_key] += 1
 
         bin_assignments[target_bin].append((dataset, E_star))
+
+    # Step 1a: Draw shared normalization factor per experiment
+    # Placed after jitter loop to preserve RNG sequence when sigma_norm=0
+    experiment_norm_factors = {}
+    if sigma_norm > 0:
+        unique_exps = set((ds.entry, ds.subentry) for ds in all_datasets)
+        for exp_key in unique_exps:
+            if norm_dist == "lognormal":
+                experiment_norm_factors[exp_key] = rng.lognormal(0.0, sigma_norm)
+            else:
+                experiment_norm_factors[exp_key] = 1.0 + rng.normal(0.0, sigma_norm)
 
     # Step 1b: Compute per-bin experiment point counts for weighting
     bin_exp_n_points: Dict[int, Dict[Tuple[str, str], int]] = {
@@ -1837,6 +1849,13 @@ def _run_one_jitter_sample(args):
                 angles_cm_deg = angles_deg
                 dsig_cm = dsig
                 error_cm = error_stat
+
+            # Apply shared experiment normalization
+            exp_key_norm = (dataset.entry, dataset.subentry)
+            N_g = experiment_norm_factors.get(exp_key_norm, 1.0)
+            if N_g != 1.0:
+                dsig_cm = dsig_cm * N_g
+                error_cm = error_cm * N_g   # preserves relative uncertainty
 
             exp_key = (dataset.entry, dataset.subentry)
             if normalize_by_n_points and exp_key in bin_exp_n_points[bin_info.index]:
@@ -1922,13 +1941,13 @@ def _run_one_jitter_sample(args):
                 ridge_lambda=ridge_lambda,
                 external_weights=combined_df['kernel_weight'].to_numpy(),
                 n_samples=1,
-                stochastic=True,
+                stochastic=_stochastic_flag,
                 random_state=base_seed + s_idx * 1000 + bin_info.index,
                 use_band_discrepancy=use_band_for_fit,
                 min_points_per_band=min_points_per_band,
                 max_tau_fraction=max_tau_fraction,
                 freeze_c0=freeze_c0,
-                sigma_norm=sigma_norm,
+                sigma_norm=0.0,  # normalization handled above (shared across bins)
                 norm_dist=norm_dist,
             )
 
@@ -2015,6 +2034,7 @@ def run_mc_with_energy_jitter(
     logger=None,
     apply_positivity_projection: bool = False,
     positivity_check_points: int = 50,
+    stochastic: bool = True,
 ) -> Tuple[Dict[int, Dict[int, np.ndarray]], BinJumpDiagnostics]:
     """
     Run MC sampling with energy jitter for cross-bin correlation.
@@ -2139,6 +2159,7 @@ def run_mc_with_energy_jitter(
         max_experiment_weight_fraction,
         apply_positivity_projection,
         positivity_check_points,
+        stochastic,
     )
 
     args_list = [(s_idx,) + shared_args for s_idx in range(n_samples)]
@@ -2357,9 +2378,10 @@ def compute_covariance_from_samples(
     all_samples: Dict[int, Dict[int, np.ndarray]],
     energy_indices: List[int],
     max_order: int,
+    valid_mask: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]]]:
     """
-    Compute covariance and correlation matrices from MC samples.
+    Compute relative (fractional) covariance and correlation matrices from MC samples.
 
     The parameter vector is organized as:
         [a_1(E_1), a_2(E_1), ..., a_L(E_1), a_1(E_2), ..., a_L(E_N)]
@@ -2375,23 +2397,22 @@ def compute_covariance_from_samples(
 
     Returns
     -------
-    Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]]]
-        - cov_matrix: Full covariance matrix
+    Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]], np.ndarray]
+        - cov_matrix: Full relative (fractional) covariance matrix
         - corr_matrix: Full correlation matrix
         - param_labels: List of (energy_index, order) tuples
+        - mean_params: MC mean parameter vector used as denominator for
+          the relative conversion (same layout as param_labels)
 
-    Uncertainty Interpretation
-    --------------------------
-    The covariance matrix contains variances of ENDF-normalized Legendre
-    coefficients a_l = (c_l / c0) / (2l+1). Since these coefficients are
-    already normalized by the total cross section (c0), they are dimensionless
-    and the variances are inherently RELATIVE (fractional).
+    Covariance Conversion
+    ---------------------
+    ``np.cov()`` computes absolute covariance: Cov(a_i, a_j).
+    ENDF MF34 with LB=5 expects relative (fractional) covariance:
+        Cov_rel(i, j) = Cov_abs(i, j) / (mean_i * mean_j)
 
-    Example: If diag(cov)[k] = 0.0001, then std = 0.01 = 1% fractional uncertainty.
-
-    When written to MF34 with LB=5 format, these values are correctly interpreted
-    as relative covariances. The MF34 reader correctly identifies LB=5 data as
-    relative (is_relative=True) since LB=0 is the only absolute format.
+    The conversion is performed here so that the returned matrix can be
+    written directly to MF34 with LB=5 format. Where |mean_i * mean_j| < 1e-30
+    (effectively zero coefficients), the relative covariance is set to zero.
     """
     n_samples = len(all_samples)
     n_energies = len(energy_indices)
@@ -2411,18 +2432,610 @@ def compute_covariance_from_samples(
             row.extend(padded)
         sample_matrix[s_idx] = row
 
-    # Compute covariance
-    cov_matrix = np.cov(sample_matrix, rowvar=False)
+    # Compute absolute covariance
+    cov_abs = np.cov(sample_matrix, rowvar=False)
 
-    # Compute correlation
-    std = np.sqrt(np.diag(cov_matrix))
+    # Zero out rows/columns for parameters that were not actually fitted
+    if valid_mask is not None:
+        invalid = ~valid_mask
+        cov_abs[invalid, :] = 0.0
+        cov_abs[:, invalid] = 0.0
+
+    # Convert absolute covariance to relative (fractional) covariance
+    # Cov_rel(i,j) = Cov_abs(i,j) / (mean_i * mean_j)
+    mean_params = np.mean(sample_matrix, axis=0)
+    denom = np.outer(mean_params, mean_params)
+    safe_mask = np.abs(denom) > 1e-30
+    cov_matrix = np.zeros_like(cov_abs)
+    cov_matrix[safe_mask] = cov_abs[safe_mask] / denom[safe_mask]
+
+    # Flush near-zero values to exactly zero (numerical noise from np.cov)
+    cov_matrix[np.abs(cov_matrix) < 1e-15] = 0.0
+
+    # Compute correlation (from absolute covariance — identical to
+    # computing from relative, since the mean factors cancel)
+    std = np.sqrt(np.maximum(np.diag(cov_abs), 0.0))
     std[std == 0] = 1.0  # Avoid division by zero
-    corr_matrix = cov_matrix / np.outer(std, std)
+    corr_matrix = cov_abs / np.outer(std, std)
+    corr_matrix[np.abs(corr_matrix) < 1e-15] = 0.0
 
     # Generate labels
     param_labels = [(e_idx, l + 1) for e_idx in energy_indices for l in range(max_order)]
 
-    return cov_matrix, corr_matrix, param_labels
+    return cov_matrix, corr_matrix, param_labels, mean_params
+
+
+def combine_jitter_stochastic_covariance(
+    cov_jitter: np.ndarray,
+    cov_stochastic: np.ndarray,
+    energy_bins: Optional[List] = None,
+    energy_indices: Optional[List[int]] = None,
+    max_order: Optional[int] = None,
+    logger=None,
+    valid_mask: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """
+    Combine jitter and stochastic relative covariance matrices.
+
+    Uses the jitter pass's *correlation structure* (which captures cross-bin
+    coupling from shared datasets/normalization) with the *total variance*
+    from both passes combined:
+
+        std_total = sqrt(diag(cov_jitter + cov_stochastic))
+        corr = corr_jitter
+        Cov_final = corr * outer(std_total, std_total)
+
+    This preserves the strong cross-energy correlations from Pass 1 (jitter)
+    while using the full variance magnitude from both passes.
+
+    For parameters with zero jitter variance (undefined correlation), a
+    Gaussian decay fallback is used for same-Legendre-order entries:
+        rho = exp(-|E_i - E_j|^2 / (2 * L^2))
+    where L = 3.0 * median(sigma_E).
+
+    If ``energy_bins`` is None, falls back to simple addition (backward compat).
+
+    Parameters
+    ----------
+    cov_jitter : np.ndarray
+        Relative covariance matrix from jitter-only MC pass (Pass 1).
+    cov_stochastic : np.ndarray
+        Relative covariance matrix from stochastic MC pass (Pass 2).
+    energy_bins : list, optional
+        List of EnergyBinInfo objects (for Gaussian fallback energies).
+    energy_indices : list of int, optional
+        Energy indices corresponding to rows of the parameter layout.
+    max_order : int, optional
+        Number of Legendre orders per energy bin.
+    logger : optional
+        Logger for diagnostics.
+
+    Returns
+    -------
+    np.ndarray
+        Combined relative covariance matrix.
+    """
+    # Backward compatibility: simple addition when no energy info provided
+    if energy_bins is None or energy_indices is None or max_order is None:
+        return cov_jitter + cov_stochastic
+
+    n = cov_jitter.shape[0]
+
+    # Total variance from both independent passes
+    var_total = np.diag(cov_jitter) + np.diag(cov_stochastic)
+    std_total = np.sqrt(np.maximum(var_total, 0.0))
+
+    # Zero out invalid (unfitted) parameters
+    if valid_mask is not None:
+        var_total[~valid_mask] = 0.0
+        std_total[~valid_mask] = 0.0
+
+    # Jitter correlation matrix (safe division for zero-variance params)
+    std_jitter = np.sqrt(np.maximum(np.diag(cov_jitter), 0.0))
+    std_jitter_safe = std_jitter.copy()
+    zero_jitter_mask = std_jitter_safe < 1e-30
+    std_jitter_safe[zero_jitter_mask] = 1.0
+    corr_jitter = cov_jitter / np.outer(std_jitter_safe, std_jitter_safe)
+
+    # Identify parameters with zero jitter variance -> need Gaussian fallback
+    n_zero = int(np.sum(zero_jitter_mask))
+    if n_zero > 0 and logger:
+        logger.info(f"  Correlation fix: {n_zero}/{n} parameters have zero jitter variance -> Gaussian fallback")
+
+    # Gaussian fallback for zero-jitter-variance parameters
+    if n_zero > 0:
+        # Compute length scale L = 3 * median(sigma_E)
+        sigma_E_values = []
+        for e_idx in energy_indices:
+            if e_idx < len(energy_bins):
+                s = energy_bins[e_idx].sigma_E_mev
+                if s > 0:
+                    sigma_E_values.append(s)
+        if sigma_E_values:
+            L_scale = 3.0 * np.median(sigma_E_values)
+        else:
+            # Fallback: 1% of energy range
+            energies = [energy_bins[e_idx].energy_mev for e_idx in energy_indices if e_idx < len(energy_bins)]
+            L_scale = 0.03 * (max(energies) - min(energies)) if len(energies) > 1 else 0.1
+
+        # Get energy for each parameter
+        param_energies = np.zeros(n)
+        param_orders = np.zeros(n, dtype=int)
+        for p in range(n):
+            e_pos = p // max_order
+            order = p % max_order + 1
+            param_orders[p] = order
+            if e_pos < len(energy_indices) and energy_indices[e_pos] < len(energy_bins):
+                param_energies[p] = energy_bins[energy_indices[e_pos]].energy_mev
+
+        # Fill fallback correlations for rows/columns with zero jitter variance
+        for i in range(n):
+            if not zero_jitter_mask[i]:
+                continue
+            for j in range(n):
+                if i == j:
+                    corr_jitter[i, j] = 1.0
+                    continue
+                # Skip invalid (unfitted) parameters
+                if valid_mask is not None and (not valid_mask[i] or not valid_mask[j]):
+                    continue
+                # Only apply Gaussian decay for same-order cross-energy entries
+                if param_orders[i] == param_orders[j]:
+                    dE = param_energies[i] - param_energies[j]
+                    rho = np.exp(-dE**2 / (2.0 * L_scale**2))
+                    # Use fallback if EITHER param has zero jitter variance
+                    corr_jitter[i, j] = rho
+                    corr_jitter[j, i] = rho
+                # Cross-order entries: keep whatever corr_jitter has (typically ~0)
+
+    # Ensure diagonal is exactly 1
+    np.fill_diagonal(corr_jitter, 1.0)
+    # Clip to [-1, 1]
+    corr_jitter = np.clip(corr_jitter, -1.0, 1.0)
+
+    # Build combined covariance: corr_jitter * outer(std_total, std_total)
+    cov_combined = corr_jitter * np.outer(std_total, std_total)
+    cov_combined[np.abs(cov_combined) < 1e-15] = 0.0
+
+    # Log correlation diagnostics
+    if logger:
+        # Off-diagonal correlation stats
+        mask_offdiag = ~np.eye(n, dtype=bool)
+        offdiag = np.abs(corr_jitter[mask_offdiag])
+        if len(offdiag) > 0:
+            logger.info(f"  Correlation fix applied: using jitter structure with total variances")
+            logger.info(f"    Off-diagonal |corr|: mean={np.mean(offdiag):.4f}, median={np.median(offdiag):.4f}")
+
+        # Same-order l=1 adjacent correlations
+        if max_order >= 1 and len(energy_indices) >= 2:
+            adj_corrs = []
+            for k in range(len(energy_indices) - 1):
+                i_param = k * max_order  # l=1 for energy k
+                j_param = (k + 1) * max_order  # l=1 for energy k+1
+                if i_param < n and j_param < n:
+                    adj_corrs.append(corr_jitter[i_param, j_param])
+            if adj_corrs:
+                adj_corrs = np.array(adj_corrs)
+                logger.info(f"    l=1 adjacent corr: mean={np.mean(adj_corrs):.4f}, "
+                            f"median={np.median(adj_corrs):.4f}, "
+                            f"min={np.min(adj_corrs):.4f}, max={np.max(adj_corrs):.4f}")
+
+    return cov_combined
+
+
+def extract_ll_prime_correlations(
+    cov_matrix: np.ndarray,
+    energy_indices: List[int],
+    max_order: int,
+    logger=None,
+    valid_mask: Optional[np.ndarray] = None,
+) -> Dict[int, np.ndarray]:
+    """
+    Extract per-energy L×L correlation blocks from the full covariance matrix.
+
+    The full covariance is laid out as (energy_0/l_1, energy_0/l_2, ...,
+    energy_1/l_1, ...) with ``max_order`` Legendre orders per energy.
+    This function pulls out the L×L correlation sub-block for each energy
+    and logs summary statistics.
+
+    Parameters
+    ----------
+    cov_matrix : np.ndarray
+        Full covariance matrix of shape (n_energies * max_order, ...).
+    energy_indices : List[int]
+        Energy bin indices present in the matrix.
+    max_order : int
+        Number of Legendre orders per energy bin.
+    logger : optional
+        Logger instance for diagnostic output.
+
+    Returns
+    -------
+    Dict[int, np.ndarray]
+        Mapping energy_index → L×L correlation matrix.
+    """
+    n_e = len(energy_indices)
+    ll_corr = {}
+
+    off_diag_abs_all = []
+    for ie, e_idx in enumerate(energy_indices):
+        start = ie * max_order
+        end = start + max_order
+        block = cov_matrix[start:end, start:end]
+
+        # Convert to correlation
+        std = np.sqrt(np.maximum(np.diag(block), 0.0))
+        std[std == 0] = 1.0
+        corr = block / np.outer(std, std)
+        np.fill_diagonal(corr, 1.0)
+
+        # Mark entries involving absent (unfitted) orders as NaN
+        if valid_mask is not None:
+            local_valid = valid_mask[start:end]
+            for li in range(max_order):
+                for lj in range(max_order):
+                    if not local_valid[li] or not local_valid[lj]:
+                        corr[li, lj] = np.nan
+
+        ll_corr[e_idx] = corr
+
+        # Off-diagonal stats
+        if max_order > 1:
+            mask = ~np.eye(max_order, dtype=bool)
+            off_vals = np.abs(corr[mask])
+            off_vals = off_vals[~np.isnan(off_vals)]
+            off_diag_abs_all.extend(off_vals.tolist())
+
+    if logger is not None and max_order > 1 and off_diag_abs_all:
+        arr = np.array(off_diag_abs_all)
+        logger.info(f"  l-l' correlation summary ({n_e} energies, L_max={max_order}):")
+        logger.info(f"    |off-diag| — mean={np.mean(arr):.4f}, "
+                     f"median={np.median(arr):.4f}, "
+                     f"max={np.max(arr):.4f}, min={np.min(arr):.4f}")
+        # Per-energy extremes
+        strongest_e = max(ll_corr, key=lambda e: np.max(np.abs(
+            ll_corr[e][~np.eye(max_order, dtype=bool)])) if max_order > 1 else 0)
+        strongest_val = np.max(np.abs(
+            ll_corr[strongest_e][~np.eye(max_order, dtype=bool)]))
+        logger.info(f"    Strongest l-l' coupling at energy idx {strongest_e}: "
+                     f"|corr|={strongest_val:.4f}")
+
+    return ll_corr
+
+
+def build_gaussian_correlation_covariance(
+    cov_stochastic: np.ndarray,
+    energy_bins: List,
+    energy_indices: List[int],
+    max_order: int,
+    logger=None,
+    valid_mask: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """
+    Build a full relative covariance matrix with Gaussian-decay energy correlations.
+
+    Uses per-bin variances from the stochastic pass (Pass 2) and replaces the
+    weak cross-energy correlations with a parametric Gaussian decay model based
+    on the TOF energy resolution of each bin.
+
+    The correlation model is:
+    - Same energy, different order: keep stochastic cross-order correlation
+    - Different energy, same order: Gaussian decay exp(-dE^2 / (2*sigma_eff^2))
+    - Different energy, different order: Gaussian decay * cross-order factor
+
+    Parameters
+    ----------
+    cov_stochastic : np.ndarray
+        Relative covariance matrix from per-bin stochastic MC (Pass 2).
+    energy_bins : list
+        List of EnergyBinInfo objects with energy_mev and sigma_E_mev attributes.
+    energy_indices : list of int
+        Energy indices corresponding to rows of the parameter layout.
+    max_order : int
+        Number of Legendre orders per energy bin.
+    logger : optional
+        Logger for diagnostics.
+
+    Returns
+    -------
+    np.ndarray
+        Full relative covariance matrix with Gaussian energy correlations.
+    """
+    n = cov_stochastic.shape[0]
+    n_energies = len(energy_indices)
+
+    if logger:
+        logger.info(f"  Building Gaussian decay correlation matrix: "
+                    f"{n_energies} energies x {max_order} orders = {n} parameters")
+        logger.info(f"  Assumptions: Gaussian energy decay (symmetric), "
+                    f"separable cross-order x cross-energy, "
+                    f"multivariate normal samples")
+
+    # 1. Extract per-parameter variance and std from stochastic pass
+    var_total = np.maximum(np.diag(cov_stochastic), 0.0)
+    std_total = np.sqrt(var_total)
+
+    # Zero out invalid (unfitted) parameters
+    if valid_mask is not None:
+        std_total[~valid_mask] = 0.0
+
+    n_zero_var = int(np.sum(var_total < 1e-30))
+    if logger and n_zero_var > 0:
+        logger.info(f"  {n_zero_var}/{n} parameters have near-zero stochastic variance")
+
+    # 2. Extract stochastic correlation matrix
+    std_safe = std_total.copy()
+    std_safe[std_safe < 1e-30] = 1.0
+    corr_stochastic = cov_stochastic / np.outer(std_safe, std_safe)
+    np.fill_diagonal(corr_stochastic, 1.0)
+    corr_stochastic = np.clip(corr_stochastic, -1.0, 1.0)
+
+    # 3. Build energy and sigma_E arrays for each parameter
+    param_energies = np.zeros(n)
+    param_sigma_E = np.zeros(n)
+    param_orders = np.zeros(n, dtype=int)
+    param_e_pos = np.zeros(n, dtype=int)  # position in energy_indices list
+
+    for p in range(n):
+        e_pos = p // max_order
+        order = p % max_order
+        param_orders[p] = order
+        param_e_pos[p] = e_pos
+        if e_pos < n_energies and energy_indices[e_pos] < len(energy_bins):
+            ebin = energy_bins[energy_indices[e_pos]]
+            param_energies[p] = ebin.energy_mev
+            param_sigma_E[p] = ebin.sigma_E_mev
+
+    # Fallback sigma_E for bins with zero resolution
+    n_zero_sigma = int(np.sum(param_sigma_E <= 0))
+    if np.any(param_sigma_E > 0):
+        median_sigma = np.median(param_sigma_E[param_sigma_E > 0])
+    else:
+        median_sigma = 0.01
+    param_sigma_E[param_sigma_E <= 0] = median_sigma
+
+    if logger:
+        sigma_vals = param_sigma_E[::max_order]  # one per energy
+        logger.info(f"  sigma_E (MeV): min={np.min(sigma_vals):.4f}, "
+                    f"median={np.median(sigma_vals):.4f}, max={np.max(sigma_vals):.4f}")
+        if n_zero_sigma > 0:
+            logger.info(f"  {n_zero_sigma}/{n} params had zero sigma_E, "
+                        f"using median fallback={median_sigma:.4f} MeV")
+
+    # 4. Build full correlation matrix (pointwise)
+    corr = np.eye(n)
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            # Skip pairs involving invalid (unfitted) parameters
+            if valid_mask is not None and (not valid_mask[i] or not valid_mask[j]):
+                continue
+
+            e_pos_i = param_e_pos[i]
+            e_pos_j = param_e_pos[j]
+            l_i = param_orders[i]
+            l_j = param_orders[j]
+
+            if e_pos_i == e_pos_j:
+                # Same energy bin, different order -> keep stochastic cross-order
+                corr[i, j] = corr_stochastic[i, j]
+                corr[j, i] = corr_stochastic[j, i]
+            else:
+                # Different energy -> Gaussian decay
+                dE = param_energies[i] - param_energies[j]
+                sigma_eff = (param_sigma_E[i] + param_sigma_E[j]) / 2.0
+                rho_E = np.exp(-dE**2 / (2.0 * sigma_eff**2))
+
+                if l_i == l_j:
+                    # Same order, different energy -> pure Gaussian
+                    corr[i, j] = rho_E
+                    corr[j, i] = rho_E
+                else:
+                    # Different order, different energy -> Gaussian * cross-order factor
+                    # Use same-energy cross-order correlation at energy i as the factor
+                    idx_same_e_li = e_pos_i * max_order + l_i
+                    idx_same_e_lj = e_pos_i * max_order + l_j
+                    corr_ll = corr_stochastic[idx_same_e_li, idx_same_e_lj]
+                    corr[i, j] = rho_E * corr_ll
+                    corr[j, i] = rho_E * corr_ll
+
+    # 5. Build covariance from correlation and stds
+    cov_full = corr * np.outer(std_total, std_total)
+
+    # 6. Ensure PSD via eigenvalue clipping
+    eigenvalues = np.linalg.eigvalsh(cov_full)
+    min_eig = np.min(eigenvalues)
+    max_eig = np.max(eigenvalues)
+    if logger:
+        logger.info(f"  Eigenvalue range: [{min_eig:.2e}, {max_eig:.2e}]")
+
+    if min_eig < -1e-10:
+        n_neg = int(np.sum(eigenvalues < -1e-10))
+        if logger:
+            logger.warning(f"  WARNING: Gaussian correlation matrix is NOT PSD "
+                           f"(min eig={min_eig:.2e}, {n_neg} negative eigenvalues)")
+            logger.info(f"  Projecting to nearest PSD via eigenvalue clipping...")
+        eigvals, eigvecs = np.linalg.eigh(cov_full)
+        eigvals_clipped = np.maximum(eigvals, 0.0)
+        cov_full = eigvecs @ np.diag(eigvals_clipped) @ eigvecs.T
+        cov_full = (cov_full + cov_full.T) / 2.0
+        new_min = np.min(np.linalg.eigvalsh(cov_full))
+        if logger:
+            logger.info(f"  After PSD projection: min eig={new_min:.2e}")
+    elif logger:
+        logger.info(f"  Correlation matrix is PSD — no projection needed")
+
+    # Log diagnostics
+    if logger:
+        # Adjacent l=1 correlations
+        if max_order >= 1 and n_energies >= 2:
+            adj_corrs = []
+            adj_dE = []
+            for k in range(n_energies - 1):
+                i_param = k * max_order
+                j_param = (k + 1) * max_order
+                if i_param < n and j_param < n:
+                    adj_corrs.append(corr[i_param, j_param])
+                    adj_dE.append(abs(param_energies[i_param] - param_energies[j_param]))
+            if adj_corrs:
+                adj_corrs = np.array(adj_corrs)
+                adj_dE = np.array(adj_dE)
+                logger.info(f"  Gaussian correlation model results:")
+                logger.info(f"    l=1 adjacent corr: mean={np.mean(adj_corrs):.4f}, "
+                            f"median={np.median(adj_corrs):.4f}, "
+                            f"min={np.min(adj_corrs):.4f}, max={np.max(adj_corrs):.4f}")
+                logger.info(f"    Adjacent dE (MeV): mean={np.mean(adj_dE):.4f}, "
+                            f"median={np.median(adj_dE):.4f}")
+
+        # Overall off-diagonal stats
+        mask_offdiag = ~np.eye(n, dtype=bool)
+        offdiag = np.abs(corr[mask_offdiag])
+        if len(offdiag) > 0:
+            logger.info(f"    Off-diagonal |corr|: mean={np.mean(offdiag):.4f}, "
+                        f"median={np.median(offdiag):.4f}, max={np.max(offdiag):.4f}")
+
+    # Flush near-zero values to exactly zero (numerical noise)
+    cov_full[np.abs(cov_full) < 1e-15] = 0.0
+
+    return cov_full
+
+
+def generate_cholesky_samples(
+    cov_full: np.ndarray,
+    mean_params: np.ndarray,
+    energy_indices: List[int],
+    max_order: int,
+    n_samples: int,
+    seed: int = 42,
+    logger=None,
+) -> Dict[int, Dict[int, np.ndarray]]:
+    """
+    Generate correlated MC samples via Cholesky decomposition.
+
+    Works in absolute space: converts relative covariance to absolute using
+    the mean parameter vector, then generates samples as mean + L @ z.
+
+    Parameters
+    ----------
+    cov_full : np.ndarray
+        Full relative (fractional) covariance matrix.
+    mean_params : np.ndarray
+        MC mean parameter vector (ENDF-normalized coefficients).
+    energy_indices : list of int
+        Energy indices corresponding to parameter layout.
+    max_order : int
+        Number of Legendre orders per energy bin.
+    n_samples : int
+        Number of samples to generate.
+    seed : int
+        Random seed.
+    logger : optional
+        Logger for diagnostics.
+
+    Returns
+    -------
+    Dict[int, Dict[int, np.ndarray]]
+        {sample_idx: {energy_index: coeffs}} with ENDF-normalized coefficients.
+    """
+    n_params = len(energy_indices) * max_order
+
+    if logger:
+        logger.info(f"  Generating {n_samples} correlated samples via Cholesky "
+                    f"({n_params} parameters, seed={seed})")
+        logger.info(f"  NOTE: Samples are drawn from a multivariate normal distribution")
+        n_near_zero = int(np.sum(np.abs(mean_params) < 1e-30))
+        if n_near_zero > 0:
+            logger.info(f"  {n_near_zero}/{n_params} mean params are near-zero "
+                        f"(absolute cov will be ~0 for those)")
+
+    # Convert relative covariance to absolute: Cov_abs = Cov_rel * outer(mean, mean)
+    cov_abs = cov_full * np.outer(mean_params, mean_params)
+    # Ensure symmetry
+    cov_abs = (cov_abs + cov_abs.T) / 2.0
+
+    # Cholesky decomposition (use eigendecomposition fallback if not PSD)
+    cholesky_succeeded = False
+    try:
+        L = np.linalg.cholesky(cov_abs)
+        cholesky_succeeded = True
+        if logger:
+            logger.info(f"  Cholesky decomposition successful ({n_params}x{n_params})")
+    except np.linalg.LinAlgError as e:
+        # Cholesky failure: the absolute covariance is not numerically PSD.
+        # This can happen when mean params near zero create a near-singular
+        # outer product, or from floating-point accumulation in the PSD
+        # projection. The eigendecomposition fallback produces L such that
+        # L @ L.T approximates cov_abs with all negative eigenvalues zeroed.
+        eigvals, eigvecs = np.linalg.eigh(cov_abs)
+        n_neg = int(np.sum(eigvals < 0))
+        min_eig = np.min(eigvals)
+        if logger:
+            logger.warning(f"  WARNING: Cholesky decomposition FAILED ({e})")
+            logger.warning(f"  Absolute covariance has {n_neg} negative eigenvalues "
+                           f"(min={min_eig:.2e})")
+            logger.info(f"  Using eigendecomposition fallback (zeroing negative eigenvalues)")
+        eigvals = np.maximum(eigvals, 0.0)
+        # L such that L @ L.T = cov_abs (approximately)
+        L = eigvecs @ np.diag(np.sqrt(eigvals))
+        if logger:
+            # Report how much variance was lost
+            total_var = np.trace(cov_abs)
+            kept_var = np.sum(eigvals)
+            if total_var > 0:
+                logger.info(f"  Variance retained after clipping: "
+                            f"{kept_var/total_var*100:.2f}%")
+
+    # Generate samples
+    rng = np.random.default_rng(seed)
+    all_samples = {}
+
+    for s_idx in range(n_samples):
+        z = rng.standard_normal(n_params)
+        sample_vec = mean_params + L @ z
+
+        # Reshape into {energy_idx: coeffs} dict
+        sample_dict = {}
+        for k, e_idx in enumerate(energy_indices):
+            start = k * max_order
+            end = start + max_order
+            sample_dict[e_idx] = sample_vec[start:end].copy()
+
+        all_samples[s_idx] = sample_dict
+
+    if logger:
+        # Verify sample covariance roughly matches target
+        sample_matrix = np.zeros((n_samples, n_params))
+        for s_idx in range(n_samples):
+            row = []
+            for e_idx in energy_indices:
+                row.extend(all_samples[s_idx][e_idx])
+            sample_matrix[s_idx] = row
+        sample_std = np.std(sample_matrix, axis=0)
+        target_std = np.sqrt(np.maximum(np.diag(cov_abs), 0.0))
+        mask = target_std > 1e-30
+        if np.any(mask):
+            ratio = sample_std[mask] / target_std[mask]
+            logger.info(f"  Sample validation — std ratio (sample/target): "
+                        f"mean={np.mean(ratio):.3f}, std={np.std(ratio):.3f}")
+            if abs(np.mean(ratio) - 1.0) > 0.15:
+                logger.warning(f"  WARNING: Sample std deviates >15% from target — "
+                               f"consider increasing n_samples (currently {n_samples})")
+
+        # Check adjacent-bin sample correlations
+        if max_order >= 1 and len(energy_indices) >= 2:
+            sample_corr = np.corrcoef(sample_matrix, rowvar=False)
+            adj_sample_corrs = []
+            for k in range(len(energy_indices) - 1):
+                i_p = k * max_order
+                j_p = (k + 1) * max_order
+                if i_p < n_params and j_p < n_params:
+                    adj_sample_corrs.append(sample_corr[i_p, j_p])
+            if adj_sample_corrs:
+                adj_arr = np.array(adj_sample_corrs)
+                logger.info(f"  Sample l=1 adjacent corr: mean={np.mean(adj_arr):.4f}, "
+                            f"median={np.median(adj_arr):.4f}")
+
+    return all_samples
 
 
 def cap_covariance_relative_uncertainty(
@@ -2442,9 +3055,8 @@ def cap_covariance_relative_uncertainty(
     Parameters
     ----------
     cov_matrix : np.ndarray
-        Covariance matrix of ENDF-normalized Legendre coefficients.
-        Since coefficients are already normalized (a_l = c_l/c0/(2l+1)),
-        the variances are inherently relative.
+        Relative (fractional) covariance matrix of Legendre coefficients,
+        as returned by ``compute_covariance_from_samples``.
     max_relative_std : float
         Maximum allowed standard deviation (e.g. 1.0 for 100% cap).
     param_labels : List[Tuple[int, int]]
@@ -2666,13 +3278,12 @@ def write_nominal_endf(
             endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
             mt_data._legendre_coeffs[nr.energy_index] = list(endf_coeffs)
 
-    # Create output structure
+    # Create output structure (nominal file lives at output_dir level, not inside endf/)
     output_path = Path(output_dir)
-    nominal_dir = output_path / "endf" / "nominal"
-    nominal_dir.mkdir(parents=True, exist_ok=True)
+    output_path.mkdir(parents=True, exist_ok=True)
 
     base = Path(original_endf_file).stem
-    output_file = nominal_dir / f"{base}_nominal.endf"
+    output_file = output_path / f"{base}_nominal.endf"
 
     # Use ENDFWriter
     writer = ENDFWriter(original_endf_file)
@@ -2775,13 +3386,12 @@ def write_average_endf(
         if e_idx < len(mt_data._legendre_coeffs):
             mt_data._legendre_coeffs[e_idx] = list(mean_coeffs)
 
-    # Create output structure
+    # Create output structure (average file lives at output_dir level, not inside endf/)
     output_path = Path(output_dir)
-    avg_dir = output_path / "endf" / "average"
-    avg_dir.mkdir(parents=True, exist_ok=True)
+    output_path.mkdir(parents=True, exist_ok=True)
 
     base = Path(original_endf_file).stem
-    output_file = avg_dir / f"{base}_average.endf"
+    output_file = output_path / f"{base}_average.endf"
 
     # Use ENDFWriter
     writer = ENDFWriter(original_endf_file)
@@ -2851,8 +3461,8 @@ def write_endf_sample(
     sample_str = f"{sample_index + 1:04d}"
     base = Path(original_endf_file).stem
 
-    # Create output structure
-    sample_dir = Path(output_dir) / "endf" / sample_str
+    # Create output structure (endf_direct/ to avoid collision with Pipeline B's endf/)
+    sample_dir = Path(output_dir) / "endf_direct" / sample_str
     sample_dir.mkdir(parents=True, exist_ok=True)
 
     output_file = sample_dir / f"{base}_{sample_str}.endf"

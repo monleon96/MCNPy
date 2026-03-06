@@ -174,9 +174,10 @@ class ENDF:
                 if order is None:
                     raise ValueError("'order' parameter is required when uncertainty=True for MF4")
                 
-                # Get MF34 covariance data
+                # Get MF34 covariance data (pass MF4 to populate Legendre coefficients)
                 mf34_mt = self.files[34].mt[mt]
-                mf34_covmat = mf34_mt.to_ang_covmat()
+                mf4 = self.files.get(4)
+                mf34_covmat = mf34_mt.to_ang_covmat(mf4_data=mf4)
                 
                 # Get isotope ID (ZAID)
                 isotope_id = self.zaid if self.zaid is not None else int(mf34_mt._za)

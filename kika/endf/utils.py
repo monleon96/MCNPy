@@ -45,18 +45,21 @@ def format_endf_number(value: Union[int, float, None], width: int = 11) -> str:
     sign_char = "-" if value < 0 else " "
     abs_val = abs(value)
     exponent = int(math.floor(math.log10(abs_val)))
+    if abs(exponent) > 99:
+        return " 0.000000+0"
     mantissa = abs_val / (10 ** exponent)
 
     # Select the number of decimals based on the exponent.
     # Use 6 decimals if |exponent| < 10, else use 5 decimals.
     # Adjust the mantissa if rounding would push it to 10 or more.
-    while True:
+    prec = 6 if abs(exponent) < 10 else 5
+    mantissa_str = f"{mantissa:1.{prec}f}"
+    # Rounding overflow: e.g. 9.9999999 -> "10.000000" (length > prec + 2)
+    if len(mantissa_str) > prec + 2:
+        mantissa /= 10.0
+        exponent += 1
         prec = 6 if abs(exponent) < 10 else 5
         mantissa_str = f"{mantissa:1.{prec}f}"
-        if float(mantissa_str) < 10:
-            break
-        mantissa /= 10
-        exponent += 1
 
     # Format the exponent: one digit if |exponent| < 10, two digits otherwise.
     if abs(exponent) < 10:
@@ -95,34 +98,29 @@ def format_endf_data_line(values: Sequence[Union[int, float, None]],
         Formatted 80-character ENDF line
     """
     # Format the data part (columns 1-66)
-    data_part = ""
-    
+    parts = []
+
     # Apply formats if provided, otherwise use default formatting
     if formats:
         # Make sure formats list matches values length
         format_list = formats + [ENDF_FORMAT_PRESERVE] * (len(values) - len(formats))
         format_list = format_list[:len(values)]
-        
-        for i, (value, fmt) in enumerate(zip(values, format_list)):
+
+        for value, fmt in zip(values, format_list):
             if fmt == ENDF_FORMAT_INT and value is not None:
-                # Format as integer, always show zero (don't use blank for zero)
-                data_part += f"{int(value):11d}"
+                parts.append(f"{int(value):11d}")
             elif fmt == ENDF_FORMAT_INT_ZERO and value is not None:
-                # Format as integer, with zero as actual zero
-                data_part += f"{int(value):11d}"
+                parts.append(f"{int(value):11d}")
             elif fmt == ENDF_FORMAT_BLANK or value is None:
-                # Blank field
-                data_part += " " * 11
+                parts.append("           ")
             else:
-                # Default to float format
-                data_part += format_endf_number(value)
+                parts.append(format_endf_number(value))
     else:
-        # Use default formatting based on value type
-        for i, value in enumerate(values[:6]):
-            data_part += format_endf_number(value)
-    
+        for value in values[:6]:
+            parts.append(format_endf_number(value))
+
     # Pad to 66 characters if needed
-    data_part = data_part.ljust(66)
+    data_part = ''.join(parts).ljust(66)
     
     # Format the identification part (columns 67-80)
     id_part = f"{mat:4d}{mf:2d}{mt:3d}{line_num:5d}"
@@ -420,6 +418,51 @@ def _interp_pair(x: float, x1: float, y1: float, x2: float, y2: float, int_code:
         return (1.0 - t) * y1 + t * y2
 
 
+def _interp_pair_vec(
+    xq: np.ndarray, x1: np.ndarray, y1: np.ndarray,
+    x2: np.ndarray, y2: np.ndarray, int_code: int,
+) -> np.ndarray:
+    """Vectorized interpolation between paired arrays using ENDF INT code."""
+    out = np.empty_like(xq, dtype=float)
+    same = x1 == x2
+    if same.all():
+        return y1.copy()
+    diff = ~same
+    dx = np.where(diff, x2 - x1, 1.0)
+    t = (xq - x1) / dx
+    code = _base_int_code(int_code)
+    if code == 1:
+        out[:] = y1
+    elif code == 2:
+        out[:] = (1.0 - t) * y1 + t * y2
+    elif code == 3:
+        safe = diff & (x1 > 0) & (x2 > 0) & (xq > 0)
+        out[:] = (1.0 - t) * y1 + t * y2  # fallback
+        if safe.any():
+            lx1 = np.log(x1[safe]); lx2 = np.log(x2[safe]); lx = np.log(xq[safe])
+            tt = (lx - lx1) / (lx2 - lx1)
+            out[safe] = (1.0 - tt) * y1[safe] + tt * y2[safe]
+    elif code == 4:
+        safe = diff & (y1 > 0) & (y2 > 0)
+        out[:] = (1.0 - t) * y1 + t * y2
+        if safe.any():
+            ln_y = (1.0 - t[safe]) * np.log(y1[safe]) + t[safe] * np.log(y2[safe])
+            out[safe] = np.exp(ln_y)
+    elif code == 5:
+        safe = diff & (x1 > 0) & (x2 > 0) & (xq > 0) & (y1 > 0) & (y2 > 0)
+        out[:] = (1.0 - t) * y1 + t * y2
+        if safe.any():
+            lx1 = np.log(x1[safe]); lx2 = np.log(x2[safe]); lx = np.log(xq[safe])
+            tt = (lx - lx1) / (lx2 - lx1)
+            ln_y = (1.0 - tt) * np.log(y1[safe]) + tt * np.log(y2[safe])
+            out[safe] = np.exp(ln_y)
+    else:
+        out[:] = (1.0 - t) * y1 + t * y2
+    if same.any():
+        out[same] = y1[same]
+    return out
+
+
 def interpolate_1d_endf(
     x_grid: ArrayLike,
     y_grid: ArrayLike,
@@ -434,36 +477,367 @@ def interpolate_1d_endf(
     """
     x = np.asarray(x_grid, dtype=float)
     y = np.asarray(y_grid, dtype=float)
+    scalar = np.ndim(xq) == 0
     if x.size == 0:
-        if np.ndim(xq) == 0:
-            return 0.0
-        return np.zeros_like(np.asarray(xq, dtype=float))
+        return 0.0 if scalar else np.zeros_like(np.asarray(xq, dtype=float))
     regions = _regionize(nbt_int_pairs, len(x))
-    xq_arr = np.asarray([xq], dtype=float).ravel() if np.ndim(xq) == 0 else np.asarray(xq, dtype=float)
-    out = np.zeros_like(xq_arr, dtype=float)
+    xq_arr = np.atleast_1d(np.asarray(xq, dtype=float))
+    n = xq_arr.size
 
-    for i, xv in enumerate(xq_arr):
-        if xv < x[0]:
-            out[i] = 0.0 if out_of_range == "zero" else y[0]
-            continue
-        if xv > x[-1]:
-            out[i] = 0.0 if out_of_range == "zero" else y[-1]
-            continue
-        # find region and interval
-        # quick locate index k with x[k] <= xv <= x[k+1]
-        k = np.searchsorted(x, xv, side="right") - 1
-        k = min(max(k, 0), len(x) - 2)
-        # find region with k inside [start, end]
-        int_code = 2
+    # Vectorized interval lookup
+    k = np.searchsorted(x, xq_arr, side="right") - 1
+    np.clip(k, 0, len(x) - 2, out=k)
+
+    # Out-of-range masks
+    lo_mask = xq_arr < x[0]
+    hi_mask = xq_arr > x[-1]
+    in_mask = ~(lo_mask | hi_mask)
+
+    out = np.empty(n, dtype=float)
+    if out_of_range == "zero":
+        out[lo_mask] = 0.0
+        out[hi_mask] = 0.0
+    else:
+        out[lo_mask] = y[0]
+        out[hi_mask] = y[-1]
+
+    if not in_mask.any():
+        return float(out[0]) if scalar else out
+
+    # In-range points
+    k_in = k[in_mask]
+    xq_in = xq_arr[in_mask]
+
+    # Fast path: single region
+    if len(regions) == 1:
+        _, _, ic = regions[0]
+        base_ic = _base_int_code(ic)
+        if base_ic == 2:
+            # Pure linear-linear → numpy builtin
+            out[in_mask] = np.interp(xq_in, x, y)
+        else:
+            out[in_mask] = _interp_pair_vec(
+                xq_in, x[k_in], y[k_in], x[k_in + 1], y[k_in + 1], ic
+            )
+    else:
+        # Assign INT codes per query point from regions
+        int_codes = np.full(k_in.size, 2, dtype=int)
         for start, end, ic in regions:
-            if start <= k + 1 <= end:
-                int_code = ic
-                break
-        out[i] = _interp_pair(xv, x[k], y[k], x[k + 1], y[k + 1], int_code)
+            rmask = (k_in + 1 >= start) & (k_in + 1 <= end)
+            int_codes[rmask] = ic
+        unique_codes = np.unique(int_codes)
+        if unique_codes.size == 1:
+            ic = int(unique_codes[0])
+            if _base_int_code(ic) == 2:
+                out[in_mask] = np.interp(xq_in, x, y)
+            else:
+                out[in_mask] = _interp_pair_vec(
+                    xq_in, x[k_in], y[k_in], x[k_in + 1], y[k_in + 1], ic
+                )
+        else:
+            result_in = np.empty(k_in.size, dtype=float)
+            for ic in unique_codes:
+                cm = int_codes == ic
+                ki = k_in[cm]
+                result_in[cm] = _interp_pair_vec(
+                    xq_in[cm], x[ki], y[ki], x[ki + 1], y[ki + 1], int(ic)
+                )
+            out[in_mask] = result_in
 
-    if np.ndim(xq) == 0:
-        return float(out[0])
-    return out
+    return float(out[0]) if scalar else out
+
+
+def parse_interp_pairs(lines, start, nr):
+    """
+    Read NR interpolation (NBT, INT) pairs from ENDF lines.
+
+    Parameters
+    ----------
+    lines : list of str
+        ENDF lines.
+    start : int
+        Index of the first line containing pairs.
+    nr : int
+        Number of (NBT, INT) pairs to read.
+
+    Returns
+    -------
+    pairs : list of tuple(int, int)
+    next_idx : int
+        Index of the next line after all pairs have been read.
+    """
+    pairs = []
+    idx = start
+    remaining = nr
+    while remaining > 0 and idx < len(lines):
+        ld = parse_line(lines[idx])
+        n_this_line = min(3, remaining)
+        for i in range(n_this_line):
+            nbt = ld.get(f"C{i * 2 + 1}")
+            interp = ld.get(f"C{i * 2 + 2}")
+            if nbt is not None and interp is not None:
+                pairs.append((int(nbt), int(interp)))
+        remaining -= n_this_line
+        idx += 1
+    return pairs, idx
+
+
+def parse_data_pairs(lines, start, np_count):
+    """
+    Read NP x/y data pairs (3 pairs per line) from ENDF lines.
+
+    Parameters
+    ----------
+    lines : list of str
+        ENDF lines.
+    start : int
+        Index of the first data line.
+    np_count : int
+        Number of (x, y) pairs to read.
+
+    Returns
+    -------
+    x_list : list of float
+    y_list : list of float
+    next_idx : int
+    """
+    x_list = []
+    y_list = []
+    idx = start
+    num_lines_needed = (np_count + 2) // 3
+    for _ in range(num_lines_needed):
+        if idx >= len(lines):
+            break
+        ld = parse_line(lines[idx])
+        idx += 1
+        for i in range(3):
+            if len(x_list) >= np_count:
+                break
+            x = ld.get(f"C{i * 2 + 1}")
+            y = ld.get(f"C{i * 2 + 2}")
+            if x is not None and y is not None:
+                x_list.append(x)
+                y_list.append(y)
+    return x_list, y_list, idx
+
+
+def format_data_values(values, mat, mf, mt, start_line, formats=None):
+    """
+    Format N scalar values into ENDF LIST-record body lines (6 values per line).
+
+    Counterpart of :func:`parse_data_values`.
+
+    Parameters
+    ----------
+    values : list of float/int
+        Scalar values to write.
+    mat, mf, mt : int
+        ENDF identification numbers.
+    start_line : int
+        Starting line sequence number.
+    formats : list of str, optional
+        Per-value format codes (ENDF_FORMAT_*).  If *None*, all values
+        are written as floats.
+
+    Returns
+    -------
+    lines : list of str
+    next_line_num : int
+    """
+    result_lines = []
+    line_num = start_line
+    n = len(values)
+    i = 0
+    while i < n:
+        chunk = values[i:i + 6]
+        if formats is not None:
+            fmts = formats[i:i + 6]
+            # Pad with ENDF_FORMAT_BLANK for trailing positions
+            while len(fmts) < len(chunk):
+                fmts.append(ENDF_FORMAT_FLOAT)
+        else:
+            fmts = [ENDF_FORMAT_FLOAT] * len(chunk)
+        # Pad chunk to 6 values
+        while len(chunk) < 6:
+            chunk.append(None)
+            fmts.append(ENDF_FORMAT_BLANK)
+        result_lines.append(format_endf_data_line(chunk, mat, mf, mt, line_num, formats=fmts))
+        line_num += 1
+        i += 6
+    return result_lines, line_num
+
+
+def parse_data_values(lines, start, n_values):
+    """
+    Read N scalar values (6 per line) from ENDF lines (LIST record body).
+
+    Parameters
+    ----------
+    lines : list of str
+        ENDF lines.
+    start : int
+        Index of the first data line.
+    n_values : int
+        Number of scalar values to read.
+
+    Returns
+    -------
+    values : list of float
+    next_idx : int
+    """
+    values = []
+    idx = start
+    num_lines_needed = (n_values + 5) // 6
+    for _ in range(num_lines_needed):
+        if idx >= len(lines):
+            break
+        ld = parse_line(lines[idx])
+        idx += 1
+        for i in range(1, 7):
+            if len(values) >= n_values:
+                break
+            v = ld.get(f"C{i}")
+            if v is not None:
+                values.append(v)
+    return values, idx
+
+
+def parse_tab1(lines, start):
+    """
+    Parse a complete TAB1 record starting at *start*.
+
+    A TAB1 record consists of:
+      - A header line with C1..C6
+      - NR interpolation (NBT, INT) pairs
+      - NP x/y data pairs
+
+    Parameters
+    ----------
+    lines : list of str
+        ENDF lines.
+    start : int
+        Index of the TAB1 header line.
+
+    Returns
+    -------
+    header : dict
+        Parsed header fields (C1..C6, MAT, MF, MT).
+    interp_pairs : list of tuple(int, int)
+    x_data : list of float
+    y_data : list of float
+    next_idx : int
+    """
+    header = parse_line(lines[start])
+    nr = int(header.get("C5", 0) or 0)
+    np_count = int(header.get("C6", 0) or 0)
+    idx = start + 1
+    interp_pairs = []
+    if nr > 0:
+        interp_pairs, idx = parse_interp_pairs(lines, idx, nr)
+    x_data, y_data, idx = parse_data_pairs(lines, idx, np_count)
+    return header, interp_pairs, x_data, y_data, idx
+
+
+def format_interp_pairs(pairs, mat, mf, mt, start_line):
+    """
+    Format NR interpolation (NBT, INT) pairs into ENDF lines.
+
+    Returns
+    -------
+    lines : list of str
+    next_line_num : int
+    """
+    result_lines = []
+    line_num = start_line
+    remaining = list(pairs)
+    while remaining:
+        chunk = remaining[:3]
+        remaining = remaining[3:]
+        values = []
+        fmts = []
+        for nbt, interp in chunk:
+            values.extend([nbt, interp])
+            fmts.extend([ENDF_FORMAT_INT, ENDF_FORMAT_INT])
+        while len(values) < 6:
+            values.append(None)
+            fmts.append(ENDF_FORMAT_BLANK)
+        result_lines.append(format_endf_data_line(values, mat, mf, mt, line_num, formats=fmts))
+        line_num += 1
+    return result_lines, line_num
+
+
+def format_data_pairs(x_data, y_data, mat, mf, mt, start_line):
+    """
+    Format NP x/y data pairs into ENDF lines (3 pairs per line).
+
+    Returns
+    -------
+    lines : list of str
+    next_line_num : int
+    """
+    result_lines = []
+    line_num = start_line
+    n = len(x_data)
+    i = 0
+    while i < n:
+        values = []
+        for j in range(3):
+            if i + j < n:
+                values.extend([x_data[i + j], y_data[i + j]])
+            else:
+                values.extend([None, None])
+        fmts = [ENDF_FORMAT_FLOAT if v is not None else ENDF_FORMAT_BLANK for v in values]
+        result_lines.append(format_endf_data_line(values, mat, mf, mt, line_num, formats=fmts))
+        line_num += 1
+        i += 3
+    return result_lines, line_num
+
+
+def format_tab1(c1, c2, l1, l2, interp_pairs, x_data, y_data, mat, mf, mt, start_line):
+    """
+    Format a complete TAB1 record to ENDF lines.
+
+    Parameters
+    ----------
+    c1, c2 : float
+        Header float fields.
+    l1, l2 : int
+        Header integer fields (positions C3, C4).
+    interp_pairs : list of tuple(int, int)
+    x_data, y_data : list of float
+    mat, mf, mt : int
+    start_line : int
+
+    Returns
+    -------
+    lines : list of str
+    next_line_num : int
+    """
+    nr = len(interp_pairs)
+    np_count = len(x_data)
+    line_num = start_line
+    result_lines = []
+
+    # Header line
+    header = format_endf_data_line(
+        [c1, c2, l1, l2, nr, np_count],
+        mat, mf, mt, line_num,
+        formats=[ENDF_FORMAT_FLOAT, ENDF_FORMAT_FLOAT,
+                 ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT, ENDF_FORMAT_INT, ENDF_FORMAT_INT],
+    )
+    result_lines.append(header)
+    line_num += 1
+
+    # Interpolation pairs
+    if nr > 0:
+        ip_lines, line_num = format_interp_pairs(interp_pairs, mat, mf, mt, line_num)
+        result_lines.extend(ip_lines)
+
+    # Data pairs
+    dp_lines, line_num = format_data_pairs(x_data, y_data, mat, mf, mt, line_num)
+    result_lines.extend(dp_lines)
+
+    return result_lines, line_num
 
 
 def project_tabulated_to_legendre(

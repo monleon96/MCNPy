@@ -10,6 +10,8 @@ from ..classes.endf import ENDF
 from ..classes.mf import MF
 from ..utils import parse_endf_id
 from .parse_mf1 import parse_mf1
+from .parse_mf2 import parse_mf2
+from .parse_mf3 import parse_mf3
 from .parse_mf4 import parse_mf4
 from .parse_mf34 import parse_mf34
 from ...utils import get_endf_logger
@@ -21,6 +23,8 @@ logger = get_endf_logger(__name__)
 # Dictionary mapping MF numbers to their parser functions
 MF_PARSERS = {
     1: parse_mf1,
+    2: parse_mf2,
+    3: parse_mf3,
     4: parse_mf4,
     34: parse_mf34,
     # Additional parsers will be registered here

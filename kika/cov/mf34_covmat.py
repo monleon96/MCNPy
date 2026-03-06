@@ -9,7 +9,7 @@ from kika._utils import create_repr_section
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from kika.plotting.plot_data import MF34HeatmapData, LegendreUncertaintyPlotData
+    from kika.plotting.plot_data import LegendreCoeffPlotData, MF34HeatmapData, LegendreUncertaintyPlotData
 
 
 @dataclass
@@ -61,6 +61,9 @@ class MF34CovMat:
     is_relative: List[bool] = field(default_factory=list)
     frame: List[str] = field(default_factory=list)
     energy_unit: str = 'eV'  # Energy unit: 'eV' or 'MeV'
+
+    # Nominal Legendre coefficients keyed by (isotope, reaction_mt, l_order)
+    legendre_coefficients: Dict[Tuple[int, int, int], np.ndarray] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # Basic methods
@@ -365,7 +368,7 @@ class MF34CovMat:
         Gmap = {t: len(unions[t]) - 1 for t in param_triplets}
         max_G = max(Gmap.values()) if Gmap else 0
         N = len(param_triplets) * max_G
-        full = np.full((N, N), np.nan, dtype=float)
+        full = np.zeros((N, N), dtype=float)
 
         for ir, rr, lr, ic, rc, lc, matrix, grid in zip(
             self.isotope_rows, self.reaction_rows, self.l_rows,
@@ -1023,9 +1026,9 @@ class MF34CovMat:
             
         Returns
         -------
-        tuple of (None, LegendreUncertaintyPlotData)
+        tuple of (LegendreCoeffPlotData or None, LegendreUncertaintyPlotData)
             Tuple containing:
-            - None: MF34 does not contain Legendre coefficient values (only uncertainties)
+            - coeff_data: Legendre coefficient data if available in ``legendre_coefficients``, else None
             - unc_data: Uncertainty data for the Legendre coefficients
             
         Raises
@@ -1044,7 +1047,7 @@ class MF34CovMat:
         >>> from kika.plotting import PlotBuilder
         >>> fig = PlotBuilder().add_data(unc_data).build()
         """
-        from kika.plotting import LegendreUncertaintyPlotData
+        from kika.plotting import LegendreCoeffPlotData, LegendreUncertaintyPlotData
         from kika._utils import zaid_to_symbol, symbol_to_zaid
         
         # Convert nuclide to isotope (ZAID) if string
@@ -1116,12 +1119,31 @@ class MF34CovMat:
             uncertainty_type=uncertainty_type,
             sigma=sigma,
             energy_bins=energy_bins,
+            plot_type='step',
             **styling_kwargs
         )
         
-        # Return tuple for API consistency (None, unc_data)
-        # MF34 does not contain Legendre coefficient values, only uncertainties
-        return None, unc_data
+        # Build LegendreCoeffPlotData if nominal coefficients are available
+        coeff_data = None
+        key = (isotope, mt, order)
+        if key in self.legendre_coefficients:
+            coeffs = np.asarray(self.legendre_coefficients[key], dtype=float)
+            if energy_bins is not None and coeffs.size == energy_bins.size - 1:
+                coeffs_extended = np.append(coeffs, coeffs[-1])
+                coeff_label = f"{zaid_to_symbol(isotope)} - $a_{{{order}}}$"
+                coeff_data = LegendreCoeffPlotData(
+                    x=energy_bins,
+                    y=coeffs_extended,
+                    label=coeff_label,
+                    order=order,
+                    isotope=zaid_to_symbol(isotope),
+                    mt=mt,
+                    plot_type='step',
+                    **styling_kwargs
+                )
+                coeff_data.step_where = 'post'
+
+        return coeff_data, unc_data
 
     def filter_by_isotope_reaction(self, isotope: int, mt: int) -> "MF34CovMat":
         """
@@ -1168,7 +1190,47 @@ class MF34CovMat:
 
         filtered_mf34.energy_unit = self.energy_unit
 
+        # Propagate matching legendre_coefficients
+        filtered_mf34.legendre_coefficients = {
+            k: v for k, v in self.legendre_coefficients.items()
+            if k[0] == isotope and k[1] == mt
+        }
+
         return filtered_mf34
+
+    def remap_mt(self, old_mt: int, new_mt: int) -> "MF34CovMat":
+        """
+        Return a copy with all occurrences of *old_mt* replaced by *new_mt*.
+
+        This is useful when NJOY GENDF files use different MT numbering
+        (e.g. MT=251 for elastic scattering) that needs to be mapped back
+        to the standard ENDF MT numbers (e.g. MT=2).
+
+        Parameters
+        ----------
+        old_mt : int
+            MT number to replace.
+        new_mt : int
+            MT number to use instead.
+
+        Returns
+        -------
+        MF34CovMat
+            New instance with remapped MT numbers.
+        """
+        import copy
+
+        new = copy.copy(self)
+        new.reaction_rows = [new_mt if m == old_mt else m for m in self.reaction_rows]
+        new.reaction_cols = [new_mt if m == old_mt else m for m in self.reaction_cols]
+
+        # Remap keys in legendre_coefficients
+        new.legendre_coefficients = {
+            (iso, (new_mt if mt == old_mt else mt), l): vals
+            for (iso, mt, l), vals in self.legendre_coefficients.items()
+        }
+
+        return new
 
     def get_uncertainties_for_legendre_coefficient(
         self, 
@@ -1284,14 +1346,100 @@ class MF34CovMat:
         else:
             raise TypeError(f"l_coefficient must be int or list of int, got {type(l_coefficient)}")
 
+    def get_ll_prime_correlations(
+        self,
+        isotope: int,
+        mt: int,
+    ) -> Dict[str, Any]:
+        """
+        Extract per-energy l-l' correlation blocks from ENDF MF34 data.
+
+        For each energy bin, builds the L×L covariance sub-block from all
+        stored (l_row, l_col) sub-matrices that share the same energy grid,
+        then converts to correlation.
+
+        Parameters
+        ----------
+        isotope : int
+            Isotope ID (e.g. 2631 for Fe-56).
+        mt : int
+            Reaction MT number (e.g. 2 for elastic).
+
+        Returns
+        -------
+        dict
+            'energy_grid': np.ndarray — bin boundaries (N+1 points)
+            'l_values': list of int — sorted Legendre orders present
+            'correlations': list of np.ndarray — one L×L correlation matrix per energy bin
+            'mean_abs_offdiag': float — mean |off-diagonal| across all bins
+        """
+        # Collect all sub-matrices matching (isotope, mt)
+        blocks = {}  # (l_row, l_col) -> (energy_grid, matrix)
+        for i, (ir, rr, lr, ic, rc, lc) in enumerate(zip(
+            self.isotope_rows, self.reaction_rows, self.l_rows,
+            self.isotope_cols, self.reaction_cols, self.l_cols,
+        )):
+            if ir == isotope and ic == isotope and rr == mt and rc == mt:
+                blocks[(lr, lc)] = (self.energy_grids[i], self.matrices[i])
+
+        if not blocks:
+            return {'energy_grid': np.array([]), 'l_values': [],
+                    'correlations': [], 'mean_abs_offdiag': 0.0}
+
+        # Determine L values and energy grid from a diagonal block
+        l_set = set()
+        for (lr, lc) in blocks:
+            l_set.add(lr)
+            l_set.add(lc)
+        l_values = sorted(l_set)
+        l_idx = {l: i for i, l in enumerate(l_values)}
+        n_l = len(l_values)
+
+        # Use energy grid from first block (assumed uniform for same isotope/mt)
+        ref_grid = list(blocks.values())[0][0]
+        energy_grid = np.array(ref_grid)
+        n_bins = len(energy_grid) - 1
+
+        # Build per-bin L×L covariance and correlation
+        correlations = []
+        off_diag_all = []
+        for g in range(n_bins):
+            cov_block = np.zeros((n_l, n_l))
+            for (lr, lc), (_, mat) in blocks.items():
+                ir_l, ic_l = l_idx[lr], l_idx[lc]
+                if g < mat.shape[0] and g < mat.shape[1]:
+                    cov_block[ir_l, ic_l] = mat[g, g]
+                    if ir_l != ic_l:
+                        cov_block[ic_l, ir_l] = mat[g, g]
+
+            # Convert to correlation
+            std = np.sqrt(np.maximum(np.diag(cov_block), 0.0))
+            std[std == 0] = 1.0
+            corr = cov_block / np.outer(std, std)
+            np.fill_diagonal(corr, 1.0)
+            correlations.append(corr)
+
+            if n_l > 1:
+                mask = ~np.eye(n_l, dtype=bool)
+                off_diag_all.extend(np.abs(corr[mask]).tolist())
+
+        mean_abs = float(np.mean(off_diag_all)) if off_diag_all else 0.0
+
+        return {
+            'energy_grid': energy_grid,
+            'l_values': l_values,
+            'correlations': correlations,
+            'mean_abs_offdiag': mean_abs,
+        }
+
     def compute_union_energy_grids(self, atol: float = 1e-12):
         """
         Compute union energy grids for all parameter triplets.
-        
-        This method creates a unified energy grid for each (isotope, reaction, legendre) 
+
+        This method creates a unified energy grid for each (isotope, reaction, legendre)
         triplet by merging all energy grids that involve that triplet, removing duplicates
         within tolerance.
-        
+
         Parameters
         ----------
         atol : float, default 1e-12

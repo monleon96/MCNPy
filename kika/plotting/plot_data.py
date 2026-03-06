@@ -429,8 +429,9 @@ class UncertaintyBand:
         if len(y_nominal) != len(self.relative_uncertainty):
             raise ValueError("y_nominal must have same length as relative_uncertainty")
         
-        y_lower = y_nominal * (1.0 - self.sigma * self.relative_uncertainty)
-        y_upper = y_nominal * (1.0 + self.sigma * self.relative_uncertainty)
+        abs_unc = np.abs(y_nominal) * self.sigma * self.relative_uncertainty
+        y_lower = y_nominal - abs_unc
+        y_upper = y_nominal + abs_unc
         
         return y_lower, y_upper
     

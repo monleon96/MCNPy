@@ -1672,6 +1672,12 @@ def read_covfil(file_path: str, energy_unit: str = 'eV') -> Union[CovMat, MF34Co
                 matrix=matrix, energy_grid=energy_grid,
                 is_relative=True, frame="unknown",
             )
+        # Store grouped Legendre coefficients from MF3 sections
+        # NJOY convention: MT = 250 + L (MT251→a_1, MT252→a_2, …)
+        for (zaid, mt_xs), values in xs_dict.items():
+            l_order = mt_xs - 250
+            if l_order >= 1:
+                mf34.legendre_coefficients[(zaid, mt_xs, l_order)] = values
         if mf34.num_matrices == 0:
             raise EmptyParsingError(
                 f"No valid data was extracted from the NJOY covariance matrix file: {file_path}"

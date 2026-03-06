@@ -7,6 +7,8 @@ from typing import List, Optional, Union
 from .classes.endf import ENDF
 from .parsers.parse_endf import parse_endf_file, parse_mf_from_file, MF_PARSERS
 from .classes.mf1.mf1mt import MT451
+from .classes.mf2.mf2mt151 import MF2MT151
+from .classes.mf3.mf3mt import MF3MT
 from .classes.mf4.base import MF4MT
 
 
@@ -23,7 +25,7 @@ def read_endf(filepath: str, mf_numbers: Optional[Union[int, List[int]]] = None)
         ENDF object with parsed data
         
     Notes:
-        Currently only parsers for MF1 and MF4 are implemented.
+        Parsers are available for MF1, MF3, MF4, and MF34.
         Other MF sections will be skipped unless parsers are added.
         
     Examples:
@@ -80,14 +82,47 @@ def read_mt451(filepath: str) -> Optional['MT451']:
     return None
 
 
+def read_mf3_mt(filepath: str, mt_number: int) -> Optional['MF3MT']:
+    """
+    Read a specific MT section from MF3 (Reaction Cross Sections) in an ENDF file.
+
+    Args:
+        filepath: Path to the ENDF file
+        mt_number: MT section number to read (e.g. 1=total, 2=elastic, 18=fission)
+
+    Returns:
+        MF3MT object if found, None otherwise
+    """
+    mf3 = parse_mf_from_file(filepath, 3)
+    if mf3 and mt_number in mf3.sections:
+        return mf3.sections[mt_number]
+    return None
+
+
+def read_mf2(filepath: str) -> Optional['MF2MT151']:
+    """
+    Read the MF2/MT151 (Resonance Parameters) section from an ENDF file.
+
+    Args:
+        filepath: Path to the ENDF file
+
+    Returns:
+        MF2MT151 object if found, None otherwise
+    """
+    mf2 = parse_mf_from_file(filepath, 2)
+    if mf2 and 151 in mf2.sections:
+        return mf2.sections[151]
+    return None
+
+
 def read_mf4_mt(filepath: str, mt_number: int) -> Optional['MF4MT']:
     """
     Read a specific MT section from MF4 in an ENDF file.
-    
+
     Args:
         filepath: Path to the ENDF file
         mt_number: MT section number to read
-        
+
     Returns:
         MF4MT object if found, None otherwise
     """

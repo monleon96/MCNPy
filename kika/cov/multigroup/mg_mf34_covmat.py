@@ -16,7 +16,7 @@ from kika.plotting.plot_builder import PlotBuilder
 
 if TYPE_CHECKING:
     from ..mf34_covmat import MF34CovMat
-    from kika.plotting.plot_data import UncertaintyBand
+    from kika.plotting.plot_data import LegendreUncertaintyPlotData
 
 @dataclass
 class MGMF34CovMat:
@@ -674,10 +674,10 @@ class MGMF34CovMat:
             
         Returns
         -------
-        tuple of (LegendreCoeffPlotData, UncertaintyBand)
+        tuple of (LegendreCoeffPlotData, LegendreUncertaintyPlotData)
             Tuple containing:
             - legendre_data: PlotData for Legendre coefficients (None if not available)
-            - unc_band: UncertaintyBand with relative uncertainties (None if not available)
+            - unc_data: Uncertainty plot data with relative uncertainties in % (None if not available)
             
         Raises
         ------
@@ -755,41 +755,45 @@ class MGMF34CovMat:
         # Explicitly tag step positioning so PlotBuilder uses post bins
         legendre_data.step_where = 'post'
         
-        unc_band = self._create_uncertainty_band(
+        unc_data = self._build_uncertainty_plotdata(
             isotope=isotope,
             mt=mt,
             order=order,
             sigma=sigma,
         )
-        
-        return legendre_data, unc_band
-    
-    def _create_uncertainty_band(
+
+        return legendre_data, unc_data
+
+    def _build_uncertainty_plotdata(
         self,
         isotope: int,
         mt: int,
         order: int,
         sigma: float,
-    ) -> Optional["UncertaintyBand"]:
+    ) -> Optional["LegendreUncertaintyPlotData"]:
         """
-        Build an UncertaintyBand from the diagonal of the relative covariance matrix.
+        Build a ``LegendreUncertaintyPlotData`` from the diagonal of the
+        relative covariance matrix.
+
+        The returned object uses bin boundaries as x-coordinates and
+        percentage-scaled relative uncertainty as y-values, consistent
+        with ``MF34CovMat.to_plot_data()``.
 
         Returns
         -------
-        UncertaintyBand or None
-            Band with relative uncertainties (fractional) aligned to the step grid,
-            or None when no matching covariance block exists.
+        LegendreUncertaintyPlotData or None
         """
-        from kika.plotting import UncertaintyBand
-        
-        # Find the covariance matrix for this order
+        from kika.plotting import LegendreUncertaintyPlotData
+        from kika._utils import zaid_to_symbol
+
+        energy_grid = np.asarray(self.energy_grid, dtype=float)
+
         for i, (iso_r, mt_r, l_r, iso_c, mt_c, l_c) in enumerate(zip(
             self.isotope_rows, self.reaction_rows, self.l_rows,
             self.isotope_cols, self.reaction_cols, self.l_cols
         )):
             if (iso_r == isotope and mt_r == mt and l_r == order and
                 iso_c == isotope and mt_c == mt and l_c == order):
-                # Found diagonal block
                 cov_matrix = self.relative_matrices[i]
                 diag = np.diag(cov_matrix)
 
@@ -797,15 +801,28 @@ class MGMF34CovMat:
                     return None
 
                 rel_unc = np.sqrt(np.maximum(diag, 0.0))
-                rel_unc_extended = np.append(rel_unc, rel_unc[-1])
+                # Convert to percentage and apply sigma
+                rel_unc_pct = rel_unc * 100.0 * sigma
+                # Extend for step='post' rendering
+                rel_unc_extended = np.append(rel_unc_pct, rel_unc_pct[-1])
 
-                return UncertaintyBand(
-                    x=np.asarray(self.energy_grid, dtype=float),
-                    relative_uncertainty=rel_unc_extended,
-                    sigma=sigma,
+                try:
+                    isotope_symbol = zaid_to_symbol(isotope)
+                except Exception:
+                    isotope_symbol = str(isotope)
+
+                return LegendreUncertaintyPlotData(
+                    x=energy_grid,
+                    y=rel_unc_extended,
+                    order=order,
+                    isotope=isotope_symbol,
+                    mt=mt,
+                    uncertainty_type='relative',
+                    plot_type='step',
+                    step_where='post',
+                    energy_bins=energy_grid,
                 )
-        
-        # No covariance data found
+
         return None
 
     def _create_uncertainty_plotdata(
@@ -825,7 +842,18 @@ class MGMF34CovMat:
 
         When ``use_centers`` is True the x-coordinates are placed at geometric
         bin centers to match the legacy MG uncertainty plots.
+
+        .. deprecated::
+            Use ``to_plot_data()`` instead.  This method is kept only for
+            backward compatibility with callers that need ``use_centers=True``.
         """
+        import warnings
+        warnings.warn(
+            "MGMF34CovMat._create_uncertainty_plotdata() is deprecated. "
+            "Use to_plot_data() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         from kika.plotting import LegendreUncertaintyPlotData
         from kika._utils import zaid_to_symbol
 

@@ -62,16 +62,19 @@ class ENDFWriter:
         for i, line in enumerate(self.original_lines):
             mat, mf, mt = parse_endf_id(line)
             
-            if mf == mf_number and current_start is None:
+            if mf == mf_number and current_start is not None:
+                # Continue within MF section
+                pass
+            elif mf == mf_number and current_start is None:
                 # Start of MF section
                 current_start = i
-            elif mf != mf_number and current_start is not None:
+            elif current_start is not None:
                 # End of MF section
-                boundaries.append((current_start, i - 1))
-                current_start = None
-            elif mf == 0 and mt == 0 and current_start is not None:
-                # End of material - also ends any current MF section
-                boundaries.append((current_start, i - 1))
+                if mf == 0 and mt == 0:
+                    # FEND line — include it in the boundary
+                    boundaries.append((current_start, i))
+                else:
+                    boundaries.append((current_start, i - 1))
                 current_start = None
         
         # Handle case where MF section goes to end of file
@@ -98,20 +101,21 @@ class ENDFWriter:
         for i, line in enumerate(self.original_lines):
             mat, mf, mt = parse_endf_id(line)
             
-            if mf == mf_number and mt == mt_number and current_start is None:
-                # Start of target MT section
-                current_start = i
-            elif mf == mf_number and mt != mt_number and current_start is not None:
-                # End of target MT section (different MT in same MF)
-                boundaries.append((current_start, i - 1))
-                current_start = None
-            elif mf != mf_number and current_start is not None:
-                # End of MF section - also ends current MT section
-                boundaries.append((current_start, i - 1))
-                current_start = None
-            elif mf == 0 and mt == 0 and current_start is not None:
-                # End of material
-                boundaries.append((current_start, i - 1))
+            if mf == mf_number and mt == mt_number:
+                if current_start is None:
+                    # Start of target MT section
+                    current_start = i
+                # else: continue within MT section
+            elif current_start is not None:
+                if mf == mf_number and mt == 0:
+                    # SEND line — include it in the boundary
+                    boundaries.append((current_start, i))
+                elif mf == 0 and mt == 0:
+                    # FEND line — include it in the boundary
+                    boundaries.append((current_start, i))
+                else:
+                    # Different MT in same MF (no SEND between them)
+                    boundaries.append((current_start, i - 1))
                 current_start = None
         
         # Handle case where MT section goes to end of file
@@ -147,14 +151,14 @@ class ENDFWriter:
             
             # Get the modified content as lines
             modified_content = str(modified_mf)
-            if not modified_content.endswith('\\n'):
-                modified_content += '\\n'
-            modified_lines = modified_content.split('\\n')[:-1]  # Remove empty last element
-            
+            if not modified_content.endswith('\n'):
+                modified_content += '\n'
+            modified_lines = modified_content.split('\n')[:-1]  # Remove empty last element
+
             # Create new file content
             new_lines = (
-                self.original_lines[:start_line] + 
-                [line + '\\n' for line in modified_lines] + 
+                self.original_lines[:start_line] +
+                [line + '\n' for line in modified_lines] +
                 self.original_lines[end_line + 1:]
             )
             
@@ -198,14 +202,14 @@ class ENDFWriter:
             
             # Get the modified content as lines
             modified_content = str(modified_mt)
-            if not modified_content.endswith('\\n'):
-                modified_content += '\\n'
-            modified_lines = modified_content.split('\\n')[:-1]  # Remove empty last element
-            
+            if not modified_content.endswith('\n'):
+                modified_content += '\n'
+            modified_lines = modified_content.split('\n')[:-1]  # Remove empty last element
+
             # Create new file content
             new_lines = (
-                self.original_lines[:start_line] + 
-                [line + '\\n' for line in modified_lines] + 
+                self.original_lines[:start_line] +
+                [line + '\n' for line in modified_lines] +
                 self.original_lines[end_line + 1:]
             )
             

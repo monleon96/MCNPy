@@ -669,6 +669,7 @@ def _weighted_ridge_fit(
     df_method: Literal["naive", "hat"] = "hat",
     external_weights: Optional[np.ndarray] = None,
     fixed_c0: Optional[float] = None,
+    fixed_coeffs: Optional[Dict[int, float]] = None,
 ) -> Tuple[np.ndarray, float, float, float]:
     """
     Fit y(mu) = sum_{l=0..L} c_l P_l(mu) using weighted least squares,
@@ -694,8 +695,11 @@ def _weighted_ridge_fit(
         Additional weights (e.g., Gaussian kernel weights g_ij).
         If provided, combined weight is: w_ij = g_ij / σ²_i
     fixed_c0 : Optional[float]
-        If provided, fix c0 to this value and only fit c1..cL.
-        This enables shape-only refits where the total cross section is fixed.
+        If provided, fix c0 to this value. Shorthand for fixed_coeffs={0: c0}.
+    fixed_coeffs : Optional[Dict[int, float]]
+        Dict mapping Legendre order l to its fixed value.
+        Fixed coefficients are subtracted from y and not fitted.
+        Can be combined with fixed_c0 (fixed_c0 takes precedence for l=0).
 
     Returns
     -------
@@ -718,60 +722,78 @@ def _weighted_ridge_fit(
         w = 1.0 / (sigma ** 2)
     sw = np.sqrt(w)
 
-    # Fixed-c0 mode: subtract constant term and fit only c1..cL
+    # Merge fixed_c0 and fixed_coeffs into a single dict
+    fixed_values: Dict[int, float] = {}
+    if fixed_coeffs is not None:
+        fixed_values.update(fixed_coeffs)
     if fixed_c0 is not None:
-        # Subtract c0 from y (since P0(mu) = 1)
-        y_adj = y - fixed_c0
+        fixed_values[0] = fixed_c0
 
-        # Design matrix without P0 column: N x L (columns P1..PL only)
-        A_full = legvander(mu, degree)
-        if degree == 0:
-            # Edge case: degree=0 with fixed_c0 means nothing to fit
-            coeffs = np.array([fixed_c0])
-            yhat = np.full(n, fixed_c0)
+    # Full design matrix: N x (L+1)
+    A_full = legvander(mu, degree)
+    all_indices = list(range(degree + 1))
+
+    if fixed_values:
+        free_indices = [l for l in all_indices if l not in fixed_values]
+        fixed_indices = sorted(fixed_values.keys())
+
+        if not free_indices:
+            # All coefficients are fixed — nothing to fit
+            coeffs = np.array([fixed_values.get(l, 0.0) for l in all_indices])
+            yhat = A_full @ coeffs
             chi2 = float(np.sum(((y - yhat) / sigma) ** 2))
-            eff_params = 0.0  # c0 is fixed, not fitted
-            dof = float(max(1, n))
-            return coeffs, chi2, dof, eff_params
+            return coeffs, chi2, float(max(1, n)), 0.0
 
-        A = A_full[:, 1:]  # columns P1..PL (size N x L)
+        # Subtract fixed contributions from y
+        fixed_vals = np.array([fixed_values[l] for l in fixed_indices])
+        y_adj = y - A_full[:, fixed_indices] @ fixed_vals
+
+        # Reduced design matrix with only free columns
+        A = A_full[:, free_indices]
         Aw = A * sw[:, None]
         yw = y_adj * sw
 
-        # Ridge penalty matrix (L x L), penalty on all terms (l=1..L)
+        n_free = len(free_indices)
+
+        # Ridge penalty on free indices, using original l for penalty scaling
         if ridge_lambda > 0.0:
-            pen = np.array([float(l ** ridge_power) for l in range(1, degree + 1)])
+            pen = np.array([float(l ** ridge_power) if l > 0 else 0.0
+                            for l in free_indices])
             R = np.diag(pen)
         else:
-            R = np.zeros((degree, degree), dtype=float)
+            R = np.zeros((n_free, n_free), dtype=float)
 
         M = Aw.T @ Aw + ridge_lambda * R
         rhs = Aw.T @ yw
 
-        # Solve for c1..cL
+        # Solve for free coefficients
         try:
             coeffs_partial = np.linalg.solve(M, rhs)
         except np.linalg.LinAlgError:
             coeffs_partial, _, rank, _ = np.linalg.lstsq(M, rhs, rcond=None)
             import warnings
             warnings.warn(
-                f"Matrix M is rank-deficient (rank={rank}/{M.shape[0]}) for degree={degree} with fixed_c0. "
-                f"Using least-squares solution.",
+                f"Matrix M is rank-deficient (rank={rank}/{M.shape[0]}) for degree={degree} "
+                f"with {len(fixed_values)} fixed coefficients. Using least-squares solution.",
                 RuntimeWarning,
                 stacklevel=2
             )
 
-        # Return full vector [fixed_c0, c1, ..., cL]
-        coeffs = np.concatenate([[fixed_c0], coeffs_partial])
+        # Reconstruct full coefficient vector
+        coeffs = np.zeros(degree + 1, dtype=float)
+        for l in fixed_indices:
+            coeffs[l] = fixed_values[l]
+        for i, l in enumerate(free_indices):
+            coeffs[l] = coeffs_partial[i]
 
         # Compute chi2 on original scale
         yhat = A_full @ coeffs
         chi2 = float(np.sum(((y - yhat) / sigma) ** 2))
 
-        # Degrees of freedom (c0 is fixed, so only L parameters fitted)
+        # Degrees of freedom (only free parameters count)
         if df_method == "naive" or ridge_lambda <= 0.0:
-            eff_params = float(degree)  # Only c1..cL fitted
-            dof = float(max(1, n - degree))
+            eff_params = float(n_free)
+            dof = float(max(1, n - n_free))
         else:
             try:
                 Minv = np.linalg.inv(M)
@@ -783,9 +805,8 @@ def _weighted_ridge_fit(
 
         return coeffs, chi2, dof, eff_params
 
-    # Standard mode: fit all c0..cL
-    # Design matrix: N x (L+1)
-    A = legvander(mu, degree)  # columns P0..PL
+    # Standard mode: fit all c0..cL (no fixed coefficients)
+    A = A_full
     Aw = A * sw[:, None]
     yw = y * sw
 
@@ -893,6 +914,8 @@ def sample_legendre_coefficients(
     sigma_norm: float = 0.0,
     norm_group_cols: Tuple[str, ...] = ("entry", "subentry"),
     norm_dist: Literal["lognormal", "normal"] = "lognormal",
+    # freeze higher-order coefficients during MC sampling
+    max_sample_order: Optional[int] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Fit Legendre coefficients c_l for y(mu) = sum c_l P_l(mu) and return samples.
@@ -946,6 +969,10 @@ def sample_legendre_coefficients(
     norm_dist : str
         Distribution for normalization factor: "lognormal" (default, always positive)
         or "normal" (can go negative for large sigma_norm).
+    max_sample_order : int, optional
+        Maximum Legendre order to vary during MC sampling. Coefficients above this
+        order are frozen at their nominal (best-fit) values. None = vary all orders.
+        E.g., max_sample_order=3 means only c0-c3 are re-fitted from perturbed data.
 
     Returns
     -------
@@ -1084,6 +1111,14 @@ def sample_legendre_coefficients(
         )
         chi2_red = float(chi2_0 / max(1e-12, dof_0))
 
+    # Build fixed_coeffs dict for freezing higher-order coefficients during MC
+    fixed_high: Optional[Dict[int, float]] = None
+    if max_sample_order is not None and max_sample_order < degree_use:
+        fixed_high = {
+            l: float(coeffs0[l])
+            for l in range(max_sample_order + 1, degree_use + 1)
+        }
+
     # Build group mapping for correlated normalization (Improvement 1.3)
     group_indices: Dict[Tuple, List[int]] = {}
     group_keys: List[Tuple] = []
@@ -1128,6 +1163,7 @@ def sample_legendre_coefficients(
                 df_method=df_method,
                 external_weights=external_weights,
                 fixed_c0=c0_fix,  # Pass fixed c0 if freeze_c0=True
+                fixed_coeffs=fixed_high,  # Freeze higher orders if max_sample_order set
             )
             samples.append(coeffs_s)
 
@@ -1156,6 +1192,8 @@ def sample_legendre_coefficients(
         fixed_c0_value=c0_fix,
         sigma_norm=sigma_norm,
         n_experiments_for_norm=len(group_keys) if sigma_norm > 0.0 else 0,
+        max_sample_order=max_sample_order,
+        n_frozen_high=len(fixed_high) if fixed_high else 0,
     )
     return coef_df, info
 
@@ -2869,6 +2907,7 @@ def check_angular_distribution_positivity(
 def project_to_positive_distribution(
     coeffs: np.ndarray,
     n_points: int = 50,
+    frozen_indices: Optional[Dict[int, float]] = None,
 ) -> np.ndarray:
     """
     Project Legendre coefficients to the nearest set producing non-negative σ(θ).
@@ -2884,6 +2923,9 @@ def project_to_positive_distribution(
         Legendre coefficients c_0, c_1, ..., c_L.
     n_points : int
         Number of constraint points in [-1, 1].
+    frozen_indices : dict, optional
+        Mapping of coefficient index → fixed value. These coefficients are
+        pinned during optimization (not allowed to change).
 
     Returns
     -------
@@ -2919,12 +2961,20 @@ def project_to_positive_distribution(
         'jac': lambda c: P_matrix,
     }
 
+    # Pin frozen coefficients via bounds: (val, val) for frozen, (None, None) for free
+    bounds = None
+    if frozen_indices:
+        bounds = [(None, None)] * n_coeffs
+        for idx, val in frozen_indices.items():
+            bounds[idx] = (val, val)
+
     result = minimize(
         objective,
         x0=coeffs.copy(),
         jac=grad,
         method='SLSQP',
         constraints=constraints,
+        bounds=bounds,
         options={'ftol': 1e-12, 'maxiter': 500},
     )
 

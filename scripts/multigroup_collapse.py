@@ -603,6 +603,82 @@ def check_positive_semidefinite(
 
 
 # =============================================================================
+# FORCED GRID GROUPING
+# =============================================================================
+
+def build_groups_from_forced_boundaries(
+    forced_boundaries_mev: np.ndarray,
+    fine_energies_mev: np.ndarray,
+    fine_bin_lower_mev: np.ndarray,
+    fine_bin_upper_mev: np.ndarray,
+    logger=None,
+) -> Tuple[List[List[int]], List[GroupInfo]]:
+    """
+    Build groups from forced energy boundaries (e.g., from original MF34 grid).
+
+    Each forced group is defined by adjacent boundary pairs. Fine bins are assigned
+    to the forced group whose interval contains their center energy.
+
+    Parameters
+    ----------
+    forced_boundaries_mev : np.ndarray
+        Sorted energy boundary points in MeV (N points -> N-1 groups).
+    fine_energies_mev : np.ndarray
+        Center energy of each fine bin in MeV.
+    fine_bin_lower_mev : np.ndarray
+        Lower boundary of each fine bin in MeV.
+    fine_bin_upper_mev : np.ndarray
+        Upper boundary of each fine bin in MeV.
+    logger : optional
+        Logger for diagnostics.
+
+    Returns
+    -------
+    Tuple[List[List[int]], List[GroupInfo]]
+        (groups, group_info) — fine bin indices per group and diagnostics.
+    """
+    n_forced = len(forced_boundaries_mev) - 1
+    groups = []
+    group_info_list = []
+
+    for g in range(n_forced):
+        lo = forced_boundaries_mev[g]
+        hi = forced_boundaries_mev[g + 1]
+
+        # Assign fine bins whose center energy falls within [lo, hi)
+        # (last group uses <= for the upper bound)
+        if g == n_forced - 1:
+            mask = (fine_energies_mev >= lo) & (fine_energies_mev <= hi)
+        else:
+            mask = (fine_energies_mev >= lo) & (fine_energies_mev < hi)
+
+        indices = list(np.where(mask)[0])
+        if not indices:
+            if logger:
+                logger.warning(f"  Forced group {g}: [{lo:.4f}, {hi:.4f}] MeV — no fine bins, skipping")
+            continue
+
+        groups.append(indices)
+        width = fine_bin_upper_mev[indices[-1]] - fine_bin_lower_mev[indices[0]]
+        info = GroupInfo(
+            group_index=len(groups) - 1,
+            fine_indices=indices,
+            energy_lower_mev=fine_energies_mev[indices[0]],
+            energy_upper_mev=fine_energies_mev[indices[-1]],
+            width_mev=width,
+            min_correlation_l1=np.nan,
+            sigma_ratio=np.nan,
+            n_fine_bins=len(indices),
+        )
+        group_info_list.append(info)
+
+    if logger:
+        logger.info(f"  Forced grouping: {n_forced} intervals -> {len(groups)} non-empty groups")
+
+    return groups, group_info_list
+
+
+# =============================================================================
 # MAIN ENTRY POINT
 # =============================================================================
 
@@ -619,6 +695,7 @@ def perform_adaptive_multigroup_collapse(
     logger=None,
     apply_covariance_cap: bool = False,
     max_relative_std_cap: float = 1.0,
+    forced_group_boundaries_mev: Optional[np.ndarray] = None,
 ) -> MultigroupResult:
     """
     Main entry point for adaptive multigroup covariance collapse.
@@ -721,19 +798,121 @@ def perform_adaptive_multigroup_collapse(
         logger.info(f"  Energy range: [{fine_energies_mev[0]:.4f}, {fine_energies_mev[-1]:.4f}] MeV")
         logger.info(f"  Covariance shape: {cov_matrix.shape}")
 
-    # Step 2: Find groups using l=1 correlation
-    groups, group_info = find_adaptive_group_boundaries(
-        corr_matrix=corr_matrix,
-        cov_matrix=cov_matrix,
-        fine_energies_mev=fine_energies_mev,
-        sigma_E_mev=sigma_E_mev,
-        fine_bin_widths_mev=fine_bin_widths_mev,
-        max_order=max_order,
-        rho_min=rho_min,
-        sigma_ratio_max=sigma_ratio_max,
-        min_width_factor=min_width_factor,
-        logger=logger,
-    )
+        # Diagnostic: l=1 adjacent correlation statistics
+        if n_fine >= 2 and max_order >= 1:
+            adjacent_corrs = []
+            for i in range(n_fine - 1):
+                idx_i = idx(i, 1, max_order)
+                idx_next = idx(i + 1, 1, max_order)
+                if idx_i < corr_matrix.shape[0] and idx_next < corr_matrix.shape[0]:
+                    adjacent_corrs.append(corr_matrix[idx_i, idx_next])
+            if adjacent_corrs:
+                adjacent_corrs = np.array(adjacent_corrs)
+                logger.info(f"  l=1 adjacent corr: mean={np.mean(adjacent_corrs):.4f}, "
+                            f"median={np.median(adjacent_corrs):.4f}, "
+                            f"max={np.max(adjacent_corrs):.4f}, "
+                            f"min={np.min(adjacent_corrs):.4f}")
+
+    # Step 2: Find groups
+    if forced_group_boundaries_mev is not None and len(forced_group_boundaries_mev) >= 2:
+        # Hybrid grouping: forced grid where available, adaptive elsewhere
+        forced_lo = forced_group_boundaries_mev[0]
+        forced_hi = forced_group_boundaries_mev[-1]
+
+        if logger:
+            logger.info(f"  Forced MF34 grid: {len(forced_group_boundaries_mev)} boundaries, "
+                        f"[{forced_lo:.4f}, {forced_hi:.4f}] MeV")
+
+        # Identify fine bins inside vs outside the forced grid range
+        inside_mask = (fine_energies_mev >= forced_lo) & (fine_energies_mev <= forced_hi)
+        inside_indices = np.where(inside_mask)[0]
+        below_indices = np.where(fine_energies_mev < forced_lo)[0]
+        above_indices = np.where(fine_energies_mev > forced_hi)[0]
+
+        all_groups = []
+        all_info = []
+
+        # Adaptive grouping for bins BELOW forced range
+        if len(below_indices) > 0:
+            if logger:
+                logger.info(f"  Adaptive grouping for {len(below_indices)} bins below forced range")
+            sub_groups, sub_info = find_adaptive_group_boundaries(
+                corr_matrix=corr_matrix,
+                cov_matrix=cov_matrix,
+                fine_energies_mev=fine_energies_mev,
+                sigma_E_mev=sigma_E_mev,
+                fine_bin_widths_mev=fine_bin_widths_mev,
+                max_order=max_order,
+                rho_min=rho_min,
+                sigma_ratio_max=sigma_ratio_max,
+                min_width_factor=min_width_factor,
+                logger=logger,
+            )
+            # Filter to only groups that contain bins below forced range
+            for g, gi in zip(sub_groups, sub_info):
+                if any(i in below_indices for i in g):
+                    filtered = [i for i in g if i in below_indices]
+                    if filtered:
+                        all_groups.append(filtered)
+                        all_info.append(gi)
+
+        # Forced grouping for bins INSIDE the forced range
+        if len(inside_indices) > 0:
+            # Clip forced boundaries to fine grid range for inside bins
+            forced_groups, forced_info = build_groups_from_forced_boundaries(
+                forced_boundaries_mev=forced_group_boundaries_mev,
+                fine_energies_mev=fine_energies_mev,
+                fine_bin_lower_mev=fine_bin_lower_mev,
+                fine_bin_upper_mev=fine_bin_upper_mev,
+                logger=logger,
+            )
+            all_groups.extend(forced_groups)
+            all_info.extend(forced_info)
+
+        # Adaptive grouping for bins ABOVE forced range
+        if len(above_indices) > 0:
+            if logger:
+                logger.info(f"  Adaptive grouping for {len(above_indices)} bins above forced range")
+            sub_groups, sub_info = find_adaptive_group_boundaries(
+                corr_matrix=corr_matrix,
+                cov_matrix=cov_matrix,
+                fine_energies_mev=fine_energies_mev,
+                sigma_E_mev=sigma_E_mev,
+                fine_bin_widths_mev=fine_bin_widths_mev,
+                max_order=max_order,
+                rho_min=rho_min,
+                sigma_ratio_max=sigma_ratio_max,
+                min_width_factor=min_width_factor,
+                logger=logger,
+            )
+            # Filter to only groups that contain bins above forced range
+            for g, gi in zip(sub_groups, sub_info):
+                if any(i in above_indices for i in g):
+                    filtered = [i for i in g if i in above_indices]
+                    if filtered:
+                        all_groups.append(filtered)
+                        all_info.append(gi)
+
+        groups = all_groups
+        # Re-index group_info
+        group_info = []
+        for new_idx, gi in enumerate(all_info):
+            gi.group_index = new_idx
+            group_info.append(gi)
+    else:
+        # Standard adaptive grouping
+        groups, group_info = find_adaptive_group_boundaries(
+            corr_matrix=corr_matrix,
+            cov_matrix=cov_matrix,
+            fine_energies_mev=fine_energies_mev,
+            sigma_E_mev=sigma_E_mev,
+            fine_bin_widths_mev=fine_bin_widths_mev,
+            max_order=max_order,
+            rho_min=rho_min,
+            sigma_ratio_max=sigma_ratio_max,
+            min_width_factor=min_width_factor,
+            logger=logger,
+        )
 
     n_groups = len(groups)
 

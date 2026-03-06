@@ -228,15 +228,29 @@ def _process_njoy_for_sample(
                     additional_suffix=sample_str,
                 )
                 
+                # Always move NJOY auxiliary files (input/output logs) for debugging
+                aux_files = ["njoy_input", "njoy_output", "xsdir_file", "viewr_output"]
+                for aux_file in aux_files:
+                    if result.get(aux_file) and os.path.exists(result[aux_file]):
+                        aux_filename = os.path.basename(result[aux_file])
+                        dest_aux = os.path.join(njoy_sample_dir, aux_filename)
+                        try:
+                            shutil.move(result[aux_file], dest_aux)
+                        except Exception as move_err:
+                            warning_msg = f"Could not move {aux_file} at {temp}K: {move_err}"
+                            results["warnings"].append(warning_msg)
+                            if logger:
+                                logger.warning(f"[NJOY] Sample {sample_str}: {warning_msg}")
+
                 if result["returncode"] == 0:
                     results["temperatures_processed"].append(temp)
-                    
+
                     # Move ACE file to our custom structure
                     if result.get("ace_file") and os.path.exists(result["ace_file"]):
                         ace_filename = os.path.basename(result["ace_file"])
                         dest_ace = os.path.join(ace_sample_dir, ace_filename)
                         shutil.move(result["ace_file"], dest_ace)
-                        
+
                         # Create xsdir files for the generated ACE file
                         if xsdir_file is not None:
                             try:
@@ -245,16 +259,16 @@ def _process_njoy_for_sample(
                                 ace_data = read_ace(dest_ace)
                                 hdr = ace_data.header
                                 has_ptable = bool(getattr(ace_data.unresolved_resonance, 'has_data', False))
-                                
+
                                 # Determine the proper cross-section library extension
                                 # For NJOY-generated files, calculate extension based on temperature
                                 base_ace, ace_file_ext = os.path.splitext(os.path.basename(dest_ace))
-                                
+
                                 # Convert temperature from MeV to Kelvin and get proper suffix
                                 from kika._utils import MeV_to_kelvin
                                 temp_K = MeV_to_kelvin(hdr.temperature)
                                 xs_ext = temperature_to_suffix(temp_K) + "c"  # Add 'c' for continuous energy
-                                
+
                                 create_xsdir_files_for_ace(
                                     ace_file_path=dest_ace,
                                     zaid=hdr.zaid,
@@ -266,26 +280,12 @@ def _process_njoy_for_sample(
                                     master_xsdir_file=xsdir_file,
                                     has_ptable=has_ptable,
                                 )
-                                    
+
                             except Exception as xsdir_err:
                                 warning_msg = f"Failed to create XSDIR files at {temp}K: {xsdir_err}"
                                 results["warnings"].append(warning_msg)
                                 if logger:
                                     logger.warning(f"[NJOY] Sample {sample_str} at {temp}K: {warning_msg}")
-                    
-                    # Move NJOY auxiliary files to our custom structure
-                    aux_files = ["njoy_input", "njoy_output", "xsdir_file", "viewr_output"]
-                    for aux_file in aux_files:
-                        if result.get(aux_file) and os.path.exists(result[aux_file]):
-                            aux_filename = os.path.basename(result[aux_file])
-                            dest_aux = os.path.join(njoy_sample_dir, aux_filename)
-                            try:
-                                shutil.move(result[aux_file], dest_aux)
-                            except Exception as move_err:
-                                warning_msg = f"Could not move {aux_file} at {temp}K: {move_err}"
-                                results["warnings"].append(warning_msg)
-                                if logger:
-                                    logger.warning(f"[NJOY] Sample {sample_str}: {warning_msg}")
                 else:
                     error_msg = f"NJOY failed at {temp}K with return code {result['returncode']}"
                     results["errors"].append(error_msg)
@@ -499,10 +499,11 @@ def perturb_ENDF_files(
     library_name: Optional[str] = None,
     njoy_version: str = "NJOY 2016.78",
     xsdir_file: Optional[str] = None,
+    energy_ranges: Optional[List[Tuple[float, float]]] = None,
 ):
     """
     Perturb ENDF nuclear data files using MF34 angular covariance matrices.
-    
+
     This function generates perturbed ENDF files by sampling perturbation factors
     from multivariate normal distributions derived from MF34 covariance matrices.
     Optionally, it can also generate ACE files for each perturbed ENDF using NJOY.
@@ -551,7 +552,13 @@ def perturb_ENDF_files(
     xsdir_file : Optional[str], default None
         Path to master XSDIR file to be modified for each generated ACE file.
         Only used when generate_ace=True.
-        
+    energy_ranges : Optional[List[Tuple[float, float]]], default None
+        List of (emin, emax) energy ranges in eV where perturbations are applied.
+        Bins outside these ranges are left unperturbed (factor = 1.0).
+        None means perturb all energies. Examples:
+        - [(0, 0.85e6), (4e6, 20e6)] : perturb up to 0.85 MeV and from 4 MeV onward
+        - [(1e6, 4e6)] : perturb only between 1-4 MeV
+
     Notes
     -----
     This function does not apply any autofix to the covariance matrices,
@@ -646,6 +653,11 @@ def perturb_ENDF_files(
     _logger.info(f"Parallel processes: {nprocs}")
     _logger.info(f"Dry run: {dry_run}")
     _logger.info(f"Generate ACE: {generate_ace}")
+    if energy_ranges is not None:
+        ranges_mev = [(e1/1e6, e2/1e6) for e1, e2 in energy_ranges]
+        _logger.info(f"Energy ranges (MeV): {ranges_mev}")
+    else:
+        _logger.info(f"Energy ranges: all")
     if generate_ace:
         _logger.info(f"NJOY executable: {njoy_exe}")
         _logger.info(f"Temperatures: {temperatures}")
@@ -735,7 +747,15 @@ def perturb_ENDF_files(
                 )
                 
                 _logger.info(f"[ENDF] File {i+1}: Successfully generated perturbation factors: shape {factors.shape}")
-                
+
+                # Apply energy range masking if specified
+                if energy_ranges is not None:
+                    factors = _mask_factors_by_energy_range(
+                        factors, param_mapping, energy_grids, energy_ranges, space
+                    )
+                    n_masked = np.sum(factors[0] == (1.0 if space == "linear" else 0.0))
+                    _logger.info(f"[ENDF] File {i+1}: Energy range filter applied — {factors.shape[1] - n_masked}/{factors.shape[1]} parameters perturbed")
+
                 # Store diagnostic results in summary data for later reporting
                 if diagnostic_results:
                     summary_data[file_key]['sampling_diagnostics'] = diagnostic_results
@@ -1415,6 +1435,61 @@ def _filter_mf34_covariance(
         _get_logger().info(f"Filtered to {filtered_cov.num_matrices} matrices")
     
     return filtered_cov
+
+
+def _mask_factors_by_energy_range(
+    factors: np.ndarray,
+    param_mapping: List[Tuple[int, int, int, int]],
+    energy_grids: Dict[Tuple[int, int, int], List[float]],
+    energy_ranges: List[Tuple[float, float]],
+    space: str = "linear",
+) -> np.ndarray:
+    """
+    Mask perturbation factors for energy bins outside the requested ranges.
+
+    Bins that do not overlap any of the specified energy ranges are set to
+    the neutral value (1.0 for linear space, 0.0 for log space).
+
+    Parameters
+    ----------
+    factors : np.ndarray
+        Perturbation factors, shape (n_samples, n_parameters)
+    param_mapping : List[Tuple[int, int, int, int]]
+        List of (isotope, mt, l_coeff, energy_bin) tuples
+    energy_grids : Dict[Tuple[int, int, int], List[float]]
+        Energy grids (eV) for each (isotope, mt, l) triplet
+    energy_ranges : List[Tuple[float, float]]
+        List of (emin, emax) energy ranges in eV
+    space : str
+        "linear" or "log"
+
+    Returns
+    -------
+    np.ndarray
+        Copy of factors with masked columns set to neutral value
+    """
+    neutral = 1.0 if space == "linear" else 0.0
+    masked = factors.copy()
+
+    for col_idx, (iso, mt, l, energy_bin) in enumerate(param_mapping):
+        triplet = (iso, mt, l)
+        grid = energy_grids.get(triplet, [])
+        if energy_bin >= len(grid) - 1:
+            # Padding bin — leave as neutral
+            masked[:, col_idx] = neutral
+            continue
+
+        bin_low = grid[energy_bin]
+        bin_high = grid[energy_bin + 1]
+
+        # Check if this bin overlaps any requested range
+        overlaps = any(bin_low < emax and bin_high > emin
+                       for emin, emax in energy_ranges)
+
+        if not overlaps:
+            masked[:, col_idx] = neutral
+
+    return masked
 
 
 def _create_parameter_mapping(mf34_cov):

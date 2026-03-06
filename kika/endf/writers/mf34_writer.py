@@ -129,14 +129,15 @@ def create_mf34_from_covariance(
 
     Covariance Interpretation
     -------------------------
-    The input covariance matrix should contain variances of ENDF-normalized
-    Legendre coefficients: a_l = (c_l / c0) / (2l+1). Since these coefficients
-    are already normalized by the total cross section (c0), they are dimensionless
-    and the covariance values are inherently RELATIVE (fractional).
+    The input covariance matrix must contain RELATIVE (fractional) covariance:
+        Cov_rel(i, j) = Cov_abs(i, j) / (mean_i * mean_j)
 
-    The LB=5 format is appropriate for this data. When read back via the MF34
-    parser, the covariance will correctly have is_relative=True, since LB=0
-    is the only format interpreted as absolute covariance.
+    This is written to MF34 with LB=5 format, which ENDF-6 defines as
+    relative covariance. The MF34 resampling model is multiplicative:
+        a_new = a_nominal * (1 + Y),  Y ~ N(0, Cov_rel)
+
+    Use ``compute_covariance_from_samples()`` in ``exfor_utils.py`` to
+    obtain the relative covariance matrix from MC samples.
 
     Examples
     --------
@@ -223,10 +224,8 @@ def create_mf34_from_covariance(
 
             # Store matrix values - upper triangle, row-wise
             # For M x M matrix: F(0,0), F(0,1), ..., F(0,M-1), F(1,1), ..., F(M-1,M-1)
-            matrix_values = []
-            for k in range(n_energies):
-                for l_idx in range(k, n_energies):
-                    matrix_values.append(float(sub_matrix[k, l_idx]))
+            triu_rows, triu_cols = np.triu_indices(n_energies)
+            matrix_values = sub_matrix[triu_rows, triu_cols].tolist()
 
             record.matrix = matrix_values
             record.nt = len(energy_grid_ev) + len(matrix_values)
@@ -305,6 +304,15 @@ def write_mf34_to_file(
     # Convert MF34MT to string
     mf34_content = str(mf34)
     mf34_lines = [line + '\n' for line in mf34_content.split('\n') if line.strip()]
+
+    # Add FEND line after MF34 content (MAT=mat, MF=0, MT=0)
+    from ..utils import format_endf_data_line, ENDF_FORMAT_INT
+    mat_num = mf34._mat or 0
+    fend_line = format_endf_data_line(
+        [0, 0, 0, 0, 0, 0], mat_num, 0, 0, 0,
+        formats=[ENDF_FORMAT_INT] * 6
+    ) + '\n'
+    mf34_lines.append(fend_line)
 
     if has_mf34:
         # Replace existing MF34
@@ -441,59 +449,37 @@ def merge_mf34(
             pipe_mat, pipe_grid = pipe_data
 
             # Build union energy grid
-            union_set = sorted(set(orig_grid) | set(pipe_grid))
-            union_grid = union_set
+            union_grid = sorted(set(orig_grid) | set(pipe_grid))
             n_intervals = len(union_grid) - 1
 
             merged_matrix = np.zeros((n_intervals, n_intervals))
 
-            # Classify each interval by midpoint
-            midpoints = [
-                0.5 * (union_grid[k] + union_grid[k + 1])
-                for k in range(n_intervals)
-            ]
-            is_pipeline = [
-                pipeline_energy_min_ev <= mp <= pipeline_energy_max_ev
-                for mp in midpoints
-            ]
+            # Classify each interval by midpoint (vectorized)
+            union_arr = np.asarray(union_grid)
+            midpoints = 0.5 * (union_arr[:-1] + union_arr[1:])
+            is_pipe = (midpoints >= pipeline_energy_min_ev) & (midpoints <= pipeline_energy_max_ev)
 
-            # Helper: find which native interval a union interval falls in
-            def _find_native_bin(union_lo, union_hi, native_grid):
-                mid = 0.5 * (union_lo + union_hi)
-                for j in range(len(native_grid) - 1):
-                    if native_grid[j] <= mid < native_grid[j + 1]:
-                        return j
-                # Edge case: mid == last boundary
-                if abs(mid - native_grid[-1]) < 1e-6 * abs(native_grid[-1]):
-                    return len(native_grid) - 2
-                return None
+            # Map union intervals to native bins via searchsorted
+            pipe_arr = np.asarray(pipe_grid, dtype=float)
+            orig_arr = np.asarray(orig_grid, dtype=float)
+            pipe_bins = np.searchsorted(pipe_arr, midpoints, side='right') - 1
+            orig_bins = np.searchsorted(orig_arr, midpoints, side='right') - 1
+            np.clip(pipe_bins, 0, len(pipe_grid) - 2, out=pipe_bins)
+            np.clip(orig_bins, 0, len(orig_grid) - 2, out=orig_bins)
 
-            for row in range(n_intervals):
-                for col in range(n_intervals):
-                    # Cross-source cells are zero
-                    if is_pipeline[row] != is_pipeline[col]:
-                        merged_matrix[row, col] = 0.0
-                        continue
+            # Fill same-source blocks with fancy indexing
+            pipe_idx = np.where(is_pipe)[0]
+            orig_idx = np.where(~is_pipe)[0]
 
-                    if is_pipeline[row]:
-                        # Both in pipeline range
-                        src_mat, src_grid = pipe_mat, pipe_grid
-                    else:
-                        # Both in original range
-                        src_mat, src_grid = orig_mat, orig_grid
+            if pipe_idx.size > 0:
+                pb = pipe_bins[pipe_idx]
+                merged_matrix[np.ix_(pipe_idx, pipe_idx)] = pipe_mat[np.ix_(pb, pb)]
 
-                    r_bin = _find_native_bin(
-                        union_grid[row], union_grid[row + 1], src_grid
-                    )
-                    c_bin = _find_native_bin(
-                        union_grid[col], union_grid[col + 1], src_grid
-                    )
+            if orig_idx.size > 0:
+                ob = orig_bins[orig_idx]
+                merged_matrix[np.ix_(orig_idx, orig_idx)] = orig_mat[np.ix_(ob, ob)]
 
-                    if r_bin is not None and c_bin is not None:
-                        merged_matrix[row, col] = src_mat[r_bin, c_bin]
-                    else:
-                        merged_matrix[row, col] = 0.0
-
+            # Cross-source cells remain zero (already initialized)
             merged_grid = union_grid
 
         # Create LB=5 sub-subsection record
@@ -513,12 +499,9 @@ def merge_mf34(
         record.ne = n_e
         record.energies = energy_grid_list
 
-        matrix_values = []
-        for k in range(m):
-            for j in range(k, m):
-                matrix_values.append(float(merged_matrix[k, j]))
-        record.matrix = matrix_values
-        record.nt = n_e + len(matrix_values)
+        triu_rows, triu_cols = np.triu_indices(m)
+        record.matrix = merged_matrix[triu_rows, triu_cols].tolist()
+        record.nt = n_e + len(record.matrix)
 
         sub_subsec.records = [record]
         subsection.sub_subsections.append(sub_subsec)
@@ -559,7 +542,7 @@ def _find_mend_marker(lines: List[str]) -> int:
     """
     Find insertion point (line index before MEND marker).
 
-    The MEND marker is identified by a line with MAT > 0, MF = 0, MT = 0.
+    The MEND marker is identified by a line with MAT = 0, MF = 0, MT = 0.
 
     Parameters
     ----------
@@ -578,7 +561,7 @@ def _find_mend_marker(lines: List[str]) -> int:
                 mat = int(line[66:70].strip() or '0')
                 mf = int(line[70:72].strip() or '0')
                 mt = int(line[72:75].strip() or '0')
-                if mat > 0 and mf == 0 and mt == 0:
+                if mat == 0 and mf == 0 and mt == 0:
                     return i
             except ValueError:
                 continue

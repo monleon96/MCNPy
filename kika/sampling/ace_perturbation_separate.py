@@ -113,14 +113,15 @@ def perturb_seprate_ACE_files(
     accept_tol: float = -1.0e-4,
     remove_blocks: Optional[Dict[int, Union[Tuple[int, int], List[Tuple[int, int]]]]] = None,  # Add remove_blocks parameter
     verbose: bool = True,
+    energy_ranges: Optional[List[Tuple[float, float]]] = None,
 ):
     """
     Perturb existing ACE nuclear data files using covariance matrices.
-    
+
     This function applies perturbation factors to existing ACE files that are organized
     in a specific directory structure (from ENDF perturbation output). Each perturbation
     sample is applied to a different existing ACE file, replacing it in-place.
-    
+
     Parameters
     ----------
     root_dir : str
@@ -163,7 +164,11 @@ def perturb_seprate_ACE_files(
         Manual specification of covariance blocks to remove by isotope
     verbose : bool, default True
         Enable verbose logging output
-        
+    energy_ranges : Optional[List[Tuple[float, float]]], default None
+        List of (emin, emax) energy ranges in eV. Only energy bins overlapping
+        these ranges will be perturbed; bins outside are set to neutral (1.0 for
+        linear space, 0.0 for log space). None means perturb all energies.
+
     Notes
     -----
     This function expects ACE files to exist in the directory structure created by
@@ -246,7 +251,12 @@ def perturb_seprate_ACE_files(
     _logger.info(f"  Accept tolerance:      {accept_tol}")
     _logger.info(f"  Remove blocks:         {remove_blocks if remove_blocks else 'None'}")
     _logger.info(f"  Verbose output:        {verbose}")
-    
+    if energy_ranges is not None:
+        formatted_ranges = ", ".join(f"[{lo:.4e}, {hi:.4e}] eV" for lo, hi in energy_ranges)
+        _logger.info(f"  Energy ranges:         {formatted_ranges}")
+    else:
+        _logger.info(f"  Energy ranges:         None (all energies)")
+
     # Print timestamp
     _logger.info(f"  Timestamp:             {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     _logger.info(f"{separator}\n")
@@ -648,6 +658,13 @@ def perturb_seprate_ACE_files(
             if fix_info.get("removed_pairs"):
                 summary_data[zaid]["autofix_info"]["removed_pairs"] = fix_info["removed_pairs"]
 
+        # Apply energy range masking if requested
+        if energy_ranges is not None and factors is not None and mt_perturb_final:
+            factors = _mask_factors_by_energy_range_ace(
+                factors, mt_perturb_final, energy_grid, energy_ranges, space
+            )
+            _logger.info(f"[ACE] [ENERGY FILTER] Applied energy range masking for {zaid}")
+
         # Store final perturbed MTs
         summary_data[zaid]["mt_perturbed"] = mt_perturb_final if mt_perturb_final else []
 
@@ -658,7 +675,7 @@ def perturb_seprate_ACE_files(
                 'mt_numbers': mt_perturb_final,
                 'energy_grid': energy_grid
             }
-            
+
             # Update master perturbation matrix incrementally
             _update_master_perturbation_matrix(
                 matrix_dir, zaid, factors, mt_perturb_final, energy_grid, verbose
@@ -992,6 +1009,53 @@ def _copy_master_files_to_temperature_directories(
                     logger.info(f"  Copied log to {temp_str}/")
             elif verbose and logger:
                 logger.info(f"  Log already exists in {temp_str}/")
+
+
+def _mask_factors_by_energy_range_ace(
+    factors: np.ndarray,
+    mt_numbers: List[int],
+    energy_grid_mev: List[float],
+    energy_ranges_ev: List[Tuple[float, float]],
+    space: str = "log",
+) -> np.ndarray:
+    """
+    Mask perturbation factors for energy bins outside the requested ranges.
+
+    Parameters
+    ----------
+    factors : np.ndarray
+        Perturbation factors, shape (n_samples, n_mts * n_groups)
+    mt_numbers : List[int]
+        MT reaction numbers corresponding to the factor columns
+    energy_grid_mev : List[float]
+        Energy bin boundaries in MeV
+    energy_ranges_ev : List[Tuple[float, float]]
+        List of (emin, emax) energy ranges in eV
+    space : str
+        "linear" or "log"
+
+    Returns
+    -------
+    np.ndarray
+        Copy of factors with masked columns set to neutral value
+    """
+    neutral = 1.0 if space == "linear" else 0.0
+    masked = factors.copy()
+    n_groups = len(energy_grid_mev) - 1
+
+    # Convert ranges from eV to MeV
+    ranges_mev = [(lo / 1e6, hi / 1e6) for lo, hi in energy_ranges_ev]
+
+    for g in range(n_groups):
+        bin_low = energy_grid_mev[g]
+        bin_high = energy_grid_mev[g + 1]
+
+        overlaps = any(bin_low < hi and bin_high > lo for lo, hi in ranges_mev)
+        if not overlaps:
+            for mt_idx in range(len(mt_numbers)):
+                masked[:, mt_idx * n_groups + g] = neutral
+
+    return masked
 
 
 def apply_perturbation_factor_to_ace(ace, sample, sample_index, energy_grid, mt_numbers, verbose=True):

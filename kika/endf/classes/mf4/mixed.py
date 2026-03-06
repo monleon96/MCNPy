@@ -352,29 +352,32 @@ class MF4MTMixed(MF4MT):
                 )
             A_tab = pad
 
-        # Evaluate coefficients at requested energies
+        # Classify all query energies by branch at once
+        branches = np.array([pick_mixed_branch(float(E), E_leg, E_tab) for E in E_query])
+        leg_mask = (branches == "leg") & (A_leg is not None) & (E_leg.size >= 1)
+        tab_mask = (branches == "tab") & (A_tab is not None) & (E_tab.size >= 1)
+        none_mask = ~(leg_mask | tab_mask)
+
         # Build result as dict of l → array(E_query)
         result: Dict[int, np.ndarray] = {l: np.zeros(nE, dtype=float) for l in range(max_legendre_order + 1)}
 
-        for j, E in enumerate(E_query):
-            branch = pick_mixed_branch(float(E), E_leg, E_tab)  # 'leg' / 'tab' / 'none'
-            if branch == "leg" and A_leg is not None and E_leg.size >= 1:
-                for l in range(max_legendre_order + 1):
-                    val = interpolate_1d_endf(
-                        E_leg, A_leg[:, l], self._interpolation or [(len(E_leg), 2)], float(E), out_of_range=out_of_range
-                    )
-                    result[l][j] = float(val)
-            elif branch == "tab" and A_tab is not None and E_tab.size >= 1:
-                for l in range(max_legendre_order + 1):
-                    val = interpolate_1d_endf(
-                        E_tab, A_tab[:, l], self._tab_interpolation or [(len(E_tab), 2)], float(E), out_of_range=out_of_range
-                    )
-                    result[l][j] = float(val)
-            else:
-                # No data available → isotropic fallback
-                result[0][j] = 1.0
-                for l in range(1, max_legendre_order + 1):
-                    result[l][j] = 0.0
+        # Isotropic fallback for points with no data
+        if none_mask.any():
+            result[0][none_mask] = 1.0
+
+        # Vectorized interpolation per Legendre order (not per energy point)
+        leg_interp = self._interpolation or ([(len(E_leg), 2)] if E_leg.size > 0 else [])
+        tab_interp = self._tab_interpolation or ([(len(E_tab), 2)] if E_tab.size > 0 else [])
+
+        for l in range(max_legendre_order + 1):
+            if leg_mask.any() and A_leg is not None:
+                result[l][leg_mask] = interpolate_1d_endf(
+                    E_leg, A_leg[:, l], leg_interp, E_query[leg_mask], out_of_range=out_of_range
+                )
+            if tab_mask.any() and A_tab is not None:
+                result[l][tab_mask] = interpolate_1d_endf(
+                    E_tab, A_tab[:, l], tab_interp, E_query[tab_mask], out_of_range=out_of_range
+                )
 
         # Cast to expected return types
         typed: Dict[int, Union[float, np.ndarray]] = {}

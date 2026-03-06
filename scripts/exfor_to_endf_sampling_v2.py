@@ -78,6 +78,10 @@ from scripts.exfor_utils import (
     log_bin_jump_diagnostics,
     # Covariance
     compute_covariance_from_samples,
+    combine_jitter_stochastic_covariance,
+    extract_ll_prime_correlations,
+    build_gaussian_correlation_covariance,
+    generate_cholesky_samples,
     cap_covariance_relative_uncertainty,
     save_all_legendre_coefficients,
     # ENDF writing
@@ -87,6 +91,11 @@ from scripts.exfor_utils import (
     write_endf_sample,
     _write_sample_wrapper,
 )
+
+# Import kika sampling modules for ACE generation and MF34-based sampling
+from kika.sampling.endf_perturbation import _process_njoy_for_sample, perturb_ENDF_files
+from kika.sampling.reprocess_endf_to_ace import _ace_file_exists
+from kika.sampling.utils import _set_logger as _set_kika_logger
 
 # Import multigroup collapse module
 from scripts.multigroup_collapse import (
@@ -131,7 +140,12 @@ import time
 # 1. INPUT/OUTPUT PATHS
 # -----------------------------------------------------------------------------
 # Reference ENDF file (source of energy grid and original Legendre coefficients)
-ENDF_FILE = "/soft_snc/lib/endf/jeff40/neutrons/26-Fe-56g.txt"
+ENDF_FILE = "/share_snc/snc/JuanMonleon/jeff40_with_MF4_from_jeff33/26-Fe-56g.txt"
+
+# Optional: separate ENDF file for MF34 covariance data to merge with pipeline MF34.
+# Set to None to use ENDF_FILE. Useful when ENDF_FILE lacks MF34 or has a
+# parser-incompatible MF34 (e.g. mixed LB types).
+MF34_SOURCE_FILE = None
 
 # EXFOR JSON directory (for source="json" or "auto")
 EXFOR_DIRECTORY = "/share_snc/snc/JuanMonleon/EXFOR/data_v1/"
@@ -141,7 +155,7 @@ EXFOR_DIRECTORY = "/share_snc/snc/JuanMonleon/EXFOR/data_v1/"
 EXFOR_DB_PATH = '/share_snc/snc/JuanMonleon/EXFOR/x4_iron_angular.db'
 
 # Output directory (all generated files go here)
-OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/EXFOR_FIT_JEFF_V14_ENERGYBIN/"
+OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/EXFOR_FIT_GAUSSCORR/"
 
 # -----------------------------------------------------------------------------
 # 2. DATA SOURCE CONFIGURATION
@@ -166,11 +180,10 @@ SUPPLEMENTARY_JSON_FILES = [
 # 3. OUTPUT GENERATION OPTIONS
 # -----------------------------------------------------------------------------
 GENERATE_NOMINAL_ENDF = True                     # Best-fit coefficients ENDF
-GENERATE_MC_MEAN_ENDF = True                     # MC mean coefficients ENDF
-GENERATE_SAMPLES_ENDF = True                    # Individual MC sample ENDFs
-GENERATE_COVARIANCE = True                      # Covariance matrix (.npy)
-GENERATE_MF34 = True                            # MF34 covariance section in ENDF
-N_SAMPLES = 25                                   # Number of MC samples
+GENERATE_MC_MEAN_ENDF = False                     # MC mean coefficients ENDF
+GENERATE_SAMPLES_ENDF = False                    # Individual MC sample ENDFs (Pipeline B generates final samples)
+SAVE_COVARIANCE_FILES = True                    # Save covariance/correlation .npy files
+N_SAMPLES = 100                                   # Number of MC samples
 
 # -----------------------------------------------------------------------------
 # 3b. MULTIGROUP COVARIANCE OPTIONS
@@ -180,18 +193,20 @@ MULTIGROUP_RHO_MIN = 0.90                        # Min correlation to merge (0.8
 MULTIGROUP_SIGMA_RATIO_MAX = 2.0                 # Max sigma ratio within group (1.5-2.0)
 MULTIGROUP_MIN_WIDTH_FACTOR = 2.0                # Group width >= k * median(sigma_E)
 MF34_COVARIANCE_TYPE = "both"                    # "fine", "multigroup", or "both"
+USE_ORIGINAL_MF34_GRID = False                   # Force multigroup grid from original MF34
+MERGE_ORIGINAL_MF34 = True                      # Merge pipeline MF34 with original (full range) or pipeline-only
 
 # Variance percentile for multigroup collapse
 # Controls how diagonal variances are scaled after averaging:
 # - 50 = median of fine variances in group (typical)
 # - 80-90 = conservative but not extreme
 # - 100 = maximum fine variance in group (most conservative)
-MULTIGROUP_VARIANCE_PERCENTILE = 90.0
+MULTIGROUP_VARIANCE_PERCENTILE = 66.67
 
 # --- Layer 1: Covariance diagonal cap ---
 # Caps excessive relative uncertainties in the covariance matrix.
 # Set APPLY_COVARIANCE_CAP = False to disable (preserves existing behavior).
-APPLY_COVARIANCE_CAP = True
+APPLY_COVARIANCE_CAP = False
 MAX_RELATIVE_STD_CAP = 1.0  # 100% relative uncertainty cap
 
 # --- File output options ---
@@ -201,7 +216,27 @@ SAVE_CORRELATION_MATRICES = False       # Save correlation alongside covariance
 # Projects MC samples to ensure non-negative angular distributions.
 # Set APPLY_POSITIVITY_PROJECTION = False to disable (preserves existing behavior).
 APPLY_POSITIVITY_PROJECTION = True
-POSITIVITY_CHECK_POINTS = 50  # Number of mu points in [-1, 1]
+POSITIVITY_CHECK_POINTS = 101  # Number of mu points in [-1, 1]
+
+# -----------------------------------------------------------------------------
+# 3c. ACE GENERATION OPTIONS
+# -----------------------------------------------------------------------------
+GENERATE_ACE = False                              # Process ENDF samples → ACE via NJOY
+ACE_TEMPERATURES = [293.6]                         # Temperature(s) in Kelvin
+ACE_NJOY_EXE = "/soft_snc/NJOY/2016.78/bin/njoy"
+ACE_LIBRARY_NAME = "jeff40"                        # Library name (e.g., 'endfb81', 'jeff40')
+ACE_NJOY_VERSION = "NJOY 2016.78"                 # NJOY version string
+ACE_XSDIR_FILE = "/share_snc/snc/JuanMonleon/xsdir_MCNPy/xsdir40-irdff2"      # Master xsdir to update (None = per-sample only)
+ACE_SKIP_EXISTING = False                          # Skip samples with existing ACE files
+
+# -----------------------------------------------------------------------------
+# 3d. UNIFIED MF34 SAMPLING (Pipeline B)
+# -----------------------------------------------------------------------------
+GENERATE_SAMPLES_FROM_MF34 = True                  # Generate samples via perturb_ENDF_files
+SAMPLING_RESOLUTION = "multigroup"                 # "fine" | "multigroup" (grid controlled by USE_ORIGINAL_MF34_GRID)
+SAMPLING_SPACE = "linear"                          # "linear" or "log"
+SAMPLING_DECOMPOSITION = "svd"                     # "svd", "cholesky", "eigen", "pca"
+SAMPLING_METHOD = "random"                          # "sobol", "lhs", "random"
 
 # -----------------------------------------------------------------------------
 # 4. GENERAL PARAMETERS (Apply to ALL methods)
@@ -220,12 +255,12 @@ M_TARG_U = 55.93494                              # Target mass in u (Fe-56)
 # Legendre fitting parameters
 MAX_LEGENDRE_DEGREE = 6                          # Maximum Legendre order (capped at 8)
 SELECT_DEGREE = "aicc"                           # "aicc", "bic", or None (use max)
-RIDGE_LAMBDA = 1e-6                              # Ridge regularization parameter
+RIDGE_LAMBDA = 1e-4                              # Ridge regularization parameter
 RIDGE_POWER = 4                                  # Power for ridge penalty (l^ridge_power)
 DF_METHOD = "hat"                                # Degrees of freedom method: "hat" or "naive"
 
 # Processing options
-N_PROCS = 12                                      # Parallel processes (1 = sequential)
+N_PROCS = 24                                      # Parallel processes (1 = sequential)
 BASE_SEED = 42                                   # Random seed for reproducibility
 
 # -----------------------------------------------------------------------------
@@ -263,7 +298,7 @@ EXCLUDE_EXPERIMENTS = ["20743002", "32246002"]
 
 # Minimum relative uncertainty floor (prevents unrealistically small errors from dominating)
 # Set to 0.0 to disable. e.g., 0.05 for 5% minimum uncertainty
-MIN_RELATIVE_UNCERTAINTY = 0.05
+MIN_RELATIVE_UNCERTAINTY = 0.02
 
 # -----------------------------------------------------------------------------
 # 6. METHOD-SPECIFIC PARAMETERS
@@ -293,13 +328,13 @@ USE_OVERLAP_WEIGHTS = True                       # Use overlap weights (True) vs
 # --- 6d. Angular-Band Discrepancy (kernel_weights, energy_bin) ---
 USE_BAND_DISCREPANCY = True                      # Use band-based uncertainty (vs global Birge)
 MIN_POINTS_PER_BAND = 3                          # Minimum points to estimate τ_b per band
-MAX_TAU_FRACTION = 0.25                          # Cap τ_b at 25% of cross section
+MAX_TAU_FRACTION = 0.05                          # Cap τ_b at 25% of cross section
 TAU_SMOOTHING_WINDOW = 3                         # Moving median window for τ_b(E) smoothing
 TAU_PRIOR_FLOOR = True                           # Apply tau prior floor from multi-experiment bins
 TAU_PRIOR_MIN_EXPERIMENTS = 2                    # Min experiments to count as "well-estimated"
 TAU_PRIOR_PERCENTILE = 50                        # Percentile of well-estimated tau for baseline
 RESCALE_UNC_BY_CHI2 = True                       # Apply Birge scaling when band discrepancy disabled
-ALLOW_SHRINK_UNC = False                         # Allow uncertainties to shrink (chi2_red < 1)
+ALLOW_SHRINK_UNC = True                          # Allow uncertainties to shrink (chi2_red < 1)
 
 # --- 6e. Per-Experiment Normalization (kernel_weights, energy_bin) ---
 NORMALIZATION_SIGMA = 0.05                       # Per-experiment normalization uncertainty (5%)
@@ -310,12 +345,15 @@ USE_MODEL_AVERAGING = True                       # Enable model averaging over L
 MIN_DEGREE_FOR_AVERAGING = 1                     # Minimum degree to consider (1 = include all)
 USE_DEGREE_SAMPLING_IN_MC = True                 # Sample degree from degree_weights distribution
 
-# --- 6g. Energy Bin Method Specific (Improvements 1.1-1.2) ---
+# --- 6g. Energy Bin Method Specific  ---
 NORMALIZE_BY_N_POINTS = True                     # Equal weight per experiment (1/n_points weighting)
 MAX_EXP_WEIGHT_FRAC_BIN = 0.5                    # Cap per-experiment dominance (1.0 = disabled)
 FREEZE_C0 = True                                # Fix c0 for shape-only refits
+MAX_SAMPLE_ORDER = None                            # Max Legendre order to sample (None for no freeze) 
+TWO_PASS_DECOMPOSITION = True                    # Separate jitter (correlation) from stochastic (variance)
+USE_GAUSSIAN_CORRELATION = True                  # Use Gaussian decay for energy correlations + Cholesky resampling
 
-# --- 6h. Energy Jitter for Cross-Bin Coupling (Improvement 1.4) ---
+# --- 6h. Energy Jitter for Cross-Bin Coupling ---
 USE_ENERGY_JITTER = True                         # Enable energy jitter for cross-bin correlation
 TOF_PARAMETERS_FILE = "/share_snc/snc/JuanMonleon/EXFOR/exfor_tof_parameters.json"
 JITTER_N_SIGMA_CLIP = 3.0                        # Clip jitter at ±n_sigma
@@ -331,8 +369,151 @@ _logger = None
 
 
 # =============================================================================
-# PARALLEL MC HELPER (top-level for pickling)
+# PARALLEL HELPERS (top-level for pickling)
 # =============================================================================
+
+
+def _discover_exfor_endf_samples(
+    output_dir: str,
+    n_samples: int,
+    endf_file: str,
+) -> List[str]:
+    """
+    Discover existing ENDF sample files written by Step 9.
+
+    Used when generate_samples_endf=False but generate_ace=True (reprocessing
+    existing samples at new temperatures).
+
+    Expected structure: {output_dir}/endf_direct/{sample_str}/{base}_{sample_str}.endf
+    where sample_str is 4-digit zero-padded (1-based).
+
+    Parameters
+    ----------
+    output_dir : str
+        Base output directory containing the endf_direct/ subdirectory
+    n_samples : int
+        Number of samples expected
+    endf_file : str
+        Path to the original ENDF file (used for base filename)
+
+    Returns
+    -------
+    List[str]
+        List of discovered ENDF sample file paths, indexed by sample_index (0-based).
+        Missing samples are represented as empty strings.
+    """
+    logger = _get_logger()
+    base = Path(endf_file).stem
+    endf_dir = Path(output_dir) / "endf_direct"
+
+    if not endf_dir.exists():
+        if logger:
+            logger.warning(f"[ACE] [DISCOVERY] ENDF directory not found: {endf_dir}")
+        return []
+
+    discovered = []
+    missing = []
+
+    for sample_num in range(1, n_samples + 1):
+        sample_str = f"{sample_num:04d}"
+        sample_dir = endf_dir / sample_str
+        expected = sample_dir / f"{base}_{sample_str}.endf"
+
+        if expected.exists():
+            discovered.append(str(expected))
+        else:
+            # Try any file matching the pattern in the sample directory
+            found = False
+            if sample_dir.is_dir():
+                for f in sample_dir.iterdir():
+                    if f.name.startswith(f"{base}_{sample_str}"):
+                        discovered.append(str(f))
+                        found = True
+                        break
+            if not found:
+                discovered.append("")
+                missing.append(str(expected))
+
+    if missing and logger:
+        logger.warning(f"[ACE] [DISCOVERY] {len(missing)}/{n_samples} expected ENDF files not found")
+        for m in missing[:5]:
+            logger.warning(f"[ACE] [DISCOVERY]   Missing: {m}")
+        if len(missing) > 5:
+            logger.warning(f"[ACE] [DISCOVERY]   ... and {len(missing) - 5} more")
+
+    n_found = sum(1 for f in discovered if f)
+    if logger:
+        logger.info(f"[ACE] [DISCOVERY] Found {n_found}/{n_samples} ENDF sample files")
+
+    return discovered
+
+
+def _ace_worker(args):
+    """
+    Process a single ENDF sample through NJOY to generate ACE files.
+
+    Top-level function (picklable for Pool.map), follows existing _mc_one_bin() pattern.
+
+    Parameters
+    ----------
+    args : tuple
+        (endf_file, sample_index, temperatures, output_dir, njoy_exe,
+         library_name, njoy_version, xsdir_file, skip_existing, zaid)
+
+    Returns
+    -------
+    tuple
+        (sample_index, result_dict) where result_dict has keys:
+        'success' (bool), 'temperatures_processed' (list), 'errors' (list),
+        'skipped' (list)
+    """
+    (endf_file, sample_index, temperatures, output_dir, njoy_exe,
+     library_name, njoy_version, xsdir_file, skip_existing, zaid) = args
+
+    sample_str = f"{sample_index + 1:04d}"
+
+    # Filter temperatures if skip_existing is enabled
+    temps_to_process = []
+    skipped_temps = []
+
+    if skip_existing and zaid is not None:
+        for temp in temperatures:
+            if _ace_file_exists(output_dir, zaid, sample_index, temp, endf_file):
+                skipped_temps.append(temp)
+            else:
+                temps_to_process.append(temp)
+    else:
+        temps_to_process = list(temperatures)
+
+    if not temps_to_process:
+        return (sample_index, {
+            "success": True,
+            "temperatures_processed": [],
+            "skipped": skipped_temps,
+            "errors": [],
+        })
+
+    try:
+        result = _process_njoy_for_sample(
+            out_endf=endf_file,
+            sample_index=sample_index,
+            njoy_exe=njoy_exe,
+            temperatures=temps_to_process,
+            library_name=library_name,
+            njoy_version=njoy_version,
+            output_dir=output_dir,
+            xsdir_file=xsdir_file,
+        )
+        result["skipped"] = skipped_temps
+        return (sample_index, result)
+    except Exception as e:
+        return (sample_index, {
+            "success": False,
+            "temperatures_processed": [],
+            "skipped": skipped_temps,
+            "errors": [f"Sample {sample_str}: {e}"],
+        })
+
 
 def _mc_one_bin(args):
     """
@@ -367,6 +548,7 @@ def _mc_one_bin(args):
         freeze_c0,
         normalization_sigma,
         norm_dist,
+        max_sample_order,
         _apply_positivity_projection,
         _positivity_check_points,
     ) = args
@@ -424,13 +606,19 @@ def _mc_one_bin(args):
                     freeze_c0=freeze_c0,
                     sigma_norm=normalization_sigma,
                     norm_dist=norm_dist,
+                    max_sample_order=max_sample_order,
                 )
                 sample_coeffs = coef_df_single.iloc[0].to_numpy()
                 if len(sample_coeffs) < max_degree + 1:
                     sample_coeffs = np.pad(sample_coeffs, (0, max_degree + 1 - len(sample_coeffs)))
                 if _apply_positivity_projection:
                     if not check_angular_distribution_positivity(sample_coeffs, _positivity_check_points):
-                        sample_coeffs = project_to_positive_distribution(sample_coeffs, _positivity_check_points)
+                        frozen = {}
+                        if freeze_c0:
+                            frozen[0] = sample_coeffs[0]
+                        if max_sample_order is not None and max_sample_order + 1 < len(sample_coeffs):
+                            frozen.update({i: sample_coeffs[i] for i in range(max_sample_order + 1, len(sample_coeffs))})
+                        sample_coeffs = project_to_positive_distribution(sample_coeffs, _positivity_check_points, frozen_indices=frozen or None)
                 endf_coeffs = endf_normalize_legendre_coeffs(sample_coeffs, include_a0=False)
                 results[s_idx] = endf_coeffs
         else:
@@ -460,13 +648,23 @@ def _mc_one_bin(args):
                 freeze_c0=freeze_c0,
                 sigma_norm=normalization_sigma,
                 norm_dist=norm_dist,
+                max_sample_order=max_sample_order,
             )
             for s_idx in range(n_samples):
                 sample_coeffs = coef_df.iloc[s_idx].to_numpy()
                 if _apply_positivity_projection:
                     if not check_angular_distribution_positivity(sample_coeffs, _positivity_check_points):
-                        sample_coeffs = project_to_positive_distribution(sample_coeffs, _positivity_check_points)
+                        frozen = {}
+                        if freeze_c0:
+                            frozen[0] = sample_coeffs[0]
+                        if max_sample_order is not None and max_sample_order + 1 < len(sample_coeffs):
+                            frozen.update({i: sample_coeffs[i] for i in range(max_sample_order + 1, len(sample_coeffs))})
+                        sample_coeffs = project_to_positive_distribution(sample_coeffs, _positivity_check_points, frozen_indices=frozen or None)
                 endf_coeffs = endf_normalize_legendre_coeffs(sample_coeffs, include_a0=False)
+                if len(endf_coeffs) < max_degree:
+                    padded = np.zeros(max_degree, dtype=float)
+                    padded[:len(endf_coeffs)] = endf_coeffs
+                    endf_coeffs = padded
                 results[s_idx] = endf_coeffs
 
         return (energy_idx, False, results, True)
@@ -1140,6 +1338,9 @@ def perform_nominal_fits(
             logger.info(
                 f"  Fit: L={frozen_degree}, χ²/dof={chi2_red:.2f}, {len(exfor_df)} pts, N_eff={final_n_eff:.1f}"
             )
+            if degree_weights and len(degree_weights) > 1:
+                dw_str = " ".join(f"L{d}:{w:.0%}" for d, w in sorted(degree_weights.items()))
+                logger.info(f"  AICc weights: {dw_str}")
             logger.info(
                 f"  τ values: τ_F={tau_F:.4f}, τ_M={tau_M:.4f}, τ_B={tau_B:.4f}"
             )
@@ -1279,6 +1480,94 @@ def load_exfor_with_new_api(
     return exfor_cache, sorted_energies
 
 
+def _extract_mf34_energy_grid(
+    endf_file: str,
+    mf34_source_file: Optional[str],
+    mt_number: int,
+    logger=None,
+) -> Optional[np.ndarray]:
+    """
+    Extract the energy grid from the original MF34 section of an ENDF file.
+
+    Returns the union energy grid boundaries in MeV, or None if MF34 is not
+    found or cannot be parsed.
+
+    Parameters
+    ----------
+    endf_file : str
+        Path to the reference ENDF file.
+    mf34_source_file : str, optional
+        Path to an alternative ENDF file containing MF34. If None, uses endf_file.
+    mt_number : int
+        MT reaction number to look up in MF34.
+    logger : optional
+        Logger for diagnostics.
+
+    Returns
+    -------
+    np.ndarray or None
+        Energy grid boundaries in MeV (sorted, unique), or None if unavailable.
+    """
+    from kika.endf.read_endf import read_endf
+
+    source = mf34_source_file or endf_file
+    try:
+        endf_data = read_endf(source, mf_numbers=34)
+    except Exception as e:
+        if logger:
+            logger.warning(f"  Could not read MF34 from {source}: {e}")
+        return None
+
+    # Access MF34 sections
+    mf34 = endf_data.mf.get(34)
+    if mf34 is None:
+        if logger:
+            logger.warning(f"  No MF34 found in {source}")
+        return None
+
+    mf34_mt = mf34.sections.get(mt_number)
+    if mf34_mt is None:
+        if logger:
+            logger.warning(f"  No MF34/MT{mt_number} found in {source}")
+        return None
+
+    try:
+        ang_covmat = mf34_mt.to_ang_covmat(energy_unit='eV')
+    except Exception as e:
+        if logger:
+            logger.warning(f"  Could not convert MF34/MT{mt_number} to covmat: {e}")
+        return None
+
+    # Get energy grid: use union grid for robustness
+    if ang_covmat.has_uniform_energy_grid():
+        if ang_covmat.energy_grids:
+            grid_ev = np.array(ang_covmat.energy_grids[0], dtype=float)
+        else:
+            if logger:
+                logger.warning(f"  MF34/MT{mt_number} has no energy grids")
+            return None
+    else:
+        union_grids = ang_covmat.compute_union_energy_grids()
+        # Collect all union grid points
+        all_points = set()
+        for grid in union_grids.values():
+            all_points.update(np.asarray(grid, dtype=float).tolist())
+        if not all_points:
+            if logger:
+                logger.warning(f"  MF34/MT{mt_number} union grids are empty")
+            return None
+        grid_ev = np.array(sorted(all_points))
+
+    # Convert eV -> MeV
+    grid_mev = grid_ev / 1e6
+
+    if logger:
+        logger.info(f"  Extracted MF34 energy grid: {len(grid_mev)} points, "
+                    f"[{grid_mev[0]:.4f}, {grid_mev[-1]:.4f}] MeV")
+
+    return grid_mev
+
+
 def run_exfor_to_endf_sampling_v2(
     endf_file: str,
     exfor_directory: str = None,
@@ -1316,8 +1605,7 @@ def run_exfor_to_endf_sampling_v2(
     generate_nominal_endf: bool = True,
     generate_mc_mean_endf: bool = True,
     generate_samples_endf: bool = True,
-    generate_covariance: bool = True,
-    generate_mf34: bool = False,
+    save_covariance_files: bool = True,
     # Multigroup covariance options
     generate_multigroup_covariance: bool = False,
     multigroup_rho_min: float = 0.90,
@@ -1325,6 +1613,7 @@ def run_exfor_to_endf_sampling_v2(
     multigroup_min_width_factor: float = 2.0,
     multigroup_variance_percentile: float = 50.0,
     mf34_covariance_type: str = "fine",
+    use_original_mf34_grid: bool = False,
     # Database configuration (new parameters)
     exfor_db_path: str = None,
     exfor_source: str = "auto",
@@ -1341,6 +1630,23 @@ def run_exfor_to_endf_sampling_v2(
     positivity_check_points: int = 50,
     # File output options
     save_correlation_matrices: bool = False,
+    # ACE generation options
+    generate_ace: bool = False,
+    ace_temperatures: Optional[List[float]] = None,
+    ace_njoy_exe: Optional[str] = None,
+    ace_library_name: Optional[str] = None,
+    ace_njoy_version: str = "NJOY 2016.78",
+    ace_xsdir_file: Optional[str] = None,
+    ace_skip_existing: bool = False,
+    # MF34 merge source
+    mf34_source_file: Optional[str] = None,
+    # Unified MF34 sampling (Pipeline B)
+    generate_samples_from_mf34: bool = False,
+    sampling_resolution: str = "fine",  # "fine" or "multigroup"
+    merge_original_mf34: bool = True,
+    sampling_space: str = "linear",
+    sampling_decomposition: str = "svd",
+    sampling_method: str = "sobol",
 ):
     """
     Main function to generate ENDF samples from EXFOR angular distribution data.
@@ -1399,6 +1705,7 @@ def run_exfor_to_endf_sampling_v2(
     # -- General: Paths --
     _logger.info("  Paths:")
     _logger.info(f"    ENDF_FILE              = {endf_file}")
+    _logger.info(f"    MF34_SOURCE_FILE       = {mf34_source_file or '(same as ENDF_FILE)'}")
     _logger.info(f"    EXFOR_DIRECTORY         = {exfor_directory}")
     _logger.info(f"    EXFOR_DB_PATH           = {exfor_db_path}")
     _logger.info(f"    OUTPUT_DIR              = {output_dir}")
@@ -1435,9 +1742,9 @@ def run_exfor_to_endf_sampling_v2(
     _logger.info(f"    GENERATE_NOMINAL_ENDF   = {generate_nominal_endf}")
     _logger.info(f"    GENERATE_MC_MEAN_ENDF   = {generate_mc_mean_endf}")
     _logger.info(f"    GENERATE_SAMPLES_ENDF   = {generate_samples_endf}")
-    _logger.info(f"    GENERATE_COVARIANCE     = {generate_covariance}")
-    _logger.info(f"    GENERATE_MF34           = {generate_mf34}")
+    _logger.info(f"    SAVE_COVARIANCE_FILES   = {save_covariance_files}")
     _logger.info(f"    N_SAMPLES               = {n_samples}")
+    _logger.info(f"    SAVE_CORRELATION_MATRICES = {save_correlation_matrices}")
     _logger.info("")
 
     # -- General: Processing --
@@ -1462,6 +1769,61 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info(f"    MF34_COVARIANCE_TYPE           = {mf34_covariance_type}")
         _logger.info(f"    MULTIGROUP_VARIANCE_PERCENTILE = {multigroup_variance_percentile}")
         _logger.info("")
+
+    # -- ACE Generation --
+    _logger.info("  ACE Generation:")
+    _logger.info(f"    GENERATE_ACE            = {generate_ace}")
+    if generate_ace:
+        # Normalize temperatures: single float → list
+        if ace_temperatures is None:
+            ace_temperatures = [293.6]
+        elif isinstance(ace_temperatures, (int, float)):
+            ace_temperatures = [float(ace_temperatures)]
+
+        # Validate required parameters
+        if not ace_njoy_exe or not os.path.isfile(ace_njoy_exe):
+            raise FileNotFoundError(
+                f"ACE_NJOY_EXE not found: {ace_njoy_exe}. "
+                "Set ACE_NJOY_EXE to a valid NJOY executable path."
+            )
+        if not ace_library_name:
+            raise ValueError(
+                "ACE_LIBRARY_NAME must be provided when GENERATE_ACE=True "
+                "(e.g., 'endfb81', 'jeff40')."
+            )
+        if not ace_temperatures:
+            raise ValueError(
+                "ACE_TEMPERATURES must be a non-empty list when GENERATE_ACE=True."
+            )
+
+        _logger.info(f"    ACE_TEMPERATURES        = {ace_temperatures}")
+        _logger.info(f"    ACE_NJOY_EXE            = {ace_njoy_exe}")
+        _logger.info(f"    ACE_LIBRARY_NAME        = {ace_library_name}")
+        _logger.info(f"    ACE_NJOY_VERSION        = {ace_njoy_version}")
+        _logger.info(f"    ACE_XSDIR_FILE          = {ace_xsdir_file}")
+        _logger.info(f"    ACE_SKIP_EXISTING       = {ace_skip_existing}")
+    _logger.info("")
+
+    # -- Unified MF34 Sampling (Pipeline B) --
+    _logger.info("  Unified MF34 Sampling (Pipeline B):")
+    _logger.info(f"    GENERATE_SAMPLES_FROM_MF34    = {generate_samples_from_mf34}")
+    if generate_samples_from_mf34:
+        _logger.info(f"    SAMPLING_RESOLUTION           = {sampling_resolution}")
+        _logger.info(f"    MERGE_ORIGINAL_MF34           = {merge_original_mf34}")
+        _logger.info(f"    SAMPLING_SPACE                = {sampling_space}")
+        _logger.info(f"    SAMPLING_DECOMPOSITION        = {sampling_decomposition}")
+        _logger.info(f"    SAMPLING_METHOD               = {sampling_method}")
+    _logger.info("")
+
+    # -- Post-Processing Layers --
+    _logger.info("  Post-Processing Layers:")
+    _logger.info(f"    APPLY_COVARIANCE_CAP       = {apply_covariance_cap}")
+    if apply_covariance_cap:
+        _logger.info(f"    MAX_RELATIVE_STD_CAP       = {max_relative_std_cap} ({max_relative_std_cap*100:.0f}%)")
+    _logger.info(f"    APPLY_POSITIVITY_PROJECTION = {apply_positivity_projection}")
+    if apply_positivity_projection:
+        _logger.info(f"    POSITIVITY_CHECK_POINTS    = {positivity_check_points}")
+    _logger.info("")
 
     # -- Experiment Selection Method --
     _logger.info(f"  EXPERIMENT_SELECTION_METHOD = {experiment_selection_method}")
@@ -1543,6 +1905,13 @@ def run_exfor_to_endf_sampling_v2(
             _logger.info(f"    TOF_PARAMETERS_FILE            = {TOF_PARAMETERS_FILE}")
         _logger.info(f"    JITTER_N_SIGMA_CLIP            = {JITTER_N_SIGMA_CLIP}")
         _logger.info(f"    TRACK_BIN_JUMPS                = {TRACK_BIN_JUMPS}")
+        _logger.info("")
+
+    # -- 6i. MC Sampling Control (energy_bin only) --
+    if experiment_selection_method == "energy_bin":
+        _logger.info("  MC Sampling Control (6i):")
+        _logger.info(f"    TWO_PASS_DECOMPOSITION         = {TWO_PASS_DECOMPOSITION}")
+        _logger.info(f"    MAX_SAMPLE_ORDER               = {MAX_SAMPLE_ORDER}")
         _logger.info("")
 
     _logger.info(separator)
@@ -1880,43 +2249,208 @@ def run_exfor_to_endf_sampling_v2(
                 )
                 _logger.info(f"  TOF params from file: {tof_summary['n_from_file']}, using defaults: {tof_summary['n_default']}")
 
-            # Run MC with energy jitter
-            all_samples, bin_jump_diag = run_mc_with_energy_jitter(
-                nominal_results=nominal_results,
-                energy_bins=energy_bins,
-                dataset_info_by_bin=dataset_info_by_bin,
-                exfor_cache=exfor_cache,
-                sorted_energies=sorted_exfor_energies,
-                n_samples=n_samples,
-                base_seed=base_seed,
-                max_degree=max_degree,
-                ridge_lambda=ridge_lambda,
-                m_proj_u=m_proj_u,
-                m_targ_u=m_targ_u,
-                use_band_discrepancy=use_band_discrepancy,
-                min_points_per_band=min_points_per_band,
-                max_tau_fraction=max_tau_fraction,
-                jitter_n_sigma_clip=JITTER_N_SIGMA_CLIP,
-                track_bin_jumps=TRACK_BIN_JUMPS,
-                min_relative_uncertainty=min_relative_uncertainty,
-                freeze_c0=FREEZE_C0,
-                sigma_norm=NORMALIZATION_SIGMA,
-                norm_dist=NORM_DIST,
-                normalize_by_n_points=NORMALIZE_BY_N_POINTS,
-                max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
-                n_procs=N_PROCS,
-                logger=_logger,
-                apply_positivity_projection=apply_positivity_projection,
-                positivity_check_points=positivity_check_points,
-            )
+            # Gaussian correlation mode: skip Pass 1 jitter, use parametric model
+            if USE_GAUSSIAN_CORRELATION:
+                _logger.info("  " + "=" * 60)
+                _logger.info("  Method: Gaussian decay correlation + Cholesky resampling")
+                _logger.info("  " + "=" * 60)
+                _logger.info("  Skipping Pass 1 (jitter MC) — correlations from parametric model")
+                _logger.info("  Per-bin stochastic MC provides: variance + cross-order correlations")
+                _logger.info("  Gaussian model provides: cross-energy correlations from TOF sigma_E")
+                _logger.info("  Cholesky sampling: draws from multivariate normal (not refits)")
+                all_samples_jitter_only = None
+                bin_jump_diag = None
+            else:
+                # Run MC with energy jitter
+                _jitter_stochastic = not TWO_PASS_DECOMPOSITION
+                if TWO_PASS_DECOMPOSITION:
+                    _logger.info("  Two-pass decomposition: Pass 1 — jitter-only (stochastic=False)")
+                all_samples, bin_jump_diag = run_mc_with_energy_jitter(
+                    nominal_results=nominal_results,
+                    energy_bins=energy_bins,
+                    dataset_info_by_bin=dataset_info_by_bin,
+                    exfor_cache=exfor_cache,
+                    sorted_energies=sorted_exfor_energies,
+                    n_samples=n_samples,
+                    base_seed=base_seed,
+                    max_degree=max_degree,
+                    ridge_lambda=ridge_lambda,
+                    m_proj_u=m_proj_u,
+                    m_targ_u=m_targ_u,
+                    use_band_discrepancy=use_band_discrepancy,
+                    min_points_per_band=min_points_per_band,
+                    max_tau_fraction=max_tau_fraction,
+                    jitter_n_sigma_clip=JITTER_N_SIGMA_CLIP,
+                    track_bin_jumps=TRACK_BIN_JUMPS,
+                    min_relative_uncertainty=min_relative_uncertainty,
+                    freeze_c0=FREEZE_C0,
+                    sigma_norm=NORMALIZATION_SIGMA,
+                    norm_dist=NORM_DIST,
+                    normalize_by_n_points=NORMALIZE_BY_N_POINTS,
+                    max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
+                    n_procs=N_PROCS,
+                    logger=_logger,
+                    apply_positivity_projection=apply_positivity_projection,
+                    positivity_check_points=positivity_check_points,
+                    stochastic=_jitter_stochastic,
+                )
 
             # Log bin jump diagnostics
-            if TRACK_BIN_JUMPS:
+            if TRACK_BIN_JUMPS and bin_jump_diag is not None:
                 log_bin_jump_diagnostics(bin_jump_diag, energy_bins, logger=_logger)
 
-            n_sampled = sum(1 for nr in nominal_results if nr.has_data and not nr.interpolated)
-            n_interpolated_used = sum(1 for nr in nominal_results if nr.has_data and nr.interpolated)
-            _logger.info(f"  MC sampled with jitter: {n_sampled} bins, interpolated: {n_interpolated_used} bins")
+            if not USE_GAUSSIAN_CORRELATION:
+                n_sampled = sum(1 for nr in nominal_results if nr.has_data and not nr.interpolated)
+                n_interpolated_used = sum(1 for nr in nominal_results if nr.has_data and nr.interpolated)
+                _logger.info(f"  MC sampled with jitter: {n_sampled} bins, interpolated: {n_interpolated_used} bins")
+
+            # Per-bin stochastic pass (Pass 2 in two-pass, or sole stochastic pass for Gaussian mode)
+            all_samples_stochastic = None
+            if TWO_PASS_DECOMPOSITION or USE_GAUSSIAN_CORRELATION:
+                if not USE_GAUSSIAN_CORRELATION:
+                    _logger.info("  Two-pass decomposition: Pass 2 — per-bin stochastic (no jitter)")
+                if N_PROCS > 1:
+                    _logger.info(f"  Using {N_PROCS} parallel processes over bins")
+
+                bin_args_list = []
+                for nr in nominal_results:
+                    if not nr.has_data:
+                        continue
+                    mc_df = nr.exfor_df_mc if nr.exfor_df_mc is not None else nr.exfor_df
+                    mc_weights = nr.kernel_weights_mc if nr.kernel_weights_mc is not None else nr.kernel_weights
+                    bin_args_list.append((
+                        nr.energy_index,
+                        nr.frozen_degree,
+                        nr.nominal_coeffs,
+                        nr.interpolated,
+                        mc_df,
+                        mc_weights,
+                        nr.degree_weights,  # degree sampling enabled in Pass 2
+                        n_samples,
+                        base_seed,
+                        max_degree,
+                        ridge_lambda,
+                        RIDGE_POWER,
+                        DF_METHOD,
+                        use_band_discrepancy,  # Pass 2 re-estimates tau from stable fixed data;
+                                               # Pass 1 pre-inflates with nominal tau instead
+                        min_points_per_band,
+                        max_tau_fraction,
+                        USE_DEGREE_SAMPLING_IN_MC,  # degree sampling enabled in Pass 2
+                        RESCALE_UNC_BY_CHI2,
+                        ALLOW_SHRINK_UNC,
+                        FREEZE_C0,
+                        0.0,  # normalization handled in Pass 1 (shared across bins)
+                        NORM_DIST,
+                        MAX_SAMPLE_ORDER,
+                        apply_positivity_projection,
+                        positivity_check_points,
+                    ))
+
+                if N_PROCS > 1:
+                    with Pool(N_PROCS) as pool:
+                        bin_results = pool.map(_mc_one_bin, bin_args_list)
+                else:
+                    bin_results = [_mc_one_bin(a) for a in bin_args_list]
+
+                all_samples_stochastic = {s_idx: {} for s_idx in range(n_samples)}
+                for energy_idx, is_interpolated, results_by_sample, success in bin_results:
+                    for s_idx, endf_coeffs in results_by_sample.items():
+                        all_samples_stochastic[s_idx][energy_idx] = endf_coeffs
+
+                _logger.info(f"  Per-bin stochastic pass completed: {len(bin_args_list)} bins")
+
+            # Gaussian correlation mode: build covariance and generate Cholesky samples
+            if USE_GAUSSIAN_CORRELATION and all_samples_stochastic is not None:
+                _logger.info("  Building Gaussian correlation covariance from stochastic pass")
+                energy_indices_for_gauss = [nr.energy_index for nr in nominal_results if nr.has_data]
+
+                # Build valid-parameter mask: only parameters actually fitted are valid
+                nr_by_idx = {nr.energy_index: nr for nr in nominal_results}
+                _valid_mask = np.zeros(len(energy_indices_for_gauss) * max_degree, dtype=bool)
+                for ie, e_idx in enumerate(energy_indices_for_gauss):
+                    nr = nr_by_idx[e_idx]
+                    n_valid = min(nr.frozen_degree, max_degree)
+                    for l in range(n_valid):
+                        _valid_mask[ie * max_degree + l] = True
+                n_invalid = int(np.sum(~_valid_mask))
+                _logger.info(f"  Valid-parameter mask: {int(np.sum(_valid_mask))}/{len(_valid_mask)} valid "
+                             f"({n_invalid} zeroed for absent higher-order coefficients)")
+
+                # Compute stochastic covariance (for per-bin variances and cross-order correlations)
+                cov_stochastic_pass2, _, _, mc_mean_stochastic = compute_covariance_from_samples(
+                    all_samples=all_samples_stochastic,
+                    energy_indices=energy_indices_for_gauss,
+                    max_order=max_degree,
+                    valid_mask=_valid_mask,
+                )
+
+                # Build full covariance with Gaussian energy correlations
+                _gaussian_cov_full = build_gaussian_correlation_covariance(
+                    cov_stochastic=cov_stochastic_pass2,
+                    energy_bins=energy_bins,
+                    energy_indices=energy_indices_for_gauss,
+                    max_order=max_degree,
+                    logger=_logger,
+                    valid_mask=_valid_mask,
+                )
+
+                # Generate properly correlated samples via Cholesky
+                _logger.info(f"  Generating {n_samples} Cholesky samples")
+                all_samples = generate_cholesky_samples(
+                    cov_full=_gaussian_cov_full,
+                    mean_params=mc_mean_stochastic,
+                    energy_indices=energy_indices_for_gauss,
+                    max_order=max_degree,
+                    n_samples=n_samples,
+                    seed=base_seed,
+                    logger=_logger,
+                )
+
+                # Store pre-built covariance for Step 7
+                _prebuilt_gaussian_cov = _gaussian_cov_full
+                _prebuilt_mc_mean = mc_mean_stochastic
+
+            elif TWO_PASS_DECOMPOSITION and all_samples_stochastic is not None:
+                # Original two-pass: Combine Pass 1 (jitter + normalization) with Pass 2 (stochastic)
+                # Formula: combined[s][e] = stochastic[s][e] + (jitter[s][e] - mean_jitter[e])
+                all_samples_jitter_only = all_samples  # preserve for covariance decomposition
+
+                energy_indices_for_combine = [nr.energy_index for nr in nominal_results if nr.has_data]
+                jitter_mean = {}
+                for e_idx in energy_indices_for_combine:
+                    arrays = [all_samples_jitter_only[s][e_idx]
+                              for s in range(n_samples) if e_idx in all_samples_jitter_only[s]]
+                    if arrays:
+                        jitter_mean[e_idx] = np.mean(arrays, axis=0)
+
+                combined_samples = {s_idx: {} for s_idx in range(n_samples)}
+                n_combined = 0
+                for s_idx in range(n_samples):
+                    for e_idx in energy_indices_for_combine:
+                        stoch = all_samples_stochastic[s_idx].get(e_idx)
+                        jitter = all_samples_jitter_only[s_idx].get(e_idx)
+                        j_mean = jitter_mean.get(e_idx)
+
+                        if stoch is None and jitter is None:
+                            continue
+                        if stoch is None:
+                            combined_samples[s_idx][e_idx] = jitter
+                            continue
+                        if jitter is None or j_mean is None:
+                            combined_samples[s_idx][e_idx] = stoch
+                            continue
+
+                        # Pad to consistent length
+                        t = max_degree
+                        s_pad = np.zeros(t); s_pad[:min(len(stoch), t)] = stoch[:t]
+                        j_pad = np.zeros(t); j_pad[:min(len(jitter), t)] = jitter[:t]
+                        m_pad = np.zeros(t); m_pad[:min(len(j_mean), t)] = j_mean[:t]
+                        combined_samples[s_idx][e_idx] = s_pad + (j_pad - m_pad)
+                        n_combined += 1
+
+                all_samples = combined_samples
+                _logger.info(f"  Combined {n_combined} bin-samples from Pass 1 + Pass 2")
 
         # If use_jitter was set to False during loading, fall through to per-bin MC
         if not use_jitter:
@@ -1956,6 +2490,7 @@ def run_exfor_to_endf_sampling_v2(
                     FREEZE_C0,
                     NORMALIZATION_SIGMA,
                     NORM_DIST,
+                    MAX_SAMPLE_ORDER,
                     apply_positivity_projection,
                     positivity_check_points,
                 ))
@@ -2016,6 +2551,7 @@ def run_exfor_to_endf_sampling_v2(
                 FREEZE_C0,
                 NORMALIZATION_SIGMA,
                 NORM_DIST,
+                MAX_SAMPLE_ORDER,
                 apply_positivity_projection,
                 positivity_check_points,
             ))
@@ -2042,6 +2578,27 @@ def run_exfor_to_endf_sampling_v2(
 
         _logger.info(f"  MC sampled: {n_sampled} bins, interpolated: {n_interpolated_used} bins")
 
+    # Ensure all_samples_stochastic and all_samples_jitter_only are accessible in Step 7
+    # (only populated in the jitter 2-pass path above)
+    try:
+        all_samples_stochastic
+    except NameError:
+        all_samples_stochastic = None
+    try:
+        all_samples_jitter_only
+    except NameError:
+        all_samples_jitter_only = None
+
+    try:
+        _prebuilt_gaussian_cov
+    except NameError:
+        _prebuilt_gaussian_cov = None
+
+    try:
+        _prebuilt_mc_mean
+    except NameError:
+        _prebuilt_mc_mean = None
+
     # Step 6: Save coefficients
     _logger.info("")
     _logger.info("[STEP 6] Saving Legendre coefficients")
@@ -2062,15 +2619,101 @@ def run_exfor_to_endf_sampling_v2(
     cov_matrix = None
     energy_indices = [nr.energy_index for nr in nominal_results if nr.has_data]
 
-    if generate_covariance:
+    # Build valid-parameter mask for Step 7 covariance paths
+    nr_by_idx_s7 = {nr.energy_index: nr for nr in nominal_results}
+    valid_mask_s7 = np.zeros(len(energy_indices) * max_degree, dtype=bool)
+    for ie, e_idx in enumerate(energy_indices):
+        nr = nr_by_idx_s7[e_idx]
+        n_valid = min(nr.frozen_degree, max_degree)
+        for l in range(n_valid):
+            valid_mask_s7[ie * max_degree + l] = True
+
+    if True:  # Covariance always computed (needed for MF34)
         _logger.info("")
         _logger.info("[STEP 7] Computing covariance matrix")
 
-        cov_matrix, corr_matrix, param_labels = compute_covariance_from_samples(
-            all_samples=all_samples,
-            energy_indices=energy_indices,
-            max_order=max_degree,
-        )
+        if USE_GAUSSIAN_CORRELATION and _prebuilt_gaussian_cov is not None:
+            # Gaussian correlation mode: use pre-built covariance from Gaussian decay model
+            _logger.info("  Using pre-built Gaussian correlation covariance")
+            cov_matrix = _prebuilt_gaussian_cov
+            mc_mean_params = _prebuilt_mc_mean
+            param_labels = [(e_idx, l + 1) for e_idx in energy_indices for l in range(max_degree)]
+
+            # Compute correlation from covariance
+            std_combined = np.sqrt(np.maximum(np.diag(cov_matrix), 0.0))
+            std_combined[std_combined == 0] = 1.0
+            corr_matrix = cov_matrix / np.outer(std_combined, std_combined)
+
+            var_total = np.diag(cov_matrix)
+            mask = var_total > 0
+            if np.any(mask):
+                _logger.info(f"  Gaussian cov variance: mean={np.mean(var_total[mask]):.2e}")
+
+        elif TWO_PASS_DECOMPOSITION and all_samples_stochastic is not None and all_samples_jitter_only is not None:
+            # Two-pass variance decomposition
+            _logger.info("  Two-pass decomposition: combining jitter correlations with total variances")
+
+            # Pass 1 result: jitter-only covariance (correct correlations, underestimated diag)
+            cov_jitter, _, param_labels, _ = compute_covariance_from_samples(
+                all_samples=all_samples_jitter_only,
+                energy_indices=energy_indices,
+                max_order=max_degree,
+                valid_mask=valid_mask_s7,
+            )
+            var_jitter = np.diag(cov_jitter)
+            _logger.info(f"  Jitter-only variance: mean={np.mean(var_jitter[var_jitter>0]):.2e}")
+
+            # Pass 2 result: stochastic covariance (full matrix, includes l-l' from degree sampling)
+            cov_stochastic, _, _, mc_mean_params_stochastic = compute_covariance_from_samples(
+                all_samples=all_samples_stochastic,
+                energy_indices=energy_indices,
+                max_order=max_degree,
+                valid_mask=valid_mask_s7,
+            )
+            var_stochastic = np.diag(cov_stochastic)
+            _logger.info(f"  Stochastic-only variance: mean={np.mean(var_stochastic[var_stochastic>0]):.2e}")
+
+            # Combine: jitter correlation structure with total variances
+            cov_matrix = combine_jitter_stochastic_covariance(
+                cov_jitter, cov_stochastic,
+                energy_bins=energy_bins,
+                energy_indices=energy_indices,
+                max_order=max_degree,
+                logger=_logger,
+                valid_mask=valid_mask_s7,
+            )
+
+            var_total = np.diag(cov_matrix)
+            mask = var_total > 0
+            jitter_frac = np.mean(var_jitter[mask] / var_total[mask]) if np.any(mask) else 0
+            _logger.info(f"  Variance decomposition: jitter={jitter_frac*100:.1f}%, stochastic={100-jitter_frac*100:.1f}%")
+
+            # Compute correlation from combined covariance
+            std_combined = np.sqrt(np.maximum(np.diag(cov_matrix), 0.0))
+            std_combined[std_combined == 0] = 1.0
+            corr_matrix = cov_matrix / np.outer(std_combined, std_combined)
+
+            # Compute MC mean parameter vector from all_samples (needed for
+            # nominal-file relative covariance rescaling)
+            n_params = len(energy_indices) * max_degree
+            sample_matrix = np.zeros((len(all_samples), n_params))
+            for s_idx in range(len(all_samples)):
+                row = []
+                for e_idx in energy_indices:
+                    coeffs = all_samples[s_idx].get(e_idx, np.zeros(max_degree))
+                    padded = np.zeros(max_degree)
+                    padded[:min(len(coeffs), max_degree)] = coeffs[:max_degree]
+                    row.extend(padded)
+                sample_matrix[s_idx] = row
+            mc_mean_params = np.mean(sample_matrix, axis=0)
+        else:
+            # Standard single-pass covariance
+            cov_matrix, corr_matrix, param_labels, mc_mean_params = compute_covariance_from_samples(
+                all_samples=all_samples,
+                energy_indices=energy_indices,
+                max_order=max_degree,
+                valid_mask=valid_mask_s7,
+            )
 
         # Validate covariance: check that diagonal values are non-trivial
         diag = np.diag(cov_matrix)
@@ -2079,15 +2722,10 @@ def run_exfor_to_endf_sampling_v2(
             min_diag = np.min(diag_nonzero)
             max_diag = np.max(diag_nonzero)
             mean_diag = np.mean(diag_nonzero)
-            # Compute standard deviation of normalized Legendre coefficients
-            # Note: The coefficients a_l = (c_l/c0)/(2l+1) are already normalized
-            # by the total cross section, making them dimensionless. Their std dev
-            # is thus inherently a fractional quantity (not a "relative uncertainty"
-            # in the traditional sense of std/mean).
-            mean_coeff_std = np.sqrt(mean_diag)
-            _logger.info(f"  Diagonal stats: min={min_diag:.2e}, max={max_diag:.2e}, mean={mean_diag:.2e}")
-            _logger.info(f"  Mean Legendre coeff std: {mean_coeff_std:.4f}")
-            _logger.info(f"  (As fraction of unity: {mean_coeff_std*100:.2f}% - coeffs are normalized)")
+            # Covariance is now relative (fractional): diag = Var(a)/mean(a)^2
+            mean_rel_std = np.sqrt(mean_diag)
+            _logger.info(f"  Relative variance stats: min={min_diag:.2e}, max={max_diag:.2e}, mean={mean_diag:.2e}")
+            _logger.info(f"  Mean relative std: {mean_rel_std:.4f} ({mean_rel_std*100:.2f}%)")
 
             if np.all(diag < 1e-20):
                 _logger.error(
@@ -2102,6 +2740,16 @@ def run_exfor_to_endf_sampling_v2(
             _logger.warning("  WARNING: No positive diagonal elements in covariance matrix!")
 
         _logger.info(f"  Covariance matrix shape: {cov_matrix.shape}")
+
+        # l-l' correlation diagnostics
+        if max_degree > 1:
+            extract_ll_prime_correlations(
+                cov_matrix=cov_matrix,
+                energy_indices=energy_indices,
+                max_order=max_degree,
+                logger=_logger,
+                valid_mask=valid_mask_s7,
+            )
 
         # Step 7a: Apply covariance cap (Layer 1) if enabled
         if apply_covariance_cap:
@@ -2138,22 +2786,34 @@ def run_exfor_to_endf_sampling_v2(
             corr_matrix = cov_matrix / np.outer(std_capped, std_capped)
 
         # Save final covariance (capped if capping was applied, raw otherwise)
-        np.save(output_path / "legendre_covariance.npy", cov_matrix)
-        if save_correlation_matrices:
-            np.save(output_path / "legendre_correlation.npy", corr_matrix)
+        if save_covariance_files:
+            np.save(output_path / "legendre_covariance.npy", cov_matrix)
+            if save_correlation_matrices:
+                np.save(output_path / "legendre_correlation.npy", corr_matrix)
 
     # Step 7b: Multigroup covariance (optional)
     multigroup_result = None
     multigroup_failure_reason = None
     if generate_multigroup_covariance:
-        if not generate_covariance:
-            multigroup_failure_reason = "generate_covariance is disabled"
-        elif cov_matrix is None:
+        if cov_matrix is None:
             multigroup_failure_reason = "covariance matrix is None (computation may have failed)"
         else:
             _logger.info("")
             _logger.info("[STEP 7b] Computing adaptive multigroup covariance")
             _logger.info(f"  Using l=1 correlation for grouping (same grid for all orders)")
+
+            # Extract forced MF34 grid if requested
+            forced_grid = None
+            if use_original_mf34_grid:
+                _logger.info(f"  Extracting original MF34 energy grid for forced grouping")
+                forced_grid = _extract_mf34_energy_grid(
+                    endf_file=endf_file,
+                    mf34_source_file=mf34_source_file,
+                    mt_number=mt_number,
+                    logger=_logger,
+                )
+                if forced_grid is None:
+                    _logger.warning("  MF34 grid extraction failed — falling back to adaptive grouping")
 
             try:
                 multigroup_result = perform_adaptive_multigroup_collapse(
@@ -2169,6 +2829,7 @@ def run_exfor_to_endf_sampling_v2(
                     logger=_logger,
                     apply_covariance_cap=apply_covariance_cap,
                     max_relative_std_cap=max_relative_std_cap,
+                    forced_group_boundaries_mev=forced_grid,
                 )
 
                 # Log and save results
@@ -2243,8 +2904,104 @@ def run_exfor_to_endf_sampling_v2(
         )
         _logger.info(f"  Written {len(output_files)} sample files")
 
+    # Step 9b: ACE generation via NJOY
+    if generate_ace:
+        _logger.info("")
+        _logger.info("[STEP 9b] Generating ACE files via NJOY")
+
+        # Bridge logger: let kika sampling functions log to our pipeline log
+        _set_kika_logger(_logger)
+
+        # Get ENDF file list: use output_files from Step 9 if available,
+        # otherwise discover existing files on disk
+        if output_files:
+            endf_sample_files = output_files
+            _logger.info(f"  Using {len(endf_sample_files)} ENDF files from Step 9")
+        else:
+            _logger.info("  Discovering existing ENDF sample files...")
+            endf_sample_files = _discover_exfor_endf_samples(
+                output_dir=str(output_path),
+                n_samples=n_samples,
+                endf_file=endf_file,
+            )
+
+        # Filter out missing files (empty strings)
+        valid_files = [(f, i) for i, f in enumerate(endf_sample_files) if f]
+
+        if not valid_files:
+            _logger.warning("[ACE] No ENDF sample files found — skipping ACE generation", console=True)
+        else:
+            _logger.info(f"  Processing {len(valid_files)} ENDF samples at {len(ace_temperatures)} temperature(s)")
+            _logger.info(f"  Temperatures: {ace_temperatures} K")
+
+            # Read ZAID from original ENDF file for skip-existing checks
+            ace_zaid = None
+            if ace_skip_existing:
+                try:
+                    _endf_for_zaid = read_endf(endf_file)
+                    ace_zaid = _endf_for_zaid.zaid
+                    _logger.info(f"  ZAID for skip-existing check: {ace_zaid}")
+                except Exception:
+                    _logger.warning("  Could not read ZAID from ENDF file — skip-existing disabled")
+
+            # Build worker args
+            ace_args_list = [
+                (f, idx, ace_temperatures, str(output_path), ace_njoy_exe,
+                 ace_library_name, ace_njoy_version, ace_xsdir_file,
+                 ace_skip_existing, ace_zaid)
+                for f, idx in valid_files
+            ]
+
+            # Run NJOY processing
+            t_ace_start = time.time()
+            ace_results = []
+
+            if n_procs > 1 and len(ace_args_list) > 1:
+                _logger.info(f"  Running NJOY in parallel ({n_procs} processes)")
+                with Pool(n_procs) as pool:
+                    ace_results = pool.map(_ace_worker, ace_args_list)
+            else:
+                _logger.info("  Running NJOY sequentially")
+                for ace_args in ace_args_list:
+                    ace_results.append(_ace_worker(ace_args))
+
+            # Summarize results
+            t_ace_elapsed = time.time() - t_ace_start
+            n_success = sum(1 for _, r in ace_results if r.get("success", False))
+            n_failed = sum(1 for _, r in ace_results if not r.get("success", False))
+            n_skipped = sum(1 for _, r in ace_results
+                           if r.get("skipped") and len(r["skipped"]) == len(ace_temperatures))
+            all_errors = []
+            for _, r in ace_results:
+                all_errors.extend(r.get("errors", []))
+
+            _logger.info(f"  ACE generation completed in {t_ace_elapsed:.1f}s")
+            _logger.info(f"  Results: {n_success} succeeded, {n_failed} failed, {n_skipped} fully skipped")
+
+            # Per-temperature breakdown
+            for temp in ace_temperatures:
+                temp_processed = sum(
+                    1 for _, r in ace_results
+                    if temp in r.get("temperatures_processed", [])
+                )
+                temp_skipped = sum(
+                    1 for _, r in ace_results
+                    if temp in r.get("skipped", [])
+                )
+                _logger.info(f"    {temp} K: {temp_processed} processed, {temp_skipped} skipped")
+
+            if all_errors:
+                _logger.warning(f"  {len(all_errors)} error(s) during ACE generation:", console=True)
+                for err in all_errors[:10]:
+                    _logger.warning(f"    {err}")
+                if len(all_errors) > 10:
+                    _logger.warning(f"    ... and {len(all_errors) - 10} more")
+
+            print(f"[INFO] ACE generation: {n_success}/{len(valid_files)} samples processed in {t_ace_elapsed:.1f}s")
+
     # Step 10: MF34 (using library functions)
-    if generate_mf34 and generate_covariance and cov_matrix is not None:
+    mg_nom_file = None
+    if cov_matrix is not None:
         _logger.info("")
         _logger.info("[STEP 10] Writing MF34 using kika.endf.writers")
         _logger.info(f"  Covariance type: {mf34_covariance_type}")
@@ -2267,17 +3024,51 @@ def run_exfor_to_endf_sampling_v2(
             mt_data = mf4.sections.get(mt_number)
             all_energies_ev = np.array(mt_data.legendre_energies)
 
-            # Read original MF34 from the reference ENDF file (if present)
+            # Build nominal relative covariance for the nominal file.
+            # The cov_matrix is relative w.r.t. MC means (correct for average file).
+            # For the nominal file, we need relative w.r.t. nominal coefficients:
+            #   Cov_rel_nom(i,j) = Cov_rel_avg(i,j) * (mean_i/nom_i) * (mean_j/nom_j)
+            nominal_params = np.zeros_like(mc_mean_params)
+            for k, e_idx in enumerate(energy_indices):
+                nr = next((r for r in nominal_results if r.energy_index == e_idx), None)
+                if nr is not None and nr.has_data:
+                    endf_nom = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
+                    n = min(len(endf_nom), max_degree)
+                    nominal_params[k * max_degree: k * max_degree + n] = endf_nom[:n]
+            # Compute rescaling factors
+            scale = np.ones_like(mc_mean_params)
+            safe = np.abs(nominal_params) > 1e-30
+            scale[safe] = mc_mean_params[safe] / nominal_params[safe]
+            cov_matrix_nominal = cov_matrix * np.outer(scale, scale)
+            max_scale_dev = np.max(np.abs(scale[safe] - 1.0)) if np.any(safe) else 0.0
+            _logger.info(f"  Nominal vs MC-mean rescaling: max |scale-1| = {max_scale_dev:.6f}")
+
+            # Read original MF34 from reference file (if present)
+            # Use mf34_source_file if provided, otherwise fall back to endf_file
+            mf34_ref = mf34_source_file if mf34_source_file else endf_file
             original_mf34_mt = None
             try:
-                endf_for_mf34 = read_endf(endf_file, mf_numbers=34)
+                endf_for_mf34 = read_endf(mf34_ref, mf_numbers=34)
                 mf34_file = endf_for_mf34.get_file(34)
                 if mf34_file is not None:
                     original_mf34_mt = mf34_file.sections.get(mt_number)
                     if original_mf34_mt is not None:
-                        _logger.info(f"  Original MF34 found for MT{mt_number} — will merge with pipeline MF34")
-            except Exception:
-                pass  # No original MF34 available
+                        _logger.info(f"  Original MF34 found for MT{mt_number} in {mf34_ref}")
+                        _logger.info(f"  Will merge with pipeline MF34")
+                    else:
+                        _logger.info(f"  MF34 file found but no MT{mt_number} section in {mf34_ref}")
+                else:
+                    _logger.info(f"  No MF34 section in {mf34_ref}")
+            except Exception as exc:
+                _logger.warning(
+                    f"  Could not read MF34 from {mf34_ref}: {exc}",
+                    console=True,
+                )
+                _logger.warning(
+                    "  MF34 merge will be skipped — pipeline MF34 will only cover "
+                    "the pipeline energy range.",
+                    console=True,
+                )
 
             # Helper to merge pipeline MF34 with original if available
             def _maybe_merge(pipeline_mf34_obj, pipe_grid_ev):
@@ -2292,73 +3083,119 @@ def run_exfor_to_endf_sampling_v2(
                     )
                 return pipeline_mf34_obj
 
+            # Compute fine energy grid (needed for fine MF34 and/or Step 11 sampling)
+            processed_energies_ev = np.array([all_energies_ev[i] for i in energy_indices])
+            if energy_indices[-1] + 1 < len(all_energies_ev):
+                energy_grid_ev = np.append(processed_energies_ev, all_energies_ev[energy_indices[-1] + 1])
+            else:
+                if len(processed_energies_ev) > 1:
+                    delta = processed_energies_ev[-1] - processed_energies_ev[-2]
+                    energy_grid_ev = np.append(processed_energies_ev, processed_energies_ev[-1] + delta)
+                else:
+                    energy_grid_ev = np.append(processed_energies_ev, processed_energies_ev[-1] * 1.1)
+
             # Write fine-grid MF34 if requested
             if mf34_covariance_type in ("fine", "both"):
-                processed_energies_ev = np.array([all_energies_ev[i] for i in energy_indices])
-                if energy_indices[-1] + 1 < len(all_energies_ev):
-                    energy_grid_ev = np.append(processed_energies_ev, all_energies_ev[energy_indices[-1] + 1])
-                else:
-                    if len(processed_energies_ev) > 1:
-                        delta = processed_energies_ev[-1] - processed_energies_ev[-2]
-                        energy_grid_ev = np.append(processed_energies_ev, processed_energies_ev[-1] + delta)
-                    else:
-                        energy_grid_ev = np.append(processed_energies_ev, processed_energies_ev[-1] * 1.1)
-
-                mf34_fine = create_mf34_from_covariance(
-                    cov_matrix=cov_matrix,
-                    energy_grid_ev=energy_grid_ev,
-                    max_order=max_degree,
-                    za=za,
-                    awr=awr,
-                    mat=mat,
-                    mt=mt_number,
-                )
-
-                mf34_fine = _maybe_merge(mf34_fine, energy_grid_ev)
-
                 if average_file:
-                    write_mf34_to_file(average_file, mf34_fine, average_file)
+                    mf34_fine_avg = create_mf34_from_covariance(
+                        cov_matrix=cov_matrix,
+                        energy_grid_ev=energy_grid_ev,
+                        max_order=max_degree,
+                        za=za,
+                        awr=awr,
+                        mat=mat,
+                        mt=mt_number,
+                    )
+                    mf34_fine_avg = _maybe_merge(mf34_fine_avg, energy_grid_ev)
+                    write_mf34_to_file(average_file, mf34_fine_avg, average_file)
                     _logger.info(f"  Fine MF34 added to average: {average_file}")
 
                 if nominal_file:
-                    write_mf34_to_file(nominal_file, mf34_fine, nominal_file)
+                    mf34_fine_nom = create_mf34_from_covariance(
+                        cov_matrix=cov_matrix_nominal,
+                        energy_grid_ev=energy_grid_ev,
+                        max_order=max_degree,
+                        za=za,
+                        awr=awr,
+                        mat=mat,
+                        mt=mt_number,
+                    )
+                    mf34_fine_nom = _maybe_merge(mf34_fine_nom, energy_grid_ev)
+                    write_mf34_to_file(nominal_file, mf34_fine_nom, nominal_file)
                     _logger.info(f"  Fine MF34 added to nominal: {nominal_file}")
 
+            # Compute nominal-relative grouped covariance (needed for MG MF34 and/or Step 11)
+            cov_grouped_nominal = None
+            if multigroup_result is not None:
+                A = multigroup_result.aggregation_matrix
+                # A operates on non-interpolated bins only; slice mc_mean_params
+                # to match (same filtering as perform_adaptive_multigroup_collapse)
+                valid_indices = [
+                    i for i, nr in enumerate(nominal_results)
+                    if not nr.interpolated and nr.has_data
+                ]
+                all_data_indices = [i for i, nr in enumerate(nominal_results) if nr.has_data]
+                if len(all_data_indices) != len(valid_indices):
+                    all_data_set = {v: pos for pos, v in enumerate(all_data_indices)}
+                    valid_positions = [all_data_set[vi] for vi in valid_indices]
+                    flat_indices = []
+                    for pos in valid_positions:
+                        for l in range(max_degree):
+                            flat_indices.append(pos * max_degree + l)
+                    mc_mean_for_mg = mc_mean_params[np.array(flat_indices)]
+                else:
+                    mc_mean_for_mg = mc_mean_params
+
+                mc_mean_grouped = A @ mc_mean_for_mg
+                nom_mean_grouped = multigroup_result.mean_grouped  # based on nominal coeffs
+                mg_scale = np.ones_like(mc_mean_grouped)
+                mg_safe = np.abs(nom_mean_grouped) > 1e-30
+                mg_scale[mg_safe] = mc_mean_grouped[mg_safe] / nom_mean_grouped[mg_safe]
+                cov_grouped_nominal = multigroup_result.cov_grouped * np.outer(mg_scale, mg_scale)
+
             # Write multigroup MF34 if requested and available
-            if mf34_covariance_type in ("multigroup", "both") and multigroup_result is not None:
-                mf34_mg = create_mf34_from_covariance(
-                    cov_matrix=multigroup_result.cov_grouped,
-                    energy_grid_ev=multigroup_result.group_boundaries_ev,
-                    max_order=max_degree,
-                    za=za,
-                    awr=awr,
-                    mat=mat,
-                    mt=mt_number,
-                )
-
-                mf34_mg = _maybe_merge(mf34_mg, multigroup_result.group_boundaries_ev)
-
+            if mf34_covariance_type in ("multigroup", "both") and cov_grouped_nominal is not None:
                 # For multigroup, write to separate files with _mg suffix
                 if average_file:
+                    mf34_mg_avg = create_mf34_from_covariance(
+                        cov_matrix=multigroup_result.cov_grouped,
+                        energy_grid_ev=multigroup_result.group_boundaries_ev,
+                        max_order=max_degree,
+                        za=za,
+                        awr=awr,
+                        mat=mat,
+                        mt=mt_number,
+                    )
+                    mf34_mg_avg = _maybe_merge(mf34_mg_avg, multigroup_result.group_boundaries_ev)
                     mg_avg_file = average_file.replace('.txt', '_mg.endf').replace('.endf', '_mg.endf')
                     if mg_avg_file == average_file:
                         mg_avg_file = average_file + '_mg'
                     # Copy average file and add multigroup MF34
                     import shutil
                     shutil.copy(average_file, mg_avg_file)
-                    write_mf34_to_file(mg_avg_file, mf34_mg, mg_avg_file)
+                    write_mf34_to_file(mg_avg_file, mf34_mg_avg, mg_avg_file)
                     _logger.info(f"  Multigroup MF34 written to: {mg_avg_file}")
 
                 if nominal_file:
+                    mf34_mg_nom = create_mf34_from_covariance(
+                        cov_matrix=cov_grouped_nominal,
+                        energy_grid_ev=multigroup_result.group_boundaries_ev,
+                        max_order=max_degree,
+                        za=za,
+                        awr=awr,
+                        mat=mat,
+                        mt=mt_number,
+                    )
+                    mf34_mg_nom = _maybe_merge(mf34_mg_nom, multigroup_result.group_boundaries_ev)
                     mg_nom_file = nominal_file.replace('.txt', '_mg.endf').replace('.endf', '_mg.endf')
                     if mg_nom_file == nominal_file:
                         mg_nom_file = nominal_file + '_mg'
                     import shutil
                     shutil.copy(nominal_file, mg_nom_file)
-                    write_mf34_to_file(mg_nom_file, mf34_mg, mg_nom_file)
+                    write_mf34_to_file(mg_nom_file, mf34_mg_nom, mg_nom_file)
                     _logger.info(f"  Multigroup MF34 written to: {mg_nom_file}")
 
-            elif mf34_covariance_type in ("multigroup", "both") and multigroup_result is None:
+            elif mf34_covariance_type in ("multigroup", "both") and cov_grouped_nominal is None:
                 if multigroup_failure_reason:
                     _logger.warning(f"  Multigroup covariance requested but failed: {multigroup_failure_reason}", console=True)
                 elif not generate_multigroup_covariance:
@@ -2366,8 +3203,115 @@ def run_exfor_to_endf_sampling_v2(
                 else:
                     _logger.warning("  Multigroup covariance requested but not computed (unknown reason)")
 
+            # --- Resolve MF34 source file for Step 11 ---
+            mf34_sample_source = None
+            if generate_samples_from_mf34 and nominal_file:
+                sr = sampling_resolution
+
+                if sr == "fine":
+                    if merge_original_mf34 and mf34_covariance_type in ("fine", "both"):
+                        # Already written as merged fine MF34 in nominal_file
+                        mf34_sample_source = nominal_file
+                    else:
+                        # Write fine MF34 for sampling (merged or pipeline-only)
+                        import shutil
+                        suffix = "_pipeline" if not merge_original_mf34 else "_fine_sampling"
+                        base_stem = Path(nominal_file).stem
+                        base_dir = Path(nominal_file).parent
+                        sampling_file = str(base_dir / f"{base_stem}{suffix}.endf")
+                        shutil.copy(nominal_file, sampling_file)
+                        mf34_fine_obj = create_mf34_from_covariance(
+                            cov_matrix=cov_matrix_nominal,
+                            energy_grid_ev=energy_grid_ev,
+                            max_order=max_degree,
+                            za=za, awr=awr, mat=mat, mt=mt_number,
+                        )
+                        if merge_original_mf34:
+                            mf34_fine_obj = _maybe_merge(mf34_fine_obj, energy_grid_ev)
+                        write_mf34_to_file(sampling_file, mf34_fine_obj, sampling_file)
+                        mf34_sample_source = sampling_file
+                        _logger.info(f"  Fine MF34 ({'merged' if merge_original_mf34 else 'pipeline-only'}) for sampling: {sampling_file}")
+
+                elif sr == "multigroup" and cov_grouped_nominal is not None:
+                    if merge_original_mf34 and mg_nom_file:
+                        # Already written as merged MG MF34
+                        mf34_sample_source = mg_nom_file
+                    else:
+                        # Write multigroup MF34 for sampling (merged or pipeline-only)
+                        import shutil
+                        suffix = "_mg_pipeline" if not merge_original_mf34 else "_mg_sampling"
+                        base_stem = Path(nominal_file).stem
+                        base_dir = Path(nominal_file).parent
+                        sampling_file = str(base_dir / f"{base_stem}{suffix}.endf")
+                        shutil.copy(nominal_file, sampling_file)
+                        mf34_mg_obj = create_mf34_from_covariance(
+                            cov_matrix=cov_grouped_nominal,
+                            energy_grid_ev=multigroup_result.group_boundaries_ev,
+                            max_order=max_degree,
+                            za=za, awr=awr, mat=mat, mt=mt_number,
+                        )
+                        if merge_original_mf34:
+                            mf34_mg_obj = _maybe_merge(mf34_mg_obj, multigroup_result.group_boundaries_ev)
+                        write_mf34_to_file(sampling_file, mf34_mg_obj, sampling_file)
+                        mf34_sample_source = sampling_file
+                        _logger.info(f"  Multigroup MF34 ({'merged' if merge_original_mf34 else 'pipeline-only'}) for sampling: {sampling_file}")
+
+                if mf34_sample_source:
+                    _logger.info(f"  Step 11 MF34 source: {mf34_sample_source}")
+                else:
+                    _logger.warning(
+                        f"  Could not resolve MF34 for ({sr}, merge={merge_original_mf34}) — "
+                        f"multigroup_result={'available' if multigroup_result is not None else 'None'}",
+                        console=True,
+                    )
+
         except Exception as e:
             _logger.error(f"Failed to write MF34: {str(e)}", console=True)
+            mf34_sample_source = None
+
+    else:
+        mf34_sample_source = None
+
+    # Step 11: Generate perturbed ENDF samples from MF34 covariance (Pipeline B)
+    if generate_samples_from_mf34:
+        _logger.info("")
+        _logger.info("[STEP 11] Generating perturbed ENDF samples from MF34 (Pipeline B)")
+        _logger.info(f"  Resolution: {sampling_resolution}, Merge original: {merge_original_mf34}")
+        _logger.info(f"  Space: {sampling_space}, Decomposition: {sampling_decomposition}")
+        _logger.info(f"  Sampling method: {sampling_method}, N={n_samples}")
+
+        if mf34_sample_source and os.path.exists(mf34_sample_source):
+            _logger.info(f"  MF34 source file: {mf34_sample_source}")
+            try:
+                perturb_ENDF_files(
+                    endf_files=nominal_file,
+                    mt_list=[mt_number],
+                    legendre_coeffs=list(range(1, max_degree + 1)),
+                    num_samples=n_samples,
+                    mf34_cov_files=mf34_sample_source,
+                    space=sampling_space,
+                    decomposition_method=sampling_decomposition,
+                    sampling_method=sampling_method,
+                    output_dir=str(output_path),
+                    seed=base_seed,
+                    nprocs=n_procs,
+                    generate_ace=generate_ace,
+                    njoy_exe=ace_njoy_exe if generate_ace else None,
+                    temperatures=ace_temperatures if generate_ace else None,
+                    library_name=ace_library_name if generate_ace else None,
+                    njoy_version=ace_njoy_version,
+                    xsdir_file=ace_xsdir_file if generate_ace else None,
+                )
+                _logger.info(f"  Pipeline B samples written to: {output_path / 'endf'}")
+            except Exception as e:
+                _logger.error(f"  Pipeline B sampling failed: {str(e)}", console=True)
+                _logger.error(f"  Traceback:\n{traceback.format_exc()}")
+        else:
+            _logger.warning(
+                f"  MF34 source for ({sampling_resolution}, merge={merge_original_mf34}) "
+                f"not available — skipping Step 11",
+                console=True,
+            )
 
     # Summary
     total_time = time.time() - t_exfor_start
@@ -2422,8 +3366,7 @@ if __name__ == "__main__":
         generate_nominal_endf=GENERATE_NOMINAL_ENDF,
         generate_mc_mean_endf=GENERATE_MC_MEAN_ENDF,
         generate_samples_endf=GENERATE_SAMPLES_ENDF,
-        generate_covariance=GENERATE_COVARIANCE,
-        generate_mf34=GENERATE_MF34,
+        save_covariance_files=SAVE_COVARIANCE_FILES,
         # Multigroup covariance options
         generate_multigroup_covariance=GENERATE_MULTIGROUP_COVARIANCE,
         multigroup_rho_min=MULTIGROUP_RHO_MIN,
@@ -2431,6 +3374,7 @@ if __name__ == "__main__":
         multigroup_min_width_factor=MULTIGROUP_MIN_WIDTH_FACTOR,
         multigroup_variance_percentile=MULTIGROUP_VARIANCE_PERCENTILE,
         mf34_covariance_type=MF34_COVARIANCE_TYPE,
+        use_original_mf34_grid=USE_ORIGINAL_MF34_GRID,
         # Database configuration
         exfor_db_path=EXFOR_DB_PATH,
         exfor_source=EXFOR_SOURCE,
@@ -2447,4 +3391,20 @@ if __name__ == "__main__":
         positivity_check_points=POSITIVITY_CHECK_POINTS,
         # File output options
         save_correlation_matrices=SAVE_CORRELATION_MATRICES,
+        # ACE generation options
+        generate_ace=GENERATE_ACE,
+        ace_temperatures=ACE_TEMPERATURES,
+        ace_njoy_exe=ACE_NJOY_EXE,
+        ace_library_name=ACE_LIBRARY_NAME,
+        ace_njoy_version=ACE_NJOY_VERSION,
+        ace_xsdir_file=ACE_XSDIR_FILE,
+        ace_skip_existing=ACE_SKIP_EXISTING,
+        mf34_source_file=MF34_SOURCE_FILE,
+        # Unified MF34 sampling (Pipeline B)
+        generate_samples_from_mf34=GENERATE_SAMPLES_FROM_MF34,
+        sampling_resolution=SAMPLING_RESOLUTION,
+        merge_original_mf34=MERGE_ORIGINAL_MF34,
+        sampling_space=SAMPLING_SPACE,
+        sampling_decomposition=SAMPLING_DECOMPOSITION,
+        sampling_method=SAMPLING_METHOD,
     )
