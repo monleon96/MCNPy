@@ -47,6 +47,7 @@ from kika.exfor.angular_distribution import ExforAngularDistribution
 from .resample_AD import (
     load_exfor_for_fitting,
     endf_normalize_legendre_coeffs,
+    sample_legendre_coefficients,
     compute_energy_resolution_tof,
     compute_n_eff,
     compute_weight_span_95,
@@ -259,70 +260,6 @@ class KernelDiagnostics:
     capping_applied: bool                           # Whether experiment capping was applied
 
 
-@dataclass
-class DatasetEnergyInfo:
-    """
-    Information about a dataset (experiment at one energy) for energy jitter MC.
-
-    Used in Improvement 1.4 (cross-bin correlation via energy jitter) to track
-    which datasets contribute to which energy bins and their energy resolution.
-
-    Attributes
-    ----------
-    entry : str
-        EXFOR entry number
-    subentry : str
-        EXFOR subentry number
-    nominal_energy_mev : float
-        Original EXFOR measurement energy in MeV
-    sigma_E_mev : float
-        Energy resolution at this energy (from TOF parameters)
-    nominal_bin_index : int
-        Index of the bin containing the nominal energy
-    exfor_df_indices : List[int]
-        Row indices in the combined exfor_df for this dataset
-    tof_source : str
-        Source of TOF parameters: "file" or "default"
-    n_points : int
-        Number of angular data points for this dataset
-    """
-    entry: str
-    subentry: str
-    nominal_energy_mev: float
-    sigma_E_mev: float
-    nominal_bin_index: int
-    exfor_df_indices: List[int]
-    tof_source: str
-    n_points: int = 0
-
-
-@dataclass
-class BinJumpDiagnostics:
-    """
-    Diagnostics for energy jitter bin jumping behavior.
-
-    Tracks how often datasets jump between bins during MC sampling,
-    which indicates the strength of cross-bin energy correlations.
-
-    Interpretation:
-    - Jump rate >30%: Grid finer than σE, strong energy correlations
-    - Jump rate 10-30%: Grid comparable to σE, moderate correlations
-    - Jump rate <10%: Grid coarser than σE, weak correlations
-    """
-    total_assignments: int              # Total dataset-to-bin assignments across all samples
-    jumped_bins: int                    # Number of assignments where dataset jumped from nominal bin
-    jump_rate: float                    # jumped_bins / total_assignments
-    jump_counts: Dict[Tuple[int, int], int]  # {(from_bin, to_bin): count}
-    datasets_outside_range: int         # Datasets that fell outside all bins (clipped or dropped)
-    interpolated_bins: int = 0          # Empty bins filled by neighbor interpolation (summed over all samples)
-    nominal_fallback_bins: int = 0      # Empty bins where interpolation failed, fell back to nominal (summed over all samples)
-
-    def top_jumps(self, n: int = 5) -> List[Tuple[Tuple[int, int], int]]:
-        """Get the n most common bin jumps."""
-        sorted_jumps = sorted(self.jump_counts.items(), key=lambda x: x[1], reverse=True)
-        return sorted_jumps[:n]
-
-
 # =============================================================================
 # RESOLUTION OVERLAP WEIGHTING
 # =============================================================================
@@ -494,7 +431,7 @@ def build_exfor_cache_from_objects(
     Build an EXFOR data cache from ExforAngularDistribution objects.
 
     This function converts a list of ExforAngularDistribution objects into the
-    cache format expected by filter_exfor_with_kernel_weights. For each object,
+    cache format expected by filter_exfor_with_energy_bin. For each object,
     it uses to_dataframe() to extract data at each available energy.
 
     Parameters
@@ -515,7 +452,7 @@ def build_exfor_cache_from_objects(
 
     Notes
     -----
-    The returned DataFrame has columns compatible with filter_exfor_with_kernel_weights:
+    The returned DataFrame has columns compatible with filter_exfor_with_energy_bin:
         - 'angle': Angle in degrees
         - 'dsig': Differential cross section in b/sr
         - 'error_stat': Statistical uncertainty in b/sr
@@ -682,342 +619,6 @@ def _is_experiment_excluded(
             return True
 
     return False
-
-
-def filter_exfor_with_kernel_weights(
-    exfor_cache: Dict[float, List[Tuple[pd.DataFrame, Dict]]],
-    sorted_energies: List[float],
-    energy_mev: float,
-    sigma_E_mev: float,
-    n_sigma: float,
-    m_proj_u: float,
-    m_targ_u: float,
-    bin_lower_mev: float = 0.0,
-    bin_upper_mev: float = float('inf'),
-    min_kernel_weight_fraction: float = 1e-3,
-    max_experiment_weight_fraction: float = 0.5,
-    default_delta_t_ns: float = 5.0,
-    default_flight_path_m: float = 27.037,
-    use_overlap_weights: bool = True,
-    normalize_by_n_points: bool = True,
-    dedupe_per_experiment: bool = True,
-    exclude_experiments: Optional[List[str]] = None,
-    min_relative_uncertainty: float = 0.0,
-    logger = None,
-) -> Tuple[pd.DataFrame, List[Dict], np.ndarray, KernelDiagnostics]:
-    """
-    Filter EXFOR data using resolution-aware kernel weighting with diagnostics.
-
-    Two weighting modes are available:
-
-    1. Overlap weights (use_overlap_weights=True, recommended):
-       w = Φ((E_high - E_j)/σ_j) - Φ((E_low - E_j)/σ_j)
-       Computes probability that the true energy lies within the bin.
-
-    2. Gaussian kernel (use_overlap_weights=False, legacy):
-       g_ij = exp(-0.5 * ((E_i - E_j)/σE_j)²)
-       Distance-based weighting.
-
-    Per-energy normalization (normalize_by_n_points=True):
-       Divides weight by number of angular points at each energy
-       to prevent experiments with many angles from dominating.
-
-    Per-experiment deduplication (dedupe_per_experiment=True):
-       If an experiment has multiple energies within the kernel range,
-       only the energy with the highest kernel weight is selected.
-       This prevents experiments with dense energy sampling from dominating.
-
-    Parameters
-    ----------
-    exfor_cache : Dict[float, List[Tuple[pd.DataFrame, Dict]]]
-        Pre-loaded EXFOR data organized by energy
-    sorted_energies : List[float]
-        Sorted list of available energies in cache
-    energy_mev : float
-        Target ENDF grid energy in MeV
-    sigma_E_mev : float
-        Default energy resolution at target energy in MeV (fallback)
-    n_sigma : float
-        Cutoff in units of σE (typically 3.0)
-    m_proj_u : float
-        Projectile mass in atomic mass units
-    m_targ_u : float
-        Target mass in atomic mass units
-    bin_lower_mev : float
-        Lower boundary of ENDF bin in MeV (for overlap weights)
-    bin_upper_mev : float
-        Upper boundary of ENDF bin in MeV (for overlap weights)
-    min_kernel_weight_fraction : float
-        Minimum kernel weight as fraction of max (default: 1e-3)
-    max_experiment_weight_fraction : float
-        Maximum allowed weight fraction per experiment (default: 0.5)
-    default_delta_t_ns : float
-        Default time resolution in nanoseconds for fallback (default: 10.0)
-    default_flight_path_m : float
-        Default flight path in meters for fallback (default: 27.037)
-    use_overlap_weights : bool
-        If True, use resolution overlap weighting (recommended).
-        If False, use legacy Gaussian kernel weighting.
-    normalize_by_n_points : bool
-        If True, divide weight by number of angular points at each energy.
-        This prevents experiments with dense angular sampling from dominating.
-    dedupe_per_experiment : bool
-        If True (default), select only the highest-weighted energy for each
-        experiment. This prevents experiments with many energies in range from
-        dominating the fit.
-    exclude_experiments : List[str], optional
-        List of experiments to exclude from filtering. Accepts multiple formats:
-        - "20743" - excludes all subentries starting with 20743
-        - "20743002" - excludes specific dataset
-        - "20743/002" - same as above
-    min_relative_uncertainty : float, optional
-        Minimum relative uncertainty as a fraction (default: 0.0 = disabled).
-        For example, 0.03 means 3% minimum uncertainty. This prevents experiments
-        with unrealistically small uncertainties from dominating the fit.
-    logger : logging.Logger, optional
-        Logger for reporting fallback usage
-
-    Returns
-    -------
-    Tuple[pd.DataFrame, List[Dict], np.ndarray, KernelDiagnostics]
-        - DataFrame with EXFOR data including 'kernel_weight' column
-        - List of experiment metadata dicts (includes 'selected_from_n_energies')
-        - Array of kernel weights for each data point
-        - KernelDiagnostics object with N_eff, weight span, etc.
-    """
-    # Empty diagnostics for early returns
-    empty_diag = KernelDiagnostics(
-        n_eff=0.0, weight_span_95=0.0, weight_span_ratio=0.0,
-        n_experiments=0, max_experiment_weight_frac=0.0,
-        experiment_weights={}, n_points_dropped=0, capping_applied=False
-    )
-
-    if not exfor_cache or not sorted_energies:
-        return pd.DataFrame(), [], np.array([]), empty_diag
-
-    # Parse exclusion patterns
-    exclusion_patterns = _parse_exclusion_list(exclude_experiments)
-
-    all_frames = []
-    experiments_info = []
-    all_kernel_weights = []
-
-    # Track experiments that used fallback (log once per experiment, not per energy)
-    fallback_logged = set()
-
-    # Step 1: Collect all candidate data with computed kernel weights, grouped by experiment
-    # experiment_candidates: {(entry, subentry): [(energy, df, meta, kernel_weight, exp_sigma_E, used_fallback), ...]}
-    experiment_candidates: Dict[Tuple[str, str], List[Tuple[float, pd.DataFrame, Dict, float, float, bool]]] = defaultdict(list)
-
-    for available_energy in sorted_energies:
-        entries = exfor_cache.get(available_energy, [])
-        for df, meta in entries:
-            # Extract metadata
-            entry = meta.get('entry', 'unknown')
-            subentry = meta.get('subentry', 'unknown')
-
-            # Check if experiment is excluded
-            if _is_experiment_excluded(entry, subentry, exclusion_patterns):
-                continue
-
-            # Get experiment-specific TOF parameters for energy resolution
-            energy_res = meta.get('energy_resolution_inputs')
-
-            if (energy_res and
-                energy_res.get('flight_path_m') is not None and
-                energy_res.get('time_resolution_ns') is not None):
-                # Compute experiment-specific sigma_E at the MEASUREMENT energy
-                # This is important: use available_energy, not energy_mev
-                exp_sigma_E = compute_energy_resolution_tof(
-                    E_mev=available_energy,  # Use measurement energy
-                    delta_t_ns=energy_res['time_resolution_ns'],
-                    flight_path_m=energy_res['flight_path_m'],
-                )
-                used_fallback = False
-            else:
-                # Fallback to default parameters at measurement energy
-                exp_sigma_E = compute_energy_resolution_tof(
-                    E_mev=available_energy,  # Use measurement energy
-                    delta_t_ns=default_delta_t_ns,
-                    flight_path_m=default_flight_path_m,
-                )
-                used_fallback = True
-
-            # Compute weight based on method
-            if use_overlap_weights:
-                # Resolution overlap: probability that true energy is in bin
-                kernel_weight = compute_overlap_weight(
-                    exp_energy_mev=available_energy,
-                    sigma_E_mev=exp_sigma_E,
-                    bin_lower_mev=bin_lower_mev,
-                    bin_upper_mev=bin_upper_mev,
-                )
-                # Skip if weight is negligible
-                if kernel_weight < min_kernel_weight_fraction:
-                    continue
-            else:
-                # Legacy Gaussian kernel weighting
-                # Check cutoff using THIS experiment's sigma_E
-                exp_cutoff = n_sigma * exp_sigma_E
-                if available_energy < (energy_mev - exp_cutoff) or available_energy > (energy_mev + exp_cutoff):
-                    continue
-                # Compute Gaussian kernel weight
-                delta_E = abs(available_energy - energy_mev)
-                kernel_weight = np.exp(-0.5 * (delta_E / exp_sigma_E)**2)
-
-            exp_key = (entry, subentry)
-            experiment_candidates[exp_key].append((available_energy, df, meta, kernel_weight, exp_sigma_E, used_fallback))
-
-    # Step 2: For each experiment, select highest-weighted energy (or all if dedupe disabled)
-    selected_data: List[Tuple[float, pd.DataFrame, Dict, float, float, bool]] = []
-
-    for exp_key, candidates in experiment_candidates.items():
-        if dedupe_per_experiment and len(candidates) > 1:
-            # Select the energy with highest kernel weight
-            best = max(candidates, key=lambda x: x[3])  # x[3] = kernel_weight
-            selected_data.append(best)
-        else:
-            selected_data.extend(candidates)
-
-    # Step 3: Process selected data (transform and build DataFrames)
-    for available_energy, df, meta, kernel_weight, exp_sigma_E, used_fallback in selected_data:
-        # Extract metadata
-        entry = meta.get('entry', 'unknown')
-        subentry = meta.get('subentry', 'unknown')
-        frame = meta.get('angle_frame', 'CM').upper()
-        reaction = meta.get('reaction', '')
-
-        # Log fallback only once per experiment (subentry)
-        if used_fallback and logger and subentry not in fallback_logged:
-            logger.info(f"  Using default TOF params for {subentry} "
-                       f"(delta_t={default_delta_t_ns}ns, L={default_flight_path_m}m)")
-            fallback_logged.add(subentry)
-
-        citation = meta.get('citation', {})
-        authors = citation.get('authors', [])
-        author = authors[0] if authors else 'unknown'
-        year = citation.get('year', 'unknown')
-
-        # Extract columns
-        angles_deg = df['angle'].to_numpy(dtype=float)
-        dsig = df['dsig'].to_numpy(dtype=float)
-        error_stat = df['error_stat'].to_numpy(dtype=float)
-
-        n_points = len(angles_deg)
-
-        # Count how many energies this experiment had in range
-        n_energies_in_range = len(experiment_candidates[(entry, subentry)])
-
-        # Per-energy normalization (Upgrade 2)
-        # Divide weight by number of angular points to prevent
-        # experiments with dense angular sampling from dominating
-        if normalize_by_n_points and n_points > 0:
-            point_weight = kernel_weight / n_points
-        else:
-            point_weight = kernel_weight
-
-        # Transform to CM frame if needed
-        if frame == 'LAB':
-            mu_lab = np.cos(np.deg2rad(angles_deg))
-            mu_cm, dsig_cm, error_cm = transform_lab_to_cm(
-                mu_lab, dsig, error_stat, m_proj_u, m_targ_u
-            )
-
-            angles_cm_deg = np.rad2deg(np.arccos(mu_cm))
-
-            transformed_df = pd.DataFrame({
-                'theta_deg': angles_cm_deg,
-                'value': dsig_cm,
-                'unc': error_cm,
-                'mu': mu_cm,
-                'frame': 'CM',
-                'entry': entry,
-                'subentry': subentry,
-                'author': author,
-                'year': year,
-                'reaction': reaction,
-                'exfor_energy_mev': available_energy,
-                'kernel_weight': point_weight,  # Use normalized point weight
-            })
-        else:
-            mu_cm = np.cos(np.deg2rad(angles_deg))
-
-            transformed_df = pd.DataFrame({
-                'theta_deg': angles_deg,
-                'value': dsig,
-                'unc': error_stat,
-                'mu': mu_cm,
-                'frame': frame,
-                'entry': entry,
-                'subentry': subentry,
-                'author': author,
-                'year': year,
-                'reaction': reaction,
-                'exfor_energy_mev': available_energy,
-                'kernel_weight': point_weight,  # Use normalized point weight
-            })
-
-        all_frames.append(transformed_df)
-        all_kernel_weights.extend([point_weight] * n_points)
-
-        # Track experiment info (store original kernel_weight for diagnostics)
-        exp_info = {
-            'entry': entry,
-            'subentry': subentry,
-            'author': author,
-            'year': year,
-            'exfor_energy_mev': available_energy,
-            'kernel_weight': kernel_weight,  # Original weight before normalization
-            'point_weight': point_weight,    # Weight after per-energy normalization
-            'n_points': n_points,
-            'sigma_E_mev': exp_sigma_E,
-            'used_fallback_tof': used_fallback,
-            'selected_from_n_energies': n_energies_in_range,  # NEW: track deduplication
-        }
-        experiments_info.append(exp_info)
-
-    if not all_frames:
-        return pd.DataFrame(), [], np.array([]), empty_diag
-
-    # Concatenate all experiments
-    result = pd.concat(all_frames, ignore_index=True)
-    kernel_weights = np.array(all_kernel_weights)
-
-    # Apply uncertainty floor if requested
-    if min_relative_uncertainty > 0:
-        result = apply_uncertainty_floor(result, min_relative_uncertainty, unc_column='unc', value_column='value')
-
-    # Apply minimum weight threshold
-    kernel_weights, n_dropped = apply_min_weight_threshold(
-        kernel_weights, min_kernel_weight_fraction
-    )
-
-    # Apply per-experiment weight capping
-    kernel_weights, exp_weight_fracs, capping_applied = apply_per_experiment_weight_cap(
-        result, kernel_weights, max_experiment_weight_fraction
-    )
-
-    # Update kernel_weight column in DataFrame
-    result['kernel_weight'] = kernel_weights
-
-    # Compute diagnostics
-    exfor_energies = result['exfor_energy_mev'].values
-    weight_span_95 = compute_weight_span_95(kernel_weights, exfor_energies, energy_mev)
-    n_eff_prelim = compute_n_eff(kernel_weights, np.ones_like(kernel_weights))
-    max_exp_frac = max(exp_weight_fracs.values()) if exp_weight_fracs else 0.0
-
-    diagnostics = KernelDiagnostics(
-        n_eff=n_eff_prelim,
-        weight_span_95=weight_span_95,
-        weight_span_ratio=weight_span_95 / sigma_E_mev if sigma_E_mev > 0 else 0.0,
-        n_experiments=len(set(exp_weight_fracs.keys())) if exp_weight_fracs else len(experiments_info),
-        max_experiment_weight_frac=max_exp_frac,
-        experiment_weights=exp_weight_fracs,
-        n_points_dropped=n_dropped,
-        capping_applied=capping_applied,
-    )
-
-    return result, experiments_info, kernel_weights, diagnostics
 
 
 def filter_exfor_with_energy_bin(
@@ -1520,756 +1121,379 @@ def load_exfor_with_asymmetric_tolerance(
 
 
 # =============================================================================
-# ENERGY JITTER MC (Improvement 1.4)
+# KERNEL-WEIGHT MC FOR CROSS-ENERGY CORRELATIONS
 # =============================================================================
 
-def precompute_dataset_energy_info(
+def precompute_overlap_weights(
     nominal_results: List,  # List[NominalFitResult]
-    tof_params_cache: Dict[str, Dict],
     energy_bins: List[EnergyBinInfo],
-    default_flight_path_m: float = 27.037,
-    default_time_resolution_ns: float = 5.0,
-) -> Dict[int, List[DatasetEnergyInfo]]:
-    """
-    Precompute σE for all datasets across all bins.
+    min_weight: float = 1e-3,
+) -> Dict[int, List[Tuple[Dict, float]]]:
+    """Compute overlap weights from ALL datasets across all bins.
 
-    This function prepares dataset information needed for the energy jitter MC:
-    - Extracts all datasets from nominal fit results
-    - Computes σE for each dataset using experiment-specific TOF parameters
-    - Maps datasets to their nominal (unperturbed) energy bins
+    For each bin, collects all datasets from all nominal results and computes
+    their CDF-based overlap weight to that bin using compute_overlap_weight().
 
     Parameters
     ----------
-    nominal_results : List[NominalFitResult]
-        Nominal fit results from Phase 1
-    tof_params_cache : Dict[str, Dict]
-        Pre-loaded TOF parameters from load_tof_parameters_file()
+    nominal_results : list
+        Nominal fit results (NominalFitResult objects).
     energy_bins : List[EnergyBinInfo]
-        List of energy bin info objects
-    default_flight_path_m : float
-        Default flight path in meters for fallback
-    default_time_resolution_ns : float
-        Default time resolution in nanoseconds for fallback
+        Energy bin definitions with boundaries and sigma_E.
+    min_weight : float
+        Minimum overlap weight to keep (default 1e-3).
 
     Returns
     -------
-    Dict[int, List[DatasetEnergyInfo]]
-        Dictionary mapping bin index to list of DatasetEnergyInfo for datasets
-        whose nominal energy falls in that bin
+    Dict[int, List[Tuple[Dict, float]]]
+        bin_index -> [(dataset_dict, weight), ...] where dataset_dict has keys:
+        'entry', 'subentry', 'exfor_energy_mev', 'exfor_df', 'n_points',
+        'experiment_id'.
     """
-    from .tof_parameters import get_tof_parameters, compute_sigma_E, find_bin_for_energy
-
-    dataset_info_by_bin: Dict[int, List[DatasetEnergyInfo]] = {
-        bin_info.index: [] for bin_info in energy_bins
-    }
-
+    # Collect all unique datasets across all bins
+    all_datasets = []
+    seen = set()
     for nr in nominal_results:
         if not nr.has_data or nr.interpolated:
             continue
-
-        # Each experiment_info entry represents one dataset (experiment at one energy)
         for exp_info in nr.experiments_info:
             entry = exp_info.get('entry', 'unknown')
             subentry = exp_info.get('subentry', 'unknown')
             exfor_energy = exp_info.get('exfor_energy_mev', nr.energy_mev)
-            n_points = exp_info.get('n_points', 0)
+            key = (entry, subentry, f"{exfor_energy:.6f}")
+            if key in seen:
+                continue
+            seen.add(key)
 
-            # Get TOF parameters for this experiment
-            tof_params = get_tof_parameters(
-                subentry=f"{entry}{subentry}",  # Combined identifier
-                tof_params_cache=tof_params_cache,
-                default_flight_path_m=default_flight_path_m,
-                default_time_resolution_ns=default_time_resolution_ns,
-            )
-
-            # Compute σE at this dataset's energy
-            sigma_E = compute_sigma_E(exfor_energy, tof_params)
-
-            # Find nominal bin (the bin containing this dataset's energy)
-            nominal_bin_idx = find_bin_for_energy(exfor_energy, energy_bins)
-            if nominal_bin_idx is None:
-                # Dataset energy outside all bins - skip
+            # Extract EXFOR data for this dataset from the bin's DataFrame
+            # The dataset's angular data is in nr.exfor_df filtered by experiment
+            df = nr.exfor_df
+            if df is None or df.empty:
                 continue
 
-            # Create dataset info
-            dataset_info = DatasetEnergyInfo(
-                entry=entry,
-                subentry=subentry,
-                nominal_energy_mev=exfor_energy,
-                sigma_E_mev=sigma_E,
-                nominal_bin_index=nominal_bin_idx,
-                exfor_df_indices=[],  # Populated if needed for building combined DataFrames
-                tof_source=tof_params.source,
-                n_points=n_points,
+            # Filter to this experiment's data
+            mask = pd.Series([False] * len(df), index=df.index)
+            if 'entry' in df.columns and 'subentry' in df.columns:
+                mask = (df['entry'].astype(str) == str(entry)) & (df['subentry'].astype(str) == str(subentry))
+            elif 'experiment_id' in df.columns:
+                exp_id = f"{entry}.{subentry}"
+                mask = df['experiment_id'] == exp_id
+
+            dataset_df = df[mask]
+            if dataset_df.empty:
+                # Try matching by energy proximity
+                if 'exfor_energy_mev' in df.columns:
+                    mask = np.abs(df['exfor_energy_mev'] - exfor_energy) < 1e-6
+                    dataset_df = df[mask]
+                if dataset_df.empty:
+                    continue
+
+            all_datasets.append({
+                'entry': entry,
+                'subentry': subentry,
+                'exfor_energy_mev': exfor_energy,
+                'exfor_df': dataset_df.copy(),
+                'n_points': len(dataset_df),
+                'experiment_id': f"{entry}.{subentry}",
+            })
+
+    # For each bin, compute overlap weight to every dataset
+    overlap_weights: Dict[int, List[Tuple[Dict, float]]] = {}
+    for bin_info in energy_bins:
+        bin_datasets = []
+        for ds in all_datasets:
+            w = compute_overlap_weight(
+                exp_energy_mev=ds['exfor_energy_mev'],
+                sigma_E_mev=bin_info.sigma_E_mev,
+                bin_lower_mev=bin_info.bin_lower_mev,
+                bin_upper_mev=bin_info.bin_upper_mev,
             )
+            if w >= min_weight:
+                bin_datasets.append((ds, w))
+        overlap_weights[bin_info.index] = bin_datasets
 
-            dataset_info_by_bin[nominal_bin_idx].append(dataset_info)
-
-    return dataset_info_by_bin
+    return overlap_weights
 
 
-def get_all_datasets_flat(
-    dataset_info_by_bin: Dict[int, List[DatasetEnergyInfo]],
-) -> List[DatasetEnergyInfo]:
+def _run_one_kw_sample(args_tuple):
+    """Single kernel-weighted multi-bin MC sample (top-level for Pool.map).
+
+    1. Draw shared normalization factor per experiment (once per sample)
+    2. Perturb all datasets (apply norm + pointwise noise)
+    3. For each bin: collect datasets with overlap weight, build weighted DataFrame
+    4. Fit Legendre coefficients
+    5. Return coefficients for all bins
+
+    The SAME perturbed dataset is used for ALL bins it contributes to,
+    creating cross-bin correlations.
     """
-    Flatten dataset info from bin-grouped dict to single list.
-
-    Parameters
-    ----------
-    dataset_info_by_bin : Dict[int, List[DatasetEnergyInfo]]
-        Datasets grouped by nominal bin
-
-    Returns
-    -------
-    List[DatasetEnergyInfo]
-        All datasets as a flat list
-    """
-    all_datasets = []
-    for datasets in dataset_info_by_bin.values():
-        all_datasets.extend(datasets)
-    return all_datasets
-
-
-def _interpolate_from_neighbors(
-    fitted_bins: Dict[int, np.ndarray],
-    energy_bins: list,
-    target_idx: int,
-    max_degree: int,
-) -> Optional[np.ndarray]:
-    """
-    Interpolate Legendre coefficients for an empty bin from same-sample
-    fitted neighbors using linear interpolation in energy space.
-
-    Parameters
-    ----------
-    fitted_bins : dict
-        Mapping bin_index -> fitted coefficient array for bins that
-        were successfully fit in this MC sample.
-    energy_bins : list of EnergyBinInfo
-        All energy bins (sorted by energy).
-    target_idx : int
-        The bin index to interpolate.
-    max_degree : int
-        Maximum Legendre degree; output is zero-padded to this length.
-
-    Returns
-    -------
-    np.ndarray or None
-        Interpolated coefficients of length *max_degree*, or None if no
-        fitted neighbors exist at all.
-    """
-    # Build an energy lookup for the target bin
-    idx_to_energy = {b.index: b.energy_mev for b in energy_bins}
-    target_energy = idx_to_energy[target_idx]
-
-    # Sorted fitted indices by energy
-    sorted_fitted = sorted(fitted_bins.keys(), key=lambda i: idx_to_energy[i])
-
-    if not sorted_fitted:
-        return None
-
-    # Find nearest lower and upper fitted bins
-    lower_idx = None
-    upper_idx = None
-    for idx in sorted_fitted:
-        if idx_to_energy[idx] < target_energy:
-            lower_idx = idx
-        elif idx_to_energy[idx] > target_energy:
-            upper_idx = idx
-            break
-
-    def _pad(arr: np.ndarray) -> np.ndarray:
-        out = np.zeros(max_degree, dtype=float)
-        n = min(len(arr), max_degree)
-        out[:n] = arr[:n]
-        return out
-
-    if lower_idx is not None and upper_idx is not None:
-        # Linear interpolation
-        e_lo = idx_to_energy[lower_idx]
-        e_hi = idx_to_energy[upper_idx]
-        t = (target_energy - e_lo) / (e_hi - e_lo)
-        c_lo = _pad(fitted_bins[lower_idx])
-        c_hi = _pad(fitted_bins[upper_idx])
-        return (1.0 - t) * c_lo + t * c_hi
-
-    if lower_idx is not None:
-        # Nearest-neighbor extrapolation (upper edge)
-        return _pad(fitted_bins[lower_idx])
-
-    if upper_idx is not None:
-        # Nearest-neighbor extrapolation (lower edge)
-        return _pad(fitted_bins[upper_idx])
-
-    return None
-
-
-def _run_one_jitter_sample(args):
-    """
-    Run a single MC sample with energy jitter (top-level for pickling).
-
-    Parameters
-    ----------
-    args : tuple
-        All inputs packed for Pool.map compatibility.
-
-    Returns
-    -------
-    tuple
-        (s_idx, sample_coeffs, local_jump_stats)
-    """
-    from .tof_parameters import find_bin_for_energy
-    from .resample_AD import (
-        sample_legendre_coefficients,
-        check_angular_distribution_positivity,
-        project_to_positive_distribution,
-    )
-
     (
         s_idx,
-        all_datasets,
-        energy_bins,
-        nominal_by_idx,
-        dataset_exfor_lookup,
-        base_seed,
+        overlap_weights,
+        energy_bins_data,
+        sigma_norm,
+        norm_dist,
         max_degree,
         ridge_lambda,
-        m_proj_u,
-        m_targ_u,
+        base_seed,
         use_band_discrepancy,
         min_points_per_band,
         max_tau_fraction,
-        jitter_n_sigma_clip,
-        track_bin_jumps,
-        min_relative_uncertainty,
         freeze_c0,
-        sigma_norm,
-        norm_dist,
-        normalize_by_n_points,
-        max_experiment_weight_fraction,
-        _apply_positivity_projection,
-        _positivity_check_points,
-        _stochastic_flag,
-    ) = args
+        max_sample_order,
+        apply_positivity_projection,
+        positivity_check_points,
+        nominal_coeffs_by_bin,
+        frozen_degrees_by_bin,
+    ) = args_tuple
 
-    rng = np.random.default_rng(base_seed + s_idx * 1000)
+    rng = np.random.default_rng(base_seed + s_idx)
 
-    # Step 1: Jitter all dataset energies and assign to bins
-    bin_assignments: Dict[int, List[Tuple[DatasetEnergyInfo, float]]] = {
-        bin_info.index: [] for bin_info in energy_bins
-    }
+    # Step 1: Draw shared normalization factors per experiment
+    experiment_norms = {}
+    for bin_idx, datasets_and_weights in overlap_weights.items():
+        for ds, w in datasets_and_weights:
+            exp_id = ds['experiment_id']
+            if exp_id not in experiment_norms:
+                if norm_dist == "lognormal" and sigma_norm > 0:
+                    experiment_norms[exp_id] = rng.lognormal(
+                        mean=-0.5 * sigma_norm**2, sigma=sigma_norm
+                    )
+                elif sigma_norm > 0:
+                    experiment_norms[exp_id] = rng.normal(1.0, sigma_norm)
+                else:
+                    experiment_norms[exp_id] = 1.0
 
-    local_total_assignments = 0
-    local_jumped_bins = 0
-    local_jump_counts: Dict[Tuple[int, int], int] = defaultdict(int)
-    local_datasets_outside_range = 0
-
-    for dataset in all_datasets:
-        z = np.clip(
-            rng.normal(0, 1),
-            -jitter_n_sigma_clip,
-            jitter_n_sigma_clip
-        )
-        E_star = dataset.nominal_energy_mev + z * dataset.sigma_E_mev
-        target_bin = find_bin_for_energy(E_star, energy_bins)
-
-        if target_bin is None:
-            local_datasets_outside_range += 1
-            continue
-
-        local_total_assignments += 1
-
-        if track_bin_jumps and target_bin != dataset.nominal_bin_index:
-            local_jumped_bins += 1
-            jump_key = (dataset.nominal_bin_index, target_bin)
-            local_jump_counts[jump_key] += 1
-
-        bin_assignments[target_bin].append((dataset, E_star))
-
-    # Step 1a: Draw shared normalization factor per experiment
-    # Placed after jitter loop to preserve RNG sequence when sigma_norm=0
-    experiment_norm_factors = {}
-    if sigma_norm > 0:
-        unique_exps = set((ds.entry, ds.subentry) for ds in all_datasets)
-        for exp_key in unique_exps:
-            if norm_dist == "lognormal":
-                experiment_norm_factors[exp_key] = rng.lognormal(0.0, sigma_norm)
-            else:
-                experiment_norm_factors[exp_key] = 1.0 + rng.normal(0.0, sigma_norm)
-
-    # Step 1b: Compute per-bin experiment point counts for weighting
-    bin_exp_n_points: Dict[int, Dict[Tuple[str, str], int]] = {
-        bin_info.index: {} for bin_info in energy_bins
-    }
-    if normalize_by_n_points:
-        for bin_idx, assigned in bin_assignments.items():
-            for dataset, E_star in assigned:
-                exp_key = (dataset.entry, dataset.subentry)
-                current = bin_exp_n_points[bin_idx].get(exp_key, 0)
-                bin_exp_n_points[bin_idx][exp_key] = current + dataset.n_points
-
-    # Step 2: Two-pass fitting
-    #   Pass 1 – fit bins that have sufficient data
-    #   Pass 2 – interpolate empty/failed bins from same-sample neighbors
-
-    sample_coeffs: Dict[int, np.ndarray] = {}
-    fitted_bins: Dict[int, np.ndarray] = {}   # bins successfully fitted
-    empty_bins: List[int] = []                 # bins that need interpolation
-
-    # --- Pass 1: attempt to fit every bin ---
-    for bin_info in energy_bins:
-        assigned = bin_assignments[bin_info.index]
-
-        if not assigned:
-            empty_bins.append(bin_info.index)
-            continue
-
-        # Build combined DataFrame from assigned datasets
-        frames = []
-        for dataset, E_star in assigned:
-            key = (dataset.entry, dataset.subentry, dataset.nominal_energy_mev)
-            if key not in dataset_exfor_lookup:
+    # Step 2: Perturb all datasets (shared across bins)
+    perturbed_datasets = {}
+    for bin_idx, datasets_and_weights in overlap_weights.items():
+        for ds, w in datasets_and_weights:
+            exp_id = ds['experiment_id']
+            e_key = f"{exp_id}_{ds['exfor_energy_mev']:.6f}"
+            if e_key in perturbed_datasets:
                 continue
-
-            df, meta = dataset_exfor_lookup[key]
-
-            angles_deg = df['angle'].to_numpy(dtype=float)
-            dsig = df['dsig'].to_numpy(dtype=float)
-            error_stat = df['error_stat'].to_numpy(dtype=float)
-
-            frame = meta.get('angle_frame', 'CM').upper()
-            if frame == 'LAB':
-                mu_lab = np.cos(np.deg2rad(angles_deg))
-                mu_cm, dsig_cm, error_cm = transform_lab_to_cm(
-                    mu_lab, dsig, error_stat, m_proj_u, m_targ_u
-                )
-                angles_cm_deg = np.rad2deg(np.arccos(mu_cm))
-            else:
-                mu_cm = np.cos(np.deg2rad(angles_deg))
-                angles_cm_deg = angles_deg
-                dsig_cm = dsig
-                error_cm = error_stat
-
-            # Apply shared experiment normalization
-            exp_key_norm = (dataset.entry, dataset.subentry)
-            N_g = experiment_norm_factors.get(exp_key_norm, 1.0)
-            if N_g != 1.0:
-                dsig_cm = dsig_cm * N_g
-                error_cm = error_cm * N_g   # preserves relative uncertainty
-
-            exp_key = (dataset.entry, dataset.subentry)
-            if normalize_by_n_points and exp_key in bin_exp_n_points[bin_info.index]:
-                total_pts = bin_exp_n_points[bin_info.index][exp_key]
-                kw = 1.0 / total_pts if total_pts > 0 else 1.0
-            else:
-                kw = 1.0
-
-            transformed_df = pd.DataFrame({
-                'theta_deg': angles_cm_deg,
-                'value': dsig_cm,
-                'unc': error_cm,
-                'mu': mu_cm,
-                'entry': dataset.entry,
-                'subentry': dataset.subentry,
-                'exfor_energy_mev': E_star,
-                'kernel_weight': kw,
-            })
-            frames.append(transformed_df)
-
-        if not frames:
-            empty_bins.append(bin_info.index)
-            continue
-
-        combined_df = pd.concat(frames, ignore_index=True)
-
-        # Apply per-experiment weight capping
-        if max_experiment_weight_fraction < 1.0 and len(combined_df) > 0:
-            kernel_weights_arr = combined_df['kernel_weight'].to_numpy()
-            kernel_weights_arr, _, _ = apply_per_experiment_weight_cap(
-                combined_df, kernel_weights_arr, max_experiment_weight_fraction
-            )
-            combined_df['kernel_weight'] = kernel_weights_arr
-
-        # Apply uncertainty floor
-        if min_relative_uncertainty > 0:
-            combined_df = apply_uncertainty_floor(
-                combined_df, min_relative_uncertainty,
-                unc_column='unc', value_column='value'
-            )
-
-        # Pre-inflate uncertainties with nominal tau
-        if use_band_discrepancy and bin_info.index in nominal_by_idx:
-            nr = nominal_by_idx[bin_info.index]
-            tau_info = nr.tau_info
-            mu_arr = combined_df['mu'].to_numpy()
-            unc_arr = combined_df['unc'].to_numpy().copy()
-
-            band_map = {
-                'tau_F': mu_arr > 0.5,
-                'tau_M': (mu_arr >= -0.5) & (mu_arr <= 0.5),
-                'tau_B': mu_arr < -0.5,
+            df = ds['exfor_df']
+            if df.empty:
+                continue
+            norm_factor = experiment_norms.get(exp_id, 1.0)
+            values = df['value'].to_numpy() * norm_factor
+            unc = df['unc'].to_numpy()
+            noise = rng.normal(0, unc)
+            perturbed_datasets[e_key] = {
+                'mu': df['mu'].to_numpy(),
+                'value': values + noise,
+                'unc': unc,
             }
-            for tau_key, mask in band_map.items():
-                tau_b = tau_info.get(tau_key, 0.0)
-                if tau_b > 0 and np.any(mask):
-                    unc_arr[mask] = np.sqrt(unc_arr[mask]**2 + tau_b**2)
 
-            combined_df['unc'] = unc_arr
-            use_band_for_fit = False
-        else:
-            use_band_for_fit = use_band_discrepancy
+    # Step 3-4: For each bin, collect perturbed data, fit
+    sample_coeffs = {}
+    for bin_info_data in energy_bins_data:
+        bin_idx = bin_info_data['index']
+        datasets_and_weights = overlap_weights.get(bin_idx, [])
 
-        # Get frozen degree from nominal fit
-        if bin_info.index in nominal_by_idx:
-            frozen_degree = nominal_by_idx[bin_info.index].frozen_degree
-        else:
-            frozen_degree = min(max_degree, len(combined_df) // 3)
-
-        if len(combined_df) < 3:
-            empty_bins.append(bin_info.index)
+        if not datasets_and_weights:
+            # Use nominal (interpolated)
+            nom = nominal_coeffs_by_bin.get(bin_idx)
+            if nom is not None:
+                sample_coeffs[bin_idx] = endf_normalize_legendre_coeffs(nom, include_a0=False)
             continue
 
-        # Fit Legendre coefficients
+        # Build combined weighted DataFrame
+        all_mu = []
+        all_values = []
+        all_unc = []
+        all_weights = []
+
+        for ds, w in datasets_and_weights:
+            exp_id = ds['experiment_id']
+            e_key = f"{exp_id}_{ds['exfor_energy_mev']:.6f}"
+            pert = perturbed_datasets.get(e_key)
+            if pert is None:
+                continue
+            n_pts = len(pert['mu'])
+            all_mu.append(pert['mu'])
+            all_values.append(pert['value'])
+            all_unc.append(pert['unc'])
+            all_weights.append(np.full(n_pts, w))
+
+        if not all_mu:
+            nom = nominal_coeffs_by_bin.get(bin_idx)
+            if nom is not None:
+                sample_coeffs[bin_idx] = endf_normalize_legendre_coeffs(nom, include_a0=False)
+            continue
+
+        mu = np.concatenate(all_mu)
+        values = np.concatenate(all_values)
+        unc = np.concatenate(all_unc)
+        weights = np.concatenate(all_weights)
+
+        if len(mu) < 3:
+            nom = nominal_coeffs_by_bin.get(bin_idx)
+            if nom is not None:
+                sample_coeffs[bin_idx] = endf_normalize_legendre_coeffs(nom, include_a0=False)
+            continue
+
+        fit_df = pd.DataFrame({'mu': mu, 'value': values, 'unc': unc})
+        degree = frozen_degrees_by_bin.get(bin_idx, max_degree)
+
         try:
             coef_df, _ = sample_legendre_coefficients(
-                combined_df,
+                fit_df,
                 value_col="value",
                 unc_col="unc",
-                degree=frozen_degree,
+                degree=degree,
                 max_degree=max_degree,
                 select_degree=None,
                 ridge_lambda=ridge_lambda,
-                external_weights=combined_df['kernel_weight'].to_numpy(),
+                external_weights=weights,
                 n_samples=1,
-                stochastic=_stochastic_flag,
-                random_state=base_seed + s_idx * 1000 + bin_info.index,
-                use_band_discrepancy=use_band_for_fit,
+                stochastic=False,
+                use_band_discrepancy=use_band_discrepancy,
                 min_points_per_band=min_points_per_band,
                 max_tau_fraction=max_tau_fraction,
                 freeze_c0=freeze_c0,
-                sigma_norm=0.0,  # normalization handled above (shared across bins)
-                norm_dist=norm_dist,
             )
+            coeffs = coef_df.iloc[0].to_numpy()
+            if len(coeffs) < max_degree + 1:
+                coeffs = np.pad(coeffs, (0, max_degree + 1 - len(coeffs)))
 
-            fit_coeffs = coef_df.iloc[0].to_numpy()
-            if _apply_positivity_projection:
-                if not check_angular_distribution_positivity(fit_coeffs, _positivity_check_points):
-                    fit_coeffs = project_to_positive_distribution(fit_coeffs, _positivity_check_points)
-            endf_coeffs = endf_normalize_legendre_coeffs(fit_coeffs, include_a0=False)
+            if apply_positivity_projection:
+                from .resample_AD import (
+                    check_angular_distribution_positivity,
+                    project_to_positive_distribution,
+                )
+                if not check_angular_distribution_positivity(coeffs, positivity_check_points):
+                    frozen = {}
+                    if freeze_c0:
+                        frozen[0] = coeffs[0]
+                    if max_sample_order is not None and max_sample_order + 1 < len(coeffs):
+                        frozen.update({i: coeffs[i] for i in range(max_sample_order + 1, len(coeffs))})
+                    coeffs = project_to_positive_distribution(
+                        coeffs, positivity_check_points, frozen_indices=frozen or None
+                    )
+
+            sample_coeffs[bin_idx] = endf_normalize_legendre_coeffs(coeffs, include_a0=False)
 
         except Exception:
-            empty_bins.append(bin_info.index)
-            continue
+            nom = nominal_coeffs_by_bin.get(bin_idx)
+            if nom is not None:
+                sample_coeffs[bin_idx] = endf_normalize_legendre_coeffs(nom, include_a0=False)
 
-        # Zero-pad to consistent length
-        if len(endf_coeffs) < max_degree:
-            padded = np.zeros(max_degree, dtype=float)
-            padded[:len(endf_coeffs)] = endf_coeffs
-            endf_coeffs = padded
-
-        fitted_bins[bin_info.index] = endf_coeffs
-        sample_coeffs[bin_info.index] = endf_coeffs
-
-    # --- Pass 2: interpolate empty/failed bins from same-sample neighbors ---
-    local_interpolated_bins = 0
-    local_nominal_fallback_bins = 0
-
-    for empty_idx in empty_bins:
-        interp = _interpolate_from_neighbors(
-            fitted_bins, energy_bins, empty_idx, max_degree
-        )
-        if interp is not None:
-            sample_coeffs[empty_idx] = interp
-            local_interpolated_bins += 1
-        else:
-            # Last resort: use nominal coefficients (no fitted neighbors at all)
-            local_nominal_fallback_bins += 1
-            if empty_idx in nominal_by_idx:
-                nr = nominal_by_idx[empty_idx]
-                endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
-                if len(endf_coeffs) < max_degree:
-                    padded = np.zeros(max_degree, dtype=float)
-                    padded[:len(endf_coeffs)] = endf_coeffs
-                    endf_coeffs = padded
-            else:
-                endf_coeffs = np.zeros(max_degree)
-            sample_coeffs[empty_idx] = endf_coeffs
-
-    local_jump_stats = (
-        local_jumped_bins,
-        local_total_assignments,
-        dict(local_jump_counts),
-        local_datasets_outside_range,
-        local_interpolated_bins,
-        local_nominal_fallback_bins,
-    )
-
-    return (s_idx, sample_coeffs, local_jump_stats)
+    return s_idx, sample_coeffs
 
 
-def run_mc_with_energy_jitter(
+def run_mc_with_kernel_weights(
     nominal_results: List,  # List[NominalFitResult]
     energy_bins: List[EnergyBinInfo],
-    dataset_info_by_bin: Dict[int, List[DatasetEnergyInfo]],
-    exfor_cache: Dict[float, List[Tuple[pd.DataFrame, Dict]]],
-    sorted_energies: List[float],
+    overlap_weights: Dict[int, List[Tuple[Dict, float]]],
     n_samples: int,
-    base_seed: int,
+    n_workers: int,
+    sigma_norm: float,
+    norm_dist: str,
     max_degree: int,
     ridge_lambda: float,
-    m_proj_u: float,
-    m_targ_u: float,
+    base_seed: int,
     use_band_discrepancy: bool = True,
     min_points_per_band: int = 3,
-    max_tau_fraction: float = 0.25,
-    jitter_n_sigma_clip: float = 3.0,
-    track_bin_jumps: bool = True,
-    min_relative_uncertainty: float = 0.0,
-    freeze_c0: bool = False,
-    sigma_norm: float = 0.0,
-    norm_dist: str = "lognormal",
-    normalize_by_n_points: bool = False,
-    max_experiment_weight_fraction: float = 1.0,
-    n_procs: int = 1,
-    logger=None,
+    max_tau_fraction: float = 0.05,
+    freeze_c0: bool = True,
+    max_sample_order: Optional[int] = None,
     apply_positivity_projection: bool = False,
-    positivity_check_points: int = 50,
-    stochastic: bool = True,
-) -> Tuple[Dict[int, Dict[int, np.ndarray]], BinJumpDiagnostics]:
-    """
-    Run MC sampling with energy jitter for cross-bin correlation.
-
-    This implements Improvement 1.4: Instead of independent per-bin sampling,
-    this method samples E* ~ N(E_nom, σE) for each dataset and assigns it to
-    the containing bin, creating cross-bin coupling in the covariance matrix.
-
-    Key insight:
-    - Nominal fit: Uses energy_bin method unchanged (preserves resonance structure)
-    - MC sampling: Introduces energy jitter per dataset
-    - Effect: Creates cross-bin correlations useful for MF34
-
-    Algorithm:
-    1. For each MC sample:
-       a. For each dataset: sample E* ~ N(E_nom, σE), clip to ±n_sigma
-       b. Assign dataset to bin containing E*
-       c. For each bin: fit using jitter-assigned datasets
+    positivity_check_points: int = 101,
+    logger=None,
+) -> Dict[int, Dict[int, np.ndarray]]:
+    """Orchestrate kernel-weighted multi-bin MC sampling.
 
     Parameters
     ----------
-    nominal_results : List[NominalFitResult]
-        Nominal fit results from Phase 1 (provides frozen degrees and tau values)
+    nominal_results : list
+        Nominal fit results.
     energy_bins : List[EnergyBinInfo]
-        Energy bin information
-    dataset_info_by_bin : Dict[int, List[DatasetEnergyInfo]]
-        Pre-computed dataset information from precompute_dataset_energy_info()
-    exfor_cache : Dict[float, List[Tuple[pd.DataFrame, Dict]]]
-        Pre-loaded EXFOR data cache
-    sorted_energies : List[float]
-        Sorted list of available EXFOR energies
+        Energy bin definitions.
+    overlap_weights : dict
+        From precompute_overlap_weights().
     n_samples : int
-        Number of MC samples to generate
-    base_seed : int
-        Base random seed for reproducibility
-    max_degree : int
-        Maximum Legendre degree
-    ridge_lambda : float
-        Ridge regularization parameter
-    m_proj_u : float
-        Projectile mass in atomic mass units
-    m_targ_u : float
-        Target mass in atomic mass units
-    use_band_discrepancy : bool
-        Use angular-band discrepancy model
-    min_points_per_band : int
-        Minimum points per angular band
-    max_tau_fraction : float
-        Maximum tau as fraction of cross section
-    jitter_n_sigma_clip : float
-        Clip energy jitter at ±n_sigma (default: 3.0)
-    track_bin_jumps : bool
-        Track bin jump statistics for diagnostics
-    min_relative_uncertainty : float
-        Minimum relative uncertainty floor
-    freeze_c0 : bool
-        Fix c0 coefficient during fitting
+        Number of MC samples.
+    n_workers : int
+        Number of parallel workers.
     sigma_norm : float
-        Per-experiment normalization uncertainty
+        Per-experiment normalization uncertainty.
     norm_dist : str
-        Normalization distribution ("lognormal" or "normal")
-    normalize_by_n_points : bool
-        If True, weight each point by 1/n_points for its experiment (equal weight per
-        experiment regardless of point count). Matches nominal fit weighting.
-    max_experiment_weight_fraction : float
-        Cap total weight fraction any single experiment can have (e.g., 0.5 = max 50%).
-        Set to 1.0 to disable capping. Matches nominal fit weighting.
-    n_procs : int
-        Number of parallel processes (1 = sequential)
+        "lognormal" or "normal".
+    max_degree : int
+        Maximum Legendre degree.
+    ridge_lambda : float
+        Ridge regularization parameter.
+    base_seed : int
+        Random seed.
     logger : optional
-        Logger instance
+        Logger instance.
 
     Returns
     -------
-    Tuple[Dict[int, Dict[int, np.ndarray]], BinJumpDiagnostics]
-        - all_samples: {sample_idx: {energy_index: endf_coeffs}}
-        - diagnostics: BinJumpDiagnostics with statistics
+    Dict[int, Dict[int, np.ndarray]]
+        {sample_idx: {energy_idx: endf_coeffs}} compatible with
+        compute_covariance_from_samples().
     """
-    # Get all datasets as flat list
-    all_datasets = get_all_datasets_flat(dataset_info_by_bin)
+    logger = logger or _get_logger()
 
-    if logger:
-        logger.info(f"  Energy jitter MC: {n_samples} samples, {len(all_datasets)} datasets")
-        logger.info(f"  Jitter clipping: ±{jitter_n_sigma_clip}σ")
-        if n_procs > 1:
-            logger.info(f"  Using {n_procs} parallel processes")
+    # Prepare bin data for pickling
+    energy_bins_data = [
+        {'index': b.index, 'energy_mev': b.energy_mev,
+         'bin_lower_mev': b.bin_lower_mev, 'bin_upper_mev': b.bin_upper_mev}
+        for b in energy_bins
+    ]
 
-    # Map nominal results by energy index for quick lookup
-    nominal_by_idx = {nr.energy_index: nr for nr in nominal_results if nr.has_data}
+    nominal_coeffs_by_bin = {}
+    frozen_degrees_by_bin = {}
+    for nr in nominal_results:
+        if nr.has_data:
+            nominal_coeffs_by_bin[nr.energy_index] = nr.nominal_coeffs
+            frozen_degrees_by_bin[nr.energy_index] = nr.frozen_degree
 
-    # Build dataset -> EXFOR data lookup
-    # Key: (entry, subentry, energy_mev) -> (df, meta)
-    dataset_exfor_lookup = {}
-    for energy_mev, entries in exfor_cache.items():
-        for df, meta in entries:
-            entry = meta.get('entry', 'unknown')
-            subentry = meta.get('subentry', 'unknown')
-            key = (entry, subentry, energy_mev)
-            dataset_exfor_lookup[key] = (df, meta)
+    args_list = [
+        (
+            s_idx,
+            overlap_weights,
+            energy_bins_data,
+            sigma_norm,
+            norm_dist,
+            max_degree,
+            ridge_lambda,
+            base_seed,
+            use_band_discrepancy,
+            min_points_per_band,
+            max_tau_fraction,
+            freeze_c0,
+            max_sample_order,
+            apply_positivity_projection,
+            positivity_check_points,
+            nominal_coeffs_by_bin,
+            frozen_degrees_by_bin,
+        )
+        for s_idx in range(n_samples)
+    ]
 
-    # Build shared args tuple (read-only data shared across all workers)
-    shared_args = (
-        all_datasets,
-        energy_bins,
-        nominal_by_idx,
-        dataset_exfor_lookup,
-        base_seed,
-        max_degree,
-        ridge_lambda,
-        m_proj_u,
-        m_targ_u,
-        use_band_discrepancy,
-        min_points_per_band,
-        max_tau_fraction,
-        jitter_n_sigma_clip,
-        track_bin_jumps,
-        min_relative_uncertainty,
-        freeze_c0,
-        sigma_norm,
-        norm_dist,
-        normalize_by_n_points,
-        max_experiment_weight_fraction,
-        apply_positivity_projection,
-        positivity_check_points,
-        stochastic,
-    )
-
-    args_list = [(s_idx,) + shared_args for s_idx in range(n_samples)]
-
-    # Run samples (parallel or sequential)
-    if n_procs > 1:
-        with Pool(n_procs) as pool:
-            results = pool.map(_run_one_jitter_sample, args_list)
+    if n_workers > 1:
+        if logger:
+            logger.info(f"  Running kernel-weight MC with {n_workers} workers, {n_samples} samples")
+        with Pool(n_workers) as pool:
+            results = pool.map(_run_one_kw_sample, args_list)
     else:
-        results = []
-        for i, args in enumerate(args_list):
-            results.append(_run_one_jitter_sample(args))
-            if logger and (i + 1) % 10 == 0:
-                logger.info(f"    Sample {i + 1}/{n_samples} completed")
+        if logger:
+            logger.info(f"  Running kernel-weight MC sequentially, {n_samples} samples")
+        results = [_run_one_kw_sample(a) for a in args_list]
 
-    # Collect results and merge diagnostics
-    all_samples: Dict[int, Dict[int, np.ndarray]] = {}
-    total_assignments = 0
-    jumped_bins = 0
-    jump_counts: Dict[Tuple[int, int], int] = defaultdict(int)
-    datasets_outside_range = 0
-    interpolated_bins = 0
-    nominal_fallback_bins = 0
-
-    for s_idx, sample_coeffs, local_jump_stats in results:
+    # Assemble into expected format
+    all_samples: Dict[int, Dict[int, np.ndarray]] = {s_idx: {} for s_idx in range(n_samples)}
+    for s_idx, sample_coeffs in results:
         all_samples[s_idx] = sample_coeffs
 
-        (local_jumped, local_total, local_jumps, local_outside,
-         local_interp, local_nominal_fb) = local_jump_stats
-        jumped_bins += local_jumped
-        total_assignments += local_total
-        datasets_outside_range += local_outside
-        interpolated_bins += local_interp
-        nominal_fallback_bins += local_nominal_fb
-        for key, count in local_jumps.items():
-            jump_counts[key] += count
+    if logger:
+        n_bins_with_data = sum(1 for b in energy_bins if overlap_weights.get(b.index))
+        logger.info(f"  Kernel-weight MC complete: {n_samples} samples, {n_bins_with_data} bins with data")
 
-    if logger and n_procs > 1:
-        logger.info(f"    All {n_samples} samples completed")
-
-    # Compute bin jump diagnostics
-    jump_rate = jumped_bins / total_assignments if total_assignments > 0 else 0.0
-
-    diagnostics = BinJumpDiagnostics(
-        total_assignments=total_assignments,
-        jumped_bins=jumped_bins,
-        jump_rate=jump_rate,
-        jump_counts=dict(jump_counts),
-        datasets_outside_range=datasets_outside_range,
-        interpolated_bins=interpolated_bins,
-        nominal_fallback_bins=nominal_fallback_bins,
-    )
-
-    return all_samples, diagnostics
-
-
-def log_bin_jump_diagnostics(
-    diagnostics: BinJumpDiagnostics,
-    energy_bins: List[EnergyBinInfo],
-    logger=None,
-) -> None:
-    """
-    Log bin jump diagnostics in a readable format.
-
-    Parameters
-    ----------
-    diagnostics : BinJumpDiagnostics
-        Bin jump statistics from run_mc_with_energy_jitter
-    energy_bins : List[EnergyBinInfo]
-        Energy bin information (for energy labels)
-    logger : optional
-        Logger instance
-    """
-    if logger is None:
-        return
-
-    # Create bin index to energy mapping
-    idx_to_energy = {bin_info.index: bin_info.energy_mev for bin_info in energy_bins}
-
-    logger.info("")
-    logger.info("[BIN JUMP DIAGNOSTICS]")
-    logger.info(f"  Total assignments: {diagnostics.total_assignments}")
-    logger.info(f"  Jumped bins: {diagnostics.jumped_bins}")
-    logger.info(f"  Jump rate: {diagnostics.jump_rate * 100:.2f}%")
-
-    if diagnostics.datasets_outside_range > 0:
-        logger.info(f"  Datasets outside range: {diagnostics.datasets_outside_range}")
-
-    if diagnostics.interpolated_bins > 0 or diagnostics.nominal_fallback_bins > 0:
-        logger.info(f"  Empty bins filled by neighbor interpolation: {diagnostics.interpolated_bins}")
-        logger.info(f"  Empty bins fell back to nominal (no neighbors): {diagnostics.nominal_fallback_bins}")
-
-    # Interpretation
-    if diagnostics.jump_rate > 0.30:
-        logger.info("  Interpretation: Grid finer than σE → strong energy correlations")
-    elif diagnostics.jump_rate > 0.10:
-        logger.info("  Interpretation: Grid comparable to σE → moderate correlations")
-    else:
-        logger.info("  Interpretation: Grid coarser than σE → weak correlations")
-
-    # Top jumps
-    top_jumps = diagnostics.top_jumps(5)
-    if top_jumps:
-        logger.info("  Top bin jumps:")
-        for (from_idx, to_idx), count in top_jumps:
-            from_e = idx_to_energy.get(from_idx, 0.0)
-            to_e = idx_to_energy.get(to_idx, 0.0)
-            logger.info(f"    {from_idx}→{to_idx} ({from_e:.4f}→{to_e:.4f} MeV): {count}")
-
-    logger.info("")
+    return all_samples
 
 
 # =============================================================================
@@ -2463,164 +1687,6 @@ def compute_covariance_from_samples(
     param_labels = [(e_idx, l + 1) for e_idx in energy_indices for l in range(max_order)]
 
     return cov_matrix, corr_matrix, param_labels, mean_params
-
-
-def combine_jitter_stochastic_covariance(
-    cov_jitter: np.ndarray,
-    cov_stochastic: np.ndarray,
-    energy_bins: Optional[List] = None,
-    energy_indices: Optional[List[int]] = None,
-    max_order: Optional[int] = None,
-    logger=None,
-    valid_mask: Optional[np.ndarray] = None,
-) -> np.ndarray:
-    """
-    Combine jitter and stochastic relative covariance matrices.
-
-    Uses the jitter pass's *correlation structure* (which captures cross-bin
-    coupling from shared datasets/normalization) with the *total variance*
-    from both passes combined:
-
-        std_total = sqrt(diag(cov_jitter + cov_stochastic))
-        corr = corr_jitter
-        Cov_final = corr * outer(std_total, std_total)
-
-    This preserves the strong cross-energy correlations from Pass 1 (jitter)
-    while using the full variance magnitude from both passes.
-
-    For parameters with zero jitter variance (undefined correlation), a
-    Gaussian decay fallback is used for same-Legendre-order entries:
-        rho = exp(-|E_i - E_j|^2 / (2 * L^2))
-    where L = 3.0 * median(sigma_E).
-
-    If ``energy_bins`` is None, falls back to simple addition (backward compat).
-
-    Parameters
-    ----------
-    cov_jitter : np.ndarray
-        Relative covariance matrix from jitter-only MC pass (Pass 1).
-    cov_stochastic : np.ndarray
-        Relative covariance matrix from stochastic MC pass (Pass 2).
-    energy_bins : list, optional
-        List of EnergyBinInfo objects (for Gaussian fallback energies).
-    energy_indices : list of int, optional
-        Energy indices corresponding to rows of the parameter layout.
-    max_order : int, optional
-        Number of Legendre orders per energy bin.
-    logger : optional
-        Logger for diagnostics.
-
-    Returns
-    -------
-    np.ndarray
-        Combined relative covariance matrix.
-    """
-    # Backward compatibility: simple addition when no energy info provided
-    if energy_bins is None or energy_indices is None or max_order is None:
-        return cov_jitter + cov_stochastic
-
-    n = cov_jitter.shape[0]
-
-    # Total variance from both independent passes
-    var_total = np.diag(cov_jitter) + np.diag(cov_stochastic)
-    std_total = np.sqrt(np.maximum(var_total, 0.0))
-
-    # Zero out invalid (unfitted) parameters
-    if valid_mask is not None:
-        var_total[~valid_mask] = 0.0
-        std_total[~valid_mask] = 0.0
-
-    # Jitter correlation matrix (safe division for zero-variance params)
-    std_jitter = np.sqrt(np.maximum(np.diag(cov_jitter), 0.0))
-    std_jitter_safe = std_jitter.copy()
-    zero_jitter_mask = std_jitter_safe < 1e-30
-    std_jitter_safe[zero_jitter_mask] = 1.0
-    corr_jitter = cov_jitter / np.outer(std_jitter_safe, std_jitter_safe)
-
-    # Identify parameters with zero jitter variance -> need Gaussian fallback
-    n_zero = int(np.sum(zero_jitter_mask))
-    if n_zero > 0 and logger:
-        logger.info(f"  Correlation fix: {n_zero}/{n} parameters have zero jitter variance -> Gaussian fallback")
-
-    # Gaussian fallback for zero-jitter-variance parameters
-    if n_zero > 0:
-        # Compute length scale L = 3 * median(sigma_E)
-        sigma_E_values = []
-        for e_idx in energy_indices:
-            if e_idx < len(energy_bins):
-                s = energy_bins[e_idx].sigma_E_mev
-                if s > 0:
-                    sigma_E_values.append(s)
-        if sigma_E_values:
-            L_scale = 3.0 * np.median(sigma_E_values)
-        else:
-            # Fallback: 1% of energy range
-            energies = [energy_bins[e_idx].energy_mev for e_idx in energy_indices if e_idx < len(energy_bins)]
-            L_scale = 0.03 * (max(energies) - min(energies)) if len(energies) > 1 else 0.1
-
-        # Get energy for each parameter
-        param_energies = np.zeros(n)
-        param_orders = np.zeros(n, dtype=int)
-        for p in range(n):
-            e_pos = p // max_order
-            order = p % max_order + 1
-            param_orders[p] = order
-            if e_pos < len(energy_indices) and energy_indices[e_pos] < len(energy_bins):
-                param_energies[p] = energy_bins[energy_indices[e_pos]].energy_mev
-
-        # Fill fallback correlations for rows/columns with zero jitter variance
-        for i in range(n):
-            if not zero_jitter_mask[i]:
-                continue
-            for j in range(n):
-                if i == j:
-                    corr_jitter[i, j] = 1.0
-                    continue
-                # Skip invalid (unfitted) parameters
-                if valid_mask is not None and (not valid_mask[i] or not valid_mask[j]):
-                    continue
-                # Only apply Gaussian decay for same-order cross-energy entries
-                if param_orders[i] == param_orders[j]:
-                    dE = param_energies[i] - param_energies[j]
-                    rho = np.exp(-dE**2 / (2.0 * L_scale**2))
-                    # Use fallback if EITHER param has zero jitter variance
-                    corr_jitter[i, j] = rho
-                    corr_jitter[j, i] = rho
-                # Cross-order entries: keep whatever corr_jitter has (typically ~0)
-
-    # Ensure diagonal is exactly 1
-    np.fill_diagonal(corr_jitter, 1.0)
-    # Clip to [-1, 1]
-    corr_jitter = np.clip(corr_jitter, -1.0, 1.0)
-
-    # Build combined covariance: corr_jitter * outer(std_total, std_total)
-    cov_combined = corr_jitter * np.outer(std_total, std_total)
-    cov_combined[np.abs(cov_combined) < 1e-15] = 0.0
-
-    # Log correlation diagnostics
-    if logger:
-        # Off-diagonal correlation stats
-        mask_offdiag = ~np.eye(n, dtype=bool)
-        offdiag = np.abs(corr_jitter[mask_offdiag])
-        if len(offdiag) > 0:
-            logger.info(f"  Correlation fix applied: using jitter structure with total variances")
-            logger.info(f"    Off-diagonal |corr|: mean={np.mean(offdiag):.4f}, median={np.median(offdiag):.4f}")
-
-        # Same-order l=1 adjacent correlations
-        if max_order >= 1 and len(energy_indices) >= 2:
-            adj_corrs = []
-            for k in range(len(energy_indices) - 1):
-                i_param = k * max_order  # l=1 for energy k
-                j_param = (k + 1) * max_order  # l=1 for energy k+1
-                if i_param < n and j_param < n:
-                    adj_corrs.append(corr_jitter[i_param, j_param])
-            if adj_corrs:
-                adj_corrs = np.array(adj_corrs)
-                logger.info(f"    l=1 adjacent corr: mean={np.mean(adj_corrs):.4f}, "
-                            f"median={np.median(adj_corrs):.4f}, "
-                            f"min={np.min(adj_corrs):.4f}, max={np.max(adj_corrs):.4f}")
-
-    return cov_combined
 
 
 def extract_ll_prime_correlations(

@@ -63,27 +63,22 @@ from scripts.exfor_utils import (
     EnergyBinInfo,
     SamplingResult,
     KernelDiagnostics,
-    DatasetEnergyInfo,
-    BinJumpDiagnostics,
     # Energy binning
     compute_energy_bins_with_tof_resolution,
     # EXFOR data conversion (new API -> legacy format)
     build_exfor_cache_from_objects,
-    # EXFOR filtering (per-energy methods)
-    filter_exfor_with_kernel_weights,
+    # EXFOR filtering
     filter_exfor_with_energy_bin,
-    # Energy jitter MC (Improvement 1.4)
-    precompute_dataset_energy_info,
-    run_mc_with_energy_jitter,
-    log_bin_jump_diagnostics,
     # Covariance
     compute_covariance_from_samples,
-    combine_jitter_stochastic_covariance,
     extract_ll_prime_correlations,
     build_gaussian_correlation_covariance,
     generate_cholesky_samples,
     cap_covariance_relative_uncertainty,
     save_all_legendre_coefficients,
+    # Kernel-weight MC (new)
+    precompute_overlap_weights,
+    run_mc_with_kernel_weights,
     # ENDF writing
     write_nominal_endf,
     write_average_endf,
@@ -119,14 +114,6 @@ from scripts.resample_AD import (
     smooth_tau_in_energy,
     apply_tau_prior_floor,
     compute_n_eff,
-    fit_legendre_global_convolution,
-    build_global_convolution_system,
-    solve_global_convolution,
-    solve_global_convolution_shape_only,
-    sample_global_convolution_mc,
-    sample_global_convolution_mc_shape_only,
-    GlobalFitDiagnostics,
-    GlobalConvolutionSystem,
 )
 
 import time
@@ -262,31 +249,7 @@ DF_METHOD = "hat"                                # Degrees of freedom method: "h
 # Processing options
 N_PROCS = 24                                      # Parallel processes (1 = sequential)
 BASE_SEED = 42                                   # Random seed for reproducibility
-
-# -----------------------------------------------------------------------------
-# 5. EXPERIMENT SELECTION METHOD
-# -----------------------------------------------------------------------------
-# Available methods:
-#
-# "global_convolution"
-#     Fits ALL energy points simultaneously using Tikhonov regularization.
-#     Properly accounts for energy resolution smearing across energy bins.
-#     Each EXFOR measurement contributes to multiple ENDF energies according
-#     to its resolution-weighted probability. Enforces smooth energy dependence.
-#     --> Uses parameters from section 6a (TOF Resolution) and 6b (Global Convolution)
-#
-# "kernel_weights"
-#     Fits each ENDF energy point independently using Gaussian kernel weighting.
-#     EXFOR data are weighted by g_ij = exp(-0.5 * ((E_i - E_j)/σE)²)
-#     --> Uses parameters from sections 6a, 6c, 6d, 6e, 6f
-#
-# "energy_bin"
-#     Simple energy binning without resolution-based weighting.
-#     Uses hard bin boundaries (no Gaussian weighting).
-#     Fastest but ignores energy resolution effects.
-#     --> Uses parameters from sections 6d, 6e, 6f
-#
-EXPERIMENT_SELECTION_METHOD = "energy_bin"
+N_EFF_WARNING_THRESHOLD = 5.0                    # Warning if effective sample size < threshold
 
 # --- Experiment Exclusion and Uncertainty Floor ---
 # Experiments to exclude from fitting (e.g., experiments with known issues)
@@ -304,28 +267,12 @@ MIN_RELATIVE_UNCERTAINTY = 0.02
 # 6. METHOD-SPECIFIC PARAMETERS
 # -----------------------------------------------------------------------------
 
-# --- 6a. TOF Energy Resolution (kernel_weights, global_convolution) ---
+# --- 6a. TOF Energy Resolution ---
 DELTA_T_NS = 5.0                                 # Time resolution in nanoseconds
 FLIGHT_PATH_M = 27.037                           # Flight path in meters
 N_SIGMA_CUTOFF = 3.0                             # Gaussian kernel cutoff (±n_sigma * σE)
 
-# --- 6b. Global Convolution (EXPERIMENT_SELECTION_METHOD = "global_convolution") ---
-GLOBAL_CONV_LAMBDA = 0.001                       # Tikhonov regularization strength
-L_DEPENDENT_POWER = 2.0                          # ℓ-scaling exponent (2-4 recommended)
-SKIP_C0_REGULARIZATION = True                    # Don't apply smoothing penalty to c0
-MIN_WEIGHT_SUM_THRESHOLD = 0.95                  # Warn if weight_sum < this (skip if < 0.5)
-GLOBAL_CONV_SHAPE_ONLY = True                   # Two-pass shape-only fit (Improvement 3.4)
-
-# --- 6c. Kernel Weight Control (EXPERIMENT_SELECTION_METHOD = "kernel_weights") ---
-MIN_KERNEL_WEIGHT_FRACTION = 1e-3                # Minimum weight threshold
-MAX_EXPERIMENT_WEIGHT_FRACTION = 0.5             # Weight cap per experiment
-N_EFF_WARNING_THRESHOLD = 5.0                    # Warning if N_eff < threshold
-WEIGHT_SPAN_WARNING_RATIO = 3.0                  # Warning if span > ratio * σE
-DEDUPE_NOMINAL = True                            # Dedupe for nominal fits (stability)
-DEDUPE_MC = False                                # Dedupe for MC sampling (False enables energy correlations)
-USE_OVERLAP_WEIGHTS = True                       # Use overlap weights (True) vs Gaussian kernel (False)
-
-# --- 6d. Angular-Band Discrepancy (kernel_weights, energy_bin) ---
+# --- 6d. Angular-Band Discrepancy ---
 USE_BAND_DISCREPANCY = True                      # Use band-based uncertainty (vs global Birge)
 MIN_POINTS_PER_BAND = 3                          # Minimum points to estimate τ_b per band
 MAX_TAU_FRACTION = 0.05                          # Cap τ_b at 25% of cross section
@@ -336,11 +283,11 @@ TAU_PRIOR_PERCENTILE = 50                        # Percentile of well-estimated 
 RESCALE_UNC_BY_CHI2 = True                       # Apply Birge scaling when band discrepancy disabled
 ALLOW_SHRINK_UNC = True                          # Allow uncertainties to shrink (chi2_red < 1)
 
-# --- 6e. Per-Experiment Normalization (kernel_weights, energy_bin) ---
+# --- 6e. Per-Experiment Normalization ---
 NORMALIZATION_SIGMA = 0.05                       # Per-experiment normalization uncertainty (5%)
 NORM_DIST = "lognormal"                          # Distribution: "lognormal" (always positive) or "normal"
 
-# --- 6f. Model Averaging (kernel_weights, energy_bin) ---
+# --- 6f. Model Averaging ---
 USE_MODEL_AVERAGING = True                       # Enable model averaging over Legendre orders
 MIN_DEGREE_FOR_AVERAGING = 1                     # Minimum degree to consider (1 = include all)
 USE_DEGREE_SAMPLING_IN_MC = True                 # Sample degree from degree_weights distribution
@@ -349,15 +296,17 @@ USE_DEGREE_SAMPLING_IN_MC = True                 # Sample degree from degree_wei
 NORMALIZE_BY_N_POINTS = True                     # Equal weight per experiment (1/n_points weighting)
 MAX_EXP_WEIGHT_FRAC_BIN = 0.5                    # Cap per-experiment dominance (1.0 = disabled)
 FREEZE_C0 = True                                # Fix c0 for shape-only refits
-MAX_SAMPLE_ORDER = None                            # Max Legendre order to sample (None for no freeze) 
-TWO_PASS_DECOMPOSITION = True                    # Separate jitter (correlation) from stochastic (variance)
-USE_GAUSSIAN_CORRELATION = True                  # Use Gaussian decay for energy correlations + Cholesky resampling
+MAX_SAMPLE_ORDER = None                            # Max Legendre order to sample (None for no freeze)
 
-# --- 6h. Energy Jitter for Cross-Bin Coupling ---
-USE_ENERGY_JITTER = True                         # Enable energy jitter for cross-bin correlation
+# --- 6h. Correlation Method ---
+# "gaussian"        — Per-bin stochastic MC → Gaussian parametric energy correlations → Cholesky samples
+# "kernel_weight_mc" — Kernel-weighted multi-bin MC → correlations from shared perturbed datasets
+CORRELATION_METHOD = "gaussian"
+KW_MC_TWO_PASS = True                            # True: per-bin variance + KW correlations. False: single-pass.
+KW_MC_MIN_WEIGHT = 1e-3                          # Overlap weight threshold for kernel-weight MC
+
+# --- 6i. TOF Parameters (for energy resolution) ---
 TOF_PARAMETERS_FILE = "/share_snc/snc/JuanMonleon/EXFOR/exfor_tof_parameters.json"
-JITTER_N_SIGMA_CLIP = 3.0                        # Clip jitter at ±n_sigma
-TRACK_BIN_JUMPS = True                           # Track bin jump statistics for diagnostics
 
 # =============================================================================
 # END OF CONFIGURATION
@@ -697,9 +646,6 @@ class NominalFitResult:
     kernel_diagnostics: Optional[KernelDiagnostics] = None
     degree_weights: Optional[Dict[int, float]] = None
     all_degrees_info: Optional[Dict[int, Dict]] = None
-    # Two-pass dedupe: store non-dedupe data for MC if needed
-    exfor_df_mc: Optional[pd.DataFrame] = None
-    kernel_weights_mc: Optional[np.ndarray] = None
 
 
 # Import the rest of the workflow functions from the original script
@@ -960,7 +906,6 @@ def perform_nominal_fits(
     energy_bins: List[EnergyBinInfo],
     exfor_cache: Dict[float, List[Tuple[pd.DataFrame, Dict]]],
     sorted_energies: List[float],
-    n_sigma: float,
     max_degree: int,
     select_degree: Optional[str],
     ridge_lambda: float,
@@ -970,226 +915,42 @@ def perform_nominal_fits(
     min_points_per_band: int,
     max_tau_fraction: float,
     tau_smoothing_window: int,
-    min_kernel_weight_fraction: float = 1e-3,
-    max_experiment_weight_fraction: float = 0.5,
     n_eff_warning_threshold: float = 5.0,
-    weight_span_warning_ratio: float = 3.0,
-    experiment_selection_method: str = "global_convolution",
     min_degree_for_averaging: int = 3,
-    delta_t_ns: float = 5.0,
-    flight_path_m: float = 27.037,
-    tikhonov_lambda: float = 0.001,
-    l_dependent_power: float = 2.0,
-    skip_c0_regularization: bool = True,
-    min_weight_sum_threshold: float = 0.95,
-    shape_only: bool = False,
     exclude_experiments: Optional[List[str]] = None,
     min_relative_uncertainty: float = 0.0,
     tau_prior_floor: bool = True,
     tau_prior_min_experiments: int = 2,
     tau_prior_percentile: float = 50.0,
     logger = None,
-) -> Tuple[List[NominalFitResult], Optional[GlobalConvolutionSystem], Optional[Dict[int, float]]]:
-    """Phase 1: Perform nominal fits to determine frozen orders and band discrepancies.
+) -> List[NominalFitResult]:
+    """Phase 1: Perform nominal fits using energy_bin method.
 
     Returns
     -------
-    Tuple[List[NominalFitResult], Optional[GlobalConvolutionSystem], Optional[Dict[int, float]]]
-        - List of nominal fit results for each energy bin
-        - GlobalConvolutionSystem for MC sampling (only for global_convolution method)
-        - c0_frozen dict (energy_index -> c0 value) if shape_only=True and global_convolution method, else None
+    List[NominalFitResult]
+        List of nominal fit results for each energy bin.
     """
     from numpy.polynomial.legendre import legvander, legval
 
     logger = _get_logger()
     results = []
-    global_system = None  # Will be set only for global_convolution method
-    c0_frozen = None  # Will be set only for global_convolution with shape_only=True
 
-    # GLOBAL CONVOLUTION METHOD
-    if experiment_selection_method == "global_convolution":
-        if logger:
-            logger.info("")
-            logger.info("[GLOBAL CONVOLUTION FIT]")
-            logger.info(f"  Method: global_convolution (all energies fitted simultaneously)")
-            logger.info(f"  Tikhonov λ: {tikhonov_lambda}")
-            logger.info(f"  ℓ-dependent power: {l_dependent_power}")
-            logger.info(f"  Skip c0 regularization: {skip_c0_regularization}")
-            logger.info(f"  Shape-only mode (Improvement 3.4): {shape_only}")
-            logger.info(f"  Max Legendre degree: {max_degree}")
-            logger.info(f"  Energy kernel cutoff: ±{n_sigma}σ")
-            logger.info(f"  Min weight fraction: {min_kernel_weight_fraction}")
-            logger.info(f"  Min weight sum threshold: {min_weight_sum_threshold}")
-            logger.info("")
-
-        coeffs_by_energy, global_diag, global_system, c0_frozen = fit_legendre_global_convolution(
+    for bin_info in energy_bins:
+        exfor_df, experiments_info, kernel_weights, diagnostics = filter_exfor_with_energy_bin(
             exfor_cache=exfor_cache,
             sorted_energies=sorted_energies,
-            energy_bins=energy_bins,
-            max_degree=max_degree,
-            n_sigma=n_sigma,
-            tikhonov_lambda=tikhonov_lambda,
-            min_kernel_weight_fraction=min_kernel_weight_fraction,
-            min_weight_sum_threshold=min_weight_sum_threshold,
+            bin_lower_mev=bin_info.bin_lower_mev,
+            bin_upper_mev=bin_info.bin_upper_mev,
+            target_energy_mev=bin_info.energy_mev,
             m_proj_u=m_proj_u,
             m_targ_u=m_targ_u,
-            delta_t_ns=delta_t_ns,
-            flight_path_m=flight_path_m,
-            l_dependent_power=l_dependent_power,
-            skip_c0_regularization=skip_c0_regularization,
-            shape_only=shape_only,
-            logger=logger,
+            dedupe_per_experiment=True,
+            exclude_experiments=exclude_experiments,
+            min_relative_uncertainty=min_relative_uncertainty,
+            normalize_by_n_points=NORMALIZE_BY_N_POINTS,
+            max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
         )
-
-        for bin_info in energy_bins:
-            if bin_info.index in coeffs_by_energy:
-                coeffs = coeffs_by_energy[bin_info.index]
-                chi2_red = global_diag.chi2_per_energy.get(bin_info.index, 0.0)
-                n_eff = global_diag.n_eff_per_energy.get(bin_info.index, 0.0)
-
-                kernel_diag = KernelDiagnostics(
-                    n_eff=n_eff,
-                    weight_span_95=0.0,
-                    weight_span_ratio=0.0,
-                    n_experiments=0,
-                    max_experiment_weight_frac=0.0,
-                    experiment_weights={},
-                    n_points_dropped=0,
-                    capping_applied=False,
-                )
-
-                results.append(NominalFitResult(
-                    energy_mev=bin_info.energy_mev,
-                    energy_index=bin_info.index,
-                    exfor_df=pd.DataFrame(),
-                    experiments_info=[],
-                    kernel_weights=np.array([]),
-                    frozen_degree=max_degree,
-                    nominal_coeffs=coeffs,
-                    sigma_eff=np.array([]),
-                    tau_info={'tau_F': 0.0, 'tau_M': 0.0, 'tau_B': 0.0},
-                    chi2_red=chi2_red,
-                    has_data=True,
-                    kernel_diagnostics=kernel_diag,
-                    degree_weights=None,
-                    all_degrees_info=None,
-                ))
-            else:
-                results.append(NominalFitResult(
-                    energy_mev=bin_info.energy_mev,
-                    energy_index=bin_info.index,
-                    exfor_df=pd.DataFrame(),
-                    experiments_info=[],
-                    kernel_weights=np.array([]),
-                    frozen_degree=0,
-                    nominal_coeffs=np.array([1.0]),
-                    sigma_eff=np.array([]),
-                    tau_info={'tau_F': 0.0, 'tau_M': 0.0, 'tau_B': 0.0},
-                    chi2_red=0.0,
-                    has_data=False,
-                    kernel_diagnostics=None,
-                    degree_weights=None,
-                    all_degrees_info=None,
-                ))
-
-        if logger:
-            n_with_data = len(global_diag.energies_with_data)
-            logger.info("[GLOBAL FIT SUMMARY]")
-            logger.info(f"  Energies with data: {n_with_data}/{len(energy_bins)}")
-            logger.info(f"  Total χ² = {global_diag.chi2:.2f}")
-            logger.info(f"  Total data points = {global_diag.n_data_points}")
-            # Log weight guard diagnostics (Improvement 3.2)
-            if global_diag.weight_sum_min < 1.0:
-                logger.info(f"  Min weight sum: {global_diag.weight_sum_min:.3f}")
-            if global_diag.n_datasets_skipped > 0:
-                logger.warning(f"  Datasets skipped (severe truncation): {global_diag.n_datasets_skipped}")
-            if global_diag.truncated_datasets:
-                logger.info(f"  Datasets with moderate truncation: {len(global_diag.truncated_datasets)}")
-            logger.info("")
-            # Log per-energy results in condensed form
-            logger.info("  Per-energy results:")
-            for bin_info in energy_bins:
-                if bin_info.index in coeffs_by_energy:
-                    chi2_e = global_diag.chi2_per_energy.get(bin_info.index, 0.0)
-                    n_eff_e = global_diag.n_eff_per_energy.get(bin_info.index, 0.0)
-                    logger.info(
-                        f"    E={bin_info.energy_mev:.4f} MeV: χ²/dof={chi2_e:.2f}, N_eff={n_eff_e:.1f}"
-                    )
-                else:
-                    logger.info(f"    E={bin_info.energy_mev:.4f} MeV: No data")
-            logger.info("")
-
-        return results, global_system, c0_frozen
-
-    # PER-ENERGY METHODS
-    for bin_info in energy_bins:
-        # Initialize MC-specific data (only used by kernel_weights method with two-pass dedupe)
-        exfor_df_mc = None
-        kernel_weights_mc = None
-
-        if experiment_selection_method == "energy_bin":
-            exfor_df, experiments_info, kernel_weights, diagnostics = filter_exfor_with_energy_bin(
-                exfor_cache=exfor_cache,
-                sorted_energies=sorted_energies,
-                bin_lower_mev=bin_info.bin_lower_mev,
-                bin_upper_mev=bin_info.bin_upper_mev,
-                target_energy_mev=bin_info.energy_mev,
-                m_proj_u=m_proj_u,
-                m_targ_u=m_targ_u,
-                dedupe_per_experiment=DEDUPE_NOMINAL,
-                exclude_experiments=exclude_experiments,
-                min_relative_uncertainty=min_relative_uncertainty,
-                # Per-experiment weighting (Improvement 1.1)
-                normalize_by_n_points=NORMALIZE_BY_N_POINTS,
-                max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
-            )
-        else:
-            # Nominal fit filter (always with DEDUPE_NOMINAL)
-            exfor_df, experiments_info, kernel_weights, diagnostics = filter_exfor_with_kernel_weights(
-                exfor_cache=exfor_cache,
-                sorted_energies=sorted_energies,
-                energy_mev=bin_info.energy_mev,
-                sigma_E_mev=bin_info.sigma_E_mev,
-                n_sigma=n_sigma,
-                m_proj_u=m_proj_u,
-                m_targ_u=m_targ_u,
-                bin_lower_mev=bin_info.bin_lower_mev,
-                bin_upper_mev=bin_info.bin_upper_mev,
-                min_kernel_weight_fraction=min_kernel_weight_fraction,
-                max_experiment_weight_fraction=max_experiment_weight_fraction,
-                default_delta_t_ns=delta_t_ns,
-                default_flight_path_m=flight_path_m,
-                use_overlap_weights=USE_OVERLAP_WEIGHTS,
-                normalize_by_n_points=NORMALIZE_BY_N_POINTS,
-                dedupe_per_experiment=DEDUPE_NOMINAL,
-                exclude_experiments=exclude_experiments,
-                min_relative_uncertainty=min_relative_uncertainty,
-                logger=logger,
-            )
-
-            # MC filter (if different from nominal - two-pass dedupe)
-            if DEDUPE_MC != DEDUPE_NOMINAL:
-                exfor_df_mc, _, kernel_weights_mc, _ = filter_exfor_with_kernel_weights(
-                    exfor_cache=exfor_cache,
-                    sorted_energies=sorted_energies,
-                    energy_mev=bin_info.energy_mev,
-                    sigma_E_mev=bin_info.sigma_E_mev,
-                    n_sigma=n_sigma,
-                    m_proj_u=m_proj_u,
-                    m_targ_u=m_targ_u,
-                    bin_lower_mev=bin_info.bin_lower_mev,
-                    bin_upper_mev=bin_info.bin_upper_mev,
-                    min_kernel_weight_fraction=min_kernel_weight_fraction,
-                    max_experiment_weight_fraction=max_experiment_weight_fraction,
-                    default_delta_t_ns=delta_t_ns,
-                    default_flight_path_m=flight_path_m,
-                    use_overlap_weights=USE_OVERLAP_WEIGHTS,
-                    normalize_by_n_points=NORMALIZE_BY_N_POINTS,
-                    dedupe_per_experiment=DEDUPE_MC,
-                    exclude_experiments=exclude_experiments,
-                    min_relative_uncertainty=min_relative_uncertainty,
-                    logger=None,  # Don't log MC filter details
-                )
 
         if exfor_df.empty or len(exfor_df) < 3:
             results.append(NominalFitResult(
@@ -1291,12 +1052,6 @@ def perform_nominal_fits(
                     f"E={bin_info.energy_mev:.4f} MeV: Low N_eff={final_n_eff:.1f} "
                     f"(threshold: {n_eff_warning_threshold})"
                 )
-            if diagnostics.weight_span_ratio > weight_span_warning_ratio:
-                logger.warning(
-                    f"E={bin_info.energy_mev:.4f} MeV: Wide weight span "
-                    f"({diagnostics.weight_span_95:.4f} MeV = {diagnostics.weight_span_ratio:.1f}×σE)"
-                )
-
         results.append(NominalFitResult(
             energy_mev=bin_info.energy_mev,
             energy_index=bin_info.index,
@@ -1312,22 +1067,12 @@ def perform_nominal_fits(
             kernel_diagnostics=diagnostics,
             degree_weights=degree_weights,
             all_degrees_info=all_degrees_info,
-            # Two-pass dedupe: MC-specific data (only used by kernel_weights method)
-            exfor_df_mc=exfor_df_mc,
-            kernel_weights_mc=kernel_weights_mc,
         ))
 
-        # Log comprehensive energy bin information
         if logger:
-            # Energy header with bin boundaries or σE depending on method
-            if experiment_selection_method == "energy_bin":
-                logger.info(
-                    f"E = {bin_info.energy_mev:.4f} MeV (bin: [{bin_info.bin_lower_mev:.4f}, {bin_info.bin_upper_mev:.4f}] MeV):"
-                )
-            else:
-                logger.info(
-                    f"E = {bin_info.energy_mev:.4f} MeV (σE = {bin_info.sigma_E_mev:.4f} MeV):"
-                )
+            logger.info(
+                f"E = {bin_info.energy_mev:.4f} MeV (bin: [{bin_info.bin_lower_mev:.4f}, {bin_info.bin_upper_mev:.4f}] MeV):"
+            )
 
             # Experiments used (condensed - one line per experiment with ranges)
             condensed_lines = _format_condensed_experiments(experiments_info)
@@ -1364,7 +1109,7 @@ def perform_nominal_fits(
             logger.info(f"  Tau prior floor baselines: τ_F={baselines['tau_F']:.4f}, "
                         f"τ_M={baselines['tau_M']:.4f}, τ_B={baselines['tau_B']:.4f}")
 
-    return results, None, None  # No global_system or c0_frozen for per-energy methods
+    return results
 
 
 # Import PrecomputedEnergyData, _precompute_energy_data, _sample_one_realization, run_mc_per_realization
@@ -1581,9 +1326,6 @@ def run_exfor_to_endf_sampling_v2(
     ridge_lambda: float = 0.0,
     m_proj_u: float = 1.008665,
     m_targ_u: float = 55.93494,
-    delta_t_ns: float = 5.0,
-    flight_path_m: float = 27.037,
-    n_sigma_cutoff: float = 3.0,
     use_band_discrepancy: bool = True,
     min_points_per_band: int = 3,
     max_tau_fraction: float = 0.25,
@@ -1594,12 +1336,7 @@ def run_exfor_to_endf_sampling_v2(
     sigma_norm: float = 0.05,
     use_model_averaging: bool = True,
     min_degree_for_averaging: int = 3,
-    min_kernel_weight_fraction: float = 1e-3,
-    max_experiment_weight_fraction: float = 0.5,
     n_eff_warning_threshold: float = 5.0,
-    weight_span_warning_ratio: float = 3.0,
-    experiment_selection_method: str = "global_convolution",
-    tikhonov_lambda: float = 0.001,
     n_procs: int = 1,
     base_seed: int = 42,
     generate_nominal_endf: bool = True,
@@ -1825,122 +1562,57 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info(f"    POSITIVITY_CHECK_POINTS    = {positivity_check_points}")
     _logger.info("")
 
-    # -- Experiment Selection Method --
-    _logger.info(f"  EXPERIMENT_SELECTION_METHOD = {experiment_selection_method}")
+    # -- Angular-Band Discrepancy (6d) --
+    _logger.info("  Angular-Band Discrepancy (6d):")
+    _logger.info(f"    USE_BAND_DISCREPANCY           = {use_band_discrepancy}")
+    _logger.info(f"    MIN_POINTS_PER_BAND            = {min_points_per_band}")
+    _logger.info(f"    MAX_TAU_FRACTION               = {max_tau_fraction}")
+    _logger.info(f"    TAU_SMOOTHING_WINDOW           = {tau_smoothing_window}")
+    _logger.info(f"    TAU_PRIOR_FLOOR                = {tau_prior_floor}")
+    if tau_prior_floor:
+        _logger.info(f"    TAU_PRIOR_MIN_EXPERIMENTS      = {tau_prior_min_experiments}")
+        _logger.info(f"    TAU_PRIOR_PERCENTILE           = {tau_prior_percentile}")
+    _logger.info(f"    RESCALE_UNC_BY_CHI2            = {RESCALE_UNC_BY_CHI2}")
+    _logger.info(f"    ALLOW_SHRINK_UNC               = {ALLOW_SHRINK_UNC}")
     _logger.info("")
 
-    # -- 6a. TOF Resolution (kernel_weights, global_convolution) --
-    if experiment_selection_method in ("kernel_weights", "global_convolution"):
-        _logger.info("  TOF Energy Resolution (6a):")
-        _logger.info(f"    DELTA_T_NS              = {delta_t_ns}")
-        _logger.info(f"    FLIGHT_PATH_M           = {flight_path_m}")
-        _logger.info(f"    N_SIGMA_CUTOFF          = {n_sigma_cutoff}")
-        _logger.info("")
+    # -- Per-Experiment Normalization (6e) --
+    _logger.info("  Per-Experiment Normalization (6e):")
+    _logger.info(f"    NORMALIZATION_SIGMA             = {sigma_norm}")
+    _logger.info(f"    NORM_DIST                      = {NORM_DIST}")
+    _logger.info("")
 
-    # -- 6b. Global Convolution (global_convolution only) --
-    if experiment_selection_method == "global_convolution":
-        _logger.info("  Global Convolution (6b):")
-        _logger.info(f"    GLOBAL_CONV_LAMBDA      = {tikhonov_lambda}")
-        _logger.info(f"    L_DEPENDENT_POWER       = {L_DEPENDENT_POWER}")
-        _logger.info(f"    SKIP_C0_REGULARIZATION  = {SKIP_C0_REGULARIZATION}")
-        _logger.info(f"    MIN_WEIGHT_SUM_THRESHOLD = {MIN_WEIGHT_SUM_THRESHOLD}")
-        _logger.info(f"    GLOBAL_CONV_SHAPE_ONLY  = {GLOBAL_CONV_SHAPE_ONLY}")
-        _logger.info("")
+    # -- Model Averaging (6f) --
+    _logger.info("  Model Averaging (6f):")
+    _logger.info(f"    USE_MODEL_AVERAGING            = {use_model_averaging}")
+    _logger.info(f"    MIN_DEGREE_FOR_AVERAGING       = {min_degree_for_averaging}")
+    _logger.info(f"    USE_DEGREE_SAMPLING_IN_MC      = {USE_DEGREE_SAMPLING_IN_MC}")
+    _logger.info("")
 
-    # -- 6c. Kernel Weight Control (kernel_weights only) --
-    if experiment_selection_method == "kernel_weights":
-        _logger.info("  Kernel Weight Control (6c):")
-        _logger.info(f"    MIN_KERNEL_WEIGHT_FRACTION     = {min_kernel_weight_fraction}")
-        _logger.info(f"    MAX_EXPERIMENT_WEIGHT_FRACTION  = {max_experiment_weight_fraction}")
-        _logger.info(f"    N_EFF_WARNING_THRESHOLD        = {n_eff_warning_threshold}")
-        _logger.info(f"    WEIGHT_SPAN_WARNING_RATIO      = {weight_span_warning_ratio}")
-        _logger.info(f"    DEDUPE_NOMINAL                 = {DEDUPE_NOMINAL}")
-        _logger.info(f"    DEDUPE_MC                      = {DEDUPE_MC}")
-        _logger.info(f"    USE_OVERLAP_WEIGHTS            = {USE_OVERLAP_WEIGHTS}")
-        _logger.info("")
+    # -- Energy Bin Method (6g) --
+    _logger.info("  Energy Bin Method (6g):")
+    _logger.info(f"    NORMALIZE_BY_N_POINTS          = {NORMALIZE_BY_N_POINTS}")
+    _logger.info(f"    MAX_EXP_WEIGHT_FRAC_BIN        = {MAX_EXP_WEIGHT_FRAC_BIN}")
+    _logger.info(f"    FREEZE_C0                      = {FREEZE_C0}")
+    _logger.info(f"    MAX_SAMPLE_ORDER               = {MAX_SAMPLE_ORDER}")
+    _logger.info("")
 
-    # -- 6d. Angular-Band Discrepancy (kernel_weights, energy_bin) --
-    if experiment_selection_method in ("kernel_weights", "energy_bin"):
-        _logger.info("  Angular-Band Discrepancy (6d):")
-        _logger.info(f"    USE_BAND_DISCREPANCY           = {use_band_discrepancy}")
-        _logger.info(f"    MIN_POINTS_PER_BAND            = {min_points_per_band}")
-        _logger.info(f"    MAX_TAU_FRACTION               = {max_tau_fraction}")
-        _logger.info(f"    TAU_SMOOTHING_WINDOW           = {tau_smoothing_window}")
-        _logger.info(f"    TAU_PRIOR_FLOOR                = {tau_prior_floor}")
-        if tau_prior_floor:
-            _logger.info(f"    TAU_PRIOR_MIN_EXPERIMENTS      = {tau_prior_min_experiments}")
-            _logger.info(f"    TAU_PRIOR_PERCENTILE           = {tau_prior_percentile}")
-        _logger.info(f"    RESCALE_UNC_BY_CHI2            = {RESCALE_UNC_BY_CHI2}")
-        _logger.info(f"    ALLOW_SHRINK_UNC               = {ALLOW_SHRINK_UNC}")
-        _logger.info("")
-
-    # -- 6e. Per-Experiment Normalization (kernel_weights, energy_bin) --
-    if experiment_selection_method in ("kernel_weights", "energy_bin"):
-        _logger.info("  Per-Experiment Normalization (6e):")
-        _logger.info(f"    NORMALIZATION_SIGMA             = {sigma_norm}")
-        _logger.info(f"    NORM_DIST                      = {NORM_DIST}")
-        _logger.info("")
-
-    # -- 6f. Model Averaging (kernel_weights, energy_bin) --
-    if experiment_selection_method in ("kernel_weights", "energy_bin"):
-        _logger.info("  Model Averaging (6f):")
-        _logger.info(f"    USE_MODEL_AVERAGING            = {use_model_averaging}")
-        _logger.info(f"    MIN_DEGREE_FOR_AVERAGING       = {min_degree_for_averaging}")
-        _logger.info(f"    USE_DEGREE_SAMPLING_IN_MC      = {USE_DEGREE_SAMPLING_IN_MC}")
-        _logger.info("")
-
-    # -- 6g. Energy Bin Specific (energy_bin only) --
-    if experiment_selection_method == "energy_bin":
-        _logger.info("  Energy Bin Method (6g):")
-        _logger.info(f"    NORMALIZE_BY_N_POINTS          = {NORMALIZE_BY_N_POINTS}")
-        _logger.info(f"    MAX_EXP_WEIGHT_FRAC_BIN        = {MAX_EXP_WEIGHT_FRAC_BIN}")
-        _logger.info(f"    FREEZE_C0                      = {FREEZE_C0}")
-        _logger.info("")
-
-    # -- 6h. Energy Jitter (energy_bin only) --
-    if experiment_selection_method == "energy_bin":
-        _logger.info("  Energy Jitter (6h):")
-        _logger.info(f"    USE_ENERGY_JITTER              = {USE_ENERGY_JITTER}")
-        if USE_ENERGY_JITTER:
-            _logger.info(f"    TOF_PARAMETERS_FILE            = {TOF_PARAMETERS_FILE}")
-        _logger.info(f"    JITTER_N_SIGMA_CLIP            = {JITTER_N_SIGMA_CLIP}")
-        _logger.info(f"    TRACK_BIN_JUMPS                = {TRACK_BIN_JUMPS}")
-        _logger.info("")
-
-    # -- 6i. MC Sampling Control (energy_bin only) --
-    if experiment_selection_method == "energy_bin":
-        _logger.info("  MC Sampling Control (6i):")
-        _logger.info(f"    TWO_PASS_DECOMPOSITION         = {TWO_PASS_DECOMPOSITION}")
-        _logger.info(f"    MAX_SAMPLE_ORDER               = {MAX_SAMPLE_ORDER}")
-        _logger.info("")
+    # -- Correlation Method (6h) --
+    _logger.info("  Correlation Method (6h):")
+    _logger.info(f"    CORRELATION_METHOD              = {CORRELATION_METHOD}")
+    if CORRELATION_METHOD == "kernel_weight_mc":
+        _logger.info(f"    KW_MC_TWO_PASS                 = {KW_MC_TWO_PASS}")
+        _logger.info(f"    KW_MC_MIN_WEIGHT               = {KW_MC_MIN_WEIGHT}")
+    _logger.info(f"    TOF_PARAMETERS_FILE            = {TOF_PARAMETERS_FILE}")
+    _logger.info("")
 
     _logger.info(separator)
     _logger.info("")
 
     # Warning legend
     _logger.info("[WARNING LEGEND]")
-    _logger.info("  The following warnings may appear during fitting:")
-    _logger.info("")
-    _logger.info("  - 'No EXFOR data': No experimental points found within energy tolerance")
-    _logger.info("      -> Effect: Coefficients will be INTERPOLATED from neighboring bins")
-    _logger.info("      -> Action: Check data coverage for this energy region")
-    _logger.info("")
-    _logger.info("  - 'Low N_eff=X.X (threshold: Y)': Effective sample size is low")
-    _logger.info("      -> Cause: Few independent data points or highly unequal weights")
-    _logger.info("      -> Effect: Larger statistical uncertainty in fitted coefficients")
-    _logger.info("      -> Action: Consider widening σE cutoff or checking data availability")
-    _logger.info("")
-    _logger.info("  - 'Wide weight span (X.XXXX MeV = Y.Yxσ_E)': Energy spread of contributing data")
-    _logger.info("      -> Cause: EXFOR data energies span a wide range around target energy")
-    _logger.info("      -> Effect: Potential bias from energy-dependent shape changes")
-    _logger.info("      -> Action: Review if energy resolution assumptions are appropriate")
-    _logger.info("")
-    if experiment_selection_method == "kernel_weights":
-        _logger.info("  - 'Experiment capping applied': One experiment dominated the weights")
-        _logger.info(f"      -> Cause: Experiment exceeded {max_experiment_weight_fraction*100:.0f}% of total weight")
-        _logger.info("      -> Effect: Weight redistributed to prevent single-experiment bias")
-        _logger.info("      -> Action: This is protective; review if capping is frequent")
-        _logger.info("")
+    _logger.info("  - 'No EXFOR data': Coefficients will be INTERPOLATED from neighboring bins")
+    _logger.info("  - 'Low N_eff': Few independent data points contributing to fit")
     _logger.info("  - 'INTERPOLATED from neighboring bins': No EXFOR data at this energy")
     _logger.info("      -> Cause: No experimental data available within energy tolerance")
     _logger.info("      -> Effect: Coefficients linearly interpolated from neighboring bins with data")
@@ -2036,8 +1708,8 @@ def run_exfor_to_endf_sampling_v2(
         energies_ev=energies_ev,
         energy_min_mev=energy_min_mev,
         energy_max_mev=energy_max_mev,
-        delta_t_ns=delta_t_ns,
-        flight_path_m=flight_path_m,
+        delta_t_ns=DELTA_T_NS,
+        flight_path_m=FLIGHT_PATH_M,
     )
 
     if not energy_bins:
@@ -2057,11 +1729,10 @@ def run_exfor_to_endf_sampling_v2(
 
     t_fit_start = time.time()
 
-    nominal_results, global_system, c0_frozen_from_nominal = perform_nominal_fits(
+    nominal_results = perform_nominal_fits(
         energy_bins=energy_bins,
         exfor_cache=exfor_cache,
         sorted_energies=sorted_exfor_energies,
-        n_sigma=n_sigma_cutoff,
         max_degree=max_degree,
         select_degree=select_degree,
         ridge_lambda=ridge_lambda,
@@ -2071,19 +1742,8 @@ def run_exfor_to_endf_sampling_v2(
         min_points_per_band=min_points_per_band,
         max_tau_fraction=max_tau_fraction,
         tau_smoothing_window=tau_smoothing_window,
-        min_kernel_weight_fraction=min_kernel_weight_fraction,
-        max_experiment_weight_fraction=max_experiment_weight_fraction,
         n_eff_warning_threshold=n_eff_warning_threshold,
-        weight_span_warning_ratio=weight_span_warning_ratio,
-        experiment_selection_method=experiment_selection_method,
         min_degree_for_averaging=min_degree_for_averaging,
-        delta_t_ns=delta_t_ns,
-        flight_path_m=flight_path_m,
-        tikhonov_lambda=tikhonov_lambda,
-        l_dependent_power=L_DEPENDENT_POWER,
-        skip_c0_regularization=SKIP_C0_REGULARIZATION,
-        min_weight_sum_threshold=MIN_WEIGHT_SUM_THRESHOLD,
-        shape_only=GLOBAL_CONV_SHAPE_ONLY,
         exclude_experiments=exclude_experiments,
         min_relative_uncertainty=min_relative_uncertainty,
         tau_prior_floor=tau_prior_floor,
@@ -2123,358 +1783,173 @@ def run_exfor_to_endf_sampling_v2(
     log_experiments_summary(nominal_results, logger=_logger)
 
     # Step 5: MC sampling
-    # Three modes available:
-    # 1. Global convolution MC (for global_convolution method): All energies sampled jointly
-    # 2. Energy jitter MC (for energy_bin method): Cross-bin correlation via energy perturbation
-    # 3. Per-bin independent MC: Original method with independent sampling per bin
     _logger.info("")
     _logger.info("[STEP 5] Phase 2: MC sampling")
     _logger.info(f"  Generating {n_samples} MC samples")
+    _logger.info(f"  Correlation method: {CORRELATION_METHOD}")
 
-    # GLOBAL CONVOLUTION MC (Improvement 3.1 - Fix MC Sampling)
-    if experiment_selection_method == "global_convolution" and global_system is not None:
-        # Shape-only MC (Improvement 3.4): c0 frozen, only c1..cL sampled
-        if GLOBAL_CONV_SHAPE_ONLY and c0_frozen_from_nominal is not None:
-            _logger.info(f"  Method: Global convolution MC (shape-only, c0 frozen)")
-            _logger.info(f"  Experiment normalization σ: {sigma_norm}")
-            _logger.info(f"  Tikhonov λ: {tikhonov_lambda}")
-            _logger.info(f"  ℓ-dependent power: {L_DEPENDENT_POWER}")
+    _prebuilt_gaussian_cov = None
+    _prebuilt_mc_mean = None
 
-            all_samples_raw, mc_diagnostics = sample_global_convolution_mc_shape_only(
-                system=global_system,
-                c0_frozen=c0_frozen_from_nominal,
-                n_samples=n_samples,
-                sigma_norm=sigma_norm,
-                tikhonov_lambda=tikhonov_lambda,
-                l_dependent_power=L_DEPENDENT_POWER,
-                seed=base_seed,
-                logger=_logger,
-                apply_positivity_projection=apply_positivity_projection,
-                positivity_check_points=positivity_check_points,
-            )
+    if CORRELATION_METHOD == "gaussian":
+        # Per-bin stochastic MC → Gaussian parametric correlations → Cholesky samples
+        _logger.info("  " + "=" * 60)
+        _logger.info("  Method: Gaussian decay correlation + Cholesky resampling")
+        _logger.info("  " + "=" * 60)
+        if N_PROCS > 1:
+            _logger.info(f"  Using {N_PROCS} parallel processes over bins")
+
+        bin_args_list = []
+        for nr in nominal_results:
+            if not nr.has_data:
+                continue
+            bin_args_list.append((
+                nr.energy_index,
+                nr.frozen_degree,
+                nr.nominal_coeffs,
+                nr.interpolated,
+                nr.exfor_df,
+                nr.kernel_weights,
+                nr.degree_weights,
+                n_samples,
+                base_seed,
+                max_degree,
+                ridge_lambda,
+                RIDGE_POWER,
+                DF_METHOD,
+                use_band_discrepancy,
+                min_points_per_band,
+                max_tau_fraction,
+                USE_DEGREE_SAMPLING_IN_MC,
+                RESCALE_UNC_BY_CHI2,
+                ALLOW_SHRINK_UNC,
+                FREEZE_C0,
+                0.0,  # normalization not applied in per-bin pass (Gaussian model handles correlations)
+                NORM_DIST,
+                MAX_SAMPLE_ORDER,
+                apply_positivity_projection,
+                positivity_check_points,
+            ))
+
+        if N_PROCS > 1:
+            with Pool(N_PROCS) as pool:
+                bin_results = pool.map(_mc_one_bin, bin_args_list)
         else:
-            _logger.info(f"  Method: Global convolution MC (all energies sampled jointly)")
-            _logger.info(f"  Experiment normalization σ: {sigma_norm}")
+            bin_results = [_mc_one_bin(a) for a in bin_args_list]
 
-            # Generate MC samples using the global system
-            all_samples_raw, mc_diagnostics = sample_global_convolution_mc(
-                system=global_system,
-                n_samples=n_samples,
-                sigma_norm=sigma_norm,
-                seed=base_seed,
-                logger=_logger,
-                apply_positivity_projection=apply_positivity_projection,
-                positivity_check_points=positivity_check_points,
-            )
+        all_samples_stochastic = {s_idx: {} for s_idx in range(n_samples)}
+        for energy_idx, is_interpolated, results_by_sample, success in bin_results:
+            for s_idx, endf_coeffs in results_by_sample.items():
+                all_samples_stochastic[s_idx][energy_idx] = endf_coeffs
 
-        # Convert to the expected format: Dict[sample_idx, Dict[energy_idx, coeffs]]
-        all_samples = {s_idx: {} for s_idx in range(n_samples)}
-        n_coeffs = global_system.n_coeffs
+        _logger.info(f"  Per-bin stochastic pass completed: {len(bin_args_list)} bins")
 
-        for s_idx in range(n_samples):
-            coeffs_vec = all_samples_raw[s_idx, :]
-            for bin_info in energy_bins:
-                param_start = global_system.energy_idx_to_param_start[bin_info.index]
-                raw_coeffs = coeffs_vec[param_start:param_start + n_coeffs]
-                endf_coeffs = endf_normalize_legendre_coeffs(raw_coeffs, include_a0=False)
-                all_samples[s_idx][bin_info.index] = endf_coeffs
+        # Build Gaussian correlation covariance and generate Cholesky samples
+        _logger.info("  Building Gaussian correlation covariance from stochastic pass")
+        energy_indices_for_gauss = [nr.energy_index for nr in nominal_results if nr.has_data]
 
-        n_sampled = len([nr for nr in nominal_results if nr.has_data and not nr.interpolated])
-        n_interpolated_used = len([nr for nr in nominal_results if nr.has_data and nr.interpolated])
+        # Build valid-parameter mask: only parameters actually fitted are valid
+        nr_by_idx = {nr.energy_index: nr for nr in nominal_results}
+        _valid_mask = np.zeros(len(energy_indices_for_gauss) * max_degree, dtype=bool)
+        for ie, e_idx in enumerate(energy_indices_for_gauss):
+            nr = nr_by_idx[e_idx]
+            n_valid = min(nr.frozen_degree, max_degree)
+            for l in range(n_valid):
+                _valid_mask[ie * max_degree + l] = True
+        n_invalid = int(np.sum(~_valid_mask))
+        _logger.info(f"  Valid-parameter mask: {int(np.sum(_valid_mask))}/{len(_valid_mask)} valid "
+                     f"({n_invalid} zeroed for absent higher-order coefficients)")
 
-        _logger.info(f"  MC sampling complete: {n_sampled} energies with data, {n_interpolated_used} interpolated")
-        _logger.info(f"  Mean coeff std/mean ratio: {mc_diagnostics.get('coeffs_mean_std_ratio', 0):.4f}")
+        # Compute stochastic covariance (for per-bin variances and cross-order correlations)
+        cov_stochastic_pass2, _, _, mc_mean_stochastic = compute_covariance_from_samples(
+            all_samples=all_samples_stochastic,
+            energy_indices=energy_indices_for_gauss,
+            max_order=max_degree,
+            valid_mask=_valid_mask,
+        )
 
-        # Shape-only specific diagnostics
-        if GLOBAL_CONV_SHAPE_ONLY and mc_diagnostics.get('shape_only'):
-            _logger.info(f"  c0 max std across samples: {mc_diagnostics.get('c0_max_std', 0):.2e} (should be ~0)")
+        # Build full covariance with Gaussian energy correlations
+        _gaussian_cov_full = build_gaussian_correlation_covariance(
+            cov_stochastic=cov_stochastic_pass2,
+            energy_bins=energy_bins,
+            energy_indices=energy_indices_for_gauss,
+            max_order=max_degree,
+            logger=_logger,
+            valid_mask=_valid_mask,
+        )
 
-        # Validation: Check that samples differ (MF34 should be non-zero)
-        sample_stds = []
-        for bin_info in energy_bins:
-            if bin_info.index in all_samples[0]:
-                coeffs_across_samples = np.array([all_samples[s][bin_info.index] for s in range(n_samples)])
-                sample_std = np.std(coeffs_across_samples, axis=0)
-                sample_stds.extend(sample_std)
-        mean_sample_std = np.mean(sample_stds) if sample_stds else 0
-        if mean_sample_std < 1e-10:
-            _logger.warning("  WARNING: MC samples appear identical (mean std ≈ 0)")
-            _logger.warning("  This may result in zero covariance/MF34. Check system setup.")
-        else:
-            _logger.info(f"  Sample diversity check: mean coeff std = {mean_sample_std:.6f}")
+        # Generate properly correlated samples via Cholesky
+        _logger.info(f"  Generating {n_samples} Cholesky samples")
+        all_samples = generate_cholesky_samples(
+            cov_full=_gaussian_cov_full,
+            mean_params=mc_mean_stochastic,
+            energy_indices=energy_indices_for_gauss,
+            max_order=max_degree,
+            n_samples=n_samples,
+            seed=base_seed,
+            logger=_logger,
+        )
 
-    # Check if energy jitter is enabled and applicable
-    elif USE_ENERGY_JITTER and experiment_selection_method == "energy_bin" and TOF_PARAMETERS_FILE is not None:
-        use_jitter = True
-        _logger.info(f"  Method: Energy jitter MC (Improvement 1.4)")
-        _logger.info(f"  TOF parameters file: {TOF_PARAMETERS_FILE}")
-        _logger.info(f"  Jitter clipping: ±{JITTER_N_SIGMA_CLIP}σ")
+        # Store pre-built covariance for Step 7
+        _prebuilt_gaussian_cov = _gaussian_cov_full
+        _prebuilt_mc_mean = mc_mean_stochastic
 
-        # Load TOF parameters
-        try:
-            tof_params_cache = load_tof_parameters_file(TOF_PARAMETERS_FILE)
-            _logger.info(f"  Loaded TOF parameters for {len(tof_params_cache)} experiments")
-        except FileNotFoundError:
-            _logger.warning(f"  TOF parameters file not found: {TOF_PARAMETERS_FILE}")
-            _logger.warning(f"  Falling back to per-bin independent MC")
-            use_jitter = False
-            tof_params_cache = {}
-        except Exception as e:
-            _logger.warning(f"  Failed to load TOF parameters: {e}")
-            _logger.warning(f"  Falling back to per-bin independent MC")
-            use_jitter = False
-            tof_params_cache = {}
+    elif CORRELATION_METHOD == "kernel_weight_mc":
+        # Kernel-weighted multi-bin MC → correlations from shared perturbed datasets
+        _logger.info("  " + "=" * 60)
+        _logger.info("  Method: Kernel-weight MC correlations")
+        _logger.info(f"  Two-pass mode: {KW_MC_TWO_PASS}")
+        _logger.info(f"  Min overlap weight: {KW_MC_MIN_WEIGHT}")
+        _logger.info("  " + "=" * 60)
 
-        if use_jitter:
-            # Precompute dataset energy info (σE for each dataset)
-            dataset_info_by_bin = precompute_dataset_energy_info(
-                nominal_results=nominal_results,
-                tof_params_cache=tof_params_cache,
-                energy_bins=energy_bins,
-                default_flight_path_m=flight_path_m,
-                default_time_resolution_ns=delta_t_ns,
-            )
+        # Precompute overlap weights for all datasets across all bins
+        overlap_weights = precompute_overlap_weights(
+            nominal_results=nominal_results,
+            energy_bins=energy_bins,
+            min_weight=KW_MC_MIN_WEIGHT,
+        )
 
-            # Log summary of TOF parameter sources
-            all_subentries = []
-            for datasets in dataset_info_by_bin.values():
-                for ds in datasets:
-                    all_subentries.append(f"{ds.entry}{ds.subentry}")
+        n_datasets_total = sum(len(dsets) for dsets in overlap_weights.values())
+        _logger.info(f"  Overlap weights computed: {n_datasets_total} (dataset, bin) pairs")
 
-            if all_subentries:
-                tof_summary = summarize_tof_parameters(
-                    tof_params_cache, all_subentries,
-                    default_flight_path_m=flight_path_m,
-                    default_time_resolution_ns=delta_t_ns,
-                )
-                _logger.info(f"  TOF params from file: {tof_summary['n_from_file']}, using defaults: {tof_summary['n_default']}")
+        # Run kernel-weight MC (all bins coupled via shared perturbations)
+        kw_samples = run_mc_with_kernel_weights(
+            nominal_results=nominal_results,
+            energy_bins=energy_bins,
+            overlap_weights=overlap_weights,
+            n_samples=n_samples,
+            n_workers=N_PROCS,
+            sigma_norm=NORMALIZATION_SIGMA,
+            norm_dist=NORM_DIST,
+            max_degree=max_degree,
+            ridge_lambda=ridge_lambda,
+            base_seed=base_seed,
+            use_band_discrepancy=use_band_discrepancy,
+            min_points_per_band=min_points_per_band,
+            max_tau_fraction=max_tau_fraction,
+            freeze_c0=FREEZE_C0,
+            max_sample_order=MAX_SAMPLE_ORDER,
+            apply_positivity_projection=apply_positivity_projection,
+            positivity_check_points=positivity_check_points,
+            logger=_logger,
+        )
 
-            # Gaussian correlation mode: skip Pass 1 jitter, use parametric model
-            if USE_GAUSSIAN_CORRELATION:
-                _logger.info("  " + "=" * 60)
-                _logger.info("  Method: Gaussian decay correlation + Cholesky resampling")
-                _logger.info("  " + "=" * 60)
-                _logger.info("  Skipping Pass 1 (jitter MC) — correlations from parametric model")
-                _logger.info("  Per-bin stochastic MC provides: variance + cross-order correlations")
-                _logger.info("  Gaussian model provides: cross-energy correlations from TOF sigma_E")
-                _logger.info("  Cholesky sampling: draws from multivariate normal (not refits)")
-                all_samples_jitter_only = None
-                bin_jump_diag = None
-            else:
-                # Run MC with energy jitter
-                _jitter_stochastic = not TWO_PASS_DECOMPOSITION
-                if TWO_PASS_DECOMPOSITION:
-                    _logger.info("  Two-pass decomposition: Pass 1 — jitter-only (stochastic=False)")
-                all_samples, bin_jump_diag = run_mc_with_energy_jitter(
-                    nominal_results=nominal_results,
-                    energy_bins=energy_bins,
-                    dataset_info_by_bin=dataset_info_by_bin,
-                    exfor_cache=exfor_cache,
-                    sorted_energies=sorted_exfor_energies,
-                    n_samples=n_samples,
-                    base_seed=base_seed,
-                    max_degree=max_degree,
-                    ridge_lambda=ridge_lambda,
-                    m_proj_u=m_proj_u,
-                    m_targ_u=m_targ_u,
-                    use_band_discrepancy=use_band_discrepancy,
-                    min_points_per_band=min_points_per_band,
-                    max_tau_fraction=max_tau_fraction,
-                    jitter_n_sigma_clip=JITTER_N_SIGMA_CLIP,
-                    track_bin_jumps=TRACK_BIN_JUMPS,
-                    min_relative_uncertainty=min_relative_uncertainty,
-                    freeze_c0=FREEZE_C0,
-                    sigma_norm=NORMALIZATION_SIGMA,
-                    norm_dist=NORM_DIST,
-                    normalize_by_n_points=NORMALIZE_BY_N_POINTS,
-                    max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
-                    n_procs=N_PROCS,
-                    logger=_logger,
-                    apply_positivity_projection=apply_positivity_projection,
-                    positivity_check_points=positivity_check_points,
-                    stochastic=_jitter_stochastic,
-                )
+        if KW_MC_TWO_PASS:
+            _logger.info("  Two-pass: running per-bin MC for variance")
 
-            # Log bin jump diagnostics
-            if TRACK_BIN_JUMPS and bin_jump_diag is not None:
-                log_bin_jump_diagnostics(bin_jump_diag, energy_bins, logger=_logger)
-
-            if not USE_GAUSSIAN_CORRELATION:
-                n_sampled = sum(1 for nr in nominal_results if nr.has_data and not nr.interpolated)
-                n_interpolated_used = sum(1 for nr in nominal_results if nr.has_data and nr.interpolated)
-                _logger.info(f"  MC sampled with jitter: {n_sampled} bins, interpolated: {n_interpolated_used} bins")
-
-            # Per-bin stochastic pass (Pass 2 in two-pass, or sole stochastic pass for Gaussian mode)
-            all_samples_stochastic = None
-            if TWO_PASS_DECOMPOSITION or USE_GAUSSIAN_CORRELATION:
-                if not USE_GAUSSIAN_CORRELATION:
-                    _logger.info("  Two-pass decomposition: Pass 2 — per-bin stochastic (no jitter)")
-                if N_PROCS > 1:
-                    _logger.info(f"  Using {N_PROCS} parallel processes over bins")
-
-                bin_args_list = []
-                for nr in nominal_results:
-                    if not nr.has_data:
-                        continue
-                    mc_df = nr.exfor_df_mc if nr.exfor_df_mc is not None else nr.exfor_df
-                    mc_weights = nr.kernel_weights_mc if nr.kernel_weights_mc is not None else nr.kernel_weights
-                    bin_args_list.append((
-                        nr.energy_index,
-                        nr.frozen_degree,
-                        nr.nominal_coeffs,
-                        nr.interpolated,
-                        mc_df,
-                        mc_weights,
-                        nr.degree_weights,  # degree sampling enabled in Pass 2
-                        n_samples,
-                        base_seed,
-                        max_degree,
-                        ridge_lambda,
-                        RIDGE_POWER,
-                        DF_METHOD,
-                        use_band_discrepancy,  # Pass 2 re-estimates tau from stable fixed data;
-                                               # Pass 1 pre-inflates with nominal tau instead
-                        min_points_per_band,
-                        max_tau_fraction,
-                        USE_DEGREE_SAMPLING_IN_MC,  # degree sampling enabled in Pass 2
-                        RESCALE_UNC_BY_CHI2,
-                        ALLOW_SHRINK_UNC,
-                        FREEZE_C0,
-                        0.0,  # normalization handled in Pass 1 (shared across bins)
-                        NORM_DIST,
-                        MAX_SAMPLE_ORDER,
-                        apply_positivity_projection,
-                        positivity_check_points,
-                    ))
-
-                if N_PROCS > 1:
-                    with Pool(N_PROCS) as pool:
-                        bin_results = pool.map(_mc_one_bin, bin_args_list)
-                else:
-                    bin_results = [_mc_one_bin(a) for a in bin_args_list]
-
-                all_samples_stochastic = {s_idx: {} for s_idx in range(n_samples)}
-                for energy_idx, is_interpolated, results_by_sample, success in bin_results:
-                    for s_idx, endf_coeffs in results_by_sample.items():
-                        all_samples_stochastic[s_idx][energy_idx] = endf_coeffs
-
-                _logger.info(f"  Per-bin stochastic pass completed: {len(bin_args_list)} bins")
-
-            # Gaussian correlation mode: build covariance and generate Cholesky samples
-            if USE_GAUSSIAN_CORRELATION and all_samples_stochastic is not None:
-                _logger.info("  Building Gaussian correlation covariance from stochastic pass")
-                energy_indices_for_gauss = [nr.energy_index for nr in nominal_results if nr.has_data]
-
-                # Build valid-parameter mask: only parameters actually fitted are valid
-                nr_by_idx = {nr.energy_index: nr for nr in nominal_results}
-                _valid_mask = np.zeros(len(energy_indices_for_gauss) * max_degree, dtype=bool)
-                for ie, e_idx in enumerate(energy_indices_for_gauss):
-                    nr = nr_by_idx[e_idx]
-                    n_valid = min(nr.frozen_degree, max_degree)
-                    for l in range(n_valid):
-                        _valid_mask[ie * max_degree + l] = True
-                n_invalid = int(np.sum(~_valid_mask))
-                _logger.info(f"  Valid-parameter mask: {int(np.sum(_valid_mask))}/{len(_valid_mask)} valid "
-                             f"({n_invalid} zeroed for absent higher-order coefficients)")
-
-                # Compute stochastic covariance (for per-bin variances and cross-order correlations)
-                cov_stochastic_pass2, _, _, mc_mean_stochastic = compute_covariance_from_samples(
-                    all_samples=all_samples_stochastic,
-                    energy_indices=energy_indices_for_gauss,
-                    max_order=max_degree,
-                    valid_mask=_valid_mask,
-                )
-
-                # Build full covariance with Gaussian energy correlations
-                _gaussian_cov_full = build_gaussian_correlation_covariance(
-                    cov_stochastic=cov_stochastic_pass2,
-                    energy_bins=energy_bins,
-                    energy_indices=energy_indices_for_gauss,
-                    max_order=max_degree,
-                    logger=_logger,
-                    valid_mask=_valid_mask,
-                )
-
-                # Generate properly correlated samples via Cholesky
-                _logger.info(f"  Generating {n_samples} Cholesky samples")
-                all_samples = generate_cholesky_samples(
-                    cov_full=_gaussian_cov_full,
-                    mean_params=mc_mean_stochastic,
-                    energy_indices=energy_indices_for_gauss,
-                    max_order=max_degree,
-                    n_samples=n_samples,
-                    seed=base_seed,
-                    logger=_logger,
-                )
-
-                # Store pre-built covariance for Step 7
-                _prebuilt_gaussian_cov = _gaussian_cov_full
-                _prebuilt_mc_mean = mc_mean_stochastic
-
-            elif TWO_PASS_DECOMPOSITION and all_samples_stochastic is not None:
-                # Original two-pass: Combine Pass 1 (jitter + normalization) with Pass 2 (stochastic)
-                # Formula: combined[s][e] = stochastic[s][e] + (jitter[s][e] - mean_jitter[e])
-                all_samples_jitter_only = all_samples  # preserve for covariance decomposition
-
-                energy_indices_for_combine = [nr.energy_index for nr in nominal_results if nr.has_data]
-                jitter_mean = {}
-                for e_idx in energy_indices_for_combine:
-                    arrays = [all_samples_jitter_only[s][e_idx]
-                              for s in range(n_samples) if e_idx in all_samples_jitter_only[s]]
-                    if arrays:
-                        jitter_mean[e_idx] = np.mean(arrays, axis=0)
-
-                combined_samples = {s_idx: {} for s_idx in range(n_samples)}
-                n_combined = 0
-                for s_idx in range(n_samples):
-                    for e_idx in energy_indices_for_combine:
-                        stoch = all_samples_stochastic[s_idx].get(e_idx)
-                        jitter = all_samples_jitter_only[s_idx].get(e_idx)
-                        j_mean = jitter_mean.get(e_idx)
-
-                        if stoch is None and jitter is None:
-                            continue
-                        if stoch is None:
-                            combined_samples[s_idx][e_idx] = jitter
-                            continue
-                        if jitter is None or j_mean is None:
-                            combined_samples[s_idx][e_idx] = stoch
-                            continue
-
-                        # Pad to consistent length
-                        t = max_degree
-                        s_pad = np.zeros(t); s_pad[:min(len(stoch), t)] = stoch[:t]
-                        j_pad = np.zeros(t); j_pad[:min(len(jitter), t)] = jitter[:t]
-                        m_pad = np.zeros(t); m_pad[:min(len(j_mean), t)] = j_mean[:t]
-                        combined_samples[s_idx][e_idx] = s_pad + (j_pad - m_pad)
-                        n_combined += 1
-
-                all_samples = combined_samples
-                _logger.info(f"  Combined {n_combined} bin-samples from Pass 1 + Pass 2")
-
-        # If use_jitter was set to False during loading, fall through to per-bin MC
-        if not use_jitter:
-            # Fallback to per-bin MC if jitter loading failed
-            _logger.warning("  " + "=" * 60)
-            _logger.warning(f"  Method: Per-bin independent MC (jitter fallback)")
-            if N_PROCS > 1:
-                _logger.info(f"  Using {N_PROCS} parallel processes over bins")
-
-            # Build args list for _mc_one_bin (no degree sampling in fallback)
+            # Pass 2: per-bin MC for variance
             bin_args_list = []
             for nr in nominal_results:
                 if not nr.has_data:
                     continue
-                mc_df = nr.exfor_df_mc if nr.exfor_df_mc is not None else nr.exfor_df
-                mc_weights = nr.kernel_weights_mc if nr.kernel_weights_mc is not None else nr.kernel_weights
                 bin_args_list.append((
                     nr.energy_index,
                     nr.frozen_degree,
                     nr.nominal_coeffs,
                     nr.interpolated,
-                    mc_df,
-                    mc_weights,
-                    None,  # no degree_weights in fallback
+                    nr.exfor_df,
+                    nr.kernel_weights,
+                    nr.degree_weights,
                     n_samples,
                     base_seed,
                     max_degree,
@@ -2484,7 +1959,7 @@ def run_exfor_to_endf_sampling_v2(
                     use_band_discrepancy,
                     min_points_per_band,
                     max_tau_fraction,
-                    False,  # USE_DEGREE_SAMPLING_IN_MC disabled in fallback
+                    USE_DEGREE_SAMPLING_IN_MC,
                     RESCALE_UNC_BY_CHI2,
                     ALLOW_SHRINK_UNC,
                     FREEZE_C0,
@@ -2501,103 +1976,62 @@ def run_exfor_to_endf_sampling_v2(
             else:
                 bin_results = [_mc_one_bin(a) for a in bin_args_list]
 
-            all_samples = {s_idx: {} for s_idx in range(n_samples)}
-            n_sampled = 0
-            n_interpolated_used = 0
-
+            all_samples_perbin = {s_idx: {} for s_idx in range(n_samples)}
             for energy_idx, is_interpolated, results_by_sample, success in bin_results:
                 for s_idx, endf_coeffs in results_by_sample.items():
-                    all_samples[s_idx][energy_idx] = endf_coeffs
-                if is_interpolated:
-                    n_interpolated_used += 1
-                elif success:
-                    n_sampled += 1
+                    all_samples_perbin[s_idx][energy_idx] = endf_coeffs
 
-            _logger.info(f"  MC sampled: {n_sampled} bins, interpolated: {n_interpolated_used} bins")
+            _logger.info(f"  Per-bin stochastic pass completed: {len(bin_args_list)} bins")
+
+            # Combine: correlations from kw_samples, variance from per-bin
+            energy_indices_kw = [nr.energy_index for nr in nominal_results if nr.has_data]
+            nr_by_idx_kw = {nr.energy_index: nr for nr in nominal_results}
+            _valid_mask_kw = np.zeros(len(energy_indices_kw) * max_degree, dtype=bool)
+            for ie, e_idx in enumerate(energy_indices_kw):
+                nr = nr_by_idx_kw[e_idx]
+                n_valid = min(nr.frozen_degree, max_degree)
+                for l in range(n_valid):
+                    _valid_mask_kw[ie * max_degree + l] = True
+
+            cov_kw, _, _, _ = compute_covariance_from_samples(
+                all_samples=kw_samples, energy_indices=energy_indices_kw,
+                max_order=max_degree, valid_mask=_valid_mask_kw,
+            )
+            cov_perbin, _, _, mc_mean_perbin = compute_covariance_from_samples(
+                all_samples=all_samples_perbin, energy_indices=energy_indices_kw,
+                max_order=max_degree, valid_mask=_valid_mask_kw,
+            )
+
+            # Extract correlation from KW, variance from per-bin
+            std_kw = np.sqrt(np.maximum(np.diag(cov_kw), 0.0))
+            std_kw[std_kw == 0] = 1.0
+            corr_kw = cov_kw / np.outer(std_kw, std_kw)
+
+            std_perbin = np.sqrt(np.maximum(np.diag(cov_perbin), 0.0))
+            cov_combined = corr_kw * np.outer(std_perbin, std_perbin)
+
+            # Generate Cholesky samples from combined covariance
+            _logger.info(f"  Generating {n_samples} Cholesky samples from combined covariance")
+            all_samples = generate_cholesky_samples(
+                cov_full=cov_combined,
+                mean_params=mc_mean_perbin,
+                energy_indices=energy_indices_kw,
+                max_order=max_degree,
+                n_samples=n_samples,
+                seed=base_seed,
+                logger=_logger,
+            )
+        else:
+            # Single pass: kernel-weight MC → full covariance directly
+            all_samples = kw_samples
+            _logger.info("  Single-pass mode: using KW MC samples directly")
+
+        n_sampled = sum(1 for nr in nominal_results if nr.has_data and not nr.interpolated)
+        n_interpolated_used = sum(1 for nr in nominal_results if nr.has_data and nr.interpolated)
+        _logger.info(f"  MC complete: {n_sampled} bins with data, {n_interpolated_used} interpolated")
 
     else:
-        # ORIGINAL METHOD: Per-bin independent MC sampling
-        _logger.info(f"  Method: Per-bin independent MC")
-        if N_PROCS > 1:
-            _logger.info(f"  Using {N_PROCS} parallel processes over bins")
-
-        # Build args list for _mc_one_bin
-        bin_args_list = []
-        for nr in nominal_results:
-            if not nr.has_data:
-                continue
-            mc_df = nr.exfor_df_mc if nr.exfor_df_mc is not None else nr.exfor_df
-            mc_weights = nr.kernel_weights_mc if nr.kernel_weights_mc is not None else nr.kernel_weights
-            bin_args_list.append((
-                nr.energy_index,
-                nr.frozen_degree,
-                nr.nominal_coeffs,
-                nr.interpolated,
-                mc_df,
-                mc_weights,
-                nr.degree_weights,
-                n_samples,
-                base_seed,
-                max_degree,
-                ridge_lambda,
-                RIDGE_POWER,
-                DF_METHOD,
-                use_band_discrepancy,
-                min_points_per_band,
-                max_tau_fraction,
-                USE_DEGREE_SAMPLING_IN_MC,
-                RESCALE_UNC_BY_CHI2,
-                ALLOW_SHRINK_UNC,
-                FREEZE_C0,
-                NORMALIZATION_SIGMA,
-                NORM_DIST,
-                MAX_SAMPLE_ORDER,
-                apply_positivity_projection,
-                positivity_check_points,
-            ))
-
-        # Run per-bin MC (parallel or sequential)
-        if N_PROCS > 1:
-            with Pool(N_PROCS) as pool:
-                bin_results = pool.map(_mc_one_bin, bin_args_list)
-        else:
-            bin_results = [_mc_one_bin(a) for a in bin_args_list]
-
-        # Assemble results into all_samples
-        all_samples = {s_idx: {} for s_idx in range(n_samples)}
-        n_sampled = 0
-        n_interpolated_used = 0
-
-        for energy_idx, is_interpolated, results_by_sample, success in bin_results:
-            for s_idx, endf_coeffs in results_by_sample.items():
-                all_samples[s_idx][energy_idx] = endf_coeffs
-            if is_interpolated:
-                n_interpolated_used += 1
-            elif success:
-                n_sampled += 1
-
-        _logger.info(f"  MC sampled: {n_sampled} bins, interpolated: {n_interpolated_used} bins")
-
-    # Ensure all_samples_stochastic and all_samples_jitter_only are accessible in Step 7
-    # (only populated in the jitter 2-pass path above)
-    try:
-        all_samples_stochastic
-    except NameError:
-        all_samples_stochastic = None
-    try:
-        all_samples_jitter_only
-    except NameError:
-        all_samples_jitter_only = None
-
-    try:
-        _prebuilt_gaussian_cov
-    except NameError:
-        _prebuilt_gaussian_cov = None
-
-    try:
-        _prebuilt_mc_mean
-    except NameError:
-        _prebuilt_mc_mean = None
+        raise ValueError(f"Unknown CORRELATION_METHOD: {CORRELATION_METHOD!r}. Use 'gaussian' or 'kernel_weight_mc'.")
 
     # Step 6: Save coefficients
     _logger.info("")
@@ -2632,8 +2066,8 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info("")
         _logger.info("[STEP 7] Computing covariance matrix")
 
-        if USE_GAUSSIAN_CORRELATION and _prebuilt_gaussian_cov is not None:
-            # Gaussian correlation mode: use pre-built covariance from Gaussian decay model
+        if _prebuilt_gaussian_cov is not None:
+            # Gaussian correlation mode: use pre-built covariance from Step 5
             _logger.info("  Using pre-built Gaussian correlation covariance")
             cov_matrix = _prebuilt_gaussian_cov
             mc_mean_params = _prebuilt_mc_mean
@@ -2648,66 +2082,8 @@ def run_exfor_to_endf_sampling_v2(
             mask = var_total > 0
             if np.any(mask):
                 _logger.info(f"  Gaussian cov variance: mean={np.mean(var_total[mask]):.2e}")
-
-        elif TWO_PASS_DECOMPOSITION and all_samples_stochastic is not None and all_samples_jitter_only is not None:
-            # Two-pass variance decomposition
-            _logger.info("  Two-pass decomposition: combining jitter correlations with total variances")
-
-            # Pass 1 result: jitter-only covariance (correct correlations, underestimated diag)
-            cov_jitter, _, param_labels, _ = compute_covariance_from_samples(
-                all_samples=all_samples_jitter_only,
-                energy_indices=energy_indices,
-                max_order=max_degree,
-                valid_mask=valid_mask_s7,
-            )
-            var_jitter = np.diag(cov_jitter)
-            _logger.info(f"  Jitter-only variance: mean={np.mean(var_jitter[var_jitter>0]):.2e}")
-
-            # Pass 2 result: stochastic covariance (full matrix, includes l-l' from degree sampling)
-            cov_stochastic, _, _, mc_mean_params_stochastic = compute_covariance_from_samples(
-                all_samples=all_samples_stochastic,
-                energy_indices=energy_indices,
-                max_order=max_degree,
-                valid_mask=valid_mask_s7,
-            )
-            var_stochastic = np.diag(cov_stochastic)
-            _logger.info(f"  Stochastic-only variance: mean={np.mean(var_stochastic[var_stochastic>0]):.2e}")
-
-            # Combine: jitter correlation structure with total variances
-            cov_matrix = combine_jitter_stochastic_covariance(
-                cov_jitter, cov_stochastic,
-                energy_bins=energy_bins,
-                energy_indices=energy_indices,
-                max_order=max_degree,
-                logger=_logger,
-                valid_mask=valid_mask_s7,
-            )
-
-            var_total = np.diag(cov_matrix)
-            mask = var_total > 0
-            jitter_frac = np.mean(var_jitter[mask] / var_total[mask]) if np.any(mask) else 0
-            _logger.info(f"  Variance decomposition: jitter={jitter_frac*100:.1f}%, stochastic={100-jitter_frac*100:.1f}%")
-
-            # Compute correlation from combined covariance
-            std_combined = np.sqrt(np.maximum(np.diag(cov_matrix), 0.0))
-            std_combined[std_combined == 0] = 1.0
-            corr_matrix = cov_matrix / np.outer(std_combined, std_combined)
-
-            # Compute MC mean parameter vector from all_samples (needed for
-            # nominal-file relative covariance rescaling)
-            n_params = len(energy_indices) * max_degree
-            sample_matrix = np.zeros((len(all_samples), n_params))
-            for s_idx in range(len(all_samples)):
-                row = []
-                for e_idx in energy_indices:
-                    coeffs = all_samples[s_idx].get(e_idx, np.zeros(max_degree))
-                    padded = np.zeros(max_degree)
-                    padded[:min(len(coeffs), max_degree)] = coeffs[:max_degree]
-                    row.extend(padded)
-                sample_matrix[s_idx] = row
-            mc_mean_params = np.mean(sample_matrix, axis=0)
         else:
-            # Standard single-pass covariance
+            # Standard covariance from MC samples
             cov_matrix, corr_matrix, param_labels, mc_mean_params = compute_covariance_from_samples(
                 all_samples=all_samples,
                 energy_indices=energy_indices,
@@ -3346,9 +2722,6 @@ if __name__ == "__main__":
         ridge_lambda=RIDGE_LAMBDA,
         m_proj_u=M_PROJ_U,
         m_targ_u=M_TARG_U,
-        delta_t_ns=DELTA_T_NS,
-        flight_path_m=FLIGHT_PATH_M,
-        n_sigma_cutoff=N_SIGMA_CUTOFF,
         use_band_discrepancy=USE_BAND_DISCREPANCY,
         min_points_per_band=MIN_POINTS_PER_BAND,
         max_tau_fraction=MAX_TAU_FRACTION,
@@ -3356,11 +2729,7 @@ if __name__ == "__main__":
         sigma_norm=NORMALIZATION_SIGMA,
         use_model_averaging=USE_MODEL_AVERAGING,
         min_degree_for_averaging=MIN_DEGREE_FOR_AVERAGING,
-        min_kernel_weight_fraction=MIN_KERNEL_WEIGHT_FRACTION,
-        max_experiment_weight_fraction=MAX_EXPERIMENT_WEIGHT_FRACTION,
         n_eff_warning_threshold=N_EFF_WARNING_THRESHOLD,
-        weight_span_warning_ratio=WEIGHT_SPAN_WARNING_RATIO,
-        experiment_selection_method=EXPERIMENT_SELECTION_METHOD,
         n_procs=N_PROCS,
         base_seed=BASE_SEED,
         generate_nominal_endf=GENERATE_NOMINAL_ENDF,
