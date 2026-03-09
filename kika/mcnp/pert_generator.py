@@ -1,10 +1,10 @@
 import os
 import re
-from typing import Optional, Union
+from typing import List, Optional, Union
 from .parse_input import read_mcnp
 from kika.materials.parse_mcnp import read_material
 from kika.materials import Material, MaterialCollection
-from kika._constants import MCNPY_HEADER, MCNPY_FOOTER, ATOMIC_MASS, N_AVOGADRO
+from kika._constants import ATOMIC_MASS, N_AVOGADRO
 
 
 def perturb_material(materials: MaterialCollection, material_id: int, nuclide: Union[int, str], 
@@ -217,7 +217,8 @@ def _calculate_perturbed_density(original_material: Material, perturbed_material
 
 
 def generate_PERTcards(inputfile, cell, reactions, material, energies=None, density=None,
-                       order=2, errors=False, in_place=True, nuclide=None):
+                       order=2, errors=False, in_place=True, nuclide=None,
+                       pert_material=None, pert_density=None):
     """Generate PERT cards for MCNP sensitivity analysis.
 
     Creates PERT cards based on the provided parameters for first and/or second order
@@ -269,6 +270,16 @@ def generate_PERTcards(inputfile, cell, reactions, material, energies=None, dens
     in_place : bool, optional
         If True (default), append PERT cards to the original input file.
         If False, create a new file with suffix ``_pert_cards``.
+    pert_material : int, list[int], optional
+        Perturbed material ID(s) used for ``MAT=`` in PERT cards. When using
+        multi-material mode this should be the ID of the perturbed material
+        (e.g. 41 instead of 400000). If None in single-material mode, falls
+        back to using ``material`` for backward compatibility.
+    pert_density : float, list[float], optional
+        Perturbed density used for ``RHO=`` in PERT cards. When using
+        multi-material mode this should be the recalculated density of the
+        perturbed material. If None, falls back to the resolved original
+        density for backward compatibility.
 
     Returns
     -------
@@ -377,6 +388,32 @@ def generate_PERTcards(inputfile, cell, reactions, material, energies=None, dens
         # Single value: replicate for all materials
         order_list = [order] * num_materials
 
+    # Validate and prepare pert_material parameter
+    if isinstance(pert_material, list):
+        if num_materials == 1:
+            raise ValueError("List of pert_material is only allowed when multiple materials are provided.")
+        if len(pert_material) != num_materials:
+            raise ValueError(f"pert_material list length ({len(pert_material)}) must match number of materials ({num_materials})")
+        pert_material_list = pert_material
+    elif pert_material is not None:
+        pert_material_list = [pert_material] * num_materials
+    else:
+        # None: will use material_list as fallback (backward compat)
+        pert_material_list = [None] * num_materials
+
+    # Validate and prepare pert_density parameter
+    if isinstance(pert_density, list):
+        if num_materials == 1:
+            raise ValueError("List of pert_density is only allowed when multiple materials are provided.")
+        if len(pert_density) != num_materials:
+            raise ValueError(f"pert_density list length ({len(pert_density)}) must match number of materials ({num_materials})")
+        pert_density_list = pert_density
+    elif pert_density is not None:
+        pert_density_list = [pert_density] * num_materials
+    else:
+        # None: will use resolved density_list as fallback (backward compat)
+        pert_density_list = [None] * num_materials
+
     # --- Use the parser to get the highest existing PERT card number ---
     input_data = read_mcnp(inputfile)
     if hasattr(input_data, "perturbation") and hasattr(input_data.perturbation, "pert"):
@@ -472,11 +509,9 @@ def generate_PERTcards(inputfile, cell, reactions, material, energies=None, dens
     # Initialize the perturbation counter
     pert_counter = max_pert_num + 1
     
-    # Write header - always include it
-    content_to_write.append(MCNPY_HEADER)
-    content_to_write.append("c \n")
 
-    # Emit ZAID comment if nuclide is provided
+    # Resolve ZAID value if nuclide is provided (used for per-block comments)
+    zaid_value = None
     if nuclide is not None:
         if isinstance(nuclide, int):
             zaid_value = nuclide
@@ -493,14 +528,26 @@ def generate_PERTcards(inputfile, cell, reactions, material, energies=None, dens
                 raise ValueError(f"Material {first_mat} not found for nuclide lookup")
         else:
             zaid_value = int(nuclide)
-        content_to_write.append(f"c kika:pert_zaid={zaid_value}\n")
 
     # Loop over each material
     for mat_idx in range(num_materials):
         cell_iter = cell_list[mat_idx]
-        density_iter = density_list[mat_idx]
-        material_iter = material_list[mat_idx]
+        material_iter = material_list[mat_idx]  # original material (for comment metadata)
         order_iter = order_list[mat_idx]
+
+        # Resolve MAT= value: pert_material if provided, else original material (backward compat)
+        mat_for_pert = pert_material_list[mat_idx]
+        if mat_for_pert is None:
+            mat_for_pert = material_iter
+
+        # Resolve RHO= value: pert_density if provided, else resolved original density (backward compat)
+        density_for_pert = pert_density_list[mat_idx]
+        if density_for_pert is None:
+            density_for_pert = density_list[mat_idx]
+
+        # Emit per-block comment with ZAID and original material
+        if zaid_value is not None:
+            content_to_write.append(f"c kika:pert_zaid={zaid_value} pert_mat={material_iter}\n")
         
         # Format cell parameter to string
         if isinstance(cell_iter, list):
@@ -517,65 +564,62 @@ def generate_PERTcards(inputfile, cell, reactions, material, energies=None, dens
                     E2 = energies[i + 1]
 
                     # Create properly formatted METHOD=2 PERT card
-                    pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={material_iter} RHO={density_iter:.6e} METHOD=2 RXN={reaction} ERG={E1:.6e} {E2:.6e}"
+                    pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={mat_for_pert} RHO={density_for_pert:.6e} METHOD=2 RXN={reaction} ERG={E1:.6e} {E2:.6e}"
                     content_to_write.append(_format_mcnp_line(pert_card) + "\n")
                     pert_counter += 1
 
                     if order_iter == 2:
                         # Create properly formatted METHOD=3 PERT card
-                        pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={material_iter} RHO={density_iter:.6e} METHOD=3 RXN={reaction} ERG={E1:.6e} {E2:.6e}"
+                        pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={mat_for_pert} RHO={density_for_pert:.6e} METHOD=3 RXN={reaction} ERG={E1:.6e} {E2:.6e}"
                         content_to_write.append(_format_mcnp_line(pert_card) + "\n")
                         pert_counter += 1
             
                     if errors:
                         # Create properly formatted METHOD=-2 PERT card
-                        pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={material_iter} RHO={density_iter:.6e} METHOD=-2 RXN={reaction} ERG={E1:.6e} {E2:.6e}"
+                        pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={mat_for_pert} RHO={density_for_pert:.6e} METHOD=-2 RXN={reaction} ERG={E1:.6e} {E2:.6e}"
                         content_to_write.append(_format_mcnp_line(pert_card) + "\n")
                         pert_counter += 1
 
                         if order_iter == 2:
                             # Create properly formatted METHOD=-3 PERT card
-                            pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={material_iter} RHO={density_iter:.6e} METHOD=-3 RXN={reaction} ERG={E1:.6e} {E2:.6e}"
+                            pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={mat_for_pert} RHO={density_for_pert:.6e} METHOD=-3 RXN={reaction} ERG={E1:.6e} {E2:.6e}"
                             content_to_write.append(_format_mcnp_line(pert_card) + "\n")
                             pert_counter += 1
 
                             # Create properly formatted METHOD=1 PERT card
-                            pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={material_iter} RHO={density_iter:.6e} METHOD=1 RXN={reaction} ERG={E1:.6e} {E2:.6e}"
+                            pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={mat_for_pert} RHO={density_for_pert:.6e} METHOD=1 RXN={reaction} ERG={E1:.6e} {E2:.6e}"
                             content_to_write.append(_format_mcnp_line(pert_card) + "\n")
                             pert_counter += 1
             else:
                 # No energies provided, omit ERG part
                 # Create properly formatted METHOD=2 PERT card
-                pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={material_iter} RHO={density_iter:.6e} METHOD=2 RXN={reaction}"
+                pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={mat_for_pert} RHO={density_for_pert:.6e} METHOD=2 RXN={reaction}"
                 content_to_write.append(_format_mcnp_line(pert_card) + "\n")
                 pert_counter += 1
 
                 if order_iter == 2:
                     # Create properly formatted METHOD=3 PERT card
-                    pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={material_iter} RHO={density_iter:.6e} METHOD=3 RXN={reaction}"
+                    pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={mat_for_pert} RHO={density_for_pert:.6e} METHOD=3 RXN={reaction}"
                     content_to_write.append(_format_mcnp_line(pert_card) + "\n")
                     pert_counter += 1
 
                 if errors:
                     # Create properly formatted METHOD=-2 PERT card
-                    pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={material_iter} RHO={density_iter:.6e} METHOD=-2 RXN={reaction}"
+                    pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={mat_for_pert} RHO={density_for_pert:.6e} METHOD=-2 RXN={reaction}"
                     content_to_write.append(_format_mcnp_line(pert_card) + "\n")
                     pert_counter += 1
 
                     if order_iter == 2:
                         # Create properly formatted METHOD=-3 PERT card
-                        pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={material_iter} RHO={density_iter:.6e} METHOD=-3 RXN={reaction}"
+                        pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={mat_for_pert} RHO={density_for_pert:.6e} METHOD=-3 RXN={reaction}"
                         content_to_write.append(_format_mcnp_line(pert_card) + "\n")
                         pert_counter += 1
 
                         # Create properly formatted METHOD=1 PERT card
-                        pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={material_iter} RHO={density_iter:.6e} METHOD=1 RXN={reaction}"
+                        pert_card = f"PERT{pert_counter}:n CELL={cell_str} MAT={mat_for_pert} RHO={density_for_pert:.6e} METHOD=1 RXN={reaction}"
                         content_to_write.append(_format_mcnp_line(pert_card) + "\n")
                         pert_counter += 1
 
-    # Write footer - always include it
-    content_to_write.append("c \n")
-    content_to_write.append(MCNPY_FOOTER)
     
     # Write all content at once
     with open(output_file, mode) as stream:
@@ -584,6 +628,65 @@ def generate_PERTcards(inputfile, cell, reactions, material, energies=None, dens
     print(f"\nSuccess! PERT cards written to: {output_file}")
     
     return
+
+
+def perturb_materials(materials: MaterialCollection, material_ids: List[int],
+                      nuclide: Union[int, str],
+                      density: Optional[Union[float, List[float]]] = None,
+                      pert_mat_id: Optional[Union[int, List[int]]] = None,
+                      **kwargs) -> List[Material]:
+    """Creates perturbed materials for multiple material IDs containing the same nuclide.
+
+    Calls :func:`perturb_material` for each material ID in the list.
+
+    Parameters
+    ----------
+    materials : MaterialCollection
+        The material collection containing the materials to perturb.
+    material_ids : list of int
+        Material ID numbers to perturb.
+    nuclide : int or str
+        ZAID (int) or symbol (str) of the nuclide to perturb.
+    density : float or list of float, optional
+        Density for each material. If a single float, used for all materials.
+        If a list, must match the length of *material_ids*.
+    pert_mat_id : int or list of int, optional
+        Perturbed material ID(s). If a single int, used for all materials.
+        If a list, must match the length of *material_ids*.
+        If None, defaults are assigned by :func:`perturb_material`.
+    **kwargs
+        Additional keyword arguments forwarded to :func:`perturb_material`
+        (e.g., ``in_place``, ``fraction_type``).
+
+    Returns
+    -------
+    list of Material
+        List of perturbed :class:`Material` objects, one per material ID.
+
+    Raises
+    ------
+    ValueError
+        If *density* or *pert_mat_id* are lists whose length does not match *material_ids*.
+    """
+    n = len(material_ids)
+    if isinstance(density, list) and len(density) != n:
+        raise ValueError(
+            f"Length of density list ({len(density)}) must match "
+            f"length of material_ids ({n})"
+        )
+    if isinstance(pert_mat_id, list) and len(pert_mat_id) != n:
+        raise ValueError(
+            f"Length of pert_mat_id list ({len(pert_mat_id)}) must match "
+            f"length of material_ids ({n})"
+        )
+
+    results = []
+    for i, mat_id in enumerate(material_ids):
+        d = density[i] if isinstance(density, list) else density
+        pid = pert_mat_id[i] if isinstance(pert_mat_id, list) else pert_mat_id
+        results.append(perturb_material(materials, mat_id, nuclide, density=d,
+                                        pert_mat_id=pid, **kwargs))
+    return results
 
 
 def _format_mcnp_line(line, max_length=120):

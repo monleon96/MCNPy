@@ -54,7 +54,13 @@ def _read_PERT(lines, start_index):
                 break
             if key == "CELL":
                 cell_vals = val.replace(',', ' ').split()
+                # Consume following bare tokens (space-separated cell IDs)
+                j += 1
+                while j < len(tokens) and "=" not in tokens[j]:
+                    cell_vals.extend(tokens[j].replace(',', ' ').split())
+                    j += 1
                 pert_attrs['cell'] = [int(x) for x in cell_vals]
+                continue
             elif key == "MAT":
                 pert_attrs['material'] = int(val)
             elif key == "RHO":
@@ -102,18 +108,22 @@ def read_mcnp(file_path):
     
     i = 0
     current_zaid = None
+    current_original_mat = None
     while i < len(lines):
         line = lines[i].strip()
-        # Detect kika:pert_zaid comment
-        zaid_match = re.search(r'kika:pert_zaid=(\d+)', line)
+        # Detect kika:pert_zaid comment (new format with pert_mat, or old format without)
+        zaid_match = re.search(r'kika:pert_zaid=(\d+)(?:\s+pert_mat=(\d+))?', line)
         if zaid_match:
             current_zaid = int(zaid_match.group(1))
+            current_original_mat = int(zaid_match.group(2)) if zaid_match.group(2) else None
             i += 1
         elif line.startswith("PERT"):
             pert_obj, i = _read_PERT(lines, i)
             if pert_obj:
                 if current_zaid is not None:
                     pert_obj.zaid = current_zaid
+                if current_original_mat is not None:
+                    pert_obj.original_material = current_original_mat
                 inst.perturbation.pert[pert_obj.id] = pert_obj
         elif line.startswith("m"):
             material_obj, i = read_material(lines, i)

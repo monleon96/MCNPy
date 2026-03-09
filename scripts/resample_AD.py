@@ -343,8 +343,12 @@ def compute_n_eff(
     if len(kernel_weights) == 0:
         return 0.0
 
-    # Combined weights: kernel weight / variance
-    w = kernel_weights / (sigma_eff ** 2)
+    # Mask out points with non-positive or non-finite sigma_eff
+    valid = np.isfinite(sigma_eff) & (sigma_eff > 0)
+    if not np.any(valid):
+        return 0.0
+    # Combined weights: kernel weight / variance (valid points only)
+    w = kernel_weights[valid] / (sigma_eff[valid] ** 2)
 
     sum_w = np.sum(w)
     sum_w2 = np.sum(w ** 2)
@@ -559,6 +563,7 @@ def _weighted_ridge_fit(
     external_weights: Optional[np.ndarray] = None,
     fixed_c0: Optional[float] = None,
     fixed_coeffs: Optional[Dict[int, float]] = None,
+    compute_dof: bool = True,
 ) -> Tuple[np.ndarray, float, float, float]:
     """
     Fit y(mu) = sum_{l=0..L} c_l P_l(mu) using weighted least squares,
@@ -680,7 +685,7 @@ def _weighted_ridge_fit(
         chi2 = float(np.sum(((y - yhat) / sigma) ** 2))
 
         # Degrees of freedom (only free parameters count)
-        if df_method == "naive" or ridge_lambda <= 0.0:
+        if df_method == "naive" or ridge_lambda <= 0.0 or not compute_dof:
             eff_params = float(n_free)
             dof = float(max(1, n - n_free))
         else:
@@ -731,7 +736,7 @@ def _weighted_ridge_fit(
     chi2 = float(np.sum(((y - yhat) / sigma) ** 2))
 
     # Degrees of freedom
-    if df_method == "naive" or ridge_lambda <= 0.0:
+    if df_method == "naive" or ridge_lambda <= 0.0 or not compute_dof:
         eff_params = float(degree + 1)
         dof = float(max(1, n - (degree + 1)))
     else:
@@ -1036,8 +1041,8 @@ def sample_legendre_coefficients(
                 for key in group_keys:
                     indices = group_indices[key]
                     if norm_dist == "lognormal":
-                        # Lognormal: always positive, multiplicative
-                        N_g = rng.lognormal(mean=0.0, sigma=sigma_norm)
+                        # Lognormal: always positive, multiplicative, bias-corrected so E[X]=1
+                        N_g = rng.lognormal(mean=-0.5 * sigma_norm**2, sigma=sigma_norm)
                     else:  # "normal"
                         N_g = 1.0 + rng.normal(0.0, sigma_norm)
                     y_s[indices] *= N_g
@@ -1053,6 +1058,7 @@ def sample_legendre_coefficients(
                 external_weights=external_weights,
                 fixed_c0=c0_fix,  # Pass fixed c0 if freeze_c0=True
                 fixed_coeffs=fixed_high,  # Freeze higher orders if max_sample_order set
+                compute_dof=False,  # Skip expensive hat-trace in MC refits
             )
             samples.append(coeffs_s)
 

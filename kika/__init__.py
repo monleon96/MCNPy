@@ -1,7 +1,7 @@
 from .mcnp.parse_mctal import read_mctal
 from .mcnp.parse_input import read_mcnp
-from .mcnp.pert_generator import generate_PERTcards, perturb_material
-from .sensitivities.sensitivity_processing import create_sdf_data, compute_sensitivity, plot_sens_comparison
+from .mcnp.pert_generator import generate_PERTcards, perturb_material, perturb_materials
+from .sensitivities.sensitivity_processing import create_sdf_data, compute_sensitivity, compute_total_sensitivity, plot_sens_comparison
 from .sensitivities.sdf import SDFData
 from .sensitivities.sdf_parser import read_sdf
 from .ace.parsers.parse_ace import read_ace
@@ -17,8 +17,8 @@ __author__ = AUTHOR
 
 __all__ = [
     'read_mctal',
-    'read_mcnp', 'generate_PERTcards', 'perturb_material',
-    'compute_sensitivity', 'plot_sens_comparison',
+    'read_mcnp', 'generate_PERTcards', 'perturb_material', 'perturb_materials',
+    'compute_sensitivity', 'compute_total_sensitivity', 'plot_sens_comparison',
     'SDFData', 'create_sdf_data', 'read_sdf',
     'read_ace',
     'read_endf',

@@ -120,6 +120,39 @@ class Perturbation:
             self.pert = PertCollection(self.pert)
     
     @property
+    def materials(self) -> List[int]:
+        """Get unique material numbers from all perturbations.
+
+        Uses ``original_material`` when available (set from ``pert_mat=`` comments),
+        falling back to ``material`` (the MAT= value in the PERT card).
+
+        :returns: Sorted list of unique material numbers across all perturbations
+        :rtype: List[int]
+        """
+        mats = set()
+        for p in self.pert.values():
+            m = p.original_material if p.original_material is not None else p.material
+            if m is not None:
+                mats.add(m)
+        return sorted(mats)
+
+    def materials_for_zaid(self, zaid: int) -> List[int]:
+        """Get unique material numbers from perturbations for a specific ZAID.
+
+        :param zaid: ZAID to filter by
+        :type zaid: int
+        :returns: Sorted list of unique material numbers for the given ZAID
+        :rtype: List[int]
+        """
+        mats = set()
+        for p in self.pert.values():
+            if p.zaid == zaid:
+                m = p.original_material if p.original_material is not None else p.material
+                if m is not None:
+                    mats.add(m)
+        return sorted(mats)
+
+    @property
     def reactions(self) -> List[Optional[int]]:
         """Get unique reaction numbers from all perturbations.
 
@@ -128,6 +161,16 @@ class Perturbation:
         """
         return sorted(list({pert.reaction for pert in self.pert.values()}))
     
+    def reactions_for_zaid(self, zaid: int) -> List[Optional[int]]:
+        """Get unique reaction numbers from perturbations for a specific ZAID.
+
+        :param zaid: ZAID to filter by
+        :type zaid: int
+        :returns: Sorted list of unique reaction numbers for the given ZAID
+        :rtype: List[Optional[int]]
+        """
+        return sorted({p.reaction for p in self.pert.values() if p.zaid == zaid})
+
     @property
     def zaids(self) -> List[int]:
         """Get unique ZAIDs from all perturbations.
@@ -151,20 +194,31 @@ class Perturbation:
                 energy_values.add(pert.energy[1])
         return sorted(list(energy_values))
     
-    def _group_perts_by_reaction(self, method: int) -> Dict[Optional[int], List[int]]:
+    def _group_perts_by_reaction(self, method: int, material: Optional[int] = None, zaid: Optional[int] = None) -> Dict[Optional[int], List[int]]:
         """Groups perturbation IDs by their reaction numbers for a given method.
 
         :param method: The perturbation method to filter by
         :type method: int
+        :param material: Optional material number to filter by. If None, all materials are included.
+        :type material: Optional[int]
+        :param zaid: Optional ZAID to filter by. If None, all ZAIDs are included.
+        :type zaid: Optional[int]
         :returns: Dictionary mapping reaction numbers to lists of perturbation IDs
         :rtype: Dict[Optional[int], List[int]]
         :raises ValueError: If no perturbations are defined
         """
         if not self.pert:
             raise ValueError("No perturbations defined")
-            
+
         # Filter perturbations by method
         filtered = {id: pert for id, pert in self.pert.items() if pert.method == method}
+        if material is not None:
+            filtered = {
+                id: pert for id, pert in filtered.items()
+                if (pert.original_material if pert.original_material is not None else pert.material) == material
+            }
+        if zaid is not None:
+            filtered = {id: pert for id, pert in filtered.items() if pert.zaid == zaid}
         if not filtered:
             return {}
             
@@ -210,6 +264,7 @@ class Perturbation:
                 'e_min': e_min,
                 'e_max': e_max,
                 'zaid': pert.zaid,
+                'original_material': pert.original_material,
             })
         
         # Create DataFrame with perturbation ID as index
@@ -340,6 +395,7 @@ class Pert:
     reaction: Optional[int] = None
     energy: Optional[Tuple[float, float]] = None
     zaid: Optional[int] = None
+    original_material: Optional[int] = None
 
     def __repr__(self):
         """Returns a formatted string representation of the perturbation.
@@ -387,6 +443,9 @@ class Pert:
 
         if self.zaid is not None:
             info_lines.append(f"{'ZAID:':{label_width}} {self.zaid}")
+
+        if self.original_material is not None:
+            info_lines.append(f"{'Original MAT:':{label_width}} {self.original_material}")
 
         # Join all information lines
         content = "\n".join(info_lines)

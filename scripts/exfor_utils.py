@@ -43,6 +43,9 @@ from kika.endf.classes.mf4.mixed import MF4MTMixed
 from kika.exfor.transforms import transform_lab_to_cm, jacobian_cm_to_lab
 from kika.exfor.angular_distribution import ExforAngularDistribution
 
+# Import TOF parameters module
+from scripts.tof_parameters import get_tof_parameters, compute_sigma_E
+
 # Import resample_AD functions (relative import for same directory)
 from .resample_AD import (
     load_exfor_for_fitting,
@@ -258,6 +261,187 @@ class KernelDiagnostics:
     experiment_weights: Dict[str, float]            # {exp_key: weight_frac} before capping
     n_points_dropped: int                           # Points dropped by min weight threshold
     capping_applied: bool                           # Whether experiment capping was applied
+
+
+def weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
+    """Compute weighted median of values.
+
+    Parameters
+    ----------
+    values : array
+        Values to compute the median of.
+    weights : array
+        Non-negative weights (need not sum to 1).
+
+    Returns
+    -------
+    float
+        Weighted median value.
+    """
+    order = np.argsort(values)
+    sorted_vals = values[order]
+    sorted_w = weights[order]
+    cum_w = np.cumsum(sorted_w)
+    half = cum_w[-1] / 2.0
+    idx = np.searchsorted(cum_w, half)
+    return float(sorted_vals[min(idx, len(sorted_vals) - 1)])
+
+
+@dataclass
+class KWDiagnostics:
+    """Diagnostics for kernel-weight overlap at one energy bin.
+
+    Experiment-level diagnostics computed from precomputed overlap weights.
+    Used for hybrid correlation blend alpha (KW vs Gaussian).
+    """
+    n_eff_kw: float                                 # Experiment-level effective sample size
+    n_experiments_kw: int                            # Number of contributing experiments
+    max_experiment_weight_frac_kw: float             # Largest single experiment weight fraction
+    weighted_median_n_points: float                  # Overlap-weighted median points per experiment
+
+
+def compute_kw_diagnostics(
+    bin_overlap: List[Tuple[Dict, float]],
+) -> Optional['KWDiagnostics']:
+    """Compute KW-level diagnostics from overlap weights for one bin.
+
+    Multiple datasets from the same experiment are aggregated: their overlap
+    weights are summed and their n_points are summed to give per-experiment
+    totals.  n_eff_kw and related metrics are then computed at the experiment
+    level so they reflect true experimental diversity.
+
+    Parameters
+    ----------
+    bin_overlap : list of (dataset_dict, weight) tuples
+        From overlap_weights[bin_idx]. May contain multiple entries per
+        experiment (different energies).
+
+    Returns
+    -------
+    KWDiagnostics or None if no overlapping experiments.
+    """
+    if not bin_overlap:
+        return None
+
+    # Aggregate per experiment: sum overlap weights and n_points
+    exp_agg: Dict[str, Tuple[float, int]] = {}  # exp_id -> (total_w, total_n_pts)
+    for ds, w in bin_overlap:
+        exp_id = ds['experiment_id']
+        prev_w, prev_n = exp_agg.get(exp_id, (0.0, 0))
+        exp_agg[exp_id] = (prev_w + w, prev_n + ds.get('n_points', 0))
+
+    exp_weights = np.array([v[0] for v in exp_agg.values()])
+    exp_n_points = np.array([v[1] for v in exp_agg.values()])
+    n_experiments_kw = len(exp_weights)
+
+    w_sum = exp_weights.sum()
+    if w_sum <= 0:
+        return None
+
+    w_frac = exp_weights / w_sum
+    n_eff_kw = 1.0 / np.sum(w_frac ** 2)
+    max_experiment_weight_frac_kw = float(np.max(w_frac))
+
+    # Overlap-weighted median of total n_points per experiment
+    wm_n_pts = weighted_median(exp_n_points.astype(float), w_frac)
+
+    return KWDiagnostics(
+        n_eff_kw=n_eff_kw,
+        n_experiments_kw=n_experiments_kw,
+        max_experiment_weight_frac_kw=max_experiment_weight_frac_kw,
+        weighted_median_n_points=wm_n_pts,
+    )
+
+
+def compute_kw_reliability_alpha(
+    kw_diag: Optional['KWDiagnostics'],
+    interpolated: bool = False,
+    alpha_min_data: float = 0.0,
+    alpha_max: float = 1.0,
+    n_eff_mid: float = 3.5,
+    n_eff_scale: float = 1.5,
+    min_experiments: int = 2,
+    dominance_threshold: float = 0.40,
+    min_points_ref: float = 5.0,
+) -> float:
+    """Compute per-bin reliability alpha from KW overlap diagnostics.
+
+    Same functional form as compute_bin_reliability_alpha but with
+    parameters tuned for experiment-level overlap weights.
+
+    Parameters
+    ----------
+    min_points_ref : float
+        Reference point count for quality penalty. Bins where the
+        weighted-median n_points is below this threshold get alpha
+        scaled by (median / min_points_ref).
+
+    Returns alpha in [0, 1] where alpha=1 means pure KW, alpha=0 means pure Gaussian.
+    """
+    if interpolated or kw_diag is None:
+        return 0.0
+
+    if not np.isfinite(kw_diag.n_eff_kw):
+        return 0.0
+
+    # Base alpha: sigmoid on experiment-level n_eff
+    x = (kw_diag.n_eff_kw - n_eff_mid) / n_eff_scale
+    alpha = alpha_min_data + (alpha_max - alpha_min_data) / (1.0 + np.exp(-x))
+
+    # Experiment count penalty
+    if kw_diag.n_experiments_kw < min_experiments:
+        alpha *= 0.25 + 0.25 * kw_diag.n_experiments_kw
+
+    # Dominance penalty
+    frac = kw_diag.max_experiment_weight_frac_kw
+    if frac > dominance_threshold:
+        alpha *= 1.0 - 0.5 * (frac - dominance_threshold) / (1.0 - dominance_threshold)
+
+    # Quality penalty: penalize bins where median experiment is too sparse
+    if min_points_ref > 0 and kw_diag.weighted_median_n_points < min_points_ref:
+        alpha *= kw_diag.weighted_median_n_points / min_points_ref
+
+    return float(np.clip(alpha, alpha_min_data, alpha_max))
+
+
+def compute_bin_reliability_alpha(
+    diagnostics: Optional[KernelDiagnostics],
+    interpolated: bool = False,
+    alpha_min_data: float = 0.05,
+    alpha_max: float = 0.75,
+    n_eff_mid: float = 7.0,
+    n_eff_scale: float = 2.0,
+    min_experiments: int = 3,
+    dominance_threshold: float = 0.25,
+) -> float:
+    """Compute per-bin reliability weight for KW vs Gaussian correlation blend.
+
+    Returns alpha in [0, 1] where alpha=1 means pure KW and alpha=0 means pure Gaussian.
+    Interpolated bins or bins without diagnostics always return 0.0.
+    Bins with data return values in [alpha_min_data, alpha_max].
+    """
+    if interpolated or diagnostics is None:
+        return 0.0
+
+    # Non-finite n_eff → pure Gaussian fallback
+    if not np.isfinite(diagnostics.n_eff):
+        return 0.0
+
+    # Base alpha: sigmoid on n_eff mapped to [alpha_min_data, alpha_max]
+    x = (diagnostics.n_eff - n_eff_mid) / n_eff_scale
+    alpha = alpha_min_data + (alpha_max - alpha_min_data) / (1.0 + np.exp(-x))
+
+    # Experiment penalty: fewer than min_experiments reduces alpha
+    if diagnostics.n_experiments < min_experiments:
+        alpha *= 0.25 + 0.25 * diagnostics.n_experiments
+
+    # Dominance penalty: one experiment dominates
+    frac = diagnostics.max_experiment_weight_frac
+    if frac > dominance_threshold:
+        alpha *= 1.0 - 0.5 * (frac - dominance_threshold) / (1.0 - dominance_threshold)
+
+    # Clamp to valid range
+    return float(np.clip(alpha, alpha_min_data, alpha_max))
 
 
 # =============================================================================
@@ -1128,11 +1312,18 @@ def precompute_overlap_weights(
     nominal_results: List,  # List[NominalFitResult]
     energy_bins: List[EnergyBinInfo],
     min_weight: float = 1e-3,
+    tof_params_cache: Optional[Dict] = None,
+    default_flight_path_m: float = 27.037,
+    default_time_resolution_ns: float = 5.0,
 ) -> Dict[int, List[Tuple[Dict, float]]]:
     """Compute overlap weights from ALL datasets across all bins.
 
     For each bin, collects all datasets from all nominal results and computes
     their CDF-based overlap weight to that bin using compute_overlap_weight().
+
+    When tof_params_cache is provided, per-experiment energy resolution is
+    computed from TOF parameters (flight path + time resolution). Otherwise
+    falls back to the bin's sigma_E (uniform resolution for all experiments).
 
     Parameters
     ----------
@@ -1142,13 +1333,19 @@ def precompute_overlap_weights(
         Energy bin definitions with boundaries and sigma_E.
     min_weight : float
         Minimum overlap weight to keep (default 1e-3).
+    tof_params_cache : dict, optional
+        Pre-loaded TOF parameters from load_tof_parameters_file().
+    default_flight_path_m : float
+        Default flight path in meters for experiments not in the cache.
+    default_time_resolution_ns : float
+        Default time resolution in nanoseconds for experiments not in the cache.
 
     Returns
     -------
     Dict[int, List[Tuple[Dict, float]]]
         bin_index -> [(dataset_dict, weight), ...] where dataset_dict has keys:
         'entry', 'subentry', 'exfor_energy_mev', 'exfor_df', 'n_points',
-        'experiment_id'.
+        'experiment_id', 'sigma_E_mev', 'tof_source'.
     """
     # Collect all unique datasets across all bins
     all_datasets = []
@@ -1188,6 +1385,19 @@ def precompute_overlap_weights(
                 if dataset_df.empty:
                     continue
 
+            # Compute per-experiment sigma_E from TOF parameters
+            subentry_id = f"{entry}{subentry}"  # format: "10571002"
+            if tof_params_cache is not None:
+                tof_params = get_tof_parameters(
+                    subentry_id, tof_params_cache,
+                    default_flight_path_m, default_time_resolution_ns,
+                )
+                ds_sigma_E = compute_sigma_E(exfor_energy, tof_params)
+                ds_tof_source = tof_params.source
+            else:
+                ds_sigma_E = None  # will use bin sigma_E as fallback
+                ds_tof_source = "bin_default"
+
             all_datasets.append({
                 'entry': entry,
                 'subentry': subentry,
@@ -1195,22 +1405,50 @@ def precompute_overlap_weights(
                 'exfor_df': dataset_df.copy(),
                 'n_points': len(dataset_df),
                 'experiment_id': f"{entry}.{subentry}",
+                'sigma_E_mev': ds_sigma_E,
+                'tof_source': ds_tof_source,
             })
 
-    # For each bin, compute overlap weight to every dataset
+    # For each bin, collect ALL datasets with non-trivial overlap weight.
+    # Multiple energies from the same experiment are kept — each with its own
+    # overlap weight — so the fit benefits from the full angular coverage and
+    # cross-bin bridging.  Intra-experiment weights are renormalized so that
+    # each experiment's total contribution equals its best single overlap
+    # weight (preventing dense-grid experiments from inflating weight).
     overlap_weights: Dict[int, List[Tuple[Dict, float]]] = {}
     for bin_info in energy_bins:
         bin_datasets = []
         for ds in all_datasets:
+            # Use per-experiment sigma_E if available, else fall back to bin sigma_E
+            sigma_E = ds['sigma_E_mev'] if ds['sigma_E_mev'] is not None else bin_info.sigma_E_mev
             w = compute_overlap_weight(
                 exp_energy_mev=ds['exfor_energy_mev'],
-                sigma_E_mev=bin_info.sigma_E_mev,
+                sigma_E_mev=sigma_E,
                 bin_lower_mev=bin_info.bin_lower_mev,
                 bin_upper_mev=bin_info.bin_upper_mev,
             )
             if w >= min_weight:
                 bin_datasets.append((ds, w))
-        overlap_weights[bin_info.index] = bin_datasets
+
+        # Experiment-level renormalization: each experiment's total weight
+        # equals its best single overlap (what closest-only dedup would give).
+        # This uses all angular data but prevents dense grids from inflating
+        # experiment-level weight.
+        exp_groups: Dict[str, List[int]] = defaultdict(list)
+        for i, (ds, w) in enumerate(bin_datasets):
+            exp_groups[ds['experiment_id']].append(i)
+
+        normalized = []
+        for exp_id, indices in exp_groups.items():
+            weights = [bin_datasets[i][1] for i in indices]
+            max_w = max(weights)
+            sum_w = sum(weights)
+            scale = max_w / sum_w  # shrink so total = max_w
+            for i in indices:
+                ds, w = bin_datasets[i]
+                normalized.append((ds, w * scale))
+
+        overlap_weights[bin_info.index] = normalized
 
     return overlap_weights
 
@@ -1245,6 +1483,7 @@ def _run_one_kw_sample(args_tuple):
         positivity_check_points,
         nominal_coeffs_by_bin,
         frozen_degrees_by_bin,
+        max_experiment_weight_fraction,
     ) = args_tuple
 
     rng = np.random.default_rng(base_seed + s_idx)
@@ -1314,7 +1553,43 @@ def _run_one_kw_sample(args_tuple):
             all_mu.append(pert['mu'])
             all_values.append(pert['value'])
             all_unc.append(pert['unc'])
-            all_weights.append(np.full(n_pts, w))
+            all_weights.append(np.full(n_pts, w / n_pts))
+
+        # Apply per-experiment weight capping (analogous to nominal fits)
+        if all_mu and max_experiment_weight_fraction < 1.0:
+            weights_arr = np.concatenate(all_weights)
+            # Track experiment id per point
+            exp_ids = []
+            for ds, w in datasets_and_weights:
+                e_key = f"{ds['experiment_id']}_{ds['exfor_energy_mev']:.6f}"
+                pert = perturbed_datasets.get(e_key)
+                if pert is not None:
+                    exp_ids.extend([ds['experiment_id']] * len(pert['mu']))
+            exp_ids = np.array(exp_ids)
+            total_w = weights_arr.sum()
+            if total_w > 0:
+                unique_exps = np.unique(exp_ids)
+                for _ in range(5):  # iterative capping
+                    changed = False
+                    total_w = weights_arr.sum()
+                    if total_w <= 0:
+                        break
+                    for exp in unique_exps:
+                        mask = exp_ids == exp
+                        frac = weights_arr[mask].sum() / total_w
+                        if frac > max_experiment_weight_fraction:
+                            scale = max_experiment_weight_fraction / frac
+                            weights_arr[mask] *= scale
+                            changed = True
+                    if not changed:
+                        break
+                # Rebuild all_weights from capped array
+                all_weights = []
+                offset = 0
+                for mu_arr in all_mu:
+                    n = len(mu_arr)
+                    all_weights.append(weights_arr[offset:offset + n])
+                    offset += n
 
         if not all_mu:
             nom = nominal_coeffs_by_bin.get(bin_idx)
@@ -1356,6 +1631,14 @@ def _run_one_kw_sample(args_tuple):
             coeffs = coef_df.iloc[0].to_numpy()
             if len(coeffs) < max_degree + 1:
                 coeffs = np.pad(coeffs, (0, max_degree + 1 - len(coeffs)))
+
+            # Freeze higher-order coefficients at nominal values
+            if max_sample_order is not None:
+                nom = nominal_coeffs_by_bin.get(bin_idx)
+                if nom is not None:
+                    for l in range(max_sample_order + 1, len(coeffs)):
+                        if l < len(nom):
+                            coeffs[l] = nom[l]
 
             if apply_positivity_projection:
                 from .resample_AD import (
@@ -1400,6 +1683,7 @@ def run_mc_with_kernel_weights(
     max_sample_order: Optional[int] = None,
     apply_positivity_projection: bool = False,
     positivity_check_points: int = 101,
+    max_experiment_weight_fraction: float = 1.0,
     logger=None,
 ) -> Dict[int, Dict[int, np.ndarray]]:
     """Orchestrate kernel-weighted multi-bin MC sampling.
@@ -1426,6 +1710,8 @@ def run_mc_with_kernel_weights(
         Ridge regularization parameter.
     base_seed : int
         Random seed.
+    max_experiment_weight_fraction : float
+        Maximum allowed weight fraction per experiment (1.0 = disabled).
     logger : optional
         Logger instance.
 
@@ -1470,6 +1756,7 @@ def run_mc_with_kernel_weights(
             positivity_check_points,
             nominal_coeffs_by_bin,
             frozen_degrees_by_bin,
+            max_experiment_weight_fraction,
         )
         for s_idx in range(n_samples)
     ]
@@ -1603,6 +1890,9 @@ def compute_covariance_from_samples(
     energy_indices: List[int],
     max_order: int,
     valid_mask: Optional[np.ndarray] = None,
+    snr_threshold: float = 0.0,
+    n_neighbors: int = 3,
+    logger=None,
 ) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]]]:
     """
     Compute relative (fractional) covariance and correlation matrices from MC samples.
@@ -1647,14 +1937,11 @@ def compute_covariance_from_samples(
 
     for s_idx in range(n_samples):
         sample_data = all_samples[s_idx]
-        row = []
-        for e_idx in energy_indices:
+        for k, e_idx in enumerate(energy_indices):
             coeffs = sample_data.get(e_idx, np.zeros(max_order))
-            # Pad or truncate to max_order
-            padded = np.zeros(max_order)
-            padded[:min(len(coeffs), max_order)] = coeffs[:max_order]
-            row.extend(padded)
-        sample_matrix[s_idx] = row
+            start = k * max_order
+            n_copy = min(len(coeffs), max_order)
+            sample_matrix[s_idx, start:start + n_copy] = coeffs[:n_copy]
 
     # Compute absolute covariance
     cov_abs = np.cov(sample_matrix, rowvar=False)
@@ -1676,6 +1963,18 @@ def compute_covariance_from_samples(
     # Flush near-zero values to exactly zero (numerical noise from np.cov)
     cov_matrix[np.abs(cov_matrix) < 1e-15] = 0.0
 
+    # Regularize near-zero-mean parameters via neighbor interpolation
+    if snr_threshold > 0:
+        cov_matrix, reg_diag = regularize_near_zero_relative_covariance(
+            cov_rel=cov_matrix,
+            mean_params=mean_params,
+            cov_abs=cov_abs,
+            max_order=max_order,
+            snr_threshold=snr_threshold,
+            n_neighbors=n_neighbors,
+            logger=logger,
+        )
+
     # Compute correlation (from absolute covariance — identical to
     # computing from relative, since the mean factors cancel)
     std = np.sqrt(np.maximum(np.diag(cov_abs), 0.0))
@@ -1687,6 +1986,816 @@ def compute_covariance_from_samples(
     param_labels = [(e_idx, l + 1) for e_idx in energy_indices for l in range(max_order)]
 
     return cov_matrix, corr_matrix, param_labels, mean_params
+
+
+def regularize_near_zero_relative_covariance(
+    cov_rel: np.ndarray,
+    mean_params: np.ndarray,
+    cov_abs: np.ndarray,
+    max_order: int,
+    snr_threshold: float = 1.0,
+    n_neighbors: int = 3,
+    logger=None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Regularize relative covariance for parameters with near-zero means.
+
+    When |mean| / sigma_abs < snr_threshold, the relative std is an artifact
+    of dividing by a near-zero mean, not a genuinely large uncertainty. This
+    replaces those explosive relative stds with interpolated values from
+    neighboring bins of the same Legendre order, applied via congruence
+    transform to preserve correlations and PSD.
+
+    Returns regularized cov_rel and diagnostics dict.
+    """
+    n_params = len(mean_params)
+    n_energies = n_params // max_order
+
+    sigma_abs = np.sqrt(np.maximum(np.diag(cov_abs), 0.0))
+    rel_std = np.sqrt(np.maximum(np.diag(cov_rel), 0.0))
+
+    # Compute SNR for each parameter
+    snr = np.full(n_params, np.inf)
+    nonzero_abs = sigma_abs > 0
+    snr[nonzero_abs] = np.abs(mean_params[nonzero_abs]) / sigma_abs[nonzero_abs]
+
+    # Flag parameters with low SNR (near-zero means)
+    flagged = snr < snr_threshold
+
+    n_flagged = int(np.sum(flagged))
+    if n_flagged == 0:
+        diagnostics = {"n_regularized": 0, "n_total": n_params}
+        if logger:
+            logger.info("  Near-zero regularization: no parameters flagged (all SNR >= threshold)")
+        return cov_rel.copy(), diagnostics
+
+    # Build scale vector
+    scale = np.ones(n_params)
+
+    for i in range(n_params):
+        if not flagged[i]:
+            continue
+        if rel_std[i] <= 0:
+            continue  # already zero relative std, nothing to scale
+
+        # Determine energy bin index k and Legendre order l
+        k = i // max_order
+        l = i % max_order
+
+        # Collect rel_std from neighboring bins of the same order l
+        neighbor_stds = []
+        # Walk left
+        count = 0
+        for kk in range(k - 1, -1, -1):
+            j = kk * max_order + l
+            if not flagged[j] and rel_std[j] > 0:
+                neighbor_stds.append(rel_std[j])
+                count += 1
+                if count >= n_neighbors:
+                    break
+        # Walk right
+        count = 0
+        for kk in range(k + 1, n_energies):
+            j = kk * max_order + l
+            if not flagged[j] and rel_std[j] > 0:
+                neighbor_stds.append(rel_std[j])
+                count += 1
+                if count >= n_neighbors:
+                    break
+
+        if neighbor_stds:
+            target_rel_std = float(np.median(neighbor_stds))
+        else:
+            # Fallback: 100% relative uncertainty
+            target_rel_std = 1.0
+
+        scale[i] = target_rel_std / rel_std[i]
+
+    # Apply congruence transform: cov_reg = diag(scale) @ cov_rel @ diag(scale)
+    cov_reg = cov_rel * np.outer(scale, scale)
+
+    diagnostics = {
+        "n_regularized": n_flagged,
+        "n_total": n_params,
+        "max_scale_down": float(np.min(scale[flagged])) if n_flagged > 0 else 1.0,
+    }
+
+    if logger:
+        logger.info(f"  Near-zero regularization: {n_flagged}/{n_params} parameters "
+                    f"(SNR < {snr_threshold})")
+        # Report before/after stats
+        old_max = float(np.max(rel_std[flagged])) if n_flagged > 0 else 0.0
+        new_rel_std = np.sqrt(np.maximum(np.diag(cov_reg), 0.0))
+        new_max = float(np.max(new_rel_std[flagged])) if n_flagged > 0 else 0.0
+        logger.info(f"  Max relative std (flagged): {old_max:.4f} -> {new_max:.4f}")
+
+    return cov_reg, diagnostics
+
+
+def regularize_post_rescaling(
+    cov_rel: np.ndarray,
+    max_order: int,
+    max_rel_std: float = 1.0,
+    n_neighbors: int = 3,
+    mc_abs_std: Optional[np.ndarray] = None,
+    nominal_means: Optional[np.ndarray] = None,
+    deflation_threshold: float = 0.5,
+    logger=None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Bidirectional regularization of relative covariance after MC-mean ->
+    nominal rescaling.
+
+    After rescaling ``cov_grouped * outer(mg_scale, mg_scale)`` where
+    ``mg_scale = mc_mean / nominal``, relative stds can both explode
+    (when |mc_mean| >> |nominal|) and collapse (when |mc_mean| << |nominal|).
+
+    Both directions are fixed with the **same strategy**: neighbor-
+    interpolated relative std from the same Legendre order, applied via
+    congruence transform (preserves correlations and PSD).
+
+    Detection criteria
+    ------------------
+    - **High-side** (inflation): ``rel_std > max_rel_std``
+    - **Low-side** (deflation): ``abs_std < deflation_threshold * mc_abs_std``
+      where ``abs_std = rel_std * |nominal_mean|``
+
+    Fix strategy (both sides)
+    -------------------------
+    Walk left/right from the flagged bin collecting up to ``n_neighbors``
+    unflagged rel_std values of the same order, take their median as
+    target.  For deflated bins, also compute the MC-informed target
+    (``deflation_threshold * mc_abs_std / |nominal|``) and use the
+    larger of the two (conservative).
+
+    Parameters
+    ----------
+    cov_rel : np.ndarray
+        Relative covariance matrix (post-rescaling).
+    max_order : int
+        Number of Legendre orders per energy bin.
+    max_rel_std : float
+        Flag parameters with relative std above this.
+    n_neighbors : int
+        Neighbors to seek on each side for interpolation.
+    mc_abs_std : np.ndarray, optional
+        Original MC absolute standard deviations (before rescaling).
+        Enables deflation detection.
+    nominal_means : np.ndarray, optional
+        Nominal mean values (denominator of relative covariance).
+        Required together with mc_abs_std for deflation detection.
+    deflation_threshold : float
+        Flag if post-rescaling abs_std < this fraction of mc_abs_std.
+    logger : optional
+        Logger instance.
+
+    Returns
+    -------
+    cov_reg : np.ndarray
+        Regularized relative covariance.
+    diagnostics : dict
+        Counts and summary statistics.
+    """
+    n_params = cov_rel.shape[0]
+    n_energies = n_params // max_order
+
+    rel_std = np.sqrt(np.maximum(np.diag(cov_rel), 0.0))
+
+    # --- High-side flags: relative std too large ---
+    flagged_high = rel_std > max_rel_std
+
+    # --- Low-side flags: rescaling crushed absolute uncertainty ---
+    flagged_low = np.zeros(n_params, dtype=bool)
+    deflation_available = mc_abs_std is not None and nominal_means is not None
+    if deflation_available:
+        current_abs_std = rel_std * np.abs(nominal_means)
+        deflated = (
+            (mc_abs_std > 1e-20)
+            & (current_abs_std < deflation_threshold * mc_abs_std)
+            & (np.abs(nominal_means) > 1e-20)
+            & ~flagged_high
+        )
+        flagged_low = deflated
+
+    flagged = flagged_high | flagged_low
+    n_flagged = int(np.sum(flagged))
+
+    if n_flagged == 0:
+        diagnostics = {"n_regularized": 0, "n_total": n_params,
+                       "n_capped": 0, "n_deflated": 0}
+        if logger:
+            logger.info("  Post-rescaling regularization: no parameters flagged")
+        return cov_rel.copy(), diagnostics
+
+    # Per-order global fallback: median of unflagged stds
+    order_fallback = np.full(max_order, max_rel_std)
+    for l in range(max_order):
+        order_indices = np.arange(l, n_params, max_order)
+        unflagged_stds = rel_std[order_indices][~flagged[order_indices]]
+        unflagged_stds = unflagged_stds[unflagged_stds > 0]
+        if len(unflagged_stds) > 0:
+            order_fallback[l] = float(np.median(unflagged_stds))
+
+    # Neighbor-interpolated target (same logic for both directions)
+    def _neighbor_target(i: int) -> Tuple[float, int, bool]:
+        k = i // max_order
+        l = i % max_order
+        neighbor_stds = []
+        count = 0
+        for kk in range(k - 1, -1, -1):
+            j = kk * max_order + l
+            if not flagged[j] and rel_std[j] > 0:
+                neighbor_stds.append(rel_std[j])
+                count += 1
+                if count >= n_neighbors:
+                    break
+        count = 0
+        for kk in range(k + 1, n_energies):
+            j = kk * max_order + l
+            if not flagged[j] and rel_std[j] > 0:
+                neighbor_stds.append(rel_std[j])
+                count += 1
+                if count >= n_neighbors:
+                    break
+        if neighbor_stds:
+            return float(np.median(neighbor_stds)), len(neighbor_stds), False
+        return order_fallback[l], 0, True
+
+    # Build scale vector
+    scale = np.ones(n_params)
+    targets = {}  # i -> (target, n_neighbors_used, used_fallback, flag_type)
+
+    for i in range(n_params):
+        if not flagged[i]:
+            continue
+
+        if flagged_high[i]:
+            if rel_std[i] <= 0:
+                continue
+            target, n_nb, fb = _neighbor_target(i)
+            scale[i] = target / rel_std[i]
+            targets[i] = (target, n_nb, fb, "high")
+
+        elif flagged_low[i]:
+            target, n_nb, fb = _neighbor_target(i)
+            # MC-informed target: what the relative std should be to preserve
+            # deflation_threshold of the original MC absolute uncertainty
+            mc_target_rel = (
+                deflation_threshold * mc_abs_std[i] / np.abs(nominal_means[i])
+                if np.abs(nominal_means[i]) > 1e-20 else target
+            )
+            # Conservative: use the larger of neighbor-interpolated and MC-informed
+            target = max(target, mc_target_rel)
+            if rel_std[i] > 0:
+                scale[i] = target / rel_std[i]
+            targets[i] = (target, n_nb, fb, "low")
+
+    # Apply congruence transform: C' = S @ C @ S (PSD-preserving)
+    cov_reg = cov_rel * np.outer(scale, scale)
+
+    n_high = int(np.sum(flagged_high))
+    n_low = int(np.sum(flagged_low))
+
+    diagnostics = {
+        "n_regularized": n_flagged,
+        "n_total": n_params,
+        "n_capped": n_high,
+        "n_deflated": n_low,
+    }
+
+    if logger:
+        parts = []
+        if n_high > 0:
+            parts.append(f"{n_high} capped (>{max_rel_std*100:.0f}%)")
+        if n_low > 0:
+            parts.append(f"{n_low} deflated (<{deflation_threshold*100:.0f}% of MC)")
+        logger.info(f"  Post-rescaling regularization: {n_flagged}/{n_params} — "
+                    + ", ".join(parts))
+        new_rel_std = np.sqrt(np.maximum(np.diag(cov_reg), 0.0))
+        for l in range(max_order):
+            order_indices = np.arange(l, n_params, max_order)
+            # High-side
+            order_flagged_h = flagged_high[order_indices]
+            n_oh = int(np.sum(order_flagged_h))
+            if n_oh > 0:
+                old_max = float(np.max(rel_std[order_indices][order_flagged_h]))
+                new_max = float(np.max(new_rel_std[order_indices][order_flagged_h]))
+                order_targets = [targets[idx][0] for idx in order_indices[order_flagged_h] if idx in targets]
+                order_n_fb = sum(1 for idx in order_indices[order_flagged_h] if idx in targets and targets[idx][2])
+                tgt_min = min(order_targets) if order_targets else 0
+                tgt_max = max(order_targets) if order_targets else 0
+                logger.info(f"    l={l+1}: {n_oh} capped "
+                            f"(max {old_max*100:.1f}% -> {new_max*100:.1f}%), "
+                            f"targets [{tgt_min*100:.1f}%-{tgt_max*100:.1f}%], "
+                            f"{order_n_fb} used fallback")
+            # Low-side
+            order_flagged_l = flagged_low[order_indices]
+            n_ol = int(np.sum(order_flagged_l))
+            if n_ol > 0 and deflation_available:
+                old_min_abs = float(np.min(
+                    rel_std[order_indices][order_flagged_l]
+                    * np.abs(nominal_means[order_indices][order_flagged_l])
+                ))
+                new_min_abs = float(np.min(
+                    new_rel_std[order_indices][order_flagged_l]
+                    * np.abs(nominal_means[order_indices][order_flagged_l])
+                ))
+                logger.info(f"    l={l+1}: {n_ol} deflated "
+                            f"(min abs_std {old_min_abs:.6f} -> {new_min_abs:.6f})")
+
+    return cov_reg, diagnostics
+
+
+def log_rel_std_profile(
+    cov_rel: np.ndarray,
+    max_order: int,
+    stage: str,
+    logger=None,
+    verbose: bool = False,
+) -> None:
+    """Log per-order percentile statistics of relative std for diagnostics.
+
+    Parameters
+    ----------
+    cov_rel : np.ndarray
+        Relative covariance matrix.
+    max_order : int
+        Number of Legendre orders per energy bin.
+    stage : str
+        Label for the pipeline stage (e.g. "FG post-rescale").
+    logger : optional
+        Logger instance.
+    verbose : bool
+        If True, also log per-bin rel_std values for each order, useful
+        for tracing exactly where spikes/serrations originate.
+    """
+    if logger is None:
+        return
+    n_params = cov_rel.shape[0]
+    n_energies = n_params // max_order
+    rel_std = np.sqrt(np.maximum(np.diag(cov_rel), 0.0))
+    for l in range(max_order):
+        order_vals = rel_std[l::max_order]
+        nz = order_vals[order_vals > 1e-15]
+        n_zero = int(np.sum(order_vals <= 1e-15))
+        if len(nz) == 0:
+            logger.info(f"  [DIAG {stage}] l={l+1}: all zero (N={len(order_vals)})")
+            continue
+        p5, p25, p50, p75, p95 = np.percentile(nz, [5, 25, 50, 75, 95])
+        mx = np.max(nz)
+        logger.info(
+            f"  [DIAG {stage}] l={l+1}: p5={p5:.1%} p25={p25:.1%} p50={p50:.1%} "
+            f"p75={p75:.1%} p95={p95:.1%} max={mx:.1%} (N={len(nz)}, "
+            f"zero={n_zero}/{len(order_vals)})"
+        )
+        if verbose:
+            # Dump every bin value for full traceability
+            vals_str = ", ".join(f"{v:.4f}" for v in order_vals)
+            logger.info(f"  [DIAG {stage}] l={l+1} bins: [{vals_str}]")
+
+
+def smooth_absent_order_uncertainties(
+    cov_rel: np.ndarray,
+    valid_mask: np.ndarray,
+    max_order: int,
+    min_rel_std: float = 0.005,
+    dip_fraction: float = 0.50,
+    spike_factor: float = 3.0,
+    dip_n_neighbors: int = 3,
+    median_fill_threshold: float = 0.50,
+    logger=None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Fill in relative uncertainties for Legendre orders absent or near-zero
+    in some energy bins, and smooth isolated spikes.
+
+    Four classes of entries are smoothed:
+
+    1. **Absent** — order was not fitted (not in valid_mask) or its diagonal
+       is effectively zero.  These are structurally zero from covariance
+       construction.
+
+    2. **Below floor** — order was fitted but its relative std is below
+       ``min_rel_std``.  This happens when the Legendre coefficient is
+       near zero and both the mean and variance are tiny, producing a
+       misleadingly small relative uncertainty.
+
+    3. **Isolated dips** — relative std is much lower than neighbors of
+       the same order (``< dip_fraction * median(neighbors)``).  These
+       are artifacts of individual bins where coefficients pass through
+       zero.
+
+    4. **Isolated spikes** — relative std is much higher than neighbors
+       of the same order (``> spike_factor * median(neighbors)``).  These
+       are artifacts of individual bins where coefficients are poorly
+       constrained.
+
+    All flagged entries are replaced by linear interpolation from
+    neighboring unflagged bins of the same order.  Scale-down (spikes)
+    is always PSD-preserving; scale-up (dips/absent) uses eigenvalue
+    clipping afterward if needed.
+
+    Parameters
+    ----------
+    cov_rel : np.ndarray
+        Relative covariance matrix (modified in-place copy returned).
+    valid_mask : np.ndarray of bool
+        True for parameters that were fitted (from frozen_degree).
+        Length = n_energies * max_order.
+    max_order : int
+        Number of Legendre orders per energy bin.
+    min_rel_std : float
+        Floor below which relative std is treated as absent (default 0.5%).
+    dip_fraction : float
+        Flag entries with rel_std < dip_fraction * median(neighbors)
+        (default 0.50 = half of neighbor median).
+    spike_factor : float
+        Flag entries with rel_std > spike_factor * median(neighbors)
+        (default 3.0 = three times neighbor median).
+    dip_n_neighbors : int
+        Number of neighbors on each side for dip/spike detection (default 3).
+    median_fill_threshold : float
+        If the fraction of flagged bins for an order exceeds this threshold,
+        use flat median fill instead of linear interpolation (default 0.50).
+    logger : optional
+        Logger instance.
+
+    Returns
+    -------
+    cov_smoothed : np.ndarray
+        Covariance with absent/near-zero/dip/spike diagonals filled.
+    diagnostics : dict
+        Per-order counts of bins smoothed, broken down by category.
+    """
+    n_params = cov_rel.shape[0]
+    n_energies = n_params // max_order
+
+    rel_std = np.sqrt(np.maximum(np.diag(cov_rel), 0.0))
+
+    # Build a global scale vector: scale[i] = target_std / old_std
+    # Applied as a single congruence transform at the end.
+    scale = np.ones(n_params)
+    # For truly-zero entries, we'll inject diagonal values directly.
+    inject_diag = {}  # i -> target_variance (for zero-row/col entries)
+
+    total_smoothed = 0
+    per_order = {}
+
+    for l in range(max_order):
+        order_indices = np.arange(l, n_params, max_order)  # length = n_energies
+        order_rel_std = rel_std[order_indices].copy()
+        order_valid = valid_mask[order_indices]
+
+        # --- Category 1: absent (not fitted or truly zero) ---
+        absent = ~order_valid | (order_rel_std < 1e-15)
+
+        # --- Category 2: below floor (fitted but rel_std too small) ---
+        below_floor = order_valid & (order_rel_std > 0) & (order_rel_std < min_rel_std)
+
+        # --- Categories 3 & 4: isolated dips and spikes (iterative) ---
+        # After interpolating the deepest outliers, shallower ones can emerge.
+        # Iterate until no new outliers are found (max 5 passes).
+        dip = np.zeros(len(order_rel_std), dtype=bool)
+        spike = np.zeros(len(order_rel_std), dtype=bool)
+        for _pass in range(5):
+            new_outliers = 0
+            for k in range(len(order_rel_std)):
+                if absent[k] or below_floor[k] or dip[k] or spike[k]:
+                    continue
+                if order_rel_std[k] <= 0:
+                    continue
+                excluded = absent | below_floor | dip | spike
+                neighbor_vals = []
+                for kk in range(max(0, k - dip_n_neighbors), k):
+                    if not excluded[kk] and order_rel_std[kk] > min_rel_std:
+                        neighbor_vals.append(order_rel_std[kk])
+                for kk in range(k + 1, min(len(order_rel_std), k + dip_n_neighbors + 1)):
+                    if not excluded[kk] and order_rel_std[kk] > min_rel_std:
+                        neighbor_vals.append(order_rel_std[kk])
+                if len(neighbor_vals) >= 2:
+                    med = float(np.median(neighbor_vals))
+                    if order_rel_std[k] < dip_fraction * med:
+                        dip[k] = True
+                        new_outliers += 1
+                    elif order_rel_std[k] > spike_factor * med:
+                        spike[k] = True
+                        new_outliers += 1
+            if new_outliers == 0:
+                break
+            # Update working rel_std with interpolated values for next pass
+            flagged_pass = absent | below_floor | dip | spike
+            present_pass = ~flagged_pass & (order_rel_std > min_rel_std)
+            if np.any(present_pass) and np.any(flagged_pass):
+                pi = np.where(present_pass)[0]
+                fi = np.where(flagged_pass)[0]
+                order_rel_std[fi] = np.interp(fi, pi, order_rel_std[pi])
+
+        # Combine all flags
+        flagged = absent | below_floor | dip | spike
+        present = ~flagged & (rel_std[order_indices] > min_rel_std)
+
+        n_flagged = int(np.sum(flagged))
+        if n_flagged == 0 or not np.any(present):
+            per_order[l + 1] = (0, 0, 0, 0)
+            continue
+
+        # Interpolate using present bins as anchor points (from original values)
+        present_idx = np.where(present)[0]
+        present_vals = rel_std[order_indices[present_idx]]
+
+        flagged_idx = np.where(flagged)[0]
+        absent_fraction = int(np.sum(absent)) / len(order_rel_std)
+        if absent_fraction > median_fill_threshold and len(present_vals) > 0:
+            # High-absence order: flat median fill avoids zigzag from sparse anchors
+            filled_vals = np.full(len(flagged_idx), np.median(present_vals))
+            if logger:
+                logger.info(f"    l={l+1}: median fill ({absent_fraction:.0%} absent, "
+                            f"median={np.median(present_vals):.4f})")
+        elif absent_fraction > 0.25 and len(present_vals) >= 5:
+            # Moderate-absence order: running-median interpolation avoids zigzag
+            # from sparse linear interpolation anchors.  First interpolate linearly,
+            # then smooth with a running median to remove serration.
+            filled_vals = np.interp(flagged_idx, present_idx, present_vals)
+            # Build a full vector (present + filled) for running median
+            full_std = rel_std[order_indices].copy()
+            full_std[flagged_idx] = filled_vals
+            # Running median over the filled entries only
+            _rm_half = max(dip_n_neighbors, 3)
+            for _fi, _fk in enumerate(flagged_idx):
+                lo = max(0, _fk - _rm_half)
+                hi = min(len(full_std), _fk + _rm_half + 1)
+                filled_vals[_fi] = np.median(full_std[lo:hi])
+            if logger:
+                logger.info(f"    l={l+1}: running-median interp ({absent_fraction:.0%} absent, "
+                            f"window={2*_rm_half+1})")
+        else:
+            filled_vals = np.interp(flagged_idx, present_idx, present_vals)
+
+        # Record scale factors or diagonal injections
+        for k_local, val in zip(flagged_idx, filled_vals):
+            i = order_indices[k_local]
+            old_std = rel_std[i]
+            if old_std > 1e-15:
+                scale[i] = val / old_std
+            else:
+                inject_diag[i] = val ** 2
+
+        n_absent = int(np.sum(absent))
+        n_floor = int(np.sum(below_floor))
+        n_dip = int(np.sum(dip))
+        n_spike = int(np.sum(spike))
+        per_order[l + 1] = (n_absent, n_floor, n_dip, n_spike)
+        total_smoothed += n_flagged
+
+    # Apply single congruence transform: C' = S @ C @ S
+    # Scale-down (scale < 1) is always PSD-preserving.
+    # Scale-up (scale > 1) can create |corr| > 1 if the original off-diagonal
+    # was already large relative to the new diagonal.  We clip eigenvalues
+    # afterward to restore PSD if needed.
+    cov_smoothed = cov_rel * np.outer(scale, scale)
+
+    # Inject diagonal values for truly-zero entries
+    for i, var in inject_diag.items():
+        cov_smoothed[i, i] = var
+
+    # PSD projection: clip negative eigenvalues (if any)
+    if np.any(scale > 1.0) or inject_diag:
+        eigvals, eigvecs = np.linalg.eigh(cov_smoothed)
+        min_eig = np.min(eigvals)
+        if min_eig < -1e-14:
+            eigvals = np.maximum(eigvals, 0.0)
+            cov_smoothed = eigvecs @ np.diag(eigvals) @ eigvecs.T
+            cov_smoothed = (cov_smoothed + cov_smoothed.T) / 2.0
+            if logger:
+                logger.info(f"  Absent-order smoothing: PSD projection applied "
+                            f"(min_eig={min_eig:.2e})")
+
+    diagnostics = {
+        "n_smoothed": total_smoothed,
+        "n_total": n_params,
+        "per_order": per_order,
+    }
+
+    if logger:
+        if total_smoothed > 0:
+            parts = []
+            for l_idx, counts in sorted(per_order.items()):
+                if isinstance(counts, tuple):
+                    if len(counts) == 4:
+                        n_abs, n_fl, n_dp, n_sp = counts
+                    else:
+                        n_abs, n_fl, n_dp = counts
+                        n_sp = 0
+                    total_l = n_abs + n_fl + n_dp + n_sp
+                else:
+                    total_l = counts
+                    n_abs = n_fl = n_dp = n_sp = 0
+                if total_l > 0:
+                    detail = []
+                    if n_abs: detail.append(f"{n_abs} absent")
+                    if n_fl: detail.append(f"{n_fl} floor")
+                    if n_dp: detail.append(f"{n_dp} dip")
+                    if n_sp: detail.append(f"{n_sp} spike")
+                    parts.append(f"l={l_idx}: {total_l} ({', '.join(detail)})")
+            logger.info(f"  Absent-order smoothing: {total_smoothed}/{n_params} "
+                        f"diagonal entries filled ({', '.join(parts)})")
+        else:
+            logger.info("  Absent-order smoothing: no absent bins to fill")
+
+    return cov_smoothed, diagnostics
+
+
+def cap_order_relative_uncertainty(
+    cov_rel: np.ndarray,
+    max_order: int,
+    order_caps: Dict[int, float],
+    logger=None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Cap relative uncertainties for specified Legendre orders via congruence transform.
+
+    Higher orders (e.g. l=4,5,6) may be weakly constrained, producing large
+    relative uncertainties.  This function scales down those rows/columns so
+    that rel_std <= cap, preserving correlations and PSD.
+
+    Parameters
+    ----------
+    cov_rel : np.ndarray
+        Relative covariance matrix.
+    max_order : int
+        Number of Legendre orders per energy bin.
+    order_caps : dict {int: float}
+        1-indexed order -> maximum allowed relative std.
+        E.g. {4: 0.20, 5: 0.15, 6: 0.10}.
+    logger : optional
+        Logger instance.
+
+    Returns
+    -------
+    cov_capped : np.ndarray
+        Capped covariance matrix.
+    diagnostics : dict
+        Per-order counts and before/after max rel_std.
+    """
+    n_params = cov_rel.shape[0]
+    rel_std = np.sqrt(np.maximum(np.diag(cov_rel), 0.0))
+    scale = np.ones(n_params)
+
+    per_order_counts = {}
+    per_order_before = {}
+    per_order_after = {}
+    total_capped = 0
+
+    for i in range(n_params):
+        order = (i % max_order) + 1  # 1-indexed
+        if order not in order_caps:
+            continue
+        cap = order_caps[order]
+        if rel_std[i] > cap:
+            scale[i] = cap / rel_std[i]
+
+    # Gather diagnostics per order
+    for order, cap in order_caps.items():
+        order_indices = np.arange(order - 1, n_params, max_order)
+        order_stds = rel_std[order_indices]
+        flagged = int(np.sum(order_stds > cap))
+        per_order_counts[order] = flagged
+        per_order_before[order] = float(np.max(order_stds)) if len(order_stds) > 0 else 0.0
+        # After capping: std * scale
+        capped_stds = order_stds * scale[order_indices]
+        per_order_after[order] = float(np.max(capped_stds)) if len(capped_stds) > 0 else 0.0
+        total_capped += flagged
+
+    # Congruence transform: cov_capped = S @ cov @ S  where S = diag(scale)
+    cov_capped = cov_rel * np.outer(scale, scale)
+
+    diagnostics = {
+        "n_capped": total_capped,
+        "n_total": n_params,
+        "per_order_counts": per_order_counts,
+        "per_order_max_before": per_order_before,
+        "per_order_max_after": per_order_after,
+    }
+
+    if logger:
+        if total_capped > 0:
+            parts = []
+            for order in sorted(per_order_counts.keys()):
+                n = per_order_counts[order]
+                if n > 0:
+                    parts.append(
+                        f"l={order}: {n} capped "
+                        f"(max {per_order_before[order]:.4f} -> {per_order_after[order]:.4f})"
+                    )
+            logger.info(f"  Order-dependent cap: {total_capped}/{n_params} entries capped "
+                        f"({', '.join(parts)})")
+        else:
+            logger.info("  Order-dependent cap: no entries exceed caps")
+
+    return cov_capped, diagnostics
+
+
+def smooth_diagonal_median(
+    cov_rel: np.ndarray,
+    max_order: int,
+    window: int = 5,
+    logger=None,
+) -> np.ndarray:
+    """
+    Apply Gaussian-weighted moving average to each order's diagonal of the
+    relative covariance, then rescale via congruence transform.
+
+    Unlike a running median (which selects a value), a weighted average
+    genuinely blends nearby values.  This breaks serrated present/absent
+    patterns where adjacent bins alternate between natural MC uncertainty
+    and filled/capped values — even when the alternation is ~50%.
+
+    The Gaussian kernel has sigma = window/4 (so the window spans ~2σ on
+    each side).  Edge bins use a truncated, renormalized kernel.
+
+    Parameters
+    ----------
+    cov_rel : np.ndarray
+        Relative covariance matrix.
+    max_order : int
+        Number of Legendre orders per energy bin.
+    window : int
+        Full window width for the Gaussian kernel (>=3).
+        The Gaussian sigma = window / 4.
+        0 or 1 disables smoothing.
+    logger : optional
+        Logger instance.
+
+    Returns
+    -------
+    cov_smoothed : np.ndarray
+        Covariance with smoothed diagonal.
+    """
+    if window < 3:
+        return cov_rel.copy()
+
+    n_params = cov_rel.shape[0]
+    n_energies = n_params // max_order
+    rel_std = np.sqrt(np.maximum(np.diag(cov_rel), 0.0))
+
+    # Build Gaussian kernel
+    sigma = window / 4.0
+    half = window // 2
+    kernel_x = np.arange(-half, half + 1, dtype=float)
+    kernel = np.exp(-0.5 * (kernel_x / sigma) ** 2)
+    # kernel is normalized per-position to handle edges
+
+    scale = np.ones(n_params)
+    total_changed = 0
+
+    for l in range(max_order):
+        order_indices = np.arange(l, n_params, max_order)
+        order_std = rel_std[order_indices].copy()
+        n = len(order_std)
+
+        # Gaussian-weighted moving average
+        smoothed = np.empty(n)
+        for k in range(n):
+            lo = max(0, k - half)
+            hi = min(n, k + half + 1)
+            # Slice kernel to match the valid range
+            k_lo = lo - (k - half)  # offset into kernel
+            k_hi = k_lo + (hi - lo)
+            w = kernel[k_lo:k_hi]
+            w_sum = w.sum()
+            if w_sum > 0:
+                smoothed[k] = np.dot(w, order_std[lo:hi]) / w_sum
+            else:
+                smoothed[k] = order_std[k]
+
+        # Compute scale factors
+        for k in range(n):
+            i = order_indices[k]
+            if order_std[k] > 1e-15 and smoothed[k] > 1e-15:
+                s = smoothed[k] / order_std[k]
+                if abs(s - 1.0) > 1e-6:
+                    scale[i] = s
+                    total_changed += 1
+
+    # Congruence transform
+    cov_smoothed = cov_rel * np.outer(scale, scale)
+
+    # PSD projection if needed (scale-up can break PSD)
+    if np.any(scale > 1.0 + 1e-6):
+        eigvals, eigvecs = np.linalg.eigh(cov_smoothed)
+        min_eig = np.min(eigvals)
+        if min_eig < -1e-14:
+            eigvals = np.maximum(eigvals, 0.0)
+            cov_smoothed = eigvecs @ np.diag(eigvals) @ eigvecs.T
+            cov_smoothed = (cov_smoothed + cov_smoothed.T) / 2.0
+            if logger:
+                logger.info(f"  Diagonal Gaussian smoothing: PSD projection applied (min_eig={min_eig:.2e})")
+
+    if logger:
+        logger.info(f"  Diagonal Gaussian smoothing (window={window}, σ={sigma:.1f}): "
+                    f"{total_changed}/{n_params} entries adjusted")
+
+    return cov_smoothed
 
 
 def extract_ll_prime_correlations(
@@ -1767,6 +2876,16 @@ def extract_ll_prime_correlations(
                      f"|corr|={strongest_val:.4f}")
 
     return ll_corr
+
+
+def _extract_correlation_matrix(cov: np.ndarray) -> np.ndarray:
+    """Extract correlation matrix from covariance with safe zero-variance handling."""
+    std = np.sqrt(np.maximum(np.diag(cov), 0.0))
+    std_safe = std.copy()
+    std_safe[std_safe < 1e-30] = 1.0
+    corr = cov / np.outer(std_safe, std_safe)
+    np.fill_diagonal(corr, 1.0)
+    return np.clip(corr, -1.0, 1.0)
 
 
 def build_gaussian_correlation_covariance(
@@ -1868,42 +2987,50 @@ def build_gaussian_correlation_covariance(
             logger.info(f"  {n_zero_sigma}/{n} params had zero sigma_E, "
                         f"using median fallback={median_sigma:.4f} MeV")
 
-    # 4. Build full correlation matrix (pointwise)
+    # 4. Build full correlation matrix (vectorized)
     corr = np.eye(n)
 
-    for i in range(n):
-        for j in range(i + 1, n):
-            # Skip pairs involving invalid (unfitted) parameters
-            if valid_mask is not None and (not valid_mask[i] or not valid_mask[j]):
-                continue
+    # Precompute pairwise quantities
+    E = param_energies
+    S = param_sigma_E
+    sigma_eff_mat = (S[:, None] + S[None, :]) / 2.0
+    dE_mat = E[:, None] - E[None, :]
+    rho_E_mat = np.exp(-dE_mat**2 / (2.0 * sigma_eff_mat**2))
 
-            e_pos_i = param_e_pos[i]
-            e_pos_j = param_e_pos[j]
-            l_i = param_orders[i]
-            l_j = param_orders[j]
+    same_e = param_e_pos[:, None] == param_e_pos[None, :]
+    same_l = param_orders[:, None] == param_orders[None, :]
+    upper = np.triu(np.ones((n, n), dtype=bool), k=1)
 
-            if e_pos_i == e_pos_j:
-                # Same energy bin, different order -> keep stochastic cross-order
-                corr[i, j] = corr_stochastic[i, j]
-                corr[j, i] = corr_stochastic[j, i]
-            else:
-                # Different energy -> Gaussian decay
-                dE = param_energies[i] - param_energies[j]
-                sigma_eff = (param_sigma_E[i] + param_sigma_E[j]) / 2.0
-                rho_E = np.exp(-dE**2 / (2.0 * sigma_eff**2))
+    if valid_mask is not None:
+        valid_pair = valid_mask[:, None] & valid_mask[None, :]
+    else:
+        valid_pair = np.ones((n, n), dtype=bool)
 
-                if l_i == l_j:
-                    # Same order, different energy -> pure Gaussian
-                    corr[i, j] = rho_E
-                    corr[j, i] = rho_E
-                else:
-                    # Different order, different energy -> Gaussian * cross-order factor
-                    # Use same-energy cross-order correlation at energy i as the factor
-                    idx_same_e_li = e_pos_i * max_order + l_i
-                    idx_same_e_lj = e_pos_i * max_order + l_j
-                    corr_ll = corr_stochastic[idx_same_e_li, idx_same_e_lj]
-                    corr[i, j] = rho_E * corr_ll
-                    corr[j, i] = rho_E * corr_ll
+    active = upper & valid_pair
+
+    # Same energy bin -> stochastic cross-order correlation
+    mask_same_e = same_e & active
+    corr[mask_same_e] = corr_stochastic[mask_same_e]
+
+    # Different energy, same order -> pure Gaussian decay
+    mask_diff_e_same_l = ~same_e & same_l & active
+    corr[mask_diff_e_same_l] = rho_E_mat[mask_diff_e_same_l]
+
+    # Different energy, different order -> Gaussian * cross-order factor
+    mask_diff_e_diff_l = ~same_e & ~same_l & active
+    if np.any(mask_diff_e_diff_l):
+        # Cross-order factor: stochastic correlation at energy_pos of row i
+        idx_i = param_e_pos[:, None] * max_order + param_orders[:, None]
+        idx_j = param_e_pos[:, None] * max_order + param_orders[None, :]
+        # Clip indices to valid range
+        max_idx = corr_stochastic.shape[0] - 1
+        idx_i_clip = np.clip(idx_i, 0, max_idx)
+        idx_j_clip = np.clip(idx_j, 0, max_idx)
+        cross_order_factor = corr_stochastic[idx_i_clip, idx_j_clip]
+        corr[mask_diff_e_diff_l] = (rho_E_mat * cross_order_factor)[mask_diff_e_diff_l]
+
+    # Mirror upper triangle to lower
+    corr = corr + corr.T - np.diag(np.diag(corr))
 
     # 5. Build covariance from correlation and stds
     cov_full = corr * np.outer(std_total, std_total)
@@ -2009,7 +3136,7 @@ def generate_cholesky_samples(
         logger.info(f"  Generating {n_samples} correlated samples via Cholesky "
                     f"({n_params} parameters, seed={seed})")
         logger.info(f"  NOTE: Samples are drawn from a multivariate normal distribution")
-        n_near_zero = int(np.sum(np.abs(mean_params) < 1e-30))
+        n_near_zero = int(np.sum(np.abs(mean_params) < 1e-6))
         if n_near_zero > 0:
             logger.info(f"  {n_near_zero}/{n_params} mean params are near-zero "
                         f"(absolute cov will be ~0 for those)")
@@ -2039,6 +3166,8 @@ def generate_cholesky_samples(
             logger.warning(f"  WARNING: Cholesky decomposition FAILED ({e})")
             logger.warning(f"  Absolute covariance has {n_neg} negative eigenvalues "
                            f"(min={min_eig:.2e})")
+            if abs(min_eig) < 1e-10:
+                logger.info(f"  -> Eigenvalues at machine-epsilon level; numerical noise, not a real PSD violation")
             logger.info(f"  Using eigendecomposition fallback (zeroing negative eigenvalues)")
         eigvals = np.maximum(eigvals, 0.0)
         # L such that L @ L.T = cov_abs (approximately)
@@ -2078,24 +3207,30 @@ def generate_cholesky_samples(
             sample_matrix[s_idx] = row
         sample_std = np.std(sample_matrix, axis=0)
         target_std = np.sqrt(np.maximum(np.diag(cov_abs), 0.0))
-        mask = target_std > 1e-30
+        # Exclude near-zero mean parameters: cov_abs = cov_rel * outer(mean, mean)
+        # makes target_std ≈ 0 when mean ≈ 0, but L @ z still couples noise into
+        # those dimensions, causing ratio blow-up that is numerical, not physical.
+        mask = (target_std > 1e-30) & (np.abs(mean_params) > 1e-6)
         if np.any(mask):
             ratio = sample_std[mask] / target_std[mask]
+            n_skipped = int(np.sum(np.abs(mean_params) <= 1e-6))
             logger.info(f"  Sample validation — std ratio (sample/target): "
-                        f"mean={np.mean(ratio):.3f}, std={np.std(ratio):.3f}")
+                        f"mean={np.mean(ratio):.3f}, std={np.std(ratio):.3f}"
+                        f" ({int(np.sum(mask))}/{n_params} params, "
+                        f"{n_skipped} near-zero-mean excluded)")
             if abs(np.mean(ratio) - 1.0) > 0.15:
                 logger.warning(f"  WARNING: Sample std deviates >15% from target — "
                                f"consider increasing n_samples (currently {n_samples})")
 
-        # Check adjacent-bin sample correlations
+        # Check adjacent-bin sample correlations (compute only needed pairs, not full corrcoef)
         if max_order >= 1 and len(energy_indices) >= 2:
-            sample_corr = np.corrcoef(sample_matrix, rowvar=False)
             adj_sample_corrs = []
             for k in range(len(energy_indices) - 1):
                 i_p = k * max_order
                 j_p = (k + 1) * max_order
                 if i_p < n_params and j_p < n_params:
-                    adj_sample_corrs.append(sample_corr[i_p, j_p])
+                    r = np.corrcoef(sample_matrix[:, i_p], sample_matrix[:, j_p])[0, 1]
+                    adj_sample_corrs.append(r)
             if adj_sample_corrs:
                 adj_arr = np.array(adj_sample_corrs)
                 logger.info(f"  Sample l=1 adjacent corr: mean={np.mean(adj_arr):.4f}, "
@@ -2291,6 +3426,104 @@ def save_all_legendre_coefficients(
     df.to_parquet(parquet_file, engine='pyarrow', index=False)
 
     return str(parquet_file)
+
+
+# =============================================================================
+# FORWARD-FILL RELATIVE UNCERTAINTY FOR ABSENT ORDERS
+# =============================================================================
+
+def forward_fill_rel_std(
+    cov_rel: np.ndarray,
+    max_order: int,
+    floor: float = 0.005,
+    logger=None,
+) -> np.ndarray:
+    """
+    Forward-fill (sample-and-hold) relative-std for low-uncertainty positions.
+
+    For each Legendre order, a bin is considered "absent" when its rel_std
+    falls below *floor* (default 0.5%).  Absent-bin diagonal entries are
+    replaced by the last value above the floor (forward fill).  Leading
+    absent bins are backward-filled from the first above-floor value.
+
+    Only the **diagonal** is modified — off-diagonal terms are left as-is.
+    The nominal coefficients remain zero for absent orders, so
+    ``abs_unc = nominal × rel_unc = 0`` is preserved during propagation.
+
+    Parameters
+    ----------
+    cov_rel : np.ndarray, shape (N, N)
+        Relative covariance matrix, laid out as
+        ``[bin0_l1, bin0_l2, ..., bin0_lM, bin1_l1, ...]``
+        where M = max_order.
+    max_order : int
+        Number of Legendre orders per energy bin (e.g. 6).
+    floor : float
+        Rel-std values below this threshold are treated as absent and
+        forward-filled.  Default 0.005 (0.5%).
+    logger : optional
+        Logger for diagnostics.
+
+    Returns
+    -------
+    np.ndarray
+        Modified copy of cov_rel with forward-filled diagonal.
+    """
+    cov = cov_rel.copy()
+    n = cov.shape[0]
+    n_bins = n // max_order
+    if n_bins == 0:
+        return cov
+
+    total_filled = 0
+
+    for l_idx in range(max_order):
+        indices = [k * max_order + l_idx for k in range(n_bins)]
+        stds = np.array([np.sqrt(max(cov[i, i], 0.0)) for i in indices])
+
+        # Present = above floor
+        present_mask = stds >= floor
+
+        n_present = int(np.sum(present_mask))
+        if n_present == 0:
+            continue  # nothing above floor for this order
+
+        filled_stds = stds.copy()
+
+        # Forward fill: carry last present value through below-floor gaps
+        last_val = 0.0
+        for k in range(n_bins):
+            if present_mask[k]:
+                last_val = filled_stds[k]
+            elif last_val > 0.0:
+                filled_stds[k] = last_val
+                total_filled += 1
+
+        # Backward fill leading absent bins from first present value
+        first_present = int(np.argmax(present_mask))
+        if first_present > 0:
+            n_leading = int(np.sum(~present_mask[:first_present]))
+            total_filled += n_leading
+            filled_stds[:first_present] = filled_stds[first_present]
+
+        # Write back to diagonal as variance (only absent bins)
+        for k in range(n_bins):
+            if not present_mask[k]:
+                idx = indices[k]
+                cov[idx, idx] = filled_stds[k] ** 2
+
+    if logger:
+        n_below = sum(
+            int(np.sum(np.array([np.sqrt(max(cov_rel[k * max_order + l, k * max_order + l], 0.0))
+                                  for k in range(n_bins)]) < floor))
+            for l in range(max_order)
+        )
+        logger.info(
+            f"  Forward-fill rel_std: filled {total_filled}/{n_below} entries "
+            f"below {floor*100:.1f}% floor across {n_bins} bins × {max_order} orders"
+        )
+
+    return cov
 
 
 # =============================================================================

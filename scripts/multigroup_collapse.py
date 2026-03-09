@@ -47,6 +47,7 @@ class MultigroupResult:
     mean_grouped: np.ndarray              # Grouped mean coefficients
     groups: List[List[int]]               # Fine bin indices per group
     group_info: List[GroupInfo]           # Diagnostics per group
+    valid_mask_grouped: np.ndarray = None # (N_groups * L,) bool – which MG params had valid fine data
 
 
 # =============================================================================
@@ -111,6 +112,10 @@ def find_adaptive_group_boundaries(
     rho_min: float = 0.90,
     sigma_ratio_max: float = 1.7,
     min_width_factor: float = 2.0,
+    rho_hard_min: float = 0.0,
+    sigma_ratio_hard_max: float = 5.0,
+    rho_soft_min: float = 0.5,
+    sigma_ratio_soft_max: float = 3.0,
     logger=None,
 ) -> Tuple[List[List[int]], List[GroupInfo]]:
     """
@@ -118,10 +123,12 @@ def find_adaptive_group_boundaries(
 
     Algorithm (greedy merging):
     1. Start at i=0
-    2. Extend group [i0, i1] while:
-       - Adjacent l=1 correlation: corr[idx(i1,1), idx(i1+1,1)] >= rho_min
-       - Sigma ratio for l=1 in [i0..i1+1]: max/min <= sigma_ratio_max
-       - OR Width < min_width_factor * median(sigma_E) (force merge for resolution)
+    2. Extend group [i0, i1] using tiered decision logic:
+       a. Hard veto: never merge if rho < rho_hard_min or ratio > sigma_ratio_hard_max
+       b. Normal accept: merge if rho >= rho_min and ratio <= sigma_ratio_max
+       c. Soft fallback: merge if group undersized AND rho >= rho_soft_min
+          AND ratio <= sigma_ratio_soft_max
+       d. Otherwise: stop extending
     3. Finalize group, start next at i1+1
 
     Parameters
@@ -170,6 +177,10 @@ def find_adaptive_group_boundaries(
         logger.info(f"    rho_min = {rho_min}")
         logger.info(f"    sigma_ratio_max = {sigma_ratio_max}")
         logger.info(f"    min_width_factor = {min_width_factor}")
+        logger.info(f"    rho_hard_min = {rho_hard_min}")
+        logger.info(f"    sigma_ratio_hard_max = {sigma_ratio_hard_max}")
+        logger.info(f"    rho_soft_min = {rho_soft_min}")
+        logger.info(f"    sigma_ratio_soft_max = {sigma_ratio_soft_max}")
         logger.info(f"    median(sigma_E) = {median_sigma_E:.4f} MeV")
         logger.info(f"    min_width = {min_width:.4f} MeV")
 
@@ -204,15 +215,18 @@ def find_adaptive_group_boundaries(
             # Check current group width
             current_width = sum(fine_bin_widths_mev[i0:i1 + 2])
 
-            # Decision logic
+            # Decision logic (tiered: hard veto → normal accept → soft fallback)
             should_extend = False
 
-            if rho >= rho_min and ratio <= sigma_ratio_max:
-                # Both criteria met - extend
+            if rho < rho_hard_min or ratio > sigma_ratio_hard_max:
+                # Hard veto: never merge across clearly bad boundaries
+                should_extend = False
+            elif rho >= rho_min and ratio <= sigma_ratio_max:
+                # Normal accept: quality criteria met
                 should_extend = True
                 min_corr_in_group = min(min_corr_in_group, rho)
-            elif current_width < min_width:
-                # Force merge for minimum resolution
+            elif current_width < min_width and rho >= rho_soft_min and ratio <= sigma_ratio_soft_max:
+                # Soft fallback: group is undersized and boundary is only mildly bad
                 should_extend = True
                 min_corr_in_group = min(min_corr_in_group, rho)
             else:
@@ -277,6 +291,196 @@ def find_adaptive_group_boundaries(
 
 
 # =============================================================================
+# SECOND-PASS MERGE AFTER SMOOTHING
+# =============================================================================
+
+def try_merge_adjacent_multigroups(
+    multigroup_result: MultigroupResult,
+    cov_mg_smoothed: np.ndarray,
+    cov_fine: np.ndarray,
+    mean_fine: np.ndarray,
+    fine_bin_widths_mev: np.ndarray,
+    fine_bin_lower_mev: np.ndarray,
+    fine_bin_upper_mev: np.ndarray,
+    n_fine: int,
+    max_order: int,
+    rho_min: float = 0.90,
+    sigma_ratio_max: float = 2.5,
+    variance_conservatism: float = 50.0,
+    valid_mask: Optional[np.ndarray] = None,
+    logger=None,
+) -> Optional[MultigroupResult]:
+    """
+    Attempt to merge adjacent multigroups whose smoothed covariance now
+    satisfies the merge criteria (correlation and sigma-ratio).
+
+    After smoothing fixes dip/spike artifacts, adjacent groups that were
+    previously split by sigma-ratio violations may now be mergeable. This
+    function performs a greedy left-to-right scan and, if any merges are
+    found, re-collapses from the fine grid with the merged group structure.
+
+    Parameters
+    ----------
+    multigroup_result : MultigroupResult
+        Result from the first-pass collapse.
+    cov_mg_smoothed : np.ndarray
+        Smoothed multigroup covariance (used for merge decisions).
+    cov_fine : np.ndarray
+        Original fine-grid covariance (used for re-collapse).
+    mean_fine : np.ndarray
+        Fine-grid mean parameter vector.
+    fine_bin_widths_mev : np.ndarray
+        Width of each fine bin in MeV.
+    fine_bin_lower_mev, fine_bin_upper_mev : np.ndarray
+        Lower/upper boundaries of fine bins in MeV.
+    n_fine : int
+        Number of fine energy bins.
+    max_order : int
+        Maximum Legendre order.
+    rho_min : float
+        Minimum l=1 adjacent correlation to allow merge.
+    sigma_ratio_max : float
+        Maximum l=1 sigma ratio within candidate merged group.
+    variance_conservatism : float
+        Conservatism parameter for percentile variance scaling.
+    valid_mask : np.ndarray, optional
+        Boolean mask for fitted parameters (n_fine * max_order).
+    logger : optional
+        Logger for diagnostics.
+
+    Returns
+    -------
+    Optional[MultigroupResult]
+        New result with merged groups, or None if no merges were possible.
+    """
+    groups = multigroup_result.groups
+    n_groups = len(groups)
+    if n_groups < 2:
+        return None
+
+    # Correlation matrix from smoothed MG covariance
+    corr_mg = cov_to_corr(cov_mg_smoothed)
+
+    # Extract l=1 sigma for each multigroup from smoothed diagonal
+    mg_sigma_l1 = np.array([
+        np.sqrt(max(cov_mg_smoothed[idx(g, 1, max_order), idx(g, 1, max_order)], 0.0))
+        for g in range(n_groups)
+    ])
+
+    # Greedy left-to-right merge scan
+    merged_groups = [list(groups[0])]
+    merged_sigmas = [mg_sigma_l1[0]]  # track l=1 sigmas contributing to current group
+
+    n_merges = 0
+    for g in range(1, n_groups):
+        prev_g = len(merged_groups) - 1  # index in merged list
+        # Original group indices for correlation lookup
+        orig_prev = prev_g + n_merges  # not needed — use g-1 in original indexing
+        # Actually we need the original indices. Track them:
+        # Since we scan left-to-right, the "previous original group" is g-1
+        # l=1 adjacent correlation between original group g-1 and g
+        rho_adj = corr_mg[idx(g - 1, 1, max_order), idx(g, 1, max_order)]
+
+        # Sigma ratio of candidate merged group: collect all l=1 sigmas
+        candidate_sigmas = merged_sigmas + [mg_sigma_l1[g]]
+        pos_sigmas = [s for s in candidate_sigmas if s > 0]
+
+        if len(pos_sigmas) >= 2:
+            sr = max(pos_sigmas) / min(pos_sigmas)
+        else:
+            sr = 1.0
+
+        if rho_adj >= rho_min and sr <= sigma_ratio_max:
+            # Merge: extend current group with fine bins from group g
+            merged_groups[-1].extend(groups[g])
+            merged_sigmas.append(mg_sigma_l1[g])
+            n_merges += 1
+        else:
+            # Start new group
+            merged_groups.append(list(groups[g]))
+            merged_sigmas = [mg_sigma_l1[g]]
+
+    if n_merges == 0:
+        if logger:
+            logger.info("  Regroup: no adjacent groups eligible for merge")
+        return None
+
+    if logger:
+        logger.info(f"  Regroup: {n_groups} -> {len(merged_groups)} groups ({n_merges} merges)")
+
+    # Re-collapse from fine grid with merged group structure
+    n_new = len(merged_groups)
+
+    A = build_aggregation_matrix(
+        groups=merged_groups,
+        fine_bin_widths_mev=fine_bin_widths_mev,
+        n_fine=n_fine,
+        max_order=max_order,
+        valid_mask=valid_mask,
+    )
+
+    cov_grouped = collapse_covariance(cov_fine, A)
+    mean_grouped = collapse_mean(mean_fine, A)
+
+    # Variance scaling
+    cov_grouped = apply_percentile_variance_scaling(
+        cov_grouped=cov_grouped,
+        cov_fine=cov_fine,
+        groups=merged_groups,
+        max_order=max_order,
+        variance_conservatism=variance_conservatism,
+        fine_bin_widths_mev=fine_bin_widths_mev,
+        valid_mask=valid_mask,
+        logger=logger,
+    )
+
+    # PSD check
+    cov_grouped, _ = check_positive_semidefinite(
+        cov_grouped, "Regrouped covariance", logger, fix_if_needed=True
+    )
+
+    corr_grouped = cov_to_corr(cov_grouped)
+
+    group_boundaries_mev = construct_group_energy_boundaries(
+        groups=merged_groups,
+        fine_bin_lower_mev=fine_bin_lower_mev,
+        fine_bin_upper_mev=fine_bin_upper_mev,
+    )
+    group_boundaries_ev = group_boundaries_mev * 1e6
+
+    # Build GroupInfo for merged groups
+    group_info = []
+    for g_idx, fine_indices in enumerate(merged_groups):
+        e_lo = fine_bin_lower_mev[fine_indices[0]]
+        e_hi = fine_bin_upper_mev[fine_indices[-1]]
+        group_info.append(GroupInfo(
+            group_index=g_idx,
+            fine_indices=fine_indices,
+            energy_lower_mev=e_lo,
+            energy_upper_mev=e_hi,
+            width_mev=e_hi - e_lo,
+            min_correlation_l1=np.nan,
+            sigma_ratio=np.nan,
+            n_fine_bins=len(fine_indices),
+        ))
+
+    # Compute valid_mask_grouped: True where at least one fine bin contributed
+    _vmg = np.any(A != 0, axis=1)
+
+    return MultigroupResult(
+        group_boundaries_mev=group_boundaries_mev,
+        group_boundaries_ev=group_boundaries_ev,
+        aggregation_matrix=A,
+        cov_grouped=cov_grouped,
+        corr_grouped=corr_grouped,
+        mean_grouped=mean_grouped,
+        groups=merged_groups,
+        group_info=group_info,
+        valid_mask_grouped=_vmg,
+    )
+
+
+# =============================================================================
 # AGGREGATION MATRIX
 # =============================================================================
 
@@ -285,6 +489,7 @@ def build_aggregation_matrix(
     fine_bin_widths_mev: np.ndarray,
     n_fine: int,
     max_order: int,
+    valid_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Build aggregation matrix A for y = A @ x, C_y = A @ C_x @ A.T.
@@ -297,6 +502,10 @@ def build_aggregation_matrix(
     For group g containing fine bins {i1, i2, ...}:
         A[g*L + (l-1), i*L + (l-1)] = w_i / sum(w_j for j in group)
 
+    When ``valid_mask`` is provided, only fitted (valid) bins contribute to
+    each order's weights.  Unfitted bins get weight 0, so their zero
+    coefficients don't dilute the group mean.
+
     Parameters
     ----------
     groups : List[List[int]]
@@ -307,6 +516,9 @@ def build_aggregation_matrix(
         Number of fine energy bins
     max_order : int
         Maximum Legendre order (L)
+    valid_mask : np.ndarray, optional
+        Boolean mask of shape (n_fine * max_order,). True = parameter was
+        fitted (frozen_degree >= order). When None, all bins contribute.
 
     Returns
     -------
@@ -320,21 +532,28 @@ def build_aggregation_matrix(
     A = np.zeros((n_group_params, n_fine_params))
 
     for g_idx, fine_indices in enumerate(groups):
-        # Compute normalization (sum of bin widths in this group)
-        total_width = sum(fine_bin_widths_mev[i] for i in fine_indices)
-
-        if total_width <= 0:
-            # Fallback: equal weighting
-            total_width = len(fine_indices)
-            weights = {i: 1.0 / total_width for i in fine_indices}
-        else:
-            weights = {i: fine_bin_widths_mev[i] / total_width for i in fine_indices}
-
-        # Fill in weights for each Legendre order
         for order in range(1, max_order + 1):
             row_idx = idx(g_idx, order, max_order)
 
-            for fine_i in fine_indices:
+            # Filter to fitted bins for this order
+            if valid_mask is not None:
+                fitted_indices = [i for i in fine_indices
+                                  if valid_mask[idx(i, order, max_order)]]
+            else:
+                fitted_indices = fine_indices
+
+            if not fitted_indices:
+                continue  # all weights remain 0
+
+            total_width = sum(fine_bin_widths_mev[i] for i in fitted_indices)
+            if total_width <= 0:
+                total_width = len(fitted_indices)
+                weights = {i: 1.0 / total_width for i in fitted_indices}
+            else:
+                weights = {i: fine_bin_widths_mev[i] / total_width
+                           for i in fitted_indices}
+
+            for fine_i in fitted_indices:
                 col_idx = idx(fine_i, order, max_order)
                 A[row_idx, col_idx] = weights[fine_i]
 
@@ -409,25 +628,119 @@ def collapse_covariance(
     return aggregation_matrix @ cov_matrix @ aggregation_matrix.T
 
 
+def _compute_group_quality_score(
+    fine_indices: List[int],
+    cov_fine: np.ndarray,
+    fine_bin_widths_mev: np.ndarray,
+    max_order: int,
+) -> float:
+    """
+    Compute retention-based quality score q for a group of fine bins.
+
+    q = rho_w + (1 - rho_w) / n_eff
+
+    where rho_w is the weight-aware mean off-diagonal l=1 correlation and
+    n_eff = 1 / sum(w_i^2) is the effective group size.
+
+    Returns 1.0 for single-bin groups or all-zero variance groups.
+    """
+    n = len(fine_indices)
+    if n == 1:
+        return 1.0
+
+    # Extract l=1 variances
+    l1_vars = np.array([
+        cov_fine[idx(i, 1, max_order), idx(i, 1, max_order)]
+        for i in fine_indices
+    ])
+
+    # All-zero variance → no information to lose
+    if not np.any(l1_vars > 0):
+        return 1.0
+
+    # Build l=1 correlation sub-matrix
+    l1_std = np.sqrt(np.maximum(l1_vars, 0.0))
+    n_bins = len(fine_indices)
+    corr_sub = np.eye(n_bins)
+    for a in range(n_bins):
+        for b in range(a + 1, n_bins):
+            if l1_std[a] > 0 and l1_std[b] > 0:
+                cov_ab = cov_fine[
+                    idx(fine_indices[a], 1, max_order),
+                    idx(fine_indices[b], 1, max_order),
+                ]
+                rho_ab = cov_ab / (l1_std[a] * l1_std[b])
+                rho_ab = np.clip(rho_ab, -1.0, 1.0)
+                corr_sub[a, b] = rho_ab
+                corr_sub[b, a] = rho_ab
+
+    # Compute width-based weights (same as aggregation matrix)
+    widths = fine_bin_widths_mev[fine_indices]
+    total_w = widths.sum()
+    if total_w <= 0:
+        w = np.ones(n_bins) / n_bins
+    else:
+        w = widths / total_w
+
+    # n_eff = 1 / sum(w_i^2)
+    n_eff = 1.0 / np.sum(w ** 2)
+
+    # rho_w = weighted mean off-diagonal correlation
+    num = 0.0
+    den = 0.0
+    for a in range(n_bins):
+        for b in range(a + 1, n_bins):
+            ww = w[a] * w[b]
+            num += ww * corr_sub[a, b]
+            den += ww
+
+    if den > 0:
+        rho_w = num / den
+    else:
+        rho_w = 0.0
+
+    q = rho_w + (1.0 - rho_w) / n_eff
+    return q
+
+
 def apply_percentile_variance_scaling(
     cov_grouped: np.ndarray,
     cov_fine: np.ndarray,
     groups: List[List[int]],
     max_order: int,
-    variance_percentile: float = 50.0,
+    variance_conservatism: float = 50.0,
+    fine_bin_widths_mev: Optional[np.ndarray] = None,
+    valid_mask: Optional[np.ndarray] = None,
     logger=None,
 ) -> np.ndarray:
     """
-    Apply PSD-safe diagonal scaling to preserve variance at target percentile.
+    Apply PSD-safe diagonal scaling to compensate averaging-induced variance loss.
 
     The standard covariance collapse C_y = A @ C_x @ A.T reduces variance due to
     averaging. This function rescales the diagonal to match a target percentile
     of the fine variances within each group, while preserving correlation structure.
 
-    Steps:
-    1. For each group and order, compute percentile of fine variances
-    2. Build diagonal scaling matrix S where S[i,i] = sqrt(target/current)
-    3. Return C_final = S @ C_grouped @ S
+    When ``fine_bin_widths_mev`` is provided, the percentile is computed
+    adaptively per group using a retention-based quality score:
+
+        q = rho_w + (1 - rho_w) / n_eff
+
+    Groups with high internal correlation or few effective bins (high q) get a
+    lower percentile (closer to 50, i.e. less inflation), while groups that lose
+    more variance from averaging get a higher percentile.  The mapping is:
+
+        p_max = min(variance_conservatism * 1.5 - 25, 95)
+        group_pct = p_max - q * (p_max - 50)
+
+    ``variance_conservatism`` thus controls the conservatism *range* rather than
+    being applied literally.  When ``variance_conservatism = 50``, p_max = 50 and
+    every group receives percentile 50 (no-op).
+
+    A no-deflation guard ensures scale factors are always >= 1.0 — this step
+    compensates for averaging-induced variance shrinkage, never introduces it.
+
+    When ``fine_bin_widths_mev`` is None, falls back to uniform
+    ``variance_conservatism`` for all groups (backward compatible).
 
     Parameters
     ----------
@@ -439,11 +752,11 @@ def apply_percentile_variance_scaling(
         Fine bin indices per group
     max_order : int
         Maximum Legendre order
-    variance_percentile : float
-        Percentile of fine variances to use as target (0-100)
-        - 50 = median (typical)
-        - 80-90 = conservative
-        - 100 = maximum (most conservative)
+    variance_conservatism : float
+        Controls conservatism range for adaptive scaling (0-100).
+        When fine_bin_widths_mev is None, applied uniformly.
+    fine_bin_widths_mev : np.ndarray, optional
+        Width of each fine bin in MeV.  Enables adaptive per-group percentile.
     logger : optional
         Logger for diagnostics
 
@@ -455,30 +768,51 @@ def apply_percentile_variance_scaling(
     n_groups = len(groups)
     n_params = n_groups * max_order
 
+    adaptive = fine_bin_widths_mev is not None
+    if adaptive:
+        p_max = min(variance_conservatism * 1.5 - 25.0, 95.0)
+
     # Build scaling factors
     scale_factors = np.ones(n_params)
+    group_percentiles = np.full(n_groups, variance_conservatism)
+    group_quality_scores = np.full(n_groups, np.nan)
 
     for g_idx, fine_indices in enumerate(groups):
+        # Compute adaptive percentile for this group
+        if adaptive:
+            q = _compute_group_quality_score(
+                fine_indices, cov_fine, fine_bin_widths_mev, max_order,
+            )
+            group_quality_scores[g_idx] = q
+            group_pct = p_max - q * (p_max - 50.0)
+            group_pct = np.clip(group_pct, 50.0, p_max)
+            group_percentiles[g_idx] = group_pct
+        else:
+            group_pct = variance_conservatism
+
         for order in range(1, max_order + 1):
             g_param = idx(g_idx, order, max_order)
 
             # Collect fine variances for this order in this group
+            # Skip unfitted bins (valid_mask == False) so zeros don't dilute
             fine_vars = []
             for fine_i in fine_indices:
                 fine_param = idx(fine_i, order, max_order)
+                if valid_mask is not None and not valid_mask[fine_param]:
+                    continue
                 fine_vars.append(cov_fine[fine_param, fine_param])
             fine_vars = np.array(fine_vars)
 
             # Compute target variance (percentile of fine variances)
             if len(fine_vars) > 0 and np.any(fine_vars > 0):
-                target_var = np.percentile(fine_vars[fine_vars > 0], variance_percentile)
+                target_var = np.percentile(fine_vars[fine_vars > 0], group_pct)
             else:
                 target_var = 0.0
 
-            # Compute scaling factor
+            # Compute scaling factor with no-deflation guard
             current_var = cov_grouped[g_param, g_param]
             if current_var > 1e-20 and target_var > 0:
-                scale_factors[g_param] = np.sqrt(target_var / current_var)
+                scale_factors[g_param] = max(1.0, np.sqrt(target_var / current_var))
             else:
                 scale_factors[g_param] = 1.0
 
@@ -487,13 +821,48 @@ def apply_percentile_variance_scaling(
     S = np.diag(scale_factors)
     cov_scaled = S @ cov_grouped @ S
 
+    # Compute variance retention diagnostics
+    # Compare grouped diagonal variances against mean of fine variances per group
+    retention_before = []
+    retention_after = []
+    for g_idx, fine_indices in enumerate(groups):
+        for order in range(1, max_order + 1):
+            g_param = idx(g_idx, order, max_order)
+            fine_vars = []
+            for fine_i in fine_indices:
+                fine_param = idx(fine_i, order, max_order)
+                if valid_mask is not None and not valid_mask[fine_param]:
+                    continue
+                fine_vars.append(cov_fine[fine_param, fine_param])
+            fine_vars = np.array(fine_vars)
+            mean_fine_var = np.mean(fine_vars[fine_vars > 0]) if np.any(fine_vars > 0) else 0.0
+            if mean_fine_var > 1e-20:
+                retention_before.append(cov_grouped[g_param, g_param] / mean_fine_var)
+                retention_after.append(cov_scaled[g_param, g_param] / mean_fine_var)
+    retention_before = np.array(retention_before) * 100
+    retention_after = np.array(retention_after) * 100
+
     # Log diagnostics
     if logger:
         avg_scale = np.mean(scale_factors)
         min_scale = np.min(scale_factors)
         max_scale = np.max(scale_factors)
-        logger.info(f"  Variance scaling (percentile={variance_percentile}%):")
+        if adaptive:
+            valid_q = group_quality_scores[~np.isnan(group_quality_scores)]
+            logger.info(f"  Adaptive variance compensation (conservatism={variance_conservatism}, p_max={p_max:.1f}%):")
+            if len(valid_q) > 0:
+                logger.info(f"    Quality scores: mean={np.mean(valid_q):.3f}, "
+                            f"min={np.min(valid_q):.3f}, max={np.max(valid_q):.3f}")
+            logger.info(f"    Per-group percentiles: mean={np.mean(group_percentiles):.1f}, "
+                        f"min={np.min(group_percentiles):.1f}, max={np.max(group_percentiles):.1f}")
+        else:
+            logger.info(f"  Variance compensation (conservatism={variance_conservatism}):")
         logger.info(f"    Scale factors: mean={avg_scale:.2f}, min={min_scale:.2f}, max={max_scale:.2f}")
+        if len(retention_before) > 0:
+            logger.info(f"    Variance retention before: {np.mean(retention_before):.0f}% (mean), "
+                        f"{np.min(retention_before):.0f}%-{np.max(retention_before):.0f}% (range)")
+            logger.info(f"    Variance retention after:  {np.mean(retention_after):.0f}% (mean), "
+                        f"{np.min(retention_after):.0f}%-{np.max(retention_after):.0f}% (range)")
 
     return cov_scaled
 
@@ -691,7 +1060,11 @@ def perform_adaptive_multigroup_collapse(
     rho_min: float = 0.90,
     sigma_ratio_max: float = 1.7,
     min_width_factor: float = 2.0,
-    variance_percentile: float = 50.0,
+    rho_hard_min: float = 0.0,
+    sigma_ratio_hard_max: float = 5.0,
+    rho_soft_min: float = 0.5,
+    sigma_ratio_soft_max: float = 3.0,
+    variance_conservatism: float = 50.0,
     logger=None,
     apply_covariance_cap: bool = False,
     max_relative_std_cap: float = 1.0,
@@ -726,11 +1099,11 @@ def perform_adaptive_multigroup_collapse(
         Maximum sigma ratio within group (default 1.7)
     min_width_factor : float
         Group width >= k * median(sigma_E) (default 2.0)
-    variance_percentile : float
-        Percentile of fine variances to use as target for diagonal scaling (0-100).
-        - 50 = median (typical, default)
-        - 80-90 = conservative but not extreme
-        - 100 = maximum (most conservative)
+    variance_conservatism : float
+        Controls how aggressively averaging-induced variance loss is compensated (50-100).
+        - 50 = no compensation (default)
+        - 66-75 = moderate adaptive compensation
+        - 90-100 = aggressive compensation (most conservative)
         This rescales the grouped covariance diagonal to preserve uncertainty
         magnitudes while maintaining the correlation structure from averaging.
     logger : optional
@@ -778,6 +1151,19 @@ def perform_adaptive_multigroup_collapse(
     # Map from valid index to energy bin
     valid_energy_bins = [energy_bins[i] for i in valid_indices]
     valid_nominal = [nominal_results[i] for i in valid_indices]
+
+    # Build valid_mask for the non-interpolated fine grid
+    # A parameter (bin i, order l) is valid iff frozen_degree >= l
+    valid_mask_mg = np.zeros(n_fine * max_order, dtype=bool)
+    for i, nr in enumerate(valid_nominal):
+        for l in range(1, min(nr.frozen_degree, max_order) + 1):
+            valid_mask_mg[idx(i, l, max_order)] = True
+
+    n_fitted = int(valid_mask_mg.sum())
+    n_total = n_fine * max_order
+    if logger:
+        logger.info(f"  Valid mask: {n_fitted}/{n_total} parameters fitted "
+                    f"({n_total - n_fitted} unfitted, {100*(n_total-n_fitted)/n_total:.1f}%)")
 
     # Extract arrays
     fine_energies_mev = np.array([eb.energy_mev for eb in valid_energy_bins])
@@ -846,6 +1232,10 @@ def perform_adaptive_multigroup_collapse(
                 rho_min=rho_min,
                 sigma_ratio_max=sigma_ratio_max,
                 min_width_factor=min_width_factor,
+                rho_hard_min=rho_hard_min,
+                sigma_ratio_hard_max=sigma_ratio_hard_max,
+                rho_soft_min=rho_soft_min,
+                sigma_ratio_soft_max=sigma_ratio_soft_max,
                 logger=logger,
             )
             # Filter to only groups that contain bins below forced range
@@ -883,6 +1273,10 @@ def perform_adaptive_multigroup_collapse(
                 rho_min=rho_min,
                 sigma_ratio_max=sigma_ratio_max,
                 min_width_factor=min_width_factor,
+                rho_hard_min=rho_hard_min,
+                sigma_ratio_hard_max=sigma_ratio_hard_max,
+                rho_soft_min=rho_soft_min,
+                sigma_ratio_soft_max=sigma_ratio_soft_max,
                 logger=logger,
             )
             # Filter to only groups that contain bins above forced range
@@ -911,6 +1305,10 @@ def perform_adaptive_multigroup_collapse(
             rho_min=rho_min,
             sigma_ratio_max=sigma_ratio_max,
             min_width_factor=min_width_factor,
+            rho_hard_min=rho_hard_min,
+            sigma_ratio_hard_max=sigma_ratio_hard_max,
+            rho_soft_min=rho_soft_min,
+            sigma_ratio_soft_max=sigma_ratio_soft_max,
             logger=logger,
         )
 
@@ -922,6 +1320,7 @@ def perform_adaptive_multigroup_collapse(
         fine_bin_widths_mev=fine_bin_widths_mev,
         n_fine=n_fine,
         max_order=max_order,
+        valid_mask=valid_mask_mg,
     )
 
     if logger:
@@ -938,7 +1337,9 @@ def perform_adaptive_multigroup_collapse(
         cov_fine=cov_matrix,
         groups=groups,
         max_order=max_order,
-        variance_percentile=variance_percentile,
+        variance_conservatism=variance_conservatism,
+        fine_bin_widths_mev=fine_bin_widths_mev,
+        valid_mask=valid_mask_mg,
         logger=logger,
     )
 
@@ -990,6 +1391,9 @@ def perform_adaptive_multigroup_collapse(
         compression = n_fine / n_groups
         logger.info(f"  Compression ratio: {compression:.1f}x ({n_fine} -> {n_groups})")
 
+    # Compute valid_mask_grouped: True where at least one fine bin contributed
+    _vmg = np.any(A != 0, axis=1)
+
     return MultigroupResult(
         group_boundaries_mev=group_boundaries_mev,
         group_boundaries_ev=group_boundaries_ev,
@@ -999,4 +1403,5 @@ def perform_adaptive_multigroup_collapse(
         mean_grouped=mean_grouped,
         groups=groups,
         group_info=group_info,
+        valid_mask_grouped=_vmg,
     )

@@ -29,7 +29,7 @@ Example:
 """
 from __future__ import annotations
 
-from typing import List, Optional, TYPE_CHECKING
+from typing import List, Optional, Tuple, TYPE_CHECKING
 import numpy as np
 
 from ..classes.mf34.mf34 import (
@@ -41,6 +41,98 @@ from ..classes.mf34.mf34 import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _make_lb5_record(
+    matrix: np.ndarray,
+    energy_grid: List[float],
+) -> SubSubsectionRecord:
+    """Create an LB=5 symmetric upper-triangle SubSubsectionRecord.
+
+    Parameters
+    ----------
+    matrix : np.ndarray
+        Square covariance matrix of shape (m, m) where m = len(energy_grid) - 1.
+    energy_grid : List[float]
+        Energy boundary points (m + 1 values).
+
+    Returns
+    -------
+    SubSubsectionRecord
+    """
+    m = len(energy_grid) - 1
+    if matrix.shape != (m, m):
+        raise ValueError(
+            f"Matrix shape {matrix.shape} doesn't match energy grid "
+            f"with {m} intervals ({len(energy_grid)} boundaries)"
+        )
+    record = SubSubsectionRecord()
+    record.ls = 1  # symmetric upper triangle
+    record.lb = 5
+    record.ne = len(energy_grid)
+    record.energies = list(energy_grid)
+    triu_rows, triu_cols = np.triu_indices(m)
+    record.matrix = matrix[triu_rows, triu_cols].tolist()
+    record.nt = len(energy_grid) + len(record.matrix)
+    return record
+
+
+def _split_matrix_excluding_range(
+    matrix: np.ndarray,
+    energy_grid: List[float],
+    exclude_min_ev: float,
+    exclude_max_ev: float,
+) -> List[Tuple[np.ndarray, List[float]]]:
+    """Split a covariance matrix to exclude an energy range.
+
+    Computes interval midpoints and removes intervals whose midpoint falls
+    within [exclude_min_ev, exclude_max_ev].  Returns 0, 1, or 2 contiguous
+    sub-matrices (below and/or above the excluded range).
+
+    Parameters
+    ----------
+    matrix : np.ndarray
+        Square covariance matrix (m, m).
+    energy_grid : List[float]
+        Energy boundaries (m + 1 values).
+    exclude_min_ev, exclude_max_ev : float
+        Energy range to exclude (inclusive on midpoints).
+
+    Returns
+    -------
+    List[Tuple[np.ndarray, List[float]]]
+        List of (sub_matrix, sub_energy_grid) for each contiguous kept region.
+    """
+    grid = np.asarray(energy_grid, dtype=float)
+    midpoints = 0.5 * (grid[:-1] + grid[1:])
+    keep = (midpoints < exclude_min_ev) | (midpoints > exclude_max_ev)
+
+    if keep.all():
+        return [(matrix, list(energy_grid))]
+    if not keep.any():
+        return []
+
+    # Find contiguous runs of True in keep
+    results: List[Tuple[np.ndarray, List[float]]] = []
+    m = len(midpoints)
+    i = 0
+    while i < m:
+        if not keep[i]:
+            i += 1
+            continue
+        # Start of a kept run
+        j = i
+        while j < m and keep[j]:
+            j += 1
+        # Indices i..j-1 are kept
+        idx = np.arange(i, j)
+        sub_matrix = matrix[np.ix_(idx, idx)]
+        # Energy grid: boundaries i through j (inclusive)
+        sub_grid = list(grid[i:j + 1])
+        results.append((sub_matrix, sub_grid))
+        i = j
+
+    return results
 
 
 def create_mf34_from_covariance(
@@ -213,24 +305,7 @@ def create_mf34_from_covariance(
 
             sub_matrix = cov_matrix[np.ix_(row_indices, col_indices)]
 
-            # Create LB=5 record with LS=1 (symmetric upper triangle storage)
-            record = SubSubsectionRecord()
-            record.ls = 1  # Symmetric storage (upper triangle)
-            record.lb = 5
-            record.ne = len(energy_grid_ev)  # Number of energy boundary points
-
-            # Store energies (boundary points)
-            record.energies = list(energy_grid_ev)
-
-            # Store matrix values - upper triangle, row-wise
-            # For M x M matrix: F(0,0), F(0,1), ..., F(0,M-1), F(1,1), ..., F(M-1,M-1)
-            triu_rows, triu_cols = np.triu_indices(n_energies)
-            matrix_values = sub_matrix[triu_rows, triu_cols].tolist()
-
-            record.matrix = matrix_values
-            record.nt = len(energy_grid_ev) + len(matrix_values)
-
-            sub_subsec.records = [record]
+            sub_subsec.records = [_make_lb5_record(sub_matrix, list(energy_grid_ev))]
             subsection.sub_subsections.append(sub_subsec)
 
     mf34._nmt1 = 1  # One subsection
@@ -388,7 +463,10 @@ def merge_mf34(
     Returns
     -------
     MF34MT
-        Merged MF34MT object with one LB=5 record per (L, L1) sub-subsection.
+        Merged MF34MT object.  Sub-subsections that exist only in the
+        original evaluation have their pipeline energy range excised,
+        potentially yielding multiple NI records (one per contiguous
+        sub-range outside the pipeline window).
     """
     from ..classes.mf34.mf34 import MF34CovMat  # noqa: F811 – local import
 
@@ -434,15 +512,24 @@ def merge_mf34(
         orig_data = orig_map.get((l, l1))
         pipe_data = pipe_map.get((l, l1))
 
-        # If only one source has this pair, use it directly
         if orig_data is None and pipe_data is not None:
+            # Pipeline-only pair: single record
             mat, egrid = pipe_data
-            merged_matrix = mat
-            merged_grid = egrid
+            records = [_make_lb5_record(mat, [float(e) for e in egrid])]
+
         elif pipe_data is None and orig_data is not None:
+            # Original-only pair: exclude the pipeline energy range.
+            # The original and pipeline are independent analyses — the
+            # original's data in the pipeline range is stale.
             mat, egrid = orig_data
-            merged_matrix = mat
-            merged_grid = egrid
+            splits = _split_matrix_excluding_range(
+                mat, egrid, pipeline_energy_min_ev, pipeline_energy_max_ev,
+            )
+            if not splits:
+                continue  # pipeline covers entire original range → skip pair
+            records = [_make_lb5_record(s_mat, [float(e) for e in s_grid])
+                       for s_mat, s_grid in splits]
+
         else:
             # Both sources have data – merge on union grid
             orig_mat, orig_grid = orig_data
@@ -480,30 +567,14 @@ def merge_mf34(
                 merged_matrix[np.ix_(orig_idx, orig_idx)] = orig_mat[np.ix_(ob, ob)]
 
             # Cross-source cells remain zero (already initialized)
-            merged_grid = union_grid
-
-        # Create LB=5 sub-subsection record
-        energy_grid_list = [float(e) for e in merged_grid]
-        n_e = len(energy_grid_list)
-        m = n_e - 1
+            records = [_make_lb5_record(merged_matrix, [float(e) for e in union_grid])]
 
         sub_subsec = SubSubsection()
         sub_subsec.l = l
         sub_subsec.l1 = l1
         sub_subsec.lct = 0  # same-as-MF4
-        sub_subsec.ni = 1
-
-        record = SubSubsectionRecord()
-        record.ls = 1  # symmetric upper triangle
-        record.lb = 5
-        record.ne = n_e
-        record.energies = energy_grid_list
-
-        triu_rows, triu_cols = np.triu_indices(m)
-        record.matrix = merged_matrix[triu_rows, triu_cols].tolist()
-        record.nt = n_e + len(record.matrix)
-
-        sub_subsec.records = [record]
+        sub_subsec.ni = len(records)
+        sub_subsec.records = records
         subsection.sub_subsections.append(sub_subsec)
 
     merged._nmt1 = 1

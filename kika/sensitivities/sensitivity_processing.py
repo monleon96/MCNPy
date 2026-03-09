@@ -4,7 +4,7 @@ This module contains functions for computing sensitivity coefficients from MCNP 
 creating SDF data objects from sensitivity data, and other related utility functions.
 """
 
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 from kika.mcnp.parse_input import read_mcnp
 from kika.mcnp.parse_mctal import read_mctal
@@ -16,7 +16,8 @@ import math
 import matplotlib.pyplot as plt
 
 
-def compute_sensitivity(inputfile: str, mctalfile: str, tally: int, zaid: int, label: str) -> SensitivityData:
+def compute_sensitivity(inputfile: str, mctalfile: str, tally: int, zaid: int, label: str,
+                        material: Optional[int] = None) -> SensitivityData:
     """Compute sensitivity coefficients from MCNP input and output files.
 
     :param inputfile: Path to MCNP input file containing the PERT cards
@@ -29,21 +30,24 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int, zaid: int, l
     :type zaid: int
     :param label: Label for the sensitivity data set
     :type label: str
+    :param material: Optional material number to filter perturbations by.
+        If None, all perturbations are used (backward-compatible behavior).
+    :type material: int, optional
     :returns: Object containing computed sensitivity coefficients
     :rtype: SensitivityData
     """
     input = read_mcnp(inputfile)
     mctal = read_mctal(mctalfile)
-    
+
     pert_energies = input.perturbation.pert_energies
-    reactions = input.perturbation.reactions
-    group_dict_first = input.perturbation._group_perts_by_reaction(2)
+    reactions = input.perturbation.reactions_for_zaid(zaid)
+    group_dict_first = input.perturbation._group_perts_by_reaction(2, material=material, zaid=zaid)
     
     # Check if second-order perturbations are available
     # Use a more reliable method to check for method 3 perturbations
     has_second_order = False
     try:
-        group_dict_second = input.perturbation._group_perts_by_reaction(3)
+        group_dict_second = input.perturbation._group_perts_by_reaction(3, material=material, zaid=zaid)
         has_second_order = bool(group_dict_second)  # True if dictionary is not empty
     except:
         group_dict_second = {}
@@ -217,7 +221,223 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int, zaid: int, l
     )
 
 
-def plot_sens_comparison(sens_list: List[SensitivityData], 
+def compute_total_sensitivity(
+    inputfile: str, mctalfile: str, tally: int, zaid: int, label: str,
+    materials: Optional[List[int]] = None,
+) -> SensitivityData:
+    """Compute total sensitivity by summing contributions from multiple materials.
+
+    For an isotope present in multiple materials, the total sensitivity is the
+    sum of the per-material sensitivities:
+
+    .. math::
+
+        S_{\\text{total}}(E) = \\sum_m S_m(E) = \\sum_m \\frac{c_{1,m}(E)}{r_0}
+
+    Errors are propagated in quadrature (assuming statistical independence
+    between material perturbations).
+
+    Parameters
+    ----------
+    inputfile : str
+        Path to MCNP input file containing the PERT cards.
+    mctalfile : str
+        Path to MCNP MCTAL output file.
+    tally : int
+        Tally number to analyze.
+    zaid : int
+        ZAID of the nuclide being perturbed.
+    label : str
+        Label for the resulting sensitivity data set.
+    materials : list of int, optional
+        Material IDs to sum over. If *None*, auto-detected from the PERT cards
+        in *inputfile*.
+
+    Returns
+    -------
+    SensitivityData
+        Total sensitivity (summed across materials).
+
+    Raises
+    ------
+    ValueError
+        If no materials are found, or perturbation energy grids differ
+        between materials.
+    """
+    # Auto-detect materials from PERT cards if not provided
+    if materials is None:
+        input_data = read_mcnp(inputfile)
+        materials = input_data.perturbation.materials_for_zaid(zaid)
+
+    if not materials:
+        raise ValueError("No materials found in perturbation cards")
+
+    # Single material — delegate directly
+    if len(materials) == 1:
+        return compute_sensitivity(inputfile, mctalfile, tally, zaid, label,
+                                   material=materials[0])
+
+    # Compute per-material sensitivities
+    per_material = {}
+    for mat in materials:
+        per_material[mat] = compute_sensitivity(
+            inputfile, mctalfile, tally, zaid,
+            label=f"{label}_mat{mat}", material=mat,
+        )
+
+    # Use the first material as reference for structure validation
+    ref = per_material[materials[0]]
+    for mat in materials[1:]:
+        if per_material[mat].pert_energies != ref.pert_energies:
+            raise ValueError(
+                f"Perturbation energy grids differ between materials "
+                f"{materials[0]} and {mat}"
+            )
+
+    # --- Sum sensitivities and propagate errors ---
+    full_data: Dict[str, Dict[int, Coefficients]] = {}
+    coefficients: Dict[str, Dict[int, TaylorCoefficients]] = {}
+
+    for energy_str in ref.data:
+        energy_data: Dict[int, Coefficients] = {}
+
+        # Collect all reactions present in any material for this energy
+        all_rxns: set = set()
+        for mat in materials:
+            mat_sens = per_material[mat]
+            if energy_str in mat_sens.data:
+                all_rxns.update(mat_sens.data[energy_str].keys())
+
+        for rxn in sorted(all_rxns):
+            # Determine number of bins from any material that has this reaction
+            n_bins = None
+            ref_coef = None
+            for mat in materials:
+                mat_sens = per_material[mat]
+                if energy_str in mat_sens.data and rxn in mat_sens.data[energy_str]:
+                    ref_coef = mat_sens.data[energy_str][rxn]
+                    n_bins = len(ref_coef.values)
+                    break
+            if n_bins is None:
+                continue
+
+            # Sum sensitivity values: S_total = sum_m S_m
+            total_values = np.zeros(n_bins)
+            total_abs_err_sq = np.zeros(n_bins)
+
+            for mat in materials:
+                mat_sens = per_material[mat]
+                if energy_str in mat_sens.data and rxn in mat_sens.data[energy_str]:
+                    coef = mat_sens.data[energy_str][rxn]
+                    vals = np.array(coef.values)
+                    total_values += vals
+                    # Absolute error on S_m = S_m * e_m (e_m is relative)
+                    abs_err = vals * np.array(coef.errors)
+                    total_abs_err_sq += abs_err ** 2
+
+            # Total relative error: |abs_err_total| / |S_total|
+            total_abs_err = np.sqrt(total_abs_err_sq)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                total_rel_err = np.where(
+                    total_values != 0,
+                    total_abs_err / np.abs(total_values),
+                    0.0,
+                )
+
+            energy_data[rxn] = Coefficients(
+                energy=energy_str,
+                reaction=rxn,
+                pert_energies=ref_coef.pert_energies,
+                values=total_values.tolist(),
+                errors=total_rel_err.tolist(),
+                r0=ref_coef.r0,
+                e0=ref_coef.e0,
+            )
+
+        full_data[energy_str] = energy_data
+
+        # --- Taylor coefficients summation (second-order) ---
+        all_coeff_rxns: set = set()
+        for mat in materials:
+            mat_sens = per_material[mat]
+            if energy_str in mat_sens.coefficients:
+                all_coeff_rxns.update(mat_sens.coefficients[energy_str].keys())
+
+        for rxn in sorted(all_coeff_rxns):
+            # Determine number of bins from any material
+            n_bins = None
+            ref_tc = None
+            for mat in materials:
+                mat_sens = per_material[mat]
+                if (energy_str in mat_sens.coefficients
+                        and rxn in mat_sens.coefficients[energy_str]):
+                    ref_tc = mat_sens.coefficients[energy_str][rxn]
+                    n_bins = len(ref_tc.c1)
+                    break
+            if n_bins is None:
+                continue
+
+            total_c1 = np.zeros(n_bins)
+            total_c2 = np.zeros(n_bins)
+            total_c1_abs_err_sq = np.zeros(n_bins)
+            total_c2_abs_err_sq = np.zeros(n_bins)
+
+            for mat in materials:
+                mat_sens = per_material[mat]
+                if (energy_str in mat_sens.coefficients
+                        and rxn in mat_sens.coefficients[energy_str]):
+                    tc = mat_sens.coefficients[energy_str][rxn]
+                    c1_arr = np.array(tc.c1)
+                    c2_arr = np.array(tc.c2)
+                    total_c1 += c1_arr
+                    total_c2 += c2_arr
+                    total_c1_abs_err_sq += (c1_arr * np.array(tc.c1_errors)) ** 2
+                    total_c2_abs_err_sq += (c2_arr * np.array(tc.c2_errors)) ** 2
+
+            with np.errstate(divide="ignore", invalid="ignore"):
+                c1_rel_err = np.where(
+                    total_c1 != 0,
+                    np.sqrt(total_c1_abs_err_sq) / np.abs(total_c1),
+                    0.0,
+                )
+                c2_rel_err = np.where(
+                    total_c2 != 0,
+                    np.sqrt(total_c2_abs_err_sq) / np.abs(total_c2),
+                    0.0,
+                )
+
+            ratio = []
+            for j in range(n_bins):
+                if total_c1[j] != 0:
+                    ratio.append(total_c2[j] / total_c1[j])
+                else:
+                    ratio.append(float("nan"))
+
+            if energy_str not in coefficients:
+                coefficients[energy_str] = {}
+            coefficients[energy_str][rxn] = TaylorCoefficients(
+                energy=energy_str,
+                reaction=rxn,
+                pert_energies=ref_tc.pert_energies,
+                c1=total_c1.tolist(),
+                c2=total_c2.tolist(),
+                ratio=ratio,
+                c1_errors=c1_rel_err.tolist(),
+                c2_errors=c2_rel_err.tolist(),
+            )
+
+    return SensitivityData(
+        tally_id=tally,
+        pert_energies=ref.pert_energies,
+        tally_name=ref.tally_name,
+        zaid=zaid,
+        label=label,
+        data=full_data,
+        coefficients=coefficients,
+    )
+
+
+def plot_sens_comparison(sens_list: List[SensitivityData],
                   energy: Union[str, List[str]] = None, 
                   reactions: Union[List[int], int] = None, 
                   energy_range: tuple = None, xlog: bool = False, ylog: bool = False):
