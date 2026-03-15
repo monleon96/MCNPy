@@ -1645,10 +1645,9 @@ def precompute_overlap_weights(
 
     # For each bin, collect ALL datasets with non-trivial overlap weight.
     # Multiple energies from the same experiment are kept — each with its own
-    # overlap weight — so the fit benefits from the full angular coverage and
-    # cross-bin bridging.  Intra-experiment weights are renormalized so that
-    # each experiment's total contribution equals its best single overlap
-    # weight (preventing dense-grid experiments from inflating weight).
+    # raw CDF overlap weight — so the fit benefits from the full angular
+    # coverage and cross-bin bridging.  The gamma-based per-point weighting
+    # in _run_one_kw_sample handles study-level budgeting.
     overlap_weights: Dict[int, List[Tuple[Dict, float]]] = {}
     for bin_info in energy_bins:
         bin_datasets = []
@@ -1664,25 +1663,7 @@ def precompute_overlap_weights(
             if w >= min_weight:
                 bin_datasets.append((ds, w))
 
-        # Experiment-level renormalization: each experiment's total weight
-        # equals its best single overlap (what closest-only dedup would give).
-        # This uses all angular data but prevents dense grids from inflating
-        # experiment-level weight.
-        exp_groups: Dict[str, List[int]] = defaultdict(list)
-        for i, (ds, w) in enumerate(bin_datasets):
-            exp_groups[ds['experiment_id']].append(i)
-
-        normalized = []
-        for exp_id, indices in exp_groups.items():
-            weights = [bin_datasets[i][1] for i in indices]
-            max_w = max(weights)
-            sum_w = sum(weights)
-            scale = max_w / sum_w  # shrink so total = max_w
-            for i in indices:
-                ds, w = bin_datasets[i]
-                normalized.append((ds, w * scale))
-
-        overlap_weights[bin_info.index] = normalized
+        overlap_weights[bin_info.index] = bin_datasets
 
     return overlap_weights
 
@@ -1775,14 +1756,19 @@ def _run_one_kw_sample(args_tuple):
             continue
 
         # Build combined weighted DataFrame with study-level sublinear budgeting
-        # First pass: count total points per study (entry) in this bin
-        study_n_points: Dict[str, int] = {}
+        # Find core dataset per study: highest overlap weight in this bin.
+        # Use only its angular point count for gamma, matching the nominal
+        # path's dedup-to-one-energy behavior.
+        study_core_n: Dict[str, int] = {}
+        study_core_w: Dict[str, float] = {}
         for ds, w in datasets_and_weights:
             study_id = ds['experiment_id'].split('.')[0]
             e_key = f"{ds['experiment_id']}_{ds['exfor_energy_mev']:.6f}"
             pert = perturbed_datasets.get(e_key)
             if pert is not None:
-                study_n_points[study_id] = study_n_points.get(study_id, 0) + len(pert['mu'])
+                if study_id not in study_core_w or w > study_core_w[study_id]:
+                    study_core_n[study_id] = len(pert['mu'])
+                    study_core_w[study_id] = w
 
         all_mu = []
         all_values = []
@@ -1800,8 +1786,8 @@ def _run_one_kw_sample(args_tuple):
             all_mu.append(pert['mu'])
             all_values.append(pert['value'])
             all_unc.append(pert['unc'])
-            # Sublinear per-point weight: W_study = n_study^gamma, per-point = W_study / n_study
-            n_study = study_n_points.get(study_id, n_pts)
+            # Sublinear per-point weight using core dataset's angular point count
+            n_study = study_core_n.get(study_id, n_pts)
             per_point_w = w * (n_study ** (weight_gamma - 1.0))
             all_weights.append(np.full(n_pts, per_point_w))
 

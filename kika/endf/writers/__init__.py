@@ -15,6 +15,7 @@ from .mf34_writer import (
     merge_mf34,
 )
 from .update_directory import update_mf1_directory
+from .section_ops import remove_sections
 
 __all__ = [
     # ENDF file modification
@@ -23,6 +24,8 @@ __all__ = [
     'replace_mt_section',
     # MF1 directory maintenance
     'update_mf1_directory',
+    # Section operations
+    'remove_sections',
     # MF34 covariance creation and manipulation
     'create_mf34_from_covariance',
     'write_mf34_to_file',

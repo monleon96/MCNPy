@@ -36,7 +36,7 @@ def update_mf1_directory(filepath: str) -> bool:
         was not found or an error occurred.
     """
     try:
-        with open(filepath, 'r') as f:
+        with open(filepath, 'r', newline='') as f:
             lines = f.readlines()
     except (FileNotFoundError, IOError) as e:
         logger.error(f"Cannot read file for directory update: {e}")
@@ -108,7 +108,7 @@ def update_mf1_directory(filepath: str) -> bool:
 
     new_file_lines = lines[:mt451_start] + new_mt451_lines + lines[mt451_end:]
 
-    with open(filepath, 'w') as f:
+    with open(filepath, 'w', newline='') as f:
         f.writelines(new_file_lines)
 
     logger.debug(

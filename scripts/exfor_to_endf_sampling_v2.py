@@ -362,7 +362,7 @@ USE_DEGREE_SAMPLING_IN_MC = True                 # Sample degree from degree_wei
 # --- 6g. Energy Bin Method Specific  ---
 NORMALIZE_BY_N_POINTS = True                     # Enable study-level sublinear weighting
 WEIGHT_GAMMA = 0.5                               # Sublinear power: 0=equal-per-study, 1=uniform-per-point, 0.5=sqrt
-MAX_EXP_WEIGHT_FRAC_BIN = 0.50                   # Cap per-study dominance (relaxed from 0.33 with gamma weighting)
+MAX_EXP_WEIGHT_FRAC_BIN = 0.80                   # Safety cap; rarely activates with corrected gamma
 FREEZE_C0 = True                                # Fix c0 for shape-only refits
 MAX_SAMPLE_ORDER = 3                               # Publish covariance for l=1..3 only (higher orders cap-dominated)
 
