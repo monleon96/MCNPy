@@ -461,7 +461,7 @@ class UncertaintyBand:
 
 
 @dataclass
-class MultigroupXSPlotData(PlotData):
+class MultigroupCrossSectionPlotData(PlotData):
     """
     Plottable data for multigroup cross sections.
     
@@ -735,7 +735,7 @@ class CovarianceHeatmapData(HeatmapPlotData):
 
 
 @dataclass
-class MF34HeatmapData(HeatmapPlotData):
+class LegendreHeatmapData(HeatmapPlotData):
     """
     Angular distribution (MF34) covariance heatmap data.
     
@@ -837,3 +837,8 @@ class MF34HeatmapData(HeatmapPlotData):
         # Convert energy_grids if provided
         if self.energy_grids is not None:
             self.energy_grids = {L: np.asarray(grid) for L, grid in self.energy_grids.items()}
+
+
+# Backward compatibility aliases
+MultigroupXSPlotData = MultigroupCrossSectionPlotData
+MF34HeatmapData = LegendreHeatmapData

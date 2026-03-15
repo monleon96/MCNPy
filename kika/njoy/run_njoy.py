@@ -237,32 +237,23 @@ def run_njoy(
         output_file.write_bytes(result.stdout)
         results["njoy_output"] = str(output_file)
         
-        # Process tape files
-        tape40 = workdir / "tape40"  # ACE file
-        tape41 = workdir / "tape41"  # xsdir file
-        tape43 = workdir / "tape43"  # Viewr output
+        # Process tape files (second ACER pass writes final ACE/xsdir)
+        tape43 = workdir / "tape43"  # ACE file (final, from second ACER pass)
+        tape44 = workdir / "tape44"  # xsdir file (final, from second ACER pass)
 
-        if tape40.exists():
+        if tape43.exists():
             ace_file = ace_dir / ace_filename
-            shutil.move(str(tape40), ace_file)
+            shutil.move(str(tape43), ace_file)
             results["ace_file"] = str(ace_file)
         else:
             results["ace_file"] = None
 
-        # Copy tape41 as .xsdir if it exists
-        if tape41.exists():
+        if tape44.exists():
             xsdir_file = njoy_files_dir / f"{base_filename}.xsdir"
-            shutil.move(str(tape41), xsdir_file)
+            shutil.move(str(tape44), xsdir_file)
             results["xsdir_file"] = str(xsdir_file)
         else:
             results["xsdir_file"] = None
-
-        if tape43.exists():
-            ps_file = njoy_files_dir / f"{base_filename}.ps"
-            shutil.move(str(tape43), ps_file)
-            results["viewr_output"] = str(ps_file)
-        else:
-            results["viewr_output"] = None
 
         return results
 

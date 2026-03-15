@@ -943,7 +943,34 @@ def check_positive_semidefinite(
     Tuple[np.ndarray, bool]
         (possibly fixed matrix, was_psd)
     """
-    eigenvalues = np.linalg.eigvalsh(matrix)
+    # Sanitize NaN/Inf before eigendecomposition
+    if np.any(~np.isfinite(matrix)):
+        n_bad = int(np.sum(~np.isfinite(matrix)))
+        if logger:
+            logger.warning(f"  {name}: {n_bad} non-finite entries found, replacing with 0")
+        matrix = matrix.copy()
+        matrix[~np.isfinite(matrix)] = 0.0
+        matrix = (matrix + matrix.T) / 2  # re-symmetrize
+
+    try:
+        eigenvalues = np.linalg.eigvalsh(matrix)
+    except np.linalg.LinAlgError:
+        if logger:
+            logger.warning(f"  {name}: eigvalsh failed to converge, falling back to eigh with clipping")
+        if fix_if_needed:
+            try:
+                eigvals, eigvecs = np.linalg.eigh(matrix)
+            except np.linalg.LinAlgError:
+                if logger:
+                    logger.warning(f"  {name}: eigh also failed, returning diagonal-only matrix")
+                fixed = np.diag(np.maximum(np.diag(matrix), 0.0))
+                return fixed, False
+            eigvals = np.maximum(eigvals, 0)
+            fixed = eigvecs @ np.diag(eigvals) @ eigvecs.T
+            fixed = (fixed + fixed.T) / 2
+            return fixed, False
+        return matrix, False
+
     min_eig = np.min(eigenvalues)
 
     if min_eig >= -1e-10:
@@ -963,8 +990,11 @@ def check_positive_semidefinite(
         fixed = (fixed + fixed.T) / 2
 
         if logger:
-            new_min = np.min(np.linalg.eigvalsh(fixed))
-            logger.info(f"  Projected {name} to PSD (new min eigenvalue: {new_min:.2e})")
+            try:
+                new_min = np.min(np.linalg.eigvalsh(fixed))
+                logger.info(f"  Projected {name} to PSD (new min eigenvalue: {new_min:.2e})")
+            except np.linalg.LinAlgError:
+                logger.info(f"  Projected {name} to PSD (verification eigvalsh skipped)")
 
         return fixed, False
 

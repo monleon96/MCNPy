@@ -1163,10 +1163,10 @@ class Coefficients:
         uncertainty_style: str = 'errorbar',
         label: str = None,
         **styling_kwargs,
-    ) -> Union['MultigroupXSPlotData', Tuple['MultigroupXSPlotData', 'UncertaintyBand']]:
+    ) -> Union['MultigroupCrossSectionPlotData', Tuple['MultigroupCrossSectionPlotData', 'UncertaintyBand']]:
         """Convert sensitivity coefficients into PlotData objects.
 
-        Returns a :class:`~kika.plotting.MultigroupXSPlotData` (step plot) and,
+        Returns a :class:`~kika.plotting.MultigroupCrossSectionPlotData` (step plot) and,
         optionally, an :class:`~kika.plotting.UncertaintyBand` suitable for
         :class:`~kika.plotting.PlotBuilder`.
 
@@ -1184,13 +1184,13 @@ class Coefficients:
         :param label: Legend label. Auto-generated as
             ``"<reaction_name> (MT<reaction>)"`` when *None*.
         :type label: str, optional
-        :param styling_kwargs: Forwarded to ``MultigroupXSPlotData``
+        :param styling_kwargs: Forwarded to ``MultigroupCrossSectionPlotData``
             (``color``, ``linestyle``, ``linewidth``, etc.).
-        :returns: ``MultigroupXSPlotData`` when *uncertainty=False*,
-            or ``(MultigroupXSPlotData, UncertaintyBand)`` when *uncertainty=True*.
-        :rtype: MultigroupXSPlotData or Tuple[MultigroupXSPlotData, UncertaintyBand]
+        :returns: ``MultigroupCrossSectionPlotData`` when *uncertainty=False*,
+            or ``(MultigroupCrossSectionPlotData, UncertaintyBand)`` when *uncertainty=True*.
+        :rtype: MultigroupCrossSectionPlotData or Tuple[MultigroupCrossSectionPlotData, UncertaintyBand]
         """
-        from kika.plotting import MultigroupXSPlotData, UncertaintyBand
+        from kika.plotting import MultigroupCrossSectionPlotData, UncertaintyBand
 
         energies = np.asarray(self.pert_energies, dtype=float)
         sens = np.asarray(self.values, dtype=float)
@@ -1209,7 +1209,7 @@ class Coefficients:
             reaction_name = MT_TO_REACTION.get(self.reaction, f"MT{self.reaction}")
             label = f"{reaction_name} (MT{self.reaction})"
 
-        plot_data = MultigroupXSPlotData(
+        plot_data = MultigroupCrossSectionPlotData(
             x=x,
             y=y,
             label=label,

@@ -232,6 +232,7 @@ class EnergyBinInfo:
     tau_M: float = 0.0                   # Mid band discrepancy
     tau_B: float = 0.0                   # Backward band discrepancy
     interpolated: bool = False           # Whether coefficients were interpolated
+    endf_index: Optional[int] = None     # Nearest index in original ENDF grid (for I/O)
 
 
 @dataclass
@@ -361,22 +362,19 @@ def compute_kw_reliability_alpha(
     n_eff_mid: float = 3.5,
     n_eff_scale: float = 1.5,
     min_experiments: int = 2,
-    dominance_threshold: float = 0.40,
     min_points_ref: float = 5.0,
 ) -> float:
     """Compute per-bin reliability alpha from KW overlap diagnostics.
 
-    Same functional form as compute_bin_reliability_alpha but with
-    parameters tuned for experiment-level overlap weights.
+    Returns alpha in [0, 1] where alpha=1 means pure KW, alpha=0 means
+    pure Gaussian.
 
     Parameters
     ----------
     min_points_ref : float
-        Reference point count for quality penalty. Bins where the
-        weighted-median n_points is below this threshold get alpha
-        scaled by (median / min_points_ref).
-
-    Returns alpha in [0, 1] where alpha=1 means pure KW, alpha=0 means pure Gaussian.
+        Minimum angular data points for full KW trust.  Bins where the
+        overlap-weighted median n_points is below this get alpha scaled
+        down linearly.  Should be set to (max_legendre_order + 1).
     """
     if interpolated or kw_diag is None:
         return 0.0
@@ -384,20 +382,16 @@ def compute_kw_reliability_alpha(
     if not np.isfinite(kw_diag.n_eff_kw):
         return 0.0
 
+    # Hard zero: need at least 2 experiments for inter-experiment correlations
+    if kw_diag.n_experiments_kw < min_experiments:
+        return 0.0
+
     # Base alpha: sigmoid on experiment-level n_eff
     x = (kw_diag.n_eff_kw - n_eff_mid) / n_eff_scale
     alpha = alpha_min_data + (alpha_max - alpha_min_data) / (1.0 + np.exp(-x))
 
-    # Experiment count penalty
-    if kw_diag.n_experiments_kw < min_experiments:
-        alpha *= 0.25 + 0.25 * kw_diag.n_experiments_kw
-
-    # Dominance penalty
-    frac = kw_diag.max_experiment_weight_frac_kw
-    if frac > dominance_threshold:
-        alpha *= 1.0 - 0.5 * (frac - dominance_threshold) / (1.0 - dominance_threshold)
-
-    # Quality penalty: penalize bins where median experiment is too sparse
+    # Quality penalty: penalize bins where experiments have too few angular
+    # points to reliably fit Legendre coefficients
     if min_points_ref > 0 and kw_diag.weighted_median_n_points < min_points_ref:
         alpha *= kw_diag.weighted_median_n_points / min_points_ref
 
@@ -412,7 +406,6 @@ def compute_bin_reliability_alpha(
     n_eff_mid: float = 7.0,
     n_eff_scale: float = 2.0,
     min_experiments: int = 3,
-    dominance_threshold: float = 0.25,
 ) -> float:
     """Compute per-bin reliability weight for KW vs Gaussian correlation blend.
 
@@ -427,18 +420,13 @@ def compute_bin_reliability_alpha(
     if not np.isfinite(diagnostics.n_eff):
         return 0.0
 
+    # Hard zero: need at least min_experiments for inter-experiment correlations
+    if diagnostics.n_experiments < min_experiments:
+        return 0.0
+
     # Base alpha: sigmoid on n_eff mapped to [alpha_min_data, alpha_max]
     x = (diagnostics.n_eff - n_eff_mid) / n_eff_scale
     alpha = alpha_min_data + (alpha_max - alpha_min_data) / (1.0 + np.exp(-x))
-
-    # Experiment penalty: fewer than min_experiments reduces alpha
-    if diagnostics.n_experiments < min_experiments:
-        alpha *= 0.25 + 0.25 * diagnostics.n_experiments
-
-    # Dominance penalty: one experiment dominates
-    frac = diagnostics.max_experiment_weight_frac
-    if frac > dominance_threshold:
-        alpha *= 1.0 - 0.5 * (frac - dominance_threshold) / (1.0 - dominance_threshold)
 
     # Clamp to valid range
     return float(np.clip(alpha, alpha_min_data, alpha_max))
@@ -511,6 +499,7 @@ def compute_energy_bins_with_tof_resolution(
     energy_max_mev: float,
     delta_t_ns: float = 5.0,
     flight_path_m: float = 27.037,
+    reference_grid_ev: Optional[np.ndarray] = None,
 ) -> List[EnergyBinInfo]:
     """
     Compute energy bins with TOF-based energy resolution.
@@ -535,6 +524,9 @@ def compute_energy_bins_with_tof_resolution(
         TOF time resolution in nanoseconds
     flight_path_m : float
         TOF flight path in meters
+    reference_grid_ev : np.ndarray, optional
+        Reference energy grid (e.g. original ENDF grid) in eV, used as
+        fallback when the primary grid has no neighbour beyond the range.
 
     Returns
     -------
@@ -544,6 +536,7 @@ def compute_energy_bins_with_tof_resolution(
     logger = _get_logger()
 
     energies_mev = energies_ev / 1e6  # Convert to MeV
+    ref_grid_mev = reference_grid_ev / 1e6 if reference_grid_ev is not None else None
 
     # First pass: identify indices in range
     indices_in_range = []
@@ -570,8 +563,23 @@ def compute_energy_bins_with_tof_resolution(
             # First bin in range: use midpoint to previous grid point if available
             if global_idx > 0:
                 bin_lower = (energies_mev[global_idx - 1] + e_mev) / 2.0
+            elif ref_grid_mev is not None:
+                below = ref_grid_mev[ref_grid_mev < e_mev]
+                if len(below) > 0:
+                    bin_lower = (below[-1] + e_mev) / 2.0
+                elif n_bins > 1:
+                    next_global_idx = indices_in_range[1]
+                    half_width = (energies_mev[next_global_idx] - e_mev) / 2.0
+                    bin_lower = max(0.0, e_mev - half_width)
+                else:
+                    bin_lower = 0.0
             else:
-                bin_lower = 0.0  # No previous point, extend down to 0
+                if n_bins > 1:
+                    next_global_idx = indices_in_range[1]
+                    half_width = (energies_mev[next_global_idx] - e_mev) / 2.0
+                    bin_lower = max(0.0, e_mev - half_width)
+                else:
+                    bin_lower = 0.0
         else:
             prev_global_idx = indices_in_range[local_idx - 1]
             bin_lower = (energies_mev[prev_global_idx] + e_mev) / 2.0
@@ -581,8 +589,14 @@ def compute_energy_bins_with_tof_resolution(
             # Last bin in range: use midpoint to next grid point if available
             if global_idx < len(energies_mev) - 1:
                 bin_upper = (e_mev + energies_mev[global_idx + 1]) / 2.0
+            elif ref_grid_mev is not None:
+                above = ref_grid_mev[ref_grid_mev > e_mev]
+                if len(above) > 0:
+                    bin_upper = (e_mev + above[0]) / 2.0
+                else:
+                    bin_upper = e_mev + (e_mev - bin_lower)
             else:
-                bin_upper = float('inf')  # No next point, extend up
+                bin_upper = e_mev + (e_mev - bin_lower)
         else:
             next_global_idx = indices_in_range[local_idx + 1]
             bin_upper = (e_mev + energies_mev[next_global_idx]) / 2.0
@@ -601,6 +615,105 @@ def compute_energy_bins_with_tof_resolution(
         logger.info(f"Computed tolerances for {len(bins)} energy bins in range [{energy_min_mev:.3f}, {energy_max_mev:.3f}] MeV")
 
     return bins
+
+
+def build_union_energy_grid(
+    exfor_cache: Dict[float, List[Tuple[pd.DataFrame, Dict]]],
+    subentries: List[Tuple[str, Optional[float], Optional[float]]],
+    energy_min_mev: float,
+    energy_max_mev: float,
+) -> np.ndarray:
+    """
+    Build a union energy grid from selected EXFOR subentries.
+
+    Each subentry carries its own energy range so that different experiments
+    can cover different parts of the spectrum without unwanted overlap.
+
+    Parameters
+    ----------
+    exfor_cache : Dict[float, List[Tuple[pd.DataFrame, Dict]]]
+        EXFOR data cache mapping energy (MeV) to list of (DataFrame, metadata)
+    subentries : List[Tuple[str, Optional[float], Optional[float]]]
+        Each element is (subentry_id, min_MeV, max_MeV).
+        None means use the global energy_min_mev / energy_max_mev.
+    energy_min_mev : float
+        Global minimum energy (MeV) — always included as endpoint
+    energy_max_mev : float
+        Global maximum energy (MeV) — always included as endpoint
+
+    Returns
+    -------
+    np.ndarray
+        Sorted union energy grid in eV
+    """
+    logger = _get_logger()
+
+    # Build per-subentry energy ranges: normalized_id → (lo, hi)
+    sub_ranges: Dict[str, Tuple[float, float]] = {}
+    for sub_id, lo, hi in subentries:
+        normed = sub_id.replace("/", "")
+        sub_ranges[normed] = (
+            lo if lo is not None else energy_min_mev,
+            hi if hi is not None else energy_max_mev,
+        )
+
+    # Collect energies with per-subentry range filtering
+    union_energies = set()
+    matched_subentries = set()
+
+    for energy_mev, entries in exfor_cache.items():
+        for _df, meta in entries:
+            sid = f"{meta['entry']}{meta['subentry']}"
+            if sid in sub_ranges:
+                lo, hi = sub_ranges[sid]
+                if lo <= energy_mev <= hi:
+                    union_energies.add(energy_mev)
+                    matched_subentries.add(sid)
+
+    # Always include global endpoints
+    union_energies.add(energy_min_mev)
+    union_energies.add(energy_max_mev)
+
+    # Sort and convert to eV
+    sorted_mev = np.array(sorted(union_energies))
+    grid_ev = sorted_mev * 1e6
+
+    if logger:
+        logger.info(f"  Union grid: {len(grid_ev)} points from subentries {sorted(matched_subentries)}")
+        if matched_subentries != set(sub_ranges):
+            missing = set(sub_ranges) - matched_subentries
+            logger.warning(f"  Subentries not found in cache: {sorted(missing)}")
+
+    return grid_ev
+
+
+def remap_samples_to_endf_indices(
+    all_samples: Dict[int, Dict[int, np.ndarray]],
+    idx_to_endf: Dict[int, int],
+) -> Dict[int, Dict[int, np.ndarray]]:
+    """
+    Remap all_samples keys from local energy_index to ENDF grid index.
+
+    Parameters
+    ----------
+    all_samples : Dict[int, Dict[int, np.ndarray]]
+        {sample_idx: {energy_index: coefficients}}
+    idx_to_endf : Dict[int, int]
+        Mapping from energy_index to endf_index
+
+    Returns
+    -------
+    Dict[int, Dict[int, np.ndarray]]
+        Remapped samples with ENDF indices as keys
+    """
+    remapped = {}
+    for s_idx, sample_dict in all_samples.items():
+        new_dict = {}
+        for e_idx, coeffs in sample_dict.items():
+            endf_idx = idx_to_endf.get(e_idx, e_idx)
+            new_dict[endf_idx] = coeffs
+        remapped[s_idx] = new_dict
+    return remapped
 
 
 # =============================================================================
@@ -816,10 +929,13 @@ def filter_exfor_with_energy_bin(
     dedupe_per_experiment: bool = True,
     exclude_experiments: Optional[List[str]] = None,
     min_relative_uncertainty: float = 0.0,
-    # NEW: per-experiment weighting options (Improvement 1.1)
+    unc_floor_strategy: str = "bin_median",
+    # Per-experiment weighting options
     normalize_by_n_points: bool = False,
+    weight_gamma: float = 0.5,                    # Sublinear power: W_j = n_j^gamma
     max_experiment_weight_fraction: float = 1.0,  # 1.0 = disabled
-) -> Tuple[pd.DataFrame, List[Dict], np.ndarray, KernelDiagnostics]:
+    logger=None,
+) -> Tuple[pd.DataFrame, List[Dict], np.ndarray, KernelDiagnostics, Dict]:
     """
     Filter EXFOR data using exact energy bin matching.
 
@@ -922,15 +1038,14 @@ def filter_exfor_with_energy_bin(
         else:
             selected_data.extend(candidates)
 
-    # Step 2b: Count total points per experiment for weighting (Improvement 1.1)
-    exp_n_points_map: Dict[Tuple[str, str], int] = {}
+    # Step 2b: Count total points per study for sublinear weighting
+    # Group by entry (study-level), not entry.subentry
+    study_n_points_map: Dict[str, int] = {}
     if normalize_by_n_points:
         for available_energy, df, meta in selected_data:
             entry = meta.get('entry', 'unknown')
-            subentry = meta.get('subentry', 'unknown')
-            exp_key = (entry, subentry)
             n_pts = len(df['angle'])
-            exp_n_points_map[exp_key] = exp_n_points_map.get(exp_key, 0) + n_pts
+            study_n_points_map[entry] = study_n_points_map.get(entry, 0) + n_pts
 
     # Also track kernel weights per row for final assembly
     all_kernel_weights: List[float] = []
@@ -944,12 +1059,13 @@ def filter_exfor_with_energy_bin(
 
         n_points = len(df['angle'])
 
-        # Determine kernel weight per point (Improvement 1.1)
-        if normalize_by_n_points and exp_key in exp_n_points_map:
-            # Each point gets 1/n_points for this experiment
-            kernel_weight = 1.0 / exp_n_points_map[exp_key]
+        # Determine kernel weight per point: sublinear study-level budgeting
+        # W_j = n_j^gamma, per-point weight = W_j / n_j = n_j^(gamma - 1)
+        if normalize_by_n_points and entry in study_n_points_map:
+            n_j = study_n_points_map[entry]
+            kernel_weight = n_j ** (weight_gamma - 1.0)
         else:
-            # Uniform weight for bin method (no Gaussian decay)
+            # Uniform weight for bin method (no weighting)
             kernel_weight = 1.0
 
         # Extract metadata (same as Gaussian kernel method)
@@ -1029,15 +1145,20 @@ def filter_exfor_with_energy_bin(
         experiments_info.append(exp_info)
 
     if not all_frames:
-        return pd.DataFrame(), [], np.array([]), empty_diag
+        empty_floor = {'n_floored': 0, 'n_total': 0, 'replacement_rel_unc': 0.0, 'per_experiment': []}
+        return pd.DataFrame(), [], np.array([]), empty_diag, empty_floor
 
     # Concatenate all experiments
     result = pd.concat(all_frames, ignore_index=True)
     kernel_weights = np.array(all_kernel_weights, dtype=float)
 
     # Apply uncertainty floor if requested
+    floor_stats = {'n_floored': 0, 'n_total': 0, 'replacement_rel_unc': 0.0, 'per_experiment': []}
     if min_relative_uncertainty > 0:
-        result = apply_uncertainty_floor(result, min_relative_uncertainty, unc_column='unc', value_column='value')
+        result, floor_stats = apply_uncertainty_floor(
+            result, min_relative_uncertainty, unc_column='unc', value_column='value',
+            strategy=unc_floor_strategy, logger=logger,
+        )
 
     # Apply per-experiment weight capping if requested (Improvement 1.1)
     capping_applied = False
@@ -1045,17 +1166,27 @@ def filter_exfor_with_energy_bin(
         kernel_weights, exp_weight_fracs, capping_applied = apply_per_experiment_weight_cap(
             result, kernel_weights, max_experiment_weight_fraction
         )
+        # Propagate capped weights to DataFrame for downstream consistency
+        # (e.g. compute_between_experiment_coeffs reads grp['kernel_weight'])
+        result['kernel_weight'] = kernel_weights
+        for exp in experiments_info:
+            mask = result['entry'] == exp['entry']
+            if mask.any():
+                exp['kernel_weight'] = float(kernel_weights[mask.values][0])
     else:
-        # Compute experiment weight fractions (for logging)
+        # Compute study-level weight fractions (for logging)
         exp_weight_fracs = {}
         total_weight = float(np.sum(kernel_weights))
         if total_weight > 1e-30:
+            seen_entries = set()
             for exp in experiments_info:
-                key = f"{exp['entry']}.{exp['subentry']}"
-                # Sum weights for this experiment
-                exp_mask = (result['entry'] == exp['entry']) & (result['subentry'] == exp['subentry'])
+                entry_key = str(exp['entry'])
+                if entry_key in seen_entries:
+                    continue
+                seen_entries.add(entry_key)
+                exp_mask = (result['entry'] == exp['entry'])
                 exp_total = float(np.sum(kernel_weights[exp_mask.values]))
-                exp_weight_fracs[key] = exp_total / total_weight
+                exp_weight_fracs[entry_key] = exp_total / total_weight
 
     # Compute diagnostics
     # N_eff = (sum w)^2 / sum(w^2)
@@ -1077,7 +1208,7 @@ def filter_exfor_with_energy_bin(
         capping_applied=capping_applied,
     )
 
-    return result, experiments_info, kernel_weights, diagnostics
+    return result, experiments_info, kernel_weights, diagnostics, floor_stats
 
 
 def apply_min_weight_threshold(
@@ -1123,48 +1254,127 @@ def apply_uncertainty_floor(
     min_relative_uncertainty: float = 0.0,
     unc_column: str = "unc",
     value_column: str = "value",
-) -> pd.DataFrame:
+    strategy: str = "bin_median",
+    logger=None,
+) -> Tuple[pd.DataFrame, Dict]:
     """
     Apply minimum relative uncertainty floor to prevent experiments with
     unrealistically small uncertainties from dominating fits.
 
-    For each data point, enforces: unc >= min_relative_uncertainty * |value|
-
-    This is a safety mechanism to handle cases where uncertainties may be
-    incorrectly reported or processed in the database.
+    Two strategies:
+    - 'fixed': enforces unc >= min_relative_uncertainty * |value| (simple floor)
+    - 'bin_median': replaces unreliable uncertainties with the median relative
+      uncertainty of trustworthy points in the bin (data-driven)
 
     Parameters
     ----------
     exfor_df : pd.DataFrame
-        EXFOR data with uncertainty and value columns
+        EXFOR data with uncertainty, value, entry, and author columns
     min_relative_uncertainty : float
-        Minimum relative uncertainty as a fraction (default: 0.0 = disabled).
-        For example, 0.03 means 3% minimum uncertainty.
+        Threshold below which uncertainties are considered unreliable.
     unc_column : str
         Column name for uncertainties (default: 'unc')
     value_column : str
         Column name for cross section values (default: 'value')
+    strategy : str
+        'fixed' or 'bin_median' (default: 'bin_median')
+    logger : optional
+        Logger for diagnostic output
 
     Returns
     -------
-    pd.DataFrame
-        Copy of DataFrame with updated uncertainties (or original if disabled)
-
-    Examples
-    --------
-    >>> df = apply_uncertainty_floor(exfor_df, min_relative_uncertainty=0.03)
-    >>> # Now all points have at least 3% relative uncertainty
+    (pd.DataFrame, dict)
+        Copy of DataFrame with updated uncertainties, and stats dict with
+        keys: n_floored, n_total, replacement_rel_unc, per_experiment (list)
     """
+    empty_stats = {'n_floored': 0, 'n_total': 0, 'replacement_rel_unc': 0.0, 'per_experiment': []}
+
     if min_relative_uncertainty <= 0:
-        return exfor_df
+        return exfor_df, empty_stats
 
     df = exfor_df.copy()
     if unc_column not in df.columns or value_column not in df.columns:
-        return df
+        return df, empty_stats
 
-    floor = min_relative_uncertainty * np.abs(df[value_column])
-    df[unc_column] = np.maximum(df[unc_column], floor)
-    return df
+    abs_val = np.abs(df[value_column].values).astype(float)
+    abs_val_safe = np.maximum(abs_val, 1e-30)
+    rel_unc = df[unc_column].values.astype(float) / abs_val_safe
+    n_total = len(df)
+
+    # Identify points below threshold
+    below = rel_unc < min_relative_uncertainty
+    n_floored = int(np.sum(below))
+
+    if n_floored == 0:
+        return df, {'n_floored': 0, 'n_total': n_total,
+                     'replacement_rel_unc': 0.0, 'per_experiment': []}
+
+    # Determine replacement value
+    if strategy == 'bin_median':
+        trustworthy = ~below
+        n_trustworthy = int(np.sum(trustworthy))
+        if n_trustworthy >= 3:
+            replacement_rel = float(np.nanmedian(rel_unc[trustworthy]))
+            if np.isnan(replacement_rel):
+                replacement_rel = min_relative_uncertainty
+                if logger:
+                    logger.debug(f"    [Unc floor] nanmedian still NaN (all trustworthy are NaN), "
+                                 f"falling back to fixed floor {min_relative_uncertainty*100:.1f}%")
+        else:
+            # Fallback: not enough trustworthy points
+            replacement_rel = min_relative_uncertainty
+            if logger:
+                logger.debug(f"    [Unc floor] <3 trustworthy pts ({n_trustworthy}), "
+                             f"falling back to fixed floor {min_relative_uncertainty*100:.1f}%")
+    else:
+        replacement_rel = min_relative_uncertainty
+
+    # Apply replacement
+    replacement_abs = replacement_rel * abs_val
+    new_unc = df[unc_column].values.astype(float).copy()
+    new_unc[below] = replacement_abs[below]
+    df[unc_column] = new_unc
+
+    # Per-experiment diagnostics
+    per_exp_stats = []
+    if 'entry' in df.columns:
+        entries = df['entry'].values
+        unique_entries = np.unique(entries)
+        for ent in unique_entries:
+            mask_ent = entries == ent
+            n_pts_ent = int(np.sum(mask_ent))
+            n_floored_ent = int(np.sum(below & mask_ent))
+            orig_mean_rel = float(np.mean(rel_unc[mask_ent])) * 100
+            author = ''
+            if 'author' in df.columns:
+                author = df.loc[mask_ent, 'author'].iloc[0]
+            per_exp_stats.append({
+                'entry': str(ent), 'author': author,
+                'n_pts': n_pts_ent, 'n_floored': n_floored_ent,
+                'orig_mean_rel_pct': orig_mean_rel,
+            })
+
+    stats = {
+        'n_floored': n_floored,
+        'n_total': n_total,
+        'replacement_rel_unc': replacement_rel,
+        'per_experiment': per_exp_stats,
+    }
+
+    # Log per-bin detail
+    if logger and n_floored > 0:
+        energy_str = ''
+        if 'exfor_energy_mev' in df.columns:
+            energy_str = f" E~{df['exfor_energy_mev'].iloc[0]:.4f} MeV:"
+        logger.info(f"    [Unc floor]{energy_str} {strategy} replacement="
+                    f"{replacement_rel*100:.1f}%, {n_floored}/{n_total} pts floored")
+        for es in per_exp_stats:
+            if es['n_floored'] > 0:
+                logger.info(f"      {es['author']} ({es['entry']}): "
+                            f"{es['n_floored']}/{es['n_pts']} pts floored "
+                            f"(orig mean={es['orig_mean_rel_pct']:.1f}% → {replacement_rel*100:.1f}%)")
+
+    return df, stats
 
 
 def apply_per_experiment_weight_cap(
@@ -1173,69 +1383,93 @@ def apply_per_experiment_weight_cap(
     max_experiment_weight_fraction: float = 0.5,
 ) -> Tuple[np.ndarray, Dict[str, float], bool]:
     """
-    Cap per-experiment total kernel weight to prevent dense experiments from dominating.
+    Cap per-study WLS effective weight to prevent experiments with small
+    uncertainties from dominating the fit.
+
+    The WLS effective weight per point is kernel_weight_i / sigma_i^2.  The cap
+    is applied to the WLS effective fraction per study (grouped by entry).
+    When a study exceeds the cap, its kernel weights are scaled down so the
+    combined WLS fraction respects the limit.
 
     Parameters
     ----------
     exfor_df : pd.DataFrame
-        EXFOR data with 'entry', 'subentry' columns
+        EXFOR data with 'entry' and 'unc' columns.
     kernel_weights : np.ndarray
-        Gaussian kernel weights (one per data point)
+        Kernel weights (one per data point).
     max_experiment_weight_fraction : float
-        Maximum allowed weight fraction per experiment (default: 0.5)
+        Maximum allowed WLS effective fraction per study (default: 0.5).
 
     Returns
     -------
     Tuple[np.ndarray, Dict[str, float], bool]
         - capped_weights: Adjusted kernel weights
-        - experiment_weight_fracs: {exp_key: weight_fraction} BEFORE capping
+        - experiment_weight_fracs: {study_key: wls_fraction} AFTER capping (post-cap if capping was applied)
         - capping_applied: Whether any capping was done
     """
     if max_experiment_weight_fraction >= 1.0:
-        # Capping disabled
         return kernel_weights.copy(), {}, False
 
     if len(kernel_weights) == 0:
         return kernel_weights.copy(), {}, False
 
-    # Build experiment key for each point
+    # Build study key for each point (group by entry, not entry.subentry)
     entries = exfor_df['entry'].values
-    subentries = exfor_df['subentry'].values
     n_points = len(kernel_weights)
-    exp_keys = [f"{entries[i]}.{subentries[i]}" for i in range(n_points)]
+    exp_keys = np.array([str(entries[i]) for i in range(n_points)])
 
-    # Compute total weight per experiment
-    exp_weights: Dict[str, float] = {}
-    for i, key in enumerate(exp_keys):
-        exp_weights[key] = exp_weights.get(key, 0.0) + kernel_weights[i]
+    sigma = exfor_df['unc'].values.astype(float)
+    # Guard against zero/tiny sigma
+    sigma = np.maximum(sigma, 1e-30)
 
-    total_weight = np.sum(kernel_weights)
-    if total_weight < 1e-30:
+    # WLS effective weight: kernel_weight / sigma^2
+    wls_eff = kernel_weights / (sigma ** 2)
+    total_wls = wls_eff.sum()
+    if total_wls < 1e-30:
         return kernel_weights.copy(), {}, False
 
-    # Compute fractions BEFORE capping (for diagnostics)
-    exp_weight_fracs = {k: v / total_weight for k, v in exp_weights.items()}
+    # Compute WLS fractions per study BEFORE capping (for diagnostics)
+    unique_studies = list(dict.fromkeys(exp_keys))
+    exp_weight_fracs: Dict[str, float] = {}
+    for study in unique_studies:
+        mask = exp_keys == study
+        exp_weight_fracs[study] = float(wls_eff[mask].sum() / total_wls)
 
-    # Edge case: only one experiment - cannot cap
-    if len(exp_weights) == 1:
+    # Edge case: only one study - cannot cap
+    if len(unique_studies) == 1:
         return kernel_weights.copy(), exp_weight_fracs, False
 
-    # Apply capping
+    # Iterative capping: scale kernel weights so WLS fraction <= cap
     capped_weights = kernel_weights.copy()
     capping_applied = False
     cap = max_experiment_weight_fraction
 
-    for exp_key, frac in exp_weight_fracs.items():
-        if frac > cap:
-            # Scale factor to bring this experiment down to the cap
-            scale = cap / frac
+    for _ in range(5):
+        changed = False
+        cur_wls = capped_weights / (sigma ** 2)
+        cur_total = cur_wls.sum()
+        if cur_total < 1e-30:
+            break
+        for study in unique_studies:
+            mask = exp_keys == study
+            frac = cur_wls[mask].sum() / cur_total
+            if frac > cap:
+                scale = cap / frac
+                capped_weights[mask] *= scale
+                capping_applied = True
+                changed = True
+        if not changed:
+            break
 
-            # Apply scale to all points from this experiment
-            for i, key in enumerate(exp_keys):
-                if key == exp_key:
-                    capped_weights[i] *= scale
-
-            capping_applied = True
+    # Recompute fractions post-cap for accurate diagnostics
+    if capping_applied:
+        cur_wls = capped_weights / (sigma ** 2)
+        cur_total = cur_wls.sum()
+        if cur_total > 1e-30:
+            exp_weight_fracs = {
+                study: float(cur_wls[exp_keys == study].sum() / cur_total)
+                for study in unique_studies
+            }
 
     return capped_weights, exp_weight_fracs, capping_applied
 
@@ -1484,6 +1718,9 @@ def _run_one_kw_sample(args_tuple):
         nominal_coeffs_by_bin,
         frozen_degrees_by_bin,
         max_experiment_weight_fraction,
+        weight_gamma,
+        tau_info_by_bin,
+        mc_order_cap_by_bin,
     ) = args_tuple
 
     rng = np.random.default_rng(base_seed + s_idx)
@@ -1537,7 +1774,16 @@ def _run_one_kw_sample(args_tuple):
                 sample_coeffs[bin_idx] = endf_normalize_legendre_coeffs(nom, include_a0=False)
             continue
 
-        # Build combined weighted DataFrame
+        # Build combined weighted DataFrame with study-level sublinear budgeting
+        # First pass: count total points per study (entry) in this bin
+        study_n_points: Dict[str, int] = {}
+        for ds, w in datasets_and_weights:
+            study_id = ds['experiment_id'].split('.')[0]
+            e_key = f"{ds['experiment_id']}_{ds['exfor_energy_mev']:.6f}"
+            pert = perturbed_datasets.get(e_key)
+            if pert is not None:
+                study_n_points[study_id] = study_n_points.get(study_id, 0) + len(pert['mu'])
+
         all_mu = []
         all_values = []
         all_unc = []
@@ -1545,6 +1791,7 @@ def _run_one_kw_sample(args_tuple):
 
         for ds, w in datasets_and_weights:
             exp_id = ds['experiment_id']
+            study_id = exp_id.split('.')[0]
             e_key = f"{exp_id}_{ds['exfor_energy_mev']:.6f}"
             pert = perturbed_datasets.get(e_key)
             if pert is None:
@@ -1553,30 +1800,38 @@ def _run_one_kw_sample(args_tuple):
             all_mu.append(pert['mu'])
             all_values.append(pert['value'])
             all_unc.append(pert['unc'])
-            all_weights.append(np.full(n_pts, w / n_pts))
+            # Sublinear per-point weight: W_study = n_study^gamma, per-point = W_study / n_study
+            n_study = study_n_points.get(study_id, n_pts)
+            per_point_w = w * (n_study ** (weight_gamma - 1.0))
+            all_weights.append(np.full(n_pts, per_point_w))
 
-        # Apply per-experiment weight capping (analogous to nominal fits)
+        # Apply per-study weight capping (group by entry, not entry.subentry)
         if all_mu and max_experiment_weight_fraction < 1.0:
             weights_arr = np.concatenate(all_weights)
-            # Track experiment id per point
+            # Track study (entry) id per point
             exp_ids = []
             for ds, w in datasets_and_weights:
                 e_key = f"{ds['experiment_id']}_{ds['exfor_energy_mev']:.6f}"
                 pert = perturbed_datasets.get(e_key)
                 if pert is not None:
-                    exp_ids.extend([ds['experiment_id']] * len(pert['mu']))
+                    # Extract entry from "entry.subentry" format
+                    study_id = ds['experiment_id'].split('.')[0]
+                    exp_ids.extend([study_id] * len(pert['mu']))
             exp_ids = np.array(exp_ids)
             total_w = weights_arr.sum()
             if total_w > 0:
+                unc_arr = np.concatenate(all_unc)
+                unc_arr = np.maximum(unc_arr, 1e-30)
                 unique_exps = np.unique(exp_ids)
-                for _ in range(5):  # iterative capping
+                for _ in range(5):  # iterative WLS-level capping
                     changed = False
-                    total_w = weights_arr.sum()
-                    if total_w <= 0:
+                    wls_eff = weights_arr / (unc_arr ** 2)
+                    total_wls = wls_eff.sum()
+                    if total_wls <= 0:
                         break
                     for exp in unique_exps:
                         mask = exp_ids == exp
-                        frac = weights_arr[mask].sum() / total_w
+                        frac = wls_eff[mask].sum() / total_wls
                         if frac > max_experiment_weight_fraction:
                             scale = max_experiment_weight_fraction / frac
                             weights_arr[mask] *= scale
@@ -1611,6 +1866,25 @@ def _run_one_kw_sample(args_tuple):
         fit_df = pd.DataFrame({'mu': mu, 'value': values, 'unc': unc})
         degree = frozen_degrees_by_bin.get(bin_idx, max_degree)
 
+        # Apply per-bin MC order cap (from angular support diagnostics)
+        bin_mc_cap = mc_order_cap_by_bin.get(bin_idx) if mc_order_cap_by_bin else None
+        effective_sample_order = max_sample_order
+        if bin_mc_cap is not None:
+            degree = min(degree, bin_mc_cap)
+            if effective_sample_order is not None:
+                effective_sample_order = min(effective_sample_order, bin_mc_cap)
+            else:
+                effective_sample_order = bin_mc_cap
+
+        # Pre-inflate uncertainties with frozen tau (from smoothed/floored nominal)
+        bin_tau = tau_info_by_bin.get(bin_idx) if tau_info_by_bin else None
+        fit_use_band_discrepancy = use_band_discrepancy
+        if bin_tau and use_band_discrepancy:
+            from .resample_AD import sigma_eff_from_tau
+            inflated = sigma_eff_from_tau(mu, unc, bin_tau)
+            fit_df['unc'] = inflated
+            fit_use_band_discrepancy = False  # already applied
+
         try:
             coef_df, _ = sample_legendre_coefficients(
                 fit_df,
@@ -1623,7 +1897,7 @@ def _run_one_kw_sample(args_tuple):
                 external_weights=weights,
                 n_samples=1,
                 stochastic=False,
-                use_band_discrepancy=use_band_discrepancy,
+                use_band_discrepancy=fit_use_band_discrepancy,
                 min_points_per_band=min_points_per_band,
                 max_tau_fraction=max_tau_fraction,
                 freeze_c0=freeze_c0,
@@ -1633,10 +1907,10 @@ def _run_one_kw_sample(args_tuple):
                 coeffs = np.pad(coeffs, (0, max_degree + 1 - len(coeffs)))
 
             # Freeze higher-order coefficients at nominal values
-            if max_sample_order is not None:
+            if effective_sample_order is not None:
                 nom = nominal_coeffs_by_bin.get(bin_idx)
                 if nom is not None:
-                    for l in range(max_sample_order + 1, len(coeffs)):
+                    for l in range(effective_sample_order + 1, len(coeffs)):
                         if l < len(nom):
                             coeffs[l] = nom[l]
 
@@ -1684,6 +1958,7 @@ def run_mc_with_kernel_weights(
     apply_positivity_projection: bool = False,
     positivity_check_points: int = 101,
     max_experiment_weight_fraction: float = 1.0,
+    weight_gamma: float = 0.5,
     logger=None,
 ) -> Dict[int, Dict[int, np.ndarray]]:
     """Orchestrate kernel-weighted multi-bin MC sampling.
@@ -1711,7 +1986,9 @@ def run_mc_with_kernel_weights(
     base_seed : int
         Random seed.
     max_experiment_weight_fraction : float
-        Maximum allowed weight fraction per experiment (1.0 = disabled).
+        Maximum allowed weight fraction per study (1.0 = disabled).
+    weight_gamma : float
+        Sublinear power for study-level budgeting (0=equal-per-study, 1=uniform).
     logger : optional
         Logger instance.
 
@@ -1732,10 +2009,16 @@ def run_mc_with_kernel_weights(
 
     nominal_coeffs_by_bin = {}
     frozen_degrees_by_bin = {}
+    tau_info_by_bin = {}
+    mc_order_cap_by_bin = {}
     for nr in nominal_results:
         if nr.has_data:
             nominal_coeffs_by_bin[nr.energy_index] = nr.nominal_coeffs
             frozen_degrees_by_bin[nr.energy_index] = nr.frozen_degree
+            if hasattr(nr, 'tau_info') and nr.tau_info:
+                tau_info_by_bin[nr.energy_index] = nr.tau_info
+            if hasattr(nr, 'mc_order_cap') and nr.mc_order_cap is not None:
+                mc_order_cap_by_bin[nr.energy_index] = nr.mc_order_cap
 
     args_list = [
         (
@@ -1757,6 +2040,9 @@ def run_mc_with_kernel_weights(
             nominal_coeffs_by_bin,
             frozen_degrees_by_bin,
             max_experiment_weight_fraction,
+            weight_gamma,
+            tau_info_by_bin,
+            mc_order_cap_by_bin,
         )
         for s_idx in range(n_samples)
     ]
@@ -1893,7 +2179,7 @@ def compute_covariance_from_samples(
     snr_threshold: float = 0.0,
     n_neighbors: int = 3,
     logger=None,
-) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]]]:
+) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]], np.ndarray, np.ndarray]:
     """
     Compute relative (fractional) covariance and correlation matrices from MC samples.
 
@@ -1911,12 +2197,13 @@ def compute_covariance_from_samples(
 
     Returns
     -------
-    Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]], np.ndarray]
-        - cov_matrix: Full relative (fractional) covariance matrix
+    Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]], np.ndarray, np.ndarray]
+        - cov_matrix: Full relative (fractional) covariance matrix (w.r.t. MC means)
         - corr_matrix: Full correlation matrix
         - param_labels: List of (energy_index, order) tuples
         - mean_params: MC mean parameter vector used as denominator for
           the relative conversion (same layout as param_labels)
+        - cov_abs: Absolute covariance matrix (before relative conversion)
 
     Covariance Conversion
     ---------------------
@@ -1956,7 +2243,7 @@ def compute_covariance_from_samples(
     # Cov_rel(i,j) = Cov_abs(i,j) / (mean_i * mean_j)
     mean_params = np.mean(sample_matrix, axis=0)
     denom = np.outer(mean_params, mean_params)
-    safe_mask = np.abs(denom) > 1e-30
+    safe_mask = np.abs(denom) > 1e-12  # ENDF 6-digit precision squared
     cov_matrix = np.zeros_like(cov_abs)
     cov_matrix[safe_mask] = cov_abs[safe_mask] / denom[safe_mask]
 
@@ -1985,7 +2272,30 @@ def compute_covariance_from_samples(
     # Generate labels
     param_labels = [(e_idx, l + 1) for e_idx in energy_indices for l in range(max_order)]
 
-    return cov_matrix, corr_matrix, param_labels, mean_params
+    return cov_matrix, corr_matrix, param_labels, mean_params, cov_abs
+
+
+def absolute_to_nominal_relative(
+    cov_abs: np.ndarray,
+    nominal_params: np.ndarray,
+    zero_threshold: float = 1e-12,
+) -> np.ndarray:
+    """Convert absolute covariance to relative-to-nominal.
+
+    Cov_rel(i,j) = Cov_abs(i,j) / (nom_i * nom_j)
+    Where |nom_i * nom_j| < zero_threshold, set to 0.
+
+    The default threshold (1e-12) corresponds to the square of the ENDF
+    11-character field precision (~6 significant digits).  Coefficients
+    below ~1e-6 are indistinguishable from zero at ENDF precision, so
+    their pairwise product is below 1e-12 and the relative covariance
+    is treated as undefined.
+    """
+    denom = np.outer(nominal_params, nominal_params)
+    safe = np.abs(denom) > zero_threshold
+    cov_rel = np.zeros_like(cov_abs)
+    cov_rel[safe] = cov_abs[safe] / denom[safe]
+    return cov_rel
 
 
 def regularize_near_zero_relative_covariance(
@@ -2092,60 +2402,34 @@ def regularize_near_zero_relative_covariance(
     return cov_reg, diagnostics
 
 
-def regularize_post_rescaling(
+def regularize_high_relative_std(
     cov_rel: np.ndarray,
     max_order: int,
     max_rel_std: float = 1.0,
     n_neighbors: int = 3,
-    mc_abs_std: Optional[np.ndarray] = None,
-    nominal_means: Optional[np.ndarray] = None,
-    deflation_threshold: float = 0.5,
     logger=None,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
-    Bidirectional regularization of relative covariance after MC-mean ->
-    nominal rescaling.
+    Regularize explosive relative standard deviations via neighbor
+    interpolation.
 
-    After rescaling ``cov_grouped * outer(mg_scale, mg_scale)`` where
-    ``mg_scale = mc_mean / nominal``, relative stds can both explode
-    (when |mc_mean| >> |nominal|) and collapse (when |mc_mean| << |nominal|).
-
-    Both directions are fixed with the **same strategy**: neighbor-
-    interpolated relative std from the same Legendre order, applied via
+    When converting absolute covariance to nominal-relative via
+    ``cov_abs / outer(nom, nom)``, near-zero nominal coefficients produce
+    large relative stds.  This function detects entries with
+    ``rel_std > max_rel_std`` and replaces them with the median of
+    neighboring unflagged bins (same Legendre order), applied via
     congruence transform (preserves correlations and PSD).
-
-    Detection criteria
-    ------------------
-    - **High-side** (inflation): ``rel_std > max_rel_std``
-    - **Low-side** (deflation): ``abs_std < deflation_threshold * mc_abs_std``
-      where ``abs_std = rel_std * |nominal_mean|``
-
-    Fix strategy (both sides)
-    -------------------------
-    Walk left/right from the flagged bin collecting up to ``n_neighbors``
-    unflagged rel_std values of the same order, take their median as
-    target.  For deflated bins, also compute the MC-informed target
-    (``deflation_threshold * mc_abs_std / |nominal|``) and use the
-    larger of the two (conservative).
 
     Parameters
     ----------
     cov_rel : np.ndarray
-        Relative covariance matrix (post-rescaling).
+        Relative covariance matrix (nominal-relative).
     max_order : int
         Number of Legendre orders per energy bin.
     max_rel_std : float
         Flag parameters with relative std above this.
     n_neighbors : int
         Neighbors to seek on each side for interpolation.
-    mc_abs_std : np.ndarray, optional
-        Original MC absolute standard deviations (before rescaling).
-        Enables deflation detection.
-    nominal_means : np.ndarray, optional
-        Nominal mean values (denominator of relative covariance).
-        Required together with mc_abs_std for deflation detection.
-    deflation_threshold : float
-        Flag if post-rescaling abs_std < this fraction of mc_abs_std.
     logger : optional
         Logger instance.
 
@@ -2161,30 +2445,14 @@ def regularize_post_rescaling(
 
     rel_std = np.sqrt(np.maximum(np.diag(cov_rel), 0.0))
 
-    # --- High-side flags: relative std too large ---
-    flagged_high = rel_std > max_rel_std
-
-    # --- Low-side flags: rescaling crushed absolute uncertainty ---
-    flagged_low = np.zeros(n_params, dtype=bool)
-    deflation_available = mc_abs_std is not None and nominal_means is not None
-    if deflation_available:
-        current_abs_std = rel_std * np.abs(nominal_means)
-        deflated = (
-            (mc_abs_std > 1e-20)
-            & (current_abs_std < deflation_threshold * mc_abs_std)
-            & (np.abs(nominal_means) > 1e-20)
-            & ~flagged_high
-        )
-        flagged_low = deflated
-
-    flagged = flagged_high | flagged_low
+    # Flag entries with relative std too large
+    flagged = rel_std > max_rel_std
     n_flagged = int(np.sum(flagged))
 
     if n_flagged == 0:
-        diagnostics = {"n_regularized": 0, "n_total": n_params,
-                       "n_capped": 0, "n_deflated": 0}
+        diagnostics = {"n_regularized": 0, "n_total": n_params}
         if logger:
-            logger.info("  Post-rescaling regularization: no parameters flagged")
+            logger.info("  Rel-std regularization: no parameters flagged")
         return cov_rel.copy(), diagnostics
 
     # Per-order global fallback: median of unflagged stds
@@ -2196,7 +2464,7 @@ def regularize_post_rescaling(
         if len(unflagged_stds) > 0:
             order_fallback[l] = float(np.median(unflagged_stds))
 
-    # Neighbor-interpolated target (same logic for both directions)
+    # Neighbor-interpolated target
     def _neighbor_target(i: int) -> Tuple[float, int, bool]:
         k = i // max_order
         l = i % max_order
@@ -2223,87 +2491,148 @@ def regularize_post_rescaling(
 
     # Build scale vector
     scale = np.ones(n_params)
-    targets = {}  # i -> (target, n_neighbors_used, used_fallback, flag_type)
+    targets = {}  # i -> (target, n_neighbors_used, used_fallback)
 
     for i in range(n_params):
-        if not flagged[i]:
+        if not flagged[i] or rel_std[i] <= 0:
             continue
-
-        if flagged_high[i]:
-            if rel_std[i] <= 0:
-                continue
-            target, n_nb, fb = _neighbor_target(i)
-            scale[i] = target / rel_std[i]
-            targets[i] = (target, n_nb, fb, "high")
-
-        elif flagged_low[i]:
-            target, n_nb, fb = _neighbor_target(i)
-            # MC-informed target: what the relative std should be to preserve
-            # deflation_threshold of the original MC absolute uncertainty
-            mc_target_rel = (
-                deflation_threshold * mc_abs_std[i] / np.abs(nominal_means[i])
-                if np.abs(nominal_means[i]) > 1e-20 else target
-            )
-            # Conservative: use the larger of neighbor-interpolated and MC-informed
-            target = max(target, mc_target_rel)
-            if rel_std[i] > 0:
-                scale[i] = target / rel_std[i]
-            targets[i] = (target, n_nb, fb, "low")
+        target, n_nb, fb = _neighbor_target(i)
+        scale[i] = target / rel_std[i]
+        targets[i] = (target, n_nb, fb)
 
     # Apply congruence transform: C' = S @ C @ S (PSD-preserving)
     cov_reg = cov_rel * np.outer(scale, scale)
 
-    n_high = int(np.sum(flagged_high))
-    n_low = int(np.sum(flagged_low))
-
     diagnostics = {
         "n_regularized": n_flagged,
         "n_total": n_params,
-        "n_capped": n_high,
-        "n_deflated": n_low,
     }
 
     if logger:
-        parts = []
-        if n_high > 0:
-            parts.append(f"{n_high} capped (>{max_rel_std*100:.0f}%)")
-        if n_low > 0:
-            parts.append(f"{n_low} deflated (<{deflation_threshold*100:.0f}% of MC)")
-        logger.info(f"  Post-rescaling regularization: {n_flagged}/{n_params} — "
-                    + ", ".join(parts))
+        logger.info(f"  Rel-std regularization: {n_flagged}/{n_params} "
+                    f"capped (>{max_rel_std*100:.0f}%)")
         new_rel_std = np.sqrt(np.maximum(np.diag(cov_reg), 0.0))
         for l in range(max_order):
             order_indices = np.arange(l, n_params, max_order)
-            # High-side
-            order_flagged_h = flagged_high[order_indices]
-            n_oh = int(np.sum(order_flagged_h))
+            order_flagged = flagged[order_indices]
+            n_oh = int(np.sum(order_flagged))
             if n_oh > 0:
-                old_max = float(np.max(rel_std[order_indices][order_flagged_h]))
-                new_max = float(np.max(new_rel_std[order_indices][order_flagged_h]))
-                order_targets = [targets[idx][0] for idx in order_indices[order_flagged_h] if idx in targets]
-                order_n_fb = sum(1 for idx in order_indices[order_flagged_h] if idx in targets and targets[idx][2])
+                old_max = float(np.max(rel_std[order_indices][order_flagged]))
+                new_max = float(np.max(new_rel_std[order_indices][order_flagged]))
+                order_targets = [targets[idx][0] for idx in order_indices[order_flagged] if idx in targets]
+                order_n_fb = sum(1 for idx in order_indices[order_flagged] if idx in targets and targets[idx][2])
                 tgt_min = min(order_targets) if order_targets else 0
                 tgt_max = max(order_targets) if order_targets else 0
                 logger.info(f"    l={l+1}: {n_oh} capped "
                             f"(max {old_max*100:.1f}% -> {new_max*100:.1f}%), "
                             f"targets [{tgt_min*100:.1f}%-{tgt_max*100:.1f}%], "
                             f"{order_n_fb} used fallback")
-            # Low-side
-            order_flagged_l = flagged_low[order_indices]
-            n_ol = int(np.sum(order_flagged_l))
-            if n_ol > 0 and deflation_available:
-                old_min_abs = float(np.min(
-                    rel_std[order_indices][order_flagged_l]
-                    * np.abs(nominal_means[order_indices][order_flagged_l])
-                ))
-                new_min_abs = float(np.min(
-                    new_rel_std[order_indices][order_flagged_l]
-                    * np.abs(nominal_means[order_indices][order_flagged_l])
-                ))
-                logger.info(f"    l={l+1}: {n_ol} deflated "
-                            f"(min abs_std {old_min_abs:.6f} -> {new_min_abs:.6f})")
 
     return cov_reg, diagnostics
+
+
+def apply_between_experiment_floor(
+    cov_rel: np.ndarray,
+    nominal_results: List,
+    energy_indices: List[int],
+    max_order: int,
+    logger=None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Apply between-experiment scatter as an uncertainty floor.
+
+    For each energy bin with ``between_exp_scatter`` available, compare
+    the scatter-implied relative std to the current covariance diagonal.
+    Where the scatter exceeds the MC-estimated uncertainty, inflate via
+    a congruence scale (preserves correlations and PSD).
+
+    Parameters
+    ----------
+    cov_rel : np.ndarray
+        Relative covariance matrix (nominal-relative).
+    nominal_results : list of NominalFitResult
+        Results from ``perform_nominal_fits()``.
+    energy_indices : list of int
+        Energy indices corresponding to the covariance matrix rows/cols.
+    max_order : int
+        Number of Legendre orders per energy bin.
+    logger : optional
+        Logger instance.
+
+    Returns
+    -------
+    cov_floored : np.ndarray
+        Covariance matrix with between-experiment floor applied.
+    diagnostics : dict
+        Summary statistics.
+    """
+    from scripts.resample_AD import endf_normalize_legendre_coeffs
+
+    n_params = cov_rel.shape[0]
+    rel_std = np.sqrt(np.maximum(np.diag(cov_rel), 0.0))
+    scale = np.ones(n_params)
+
+    # Build lookup: energy_index -> NominalFitResult
+    nr_lookup = {}
+    for nr in nominal_results:
+        if nr.has_data and not nr.interpolated:
+            nr_lookup[nr.energy_index] = nr
+
+    n_floored = 0
+    per_order_stats = {l: {'n_floored': 0, 'inflation_factors': []} for l in range(max_order)}
+
+    for k, e_idx in enumerate(energy_indices):
+        nr = nr_lookup.get(e_idx)
+        if nr is None or nr.between_exp_scatter is None:
+            continue
+
+        scatter = nr.between_exp_scatter
+        L_common = nr.between_exp_L_common
+
+        # Get nominal ENDF a_l coefficients for this bin
+        endf_a_l = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
+
+        for l_idx in range(min(L_common, max_order)):
+            param_idx = k * max_order + l_idx
+
+            # scatter is in absolute a_l units; convert to relative
+            if l_idx < len(endf_a_l) and abs(endf_a_l[l_idx]) > 1e-15:
+                scatter_rel = scatter[l_idx] / abs(endf_a_l[l_idx])
+            else:
+                continue
+
+            current_rel_std = rel_std[param_idx]
+            if current_rel_std > 1e-15 and scatter_rel > current_rel_std:
+                s = scatter_rel / current_rel_std
+                scale[param_idx] = s
+                n_floored += 1
+                per_order_stats[l_idx]['n_floored'] += 1
+                per_order_stats[l_idx]['inflation_factors'].append(s)
+
+    # Apply congruence transform: C' = S @ C @ S
+    cov_floored = cov_rel * np.outer(scale, scale)
+
+    n_bins_with_scatter = sum(
+        1 for e_idx in energy_indices
+        if nr_lookup.get(e_idx) is not None and nr_lookup[e_idx].between_exp_scatter is not None
+    )
+
+    diagnostics = {
+        'n_bins_with_scatter': n_bins_with_scatter,
+        'n_floored': n_floored,
+        'per_order': per_order_stats,
+    }
+
+    if logger:
+        logger.info(f"  [Between-exp floor] {n_bins_with_scatter}/{len(energy_indices)} bins had "
+                     f"scatter computed, {n_floored} (E,l) entries floored")
+        for l in range(max_order):
+            stats = per_order_stats[l]
+            if stats['n_floored'] > 0:
+                mean_infl = float(np.mean(stats['inflation_factors']))
+                logger.info(f"    l={l+1}: {stats['n_floored']} floored "
+                            f"(mean inflation {mean_infl:.1f}x)")
+
+    return cov_floored, diagnostics
 
 
 def log_rel_std_profile(
@@ -2359,8 +2688,8 @@ def smooth_absent_order_uncertainties(
     valid_mask: np.ndarray,
     max_order: int,
     min_rel_std: float = 0.005,
-    dip_fraction: float = 0.50,
-    spike_factor: float = 3.0,
+    dip_fraction: Optional[float] = 0.50,
+    spike_factor: Optional[float] = 3.0,
     dip_n_neighbors: int = 3,
     median_fill_threshold: float = 0.50,
     logger=None,
@@ -2474,10 +2803,10 @@ def smooth_absent_order_uncertainties(
                         neighbor_vals.append(order_rel_std[kk])
                 if len(neighbor_vals) >= 2:
                     med = float(np.median(neighbor_vals))
-                    if order_rel_std[k] < dip_fraction * med:
+                    if dip_fraction is not None and order_rel_std[k] < dip_fraction * med:
                         dip[k] = True
                         new_outliers += 1
-                    elif order_rel_std[k] > spike_factor * med:
+                    elif spike_factor is not None and order_rel_std[k] > spike_factor * med:
                         spike[k] = True
                         new_outliers += 1
             if new_outliers == 0:
@@ -2961,13 +3290,16 @@ def build_gaussian_correlation_covariance(
     param_orders = np.zeros(n, dtype=int)
     param_e_pos = np.zeros(n, dtype=int)  # position in energy_indices list
 
+    # Build index→bin lookup (handles non-sequential indices from union grids)
+    bin_by_idx = {b.index: b for b in energy_bins}
+
     for p in range(n):
         e_pos = p // max_order
         order = p % max_order
         param_orders[p] = order
         param_e_pos[p] = e_pos
-        if e_pos < n_energies and energy_indices[e_pos] < len(energy_bins):
-            ebin = energy_bins[energy_indices[e_pos]]
+        if e_pos < n_energies and energy_indices[e_pos] in bin_by_idx:
+            ebin = bin_by_idx[energy_indices[e_pos]]
             param_energies[p] = ebin.energy_mev
             param_sigma_E[p] = ebin.sigma_E_mev
 
@@ -3145,6 +3477,16 @@ def generate_cholesky_samples(
     cov_abs = cov_full * np.outer(mean_params, mean_params)
     # Ensure symmetry
     cov_abs = (cov_abs + cov_abs.T) / 2.0
+
+    # Ridge regularization: add small nugget to diagonal for numerical stability.
+    # Near-zero-mean params create near-singular cov_abs (zero rows/columns).
+    # The nugget makes the matrix strictly PD, bounds the condition number,
+    # and adds negligible variance (~1e-10 relative to max diagonal).
+    diag_abs = np.diag(cov_abs)
+    nugget = np.max(diag_abs[diag_abs > 0]) * 1e-10 if np.any(diag_abs > 0) else 1e-30
+    cov_abs[np.diag_indices_from(cov_abs)] += nugget
+    if logger:
+        logger.info(f"  Ridge regularization: nugget={nugget:.2e}")
 
     # Cholesky decomposition (use eigendecomposition fallback if not PSD)
     cholesky_succeeded = False
@@ -3527,6 +3869,89 @@ def forward_fill_rel_std(
 
 
 # =============================================================================
+# SPLICE HELPERS FOR PIPELINE ENERGY GRID
+# =============================================================================
+
+def build_pipeline_coeffs_for_splice(
+    energy_bins: List,  # List[EnergyBinInfo]
+    coeffs_by_index: Dict[int, np.ndarray],
+) -> Tuple[List[float], List[List[float]]]:
+    """
+    Build sorted (energies, coefficients) lists for splicing into MF4.
+
+    Parameters
+    ----------
+    energy_bins : List[EnergyBinInfo]
+        Energy bins from the pipeline, with .index, .energy_ev, .original_coeffs
+    coeffs_by_index : Dict[int, ndarray]
+        ENDF-format coefficients keyed by energy_bin.index
+
+    Returns
+    -------
+    (energies_ev, coeffs_lists) : Tuple[List[float], List[List[float]]]
+        Sorted by energy
+    """
+    sorted_bins = sorted(energy_bins, key=lambda b: b.energy_ev)
+    energies = []
+    coeffs = []
+    for b in sorted_bins:
+        energies.append(b.energy_ev)
+        if b.index in coeffs_by_index:
+            coeffs.append(list(coeffs_by_index[b.index]))
+        else:
+            coeffs.append(list(b.original_coeffs))
+    return energies, coeffs
+
+
+def splice_legendre_grid(
+    mt_data,                        # MF4MTLegendre or MF4MTMixed
+    pipeline_energies_ev: List[float],
+    pipeline_coeffs: List[List[float]],
+    energy_min_ev: float,
+    energy_max_ev: float,
+) -> None:
+    """
+    Remove original ENDF energy points in [E_min, E_max] and insert pipeline
+    points instead. Points outside that range are kept.
+
+    Modifies mt_data in-place (_energies, _legendre_coeffs, _interpolation, _nr).
+    """
+    orig_e = np.array(mt_data._energies)
+    orig_c = mt_data._legendre_coeffs
+
+    # Keep mask: outside the splice range (1 eV tolerance)
+    keep = (orig_e < energy_min_ev - 1.0) | (orig_e > energy_max_ev + 1.0)
+
+    # Split into left / right portions
+    left_idx = np.where(keep & (orig_e < energy_min_ev))[0]
+    right_idx = np.where(keep & (orig_e > energy_max_ev))[0]
+
+    left_energies = [orig_e[i] for i in left_idx]
+    left_coeffs = [list(orig_c[i]) for i in left_idx]
+
+    right_energies = [orig_e[i] for i in right_idx]
+    right_coeffs = [list(orig_c[i]) for i in right_idx]
+
+    # Concatenate: left + pipeline + right
+    new_energies = left_energies + list(pipeline_energies_ev) + right_energies
+    new_coeffs = left_coeffs + [list(c) for c in pipeline_coeffs] + right_coeffs
+
+    # Sanity: must be sorted
+    for i in range(1, len(new_energies)):
+        assert new_energies[i] > new_energies[i - 1], (
+            f"Spliced grid not sorted at index {i}: "
+            f"{new_energies[i-1]:.1f} >= {new_energies[i]:.1f}"
+        )
+
+    # Assign back
+    mt_data._energies = new_energies
+    mt_data._legendre_coeffs = new_coeffs
+    new_ne = len(new_energies)
+    mt_data._interpolation = [(new_ne, 2)]
+    mt_data._nr = 1
+
+
+# =============================================================================
 # ENDF WRITING FUNCTIONS
 # =============================================================================
 
@@ -3535,6 +3960,8 @@ def write_nominal_endf(
     mt_number: int,
     nominal_results: List,  # List[NominalFitResult]
     output_dir: str,
+    energy_bins: Optional[List] = None,
+    energy_range_mev: Optional[Tuple[float, float]] = None,
 ) -> str:
     """
     Write ENDF file with nominal fit coefficients.
@@ -3549,6 +3976,10 @@ def write_nominal_endf(
         Nominal fit results from Phase 1
     output_dir : str
         Output directory
+    energy_bins : Optional[List[EnergyBinInfo]]
+        Pipeline energy bins (enables splice mode)
+    energy_range_mev : Optional[Tuple[float, float]]
+        (E_min, E_max) in MeV for the splice range
 
     Returns
     -------
@@ -3570,12 +4001,26 @@ def write_nominal_endf(
     if not isinstance(mt_data, (MF4MTLegendre, MF4MTMixed)):
         raise ValueError(f"MT{mt_number} is not Legendre or Mixed type")
 
-    # Apply nominal coefficients for energies with EXFOR data
-    for nr in nominal_results:
-        if nr.has_data and nr.energy_index < len(mt_data._legendre_coeffs):
-            # Convert nominal coefficients to ENDF format
-            endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
-            mt_data._legendre_coeffs[nr.energy_index] = list(endf_coeffs)
+    if energy_bins is not None and energy_range_mev is not None:
+        # Splice mode: replace energy grid in [E_min, E_max] with pipeline grid
+        coeffs_by_index = {}
+        for nr in nominal_results:
+            if nr.has_data:
+                endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
+                coeffs_by_index[nr.energy_index] = endf_coeffs
+        energies, coeffs = build_pipeline_coeffs_for_splice(energy_bins, coeffs_by_index)
+        e_min_ev = energy_range_mev[0] * 1e6
+        e_max_ev = energy_range_mev[1] * 1e6
+        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev)
+    else:
+        # Legacy in-place mode
+        for nr in nominal_results:
+            endf_idx = getattr(nr, 'endf_index', None)
+            if endf_idx is None:
+                endf_idx = nr.energy_index
+            if nr.has_data and endf_idx < len(mt_data._legendre_coeffs):
+                endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
+                mt_data._legendre_coeffs[endf_idx] = list(endf_coeffs)
 
     # Create output structure (nominal file lives at output_dir level, not inside endf/)
     output_path = Path(output_dir)
@@ -3640,6 +4085,8 @@ def write_average_endf(
     nominal_results: List,  # List[NominalFitResult]
     all_samples: Dict[int, Dict[int, np.ndarray]],
     output_dir: str,
+    energy_bins: Optional[List] = None,
+    energy_range_mev: Optional[Tuple[float, float]] = None,
 ) -> str:
     """
     Write ENDF file with MC mean coefficients (average file).
@@ -3656,6 +4103,10 @@ def write_average_endf(
         {sample_idx: {energy_index: endf_coeffs}} for all MC samples
     output_dir : str
         Output directory
+    energy_bins : Optional[List[EnergyBinInfo]]
+        Pipeline energy bins (enables splice mode)
+    energy_range_mev : Optional[Tuple[float, float]]
+        (E_min, E_max) in MeV for the splice range
 
     Returns
     -------
@@ -3680,10 +4131,24 @@ def write_average_endf(
     if not isinstance(mt_data, (MF4MTLegendre, MF4MTMixed)):
         raise ValueError(f"MT{mt_number} is not Legendre or Mixed type")
 
-    # Apply MC mean coefficients for energies with data
-    for e_idx, mean_coeffs in mc_mean_coeffs.items():
-        if e_idx < len(mt_data._legendre_coeffs):
-            mt_data._legendre_coeffs[e_idx] = list(mean_coeffs)
+    if energy_bins is not None and energy_range_mev is not None:
+        # Splice mode
+        energies, coeffs = build_pipeline_coeffs_for_splice(energy_bins, mc_mean_coeffs)
+        e_min_ev = energy_range_mev[0] * 1e6
+        e_max_ev = energy_range_mev[1] * 1e6
+        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev)
+    else:
+        # Legacy in-place mode
+        idx_to_endf = {}
+        for nr in nominal_results:
+            endf_idx = getattr(nr, 'endf_index', None)
+            if endf_idx is not None:
+                idx_to_endf[nr.energy_index] = endf_idx
+
+        for e_idx, mean_coeffs in mc_mean_coeffs.items():
+            endf_idx = idx_to_endf.get(e_idx, e_idx)
+            if endf_idx < len(mt_data._legendre_coeffs):
+                mt_data._legendre_coeffs[endf_idx] = list(mean_coeffs)
 
     # Create output structure (average file lives at output_dir level, not inside endf/)
     output_path = Path(output_dir)
@@ -3710,6 +4175,8 @@ def write_endf_sample(
     sampled_coeffs_by_energy: Dict[int, np.ndarray],
     output_dir: str,
     cached_original_coeffs: Optional[List[List[float]]] = None,
+    energy_bins: Optional[List] = None,
+    energy_range_mev: Optional[Tuple[float, float]] = None,
 ) -> str:
     """
     Write a single ENDF sample file.
@@ -3730,6 +4197,10 @@ def write_endf_sample(
         Output directory
     cached_original_coeffs : Optional[List[List[float]]]
         If provided, use these as the original coefficients
+    energy_bins : Optional[List[EnergyBinInfo]]
+        Pipeline energy bins (enables splice mode)
+    energy_range_mev : Optional[Tuple[float, float]]
+        (E_min, E_max) in MeV for the splice range
 
     Returns
     -------
@@ -3751,10 +4222,17 @@ def write_endf_sample(
     if not isinstance(mt_data, (MF4MTLegendre, MF4MTMixed)):
         raise ValueError(f"MT{mt_number} is not Legendre or Mixed type")
 
-    # Modify coefficients at each energy
-    for energy_idx, new_coeffs in sampled_coeffs_by_energy.items():
-        if energy_idx < len(mt_data._legendre_coeffs):
-            mt_data._legendre_coeffs[energy_idx] = list(new_coeffs)
+    if energy_bins is not None and energy_range_mev is not None:
+        # Splice mode
+        energies, coeffs = build_pipeline_coeffs_for_splice(energy_bins, sampled_coeffs_by_energy)
+        e_min_ev = energy_range_mev[0] * 1e6
+        e_max_ev = energy_range_mev[1] * 1e6
+        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev)
+    else:
+        # Legacy in-place mode
+        for energy_idx, new_coeffs in sampled_coeffs_by_energy.items():
+            if energy_idx < len(mt_data._legendre_coeffs):
+                mt_data._legendre_coeffs[energy_idx] = list(new_coeffs)
 
     # Write output file
     sample_str = f"{sample_index + 1:04d}"
@@ -3790,6 +4268,8 @@ def write_endf_samples_batch(
     all_samples: Dict[int, Dict[int, np.ndarray]],
     output_dir: str,
     n_procs: int = 1,
+    energy_bins: Optional[List] = None,
+    energy_range_mev: Optional[Tuple[float, float]] = None,
 ) -> List[str]:
     """
     Write multiple ENDF samples efficiently.
@@ -3810,6 +4290,10 @@ def write_endf_samples_batch(
         Output directory
     n_procs : int
         Number of parallel processes (1 = sequential)
+    energy_bins : Optional[List[EnergyBinInfo]]
+        Pipeline energy bins (enables splice mode)
+    energy_range_mev : Optional[Tuple[float, float]]
+        (E_min, E_max) in MeV for the splice range
 
     Returns
     -------
@@ -3817,6 +4301,7 @@ def write_endf_samples_batch(
         Paths to output files
     """
     n_total = len(all_samples)
+    use_splice = energy_bins is not None and energy_range_mev is not None
 
     if n_procs > 1:
         # Parallel mode: each worker reads the ENDF template independently
@@ -3829,6 +4314,8 @@ def write_endf_samples_batch(
                 all_samples[sample_idx],
                 output_dir,
                 None,  # cached_original_coeffs (worker reads fresh)
+                energy_bins,
+                energy_range_mev,
             )
             for sample_idx in sorted(all_samples.keys())
         ]
@@ -3856,41 +4343,104 @@ def write_endf_samples_batch(
     if not isinstance(mt_data_template, (MF4MTLegendre, MF4MTMixed)):
         raise ValueError(f"MT{mt_number} is not Legendre or Mixed type")
 
-    # Store original coefficients for restoration
-    original_coeffs = [list(c) for c in mt_data_template._legendre_coeffs]
-
     # Create writer once
     writer = ENDFWriter(original_endf_file)
-
     output_files = []
 
-    for sample_idx in sorted(all_samples.keys()):
-        # Restore original coefficients
-        mt_data_template._legendre_coeffs = [list(c) for c in original_coeffs]
+    if use_splice:
+        # Splice mode: establish grid structure once, then swap coefficients per sample
+        e_min_ev = energy_range_mev[0] * 1e6
+        e_max_ev = energy_range_mev[1] * 1e6
 
-        # Apply sampled coefficients
-        sampled_coeffs = all_samples[sample_idx]
-        for energy_idx, new_coeffs in sampled_coeffs.items():
-            if energy_idx < len(mt_data_template._legendre_coeffs):
-                mt_data_template._legendre_coeffs[energy_idx] = list(new_coeffs)
+        # Compute left/right portions once (same for every sample)
+        orig_e = np.array(mt_data_template._energies)
+        orig_c = mt_data_template._legendre_coeffs
+        keep = (orig_e < e_min_ev - 1.0) | (orig_e > e_max_ev + 1.0)
+        left_idx = np.where(keep & (orig_e < e_min_ev))[0]
+        right_idx = np.where(keep & (orig_e > e_max_ev))[0]
 
-        # Write output file
-        sample_str = f"{sample_idx + 1:04d}"
-        sample_dir = output_path / "endf" / sample_str
-        sample_dir.mkdir(parents=True, exist_ok=True)
-        output_file = sample_dir / f"{base}_{sample_str}.endf"
+        left_energies = [orig_e[i] for i in left_idx]
+        left_coeffs = [list(orig_c[i]) for i in left_idx]
+        right_energies = [orig_e[i] for i in right_idx]
+        right_coeffs = [list(orig_c[i]) for i in right_idx]
 
-        success = writer.replace_mf_section(mf4_template, str(output_file))
-        if not success:
-            raise RuntimeError(f"Failed to write {output_file}")
+        # Build pipeline energies once (same for every sample)
+        sorted_bins = sorted(energy_bins, key=lambda b: b.energy_ev)
+        pipeline_energies = [b.energy_ev for b in sorted_bins]
 
-        # Strip MF34 from sample files — samples should not carry covariance data
-        remove_mf34_from_file(str(output_file))
+        # Build the spliced energy grid (constant across samples)
+        spliced_energies = left_energies + pipeline_energies + right_energies
+        new_ne = len(spliced_energies)
 
-        output_files.append(str(output_file))
+        # Set the fixed grid structure
+        mt_data_template._energies = spliced_energies
+        mt_data_template._interpolation = [(new_ne, 2)]
+        mt_data_template._nr = 1
 
-        if (sample_idx + 1) % 50 == 0 or sample_idx == 0 or sample_idx == n_total - 1:
-            print(f"[INFO] Writing sample {sample_idx + 1}/{n_total}")
+        n_left = len(left_coeffs)
+        n_pipeline = len(sorted_bins)
+
+        for sample_idx in sorted(all_samples.keys()):
+            # Build pipeline coefficients for this sample
+            sampled = all_samples[sample_idx]
+            pipeline_coeffs = []
+            for b in sorted_bins:
+                if b.index in sampled:
+                    pipeline_coeffs.append(list(sampled[b.index]))
+                else:
+                    pipeline_coeffs.append(list(b.original_coeffs))
+
+            # Assemble full coefficients: left + pipeline + right
+            mt_data_template._legendre_coeffs = (
+                [list(c) for c in left_coeffs]
+                + pipeline_coeffs
+                + [list(c) for c in right_coeffs]
+            )
+
+            # Write output file
+            sample_str = f"{sample_idx + 1:04d}"
+            sample_dir = output_path / "endf" / sample_str
+            sample_dir.mkdir(parents=True, exist_ok=True)
+            output_file = sample_dir / f"{base}_{sample_str}.endf"
+
+            success = writer.replace_mf_section(mf4_template, str(output_file))
+            if not success:
+                raise RuntimeError(f"Failed to write {output_file}")
+
+            remove_mf34_from_file(str(output_file))
+            output_files.append(str(output_file))
+
+            if (sample_idx + 1) % 50 == 0 or sample_idx == 0 or sample_idx == n_total - 1:
+                print(f"[INFO] Writing sample {sample_idx + 1}/{n_total}")
+    else:
+        # Legacy in-place mode
+        original_coeffs = [list(c) for c in mt_data_template._legendre_coeffs]
+
+        for sample_idx in sorted(all_samples.keys()):
+            # Restore original coefficients
+            mt_data_template._legendre_coeffs = [list(c) for c in original_coeffs]
+
+            # Apply sampled coefficients
+            sampled_coeffs = all_samples[sample_idx]
+            for energy_idx, new_coeffs in sampled_coeffs.items():
+                if energy_idx < len(mt_data_template._legendre_coeffs):
+                    mt_data_template._legendre_coeffs[energy_idx] = list(new_coeffs)
+
+            # Write output file
+            sample_str = f"{sample_idx + 1:04d}"
+            sample_dir = output_path / "endf" / sample_str
+            sample_dir.mkdir(parents=True, exist_ok=True)
+            output_file = sample_dir / f"{base}_{sample_str}.endf"
+
+            success = writer.replace_mf_section(mf4_template, str(output_file))
+            if not success:
+                raise RuntimeError(f"Failed to write {output_file}")
+
+            remove_mf34_from_file(str(output_file))
+            output_files.append(str(output_file))
+
+            if (sample_idx + 1) % 50 == 0 or sample_idx == 0 or sample_idx == n_total - 1:
+                print(f"[INFO] Writing sample {sample_idx + 1}/{n_total}")
 
     return output_files
 

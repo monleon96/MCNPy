@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from numpy.polynomial.legendre import legvander, legval
 from scipy.stats import norm
+from scipy.linalg import cho_factor, cho_solve
 import matplotlib.pyplot as plt
 
 # Import from kika.exfor (new module)
@@ -183,6 +184,33 @@ def compute_angular_band_discrepancy(
     return sigma_eff, tau_values
 
 
+def sigma_eff_from_tau(
+    mu: np.ndarray,
+    sigma: np.ndarray,
+    tau_info: Dict[str, float],
+) -> np.ndarray:
+    """Reconstruct sigma_eff from known tau values (no re-estimation).
+
+    Uses the same band definitions as compute_angular_band_discrepancy:
+      Forward:  mu > 0.5   -> tau_F
+      Mid:      |mu| <= 0.5 -> tau_M
+      Backward: mu < -0.5  -> tau_B
+
+    sigma_eff_i = sqrt(sigma_i^2 + tau_b^2)
+    """
+    sigma_eff = sigma.copy()
+    bands = {
+        'tau_F': mu > 0.5,
+        'tau_M': (mu >= -0.5) & (mu <= 0.5),
+        'tau_B': mu < -0.5,
+    }
+    for key, mask in bands.items():
+        tau_b = tau_info.get(key, 0.0)
+        if tau_b > 0 and np.any(mask):
+            sigma_eff[mask] = np.sqrt(sigma[mask]**2 + tau_b**2)
+    return sigma_eff
+
+
 def smooth_tau_in_energy(
     tau_by_energy: Dict[float, Dict[str, float]],
     window: int = 3,
@@ -252,22 +280,22 @@ def smooth_tau_in_energy(
 
 def apply_tau_prior_floor(
     nominal_results: List,
-    min_experiments: int = 2,
+    n_eff_threshold: float = 5.0,
     percentile: float = 50.0,
 ) -> Dict[str, float]:
     """
-    Compute a per-band tau baseline from multi-experiment bins and enforce it
-    as a floor on single-experiment bins (partial pooling).
+    Compute a per-band tau baseline from well-supported bins and enforce it
+    as a floor on low-support bins (partial pooling).
 
-    For bins with fewer than `min_experiments` experiments, the tau values are
-    raised to at least the baseline computed from well-estimated bins.
+    Bins with N_eff >= n_eff_threshold are considered well-estimated (used to
+    compute the baseline). Bins with N_eff < n_eff_threshold get the floor applied.
 
     Parameters
     ----------
     nominal_results : List[NominalFitResult]
         Nominal fit results (modified in-place).
-    min_experiments : int
-        Minimum number of experiments for a bin to be considered well-estimated.
+    n_eff_threshold : float
+        Minimum N_eff for a bin to be considered well-estimated.
     percentile : float
         Percentile of well-estimated tau values to use as baseline (e.g. 50 = median).
 
@@ -279,16 +307,17 @@ def apply_tau_prior_floor(
     bands = ['tau_F', 'tau_M', 'tau_B']
     baselines: Dict[str, float] = {b: 0.0 for b in bands}
 
-    # Step 1: Collect tau values from well-estimated bins
+    # Step 1: Collect tau values from well-supported bins (high N_eff)
     well_estimated: Dict[str, List[float]] = {b: [] for b in bands}
     for r in nominal_results:
         if not r.has_data or r.interpolated:
             continue
-        n_exp = len(r.experiments_info)
-        if n_exp >= min_experiments:
+        r_neff = getattr(r.kernel_diagnostics, 'n_eff', 0.0) if hasattr(r, 'kernel_diagnostics') else 0.0
+        if r_neff >= n_eff_threshold:
             for b in bands:
                 val = r.tau_info.get(b, 0.0)
-                well_estimated[b].append(val)
+                if val > 0.0:  # exclude zeros — floor would collapse otherwise
+                    well_estimated[b].append(val)
 
     # Step 2: Compute baseline per band (need >= 3 well-estimated bins)
     for b in bands:
@@ -296,12 +325,12 @@ def apply_tau_prior_floor(
         if len(vals) >= 3:
             baselines[b] = float(np.percentile(vals, percentile))
 
-    # Step 3: Apply floor to under-estimated bins
+    # Step 3: Apply floor to low-support bins (low N_eff)
     for r in nominal_results:
         if not r.has_data or r.interpolated:
             continue
-        n_exp = len(r.experiments_info)
-        if n_exp < min_experiments:
+        r_neff = getattr(r.kernel_diagnostics, 'n_eff', 0.0) if hasattr(r, 'kernel_diagnostics') else 0.0
+        if r_neff < n_eff_threshold:
             updated = dict(r.tau_info)
             for b in bands:
                 updated[b] = max(updated.get(b, 0.0), baselines[b])
@@ -357,6 +386,236 @@ def compute_n_eff(
         return 0.0
 
     return (sum_w ** 2) / sum_w2
+
+
+def compute_angular_support_diagnostics(
+    mu: np.ndarray,
+    kernel_weights: np.ndarray,
+    max_degree: int,
+) -> Dict[str, float]:
+    """Compute diagnostics for angular coverage quality.
+
+    Returns dict with:
+    - n_unique_mu: distinct mu values (rounded to 4 decimals)
+    - mu_coverage: (max_mu - min_mu) / 2
+    - max_mu_gap: largest gap between consecutive sorted unique mu
+    - legendre_cond: condition number of weighted Legendre design at max_degree
+    - recommended_mc_order: suggested max order for MC sampling
+    """
+    from numpy.polynomial.legendre import legvander
+
+    unique_mu = np.unique(np.round(mu, decimals=4))
+    n_unique = len(unique_mu)
+    sorted_mu = np.sort(unique_mu)
+
+    mu_coverage = (sorted_mu[-1] - sorted_mu[0]) / 2.0 if n_unique > 1 else 0.0
+    max_gap = float(np.max(np.diff(sorted_mu))) if n_unique > 1 else 2.0
+
+    # Weighted Legendre design matrix condition number
+    W_sqrt = np.sqrt(np.maximum(kernel_weights, 0.0))
+    w_max = W_sqrt.max()
+    if w_max > 0:
+        W_sqrt = W_sqrt / w_max
+
+    # Compute condition number at max_degree
+    V = legvander(mu, max_degree)
+    VW = V * W_sqrt[:, None]
+    try:
+        cond = float(np.linalg.cond(VW))
+    except Exception:
+        cond = 1e12
+
+    # Heuristic for recommended MC order:
+    # 1. Need >= 2*(L+1) unique mu values
+    # 2. Condition number < 1e6 at that order
+    max_by_points = max(0, n_unique // 2 - 1)
+
+    max_by_cond = max_degree
+    for L_test in range(max_degree, 0, -1):
+        V_test = legvander(mu, L_test)
+        VW_test = V_test * W_sqrt[:, None]
+        try:
+            c = float(np.linalg.cond(VW_test))
+            if c < 1e6:
+                max_by_cond = L_test
+                break
+        except Exception:
+            continue
+    else:
+        max_by_cond = 1
+
+    recommended = min(max_by_points, max_by_cond, max_degree)
+
+    return {
+        'n_unique_mu': n_unique,
+        'mu_coverage': mu_coverage,
+        'max_mu_gap': max_gap,
+        'legendre_cond': cond,
+        'recommended_mc_order': max(1, recommended),
+    }
+
+
+def compute_between_experiment_coeffs(
+    exfor_df: pd.DataFrame,
+    degree: int,
+    fixed_c0: float,
+    min_points: int = 3,
+    ridge_lambda: float = 1e-6,
+    min_mu_coverage: float = 1.0,
+    max_cond: float = 1e4,
+) -> Optional[Dict]:
+    """Compute per-experiment Legendre coefficients and their weighted scatter.
+
+    For each qualifying experiment (>= min_points angular points), fit Legendre
+    polynomials independently with c0 frozen to the pooled value. Then compute
+    the weighted scatter of the resulting ENDF a_l coefficients across experiments.
+
+    This provides a "between-experiment" uncertainty floor analogous to the PDG
+    external error: if independent measurements disagree beyond their internal
+    errors, the uncertainty must reflect that disagreement.
+
+    An angular quality gate ensures that only experiments with sufficient angular
+    coverage and numerical stability contribute to the scatter estimate.  An
+    experiment with a handful of points at close angles cannot reliably determine
+    Legendre coefficients and would inflate the scatter artificially.
+
+    Parameters
+    ----------
+    exfor_df : pd.DataFrame
+        EXFOR data with columns 'mu', 'value', 'unc', 'entry', 'kernel_weight'.
+    degree : int
+        Maximum Legendre order from the pooled nominal fit.
+    fixed_c0 : float
+        c0 coefficient from the pooled fit (frozen for per-experiment fits).
+    min_points : int
+        Minimum angular points per experiment to qualify (default 3).
+    ridge_lambda : float
+        Small ridge parameter to stabilize near-singular per-experiment fits.
+    min_mu_coverage : float
+        Minimum angular span ``max(mu) - min(mu)`` required (default 1.0,
+        i.e. 50 % of the full [-1, 1] range).
+    max_cond : float
+        Maximum condition number of the per-experiment Legendre design matrix
+        (default 1e4).  Experiments whose design matrix exceeds this are
+        excluded because the fitted coefficients would be numerically
+        unreliable.
+
+    Returns
+    -------
+    dict or None
+        If >= 2 qualifying experiments:
+        - 'scatter': np.ndarray of weighted scatter for l=1..L_common (ENDF a_l units)
+        - 'L_common': int, max order with valid scatter
+        - 'n_experiments': int, number of qualifying experiments
+        - 'per_experiment': dict mapping entry -> (a_l array, n_points, weight_sum)
+        - 'skipped_experiments': list of (entry, reason) for experiments that
+          failed the quality gate
+        Returns None if fewer than 2 experiments qualify.
+    """
+    from numpy.polynomial.legendre import legvander
+
+    if 'entry' not in exfor_df.columns:
+        return None
+
+    # Group by experiment entry
+    grouped = exfor_df.groupby('entry')
+    per_experiment = {}
+    skipped = []
+
+    for entry_val, grp in grouped:
+        n_pts = len(grp)
+        if n_pts < min_points:
+            skipped.append((entry_val, f"too few points ({n_pts} < {min_points})"))
+            continue
+
+        mu = grp['mu'].to_numpy()
+        y = grp['value'].to_numpy()
+        sigma = grp['unc'].to_numpy()
+
+        # Determine max fit order: need n_pts > L_j + 1 (c0 frozen -> L_j free params)
+        L_j = min(n_pts - 2, degree)
+        if L_j < 1:
+            skipped.append((entry_val, f"L_j<1 (n_pts={n_pts})"))
+            continue
+
+        # --- Angular quality gate ---
+        unique_mu = np.unique(np.round(mu, decimals=4))
+        n_unique = len(unique_mu)
+
+        # (a) Angular coverage: must span enough of the cosine range
+        #     If points cluster in a narrow angular window the Legendre
+        #     polynomials are nearly collinear there and the fitted
+        #     coefficients reflect local noise, not the true shape.
+        mu_span = float(unique_mu.max() - unique_mu.min()) if n_unique > 1 else 0.0
+        if mu_span < min_mu_coverage:
+            skipped.append((entry_val, f"poor angular coverage (span={mu_span:.2f} < {min_mu_coverage})"))
+            continue
+
+        # (b) Condition number of per-experiment Legendre design matrix
+        #     Catches ill-conditioning from any source (clustered angles,
+        #     gaps, too few points for the order, etc.).
+        V = legvander(mu, L_j)
+        try:
+            cond = float(np.linalg.cond(V))
+        except Exception:
+            cond = np.inf
+        if cond > max_cond:
+            skipped.append((entry_val, f"ill-conditioned design (cond={cond:.0f} > {max_cond:.0f})"))
+            continue
+
+        # Use kernel_weight sum as scatter weight for this experiment
+        if 'kernel_weight' in grp.columns:
+            weight_sum = float(grp['kernel_weight'].sum())
+        else:
+            weight_sum = float(n_pts)
+
+        try:
+            coeffs, _chi2, _dof, _k = _weighted_ridge_fit(
+                mu, y, sigma, L_j,
+                fixed_c0=fixed_c0,
+                ridge_lambda=ridge_lambda,
+            )
+            a_l = endf_normalize_legendre_coeffs(coeffs)  # returns a_1..a_L
+            per_experiment[entry_val] = (a_l, n_pts, weight_sum)
+        except (ValueError, np.linalg.LinAlgError):
+            skipped.append((entry_val, "fit failed"))
+            continue
+
+    if len(per_experiment) < 2:
+        return None
+
+    # Common order: min of all per-experiment fit orders
+    L_common = min(len(a_l) for a_l, _, _ in per_experiment.values())
+    if L_common < 1:
+        return None
+
+    # Compute weighted scatter for each order l=1..L_common
+    scatter = np.zeros(L_common)
+    entries = list(per_experiment.keys())
+    N = len(entries)
+    weights = np.array([per_experiment[e][2] for e in entries])
+    W_total = weights.sum()
+
+    for l_idx in range(L_common):
+        a_vals = np.array([per_experiment[e][0][l_idx] for e in entries])
+
+        if N == 2:
+            # For N=2: scatter = sqrt(w1*w2/(w1+w2)) * |a1 - a2|
+            w1, w2 = weights[0], weights[1]
+            scatter[l_idx] = np.sqrt(w1 * w2 / (w1 + w2)) * abs(a_vals[0] - a_vals[1])
+        else:
+            # Weighted scatter: sqrt(sum w_j*(a_j - a_bar)^2 / ((N-1)/N * sum_w))
+            a_bar = np.average(a_vals, weights=weights)
+            var = np.sum(weights * (a_vals - a_bar) ** 2) / ((N - 1) / N * W_total)
+            scatter[l_idx] = np.sqrt(var)
+
+    return {
+        'scatter': scatter,
+        'L_common': L_common,
+        'n_experiments': N,
+        'per_experiment': per_experiment,
+        'skipped_experiments': skipped,
+    }
 
 
 def compute_weight_span_95(
@@ -754,6 +1013,127 @@ def _weighted_ridge_fit(
     return coeffs, chi2, dof, eff_params
 
 
+def _batch_mc_ridge_solve(
+    mu: np.ndarray,
+    Y_perturbed: np.ndarray,
+    sigma: np.ndarray,
+    degree: int,
+    ridge_lambda: float = 0.0,
+    ridge_power: int = 4,
+    external_weights: Optional[np.ndarray] = None,
+    fixed_c0: Optional[float] = None,
+    fixed_coeffs: Optional[Dict[int, float]] = None,
+) -> np.ndarray:
+    """
+    Batch-solve MC ridge regressions: factorize M once, solve all RHS at once.
+
+    Parameters
+    ----------
+    mu : np.ndarray
+        Cosine of scattering angle, shape (n,).
+    Y_perturbed : np.ndarray
+        Perturbed y vectors, shape (n_draws, n).
+    sigma : np.ndarray
+        Uncertainties, shape (n,).
+    degree : int
+        Legendre polynomial degree.
+    ridge_lambda, ridge_power, external_weights, fixed_c0, fixed_coeffs :
+        Same as ``_weighted_ridge_fit``.
+
+    Returns
+    -------
+    np.ndarray
+        Fitted coefficients, shape (n_draws, degree + 1).
+    """
+    # Weights (identical for all samples)
+    if external_weights is not None:
+        w = external_weights / (sigma ** 2)
+    else:
+        w = 1.0 / (sigma ** 2)
+    sw = np.sqrt(w)
+
+    # Merge fixed coefficient specs
+    fixed_values: Dict[int, float] = {}
+    if fixed_coeffs is not None:
+        fixed_values.update(fixed_coeffs)
+    if fixed_c0 is not None:
+        fixed_values[0] = fixed_c0
+
+    A_full = legvander(mu, degree)
+    all_indices = list(range(degree + 1))
+    n_draws = Y_perturbed.shape[0]
+
+    if fixed_values:
+        free_indices = [l for l in all_indices if l not in fixed_values]
+        fixed_indices = sorted(fixed_values.keys())
+
+        if not free_indices:
+            # All coefficients fixed — nothing to solve
+            coeffs_row = np.array([fixed_values.get(l, 0.0) for l in all_indices])
+            return np.tile(coeffs_row, (n_draws, 1))
+
+        fixed_vals = np.array([fixed_values[l] for l in fixed_indices])
+        # Subtract fixed contributions from all rows at once
+        Y_adj = Y_perturbed - (A_full[:, fixed_indices] @ fixed_vals)[np.newaxis, :]
+
+        A = A_full[:, free_indices]
+        Aw = A * sw[:, None]
+        n_free = len(free_indices)
+
+        if ridge_lambda > 0.0:
+            pen = np.array([float(l ** ridge_power) if l > 0 else 0.0
+                            for l in free_indices])
+            R = np.diag(pen)
+        else:
+            R = np.zeros((n_free, n_free), dtype=float)
+    else:
+        Y_adj = Y_perturbed
+        A = A_full
+        Aw = A * sw[:, None]
+        n_free = degree + 1
+
+        if ridge_lambda > 0.0:
+            pen = np.arange(degree + 1, dtype=float) ** ridge_power
+            pen[0] = 0.0
+            R = np.diag(pen)
+        else:
+            R = np.zeros((n_free, n_free), dtype=float)
+        free_indices = all_indices
+        fixed_indices = []
+
+    M = Aw.T @ Aw + ridge_lambda * R
+
+    # Factorize M once
+    try:
+        factor = cho_factor(M)
+        use_cho = True
+    except np.linalg.LinAlgError:
+        M_pinv = np.linalg.pinv(M)
+        use_cho = False
+
+    # Weighted RHS for all samples: shape (n_free, n_draws)
+    Yw = Y_adj * sw[np.newaxis, :]  # (n_draws, n)
+    RHS = Aw.T @ Yw.T              # (n_free, n_draws)
+
+    # Batch solve
+    if use_cho:
+        X = cho_solve(factor, RHS)  # (n_free, n_draws)
+    else:
+        X = M_pinv @ RHS
+
+    # Reconstruct full coefficient matrix
+    if fixed_values:
+        coeffs_all = np.zeros((n_draws, degree + 1), dtype=float)
+        for l in fixed_indices:
+            coeffs_all[:, l] = fixed_values[l]
+        for i, l in enumerate(free_indices):
+            coeffs_all[:, l] = X[i, :]
+    else:
+        coeffs_all = X.T  # (n_draws, n_free) = (n_draws, degree+1)
+
+    return coeffs_all
+
+
 def _criterion_score(
     chi2: float,
     n: int,
@@ -971,6 +1351,24 @@ def sample_legendre_coefficients(
 
     if use_band_discrepancy:
         # Angular-band discrepancy model: compute τ_F, τ_M, τ_B
+        # Pass 1: estimate tau from nominal fit residuals
+        y_fit = legval(mu, coeffs0)
+        sigma_eff, tau_info = compute_angular_band_discrepancy(
+            mu=mu, y=y, sigma=sigma, y_fit=y_fit,
+            min_points_per_band=min_points_per_band,
+            max_tau_fraction=max_tau_fraction,
+        )
+        # IRLS step: refit nominal with inflated uncertainties so the central
+        # fit adapts to problematic angular sectors (improves low-order coverage)
+        coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
+            mu, y, sigma_eff, degree_use,
+            ridge_lambda=ridge_lambda,
+            ridge_power=ridge_power,
+            df_method=df_method,
+            external_weights=external_weights,
+        )
+        chi2_red = float(chi2_0 / max(1e-12, dof_0))
+        # Pass 2: recompute tau with updated fit
         y_fit = legval(mu, coeffs0)
         sigma_eff, tau_info = compute_angular_band_discrepancy(
             mu=mu, y=y, sigma=sigma, y_fit=y_fit,
@@ -1028,41 +1426,40 @@ def sample_legendre_coefficients(
             group_keys = list(group_indices.keys())
 
     # Sampling fits
-    samples = []
     if n_samples <= 1 and not stochastic:
-        samples.append(coeffs0)
+        coef_mat = coeffs0[np.newaxis, :]
     else:
         n_draws = max(1, int(n_samples))
-        for _ in range(n_draws):
-            y_s = y.copy()
 
-            # Apply correlated normalization uncertainty per experiment (Improvement 1.3)
-            if sigma_norm > 0.0 and group_keys:
-                for key in group_keys:
-                    indices = group_indices[key]
-                    if norm_dist == "lognormal":
-                        # Lognormal: always positive, multiplicative, bias-corrected so E[X]=1
-                        N_g = rng.lognormal(mean=-0.5 * sigma_norm**2, sigma=sigma_norm)
-                    else:  # "normal"
-                        N_g = 1.0 + rng.normal(0.0, sigma_norm)
-                    y_s[indices] *= N_g
+        # Generate all perturbed y vectors at once
+        Y_perturbed = np.tile(y, (n_draws, 1))  # (n_draws, n)
 
-            # Add pointwise noise
-            y_s = y_s + rng.normal(loc=0.0, scale=sigma_eff, size=n)
+        # Apply correlated normalization uncertainty per experiment (Improvement 1.3)
+        if sigma_norm > 0.0 and group_keys:
+            for key in group_keys:
+                indices = group_indices[key]
+                if norm_dist == "lognormal":
+                    N_g = rng.lognormal(
+                        mean=-0.5 * sigma_norm**2,
+                        sigma=sigma_norm,
+                        size=n_draws,
+                    )
+                else:  # "normal"
+                    N_g = 1.0 + rng.normal(0.0, sigma_norm, size=n_draws)
+                Y_perturbed[:, indices] *= N_g[:, np.newaxis]
 
-            coeffs_s, _, _, _ = _weighted_ridge_fit(
-                mu, y_s, sigma_eff, degree_use,
-                ridge_lambda=ridge_lambda,
-                ridge_power=ridge_power,
-                df_method=df_method,
-                external_weights=external_weights,
-                fixed_c0=c0_fix,  # Pass fixed c0 if freeze_c0=True
-                fixed_coeffs=fixed_high,  # Freeze higher orders if max_sample_order set
-                compute_dof=False,  # Skip expensive hat-trace in MC refits
-            )
-            samples.append(coeffs_s)
+        # Add pointwise noise
+        Y_perturbed += rng.normal(loc=0.0, scale=sigma_eff, size=(n_draws, n))
 
-    coef_mat = np.vstack(samples)
+        # Batch solve: factorize M once, solve all RHS simultaneously
+        coef_mat = _batch_mc_ridge_solve(
+            mu, Y_perturbed, sigma_eff, degree_use,
+            ridge_lambda=ridge_lambda,
+            ridge_power=ridge_power,
+            external_weights=external_weights,
+            fixed_c0=c0_fix,
+            fixed_coeffs=fixed_high,
+        )
     coef_df = pd.DataFrame(coef_mat, columns=[f"c{l}" for l in range(degree_use + 1)])
 
     info = dict(

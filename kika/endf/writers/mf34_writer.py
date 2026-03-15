@@ -269,6 +269,21 @@ def create_mf34_from_covariance(
             f"{n_energies} energy intervals and {max_order} Legendre orders"
         )
 
+    # Validate finite values in inputs
+    if not np.all(np.isfinite(cov_matrix)):
+        n_inf = int(np.sum(np.isinf(cov_matrix)))
+        n_nan = int(np.sum(np.isnan(cov_matrix)))
+        inf_indices = np.argwhere(~np.isfinite(cov_matrix))
+        raise ValueError(
+            f"Covariance matrix contains {n_inf} inf and {n_nan} NaN values. "
+            f"First 5 non-finite positions (row, col): {inf_indices[:5].tolist()}"
+        )
+    if not np.all(np.isfinite(energy_grid_ev)):
+        raise ValueError(
+            f"Energy grid contains non-finite values: "
+            f"{energy_grid_ev[~np.isfinite(energy_grid_ev)]}"
+        )
+
     # Create MF34MT structure
     mf34 = MF34MT(number=mt)
     mf34._za = za
@@ -319,6 +334,7 @@ def write_mf34_to_file(
     mf34: MF34MT,
     output_path: str,
     replace_existing: bool = True,
+    update_directory: bool = True,
 ) -> str:
     """
     Write MF34 section to an ENDF file.
@@ -391,7 +407,17 @@ def write_mf34_to_file(
 
     if has_mf34:
         # Replace existing MF34
-        new_lines = lines[:mf34_start] + mf34_lines + lines[mf34_end:]
+        # Skip past the old FEND line (MF=0, MT=0) that follows the MF34 SEND
+        skip_end = mf34_end
+        if skip_end < len(lines) and len(lines[skip_end]) >= 75:
+            try:
+                old_mf = int(lines[skip_end][70:72].strip() or '0')
+                old_mt = int(lines[skip_end][72:75].strip() or '0')
+                if old_mf == 0 and old_mt == 0:
+                    skip_end += 1  # Skip the old FEND line
+            except ValueError:
+                pass
+        new_lines = lines[:mf34_start] + mf34_lines + lines[skip_end:]
     else:
         # Insert MF34 before MEND marker
         insert_idx = _find_mend_marker(lines)
@@ -400,6 +426,10 @@ def write_mf34_to_file(
     # Write output
     with open(output_path, 'w') as f:
         f.writelines(new_lines)
+
+    if update_directory:
+        from .update_directory import update_mf1_directory
+        update_mf1_directory(output_path)
 
     return output_path
 
@@ -468,11 +498,23 @@ def merge_mf34(
         potentially yielding multiple NI records (one per contiguous
         sub-range outside the pipeline window).
     """
-    from ..classes.mf34.mf34 import MF34CovMat  # noqa: F811 – local import
+    from kika.cov.legendre_covariance import LegendreCovariance  # noqa: F811 – local import
 
-    # --- Convert both to MF34CovMat to get per-(L,L1) matrices ----------
+    # --- Convert both to LegendreCovariance to get per-(L,L1) matrices ----------
     orig_cov = original_mf34.to_ang_covmat()
     pipe_cov = pipeline_mf34.to_ang_covmat()
+
+    # Validate finite values from both sources
+    for label, covmat in [("original", orig_cov), ("pipeline", pipe_cov)]:
+        for i in range(covmat.num_matrices):
+            mat = covmat.matrices[i]
+            if not np.all(np.isfinite(mat)):
+                raise ValueError(
+                    f"{label.capitalize()} MF34 (L={covmat.l_rows[i]}, "
+                    f"L1={covmat.l_cols[i]}) contains non-finite values: "
+                    f"{int(np.sum(np.isinf(mat)))} inf, "
+                    f"{int(np.sum(np.isnan(mat)))} NaN"
+                )
 
     # Build lookup: (l_row, l_col) -> (matrix, energy_grid) for each source
     def _build_ll_map(covmat):
@@ -582,7 +624,7 @@ def merge_mf34(
     return merged
 
 
-def remove_mf34_from_file(filepath: str) -> bool:
+def remove_mf34_from_file(filepath: str, update_directory: bool = True) -> bool:
     """
     Remove MF34 section from an ENDF file if present.
 
@@ -590,6 +632,8 @@ def remove_mf34_from_file(filepath: str) -> bool:
     ----------
     filepath : str or Path
         Path to the ENDF file to modify in place.
+    update_directory : bool, default True
+        If True, update MF1/MT451 directory after removal.
 
     Returns
     -------
@@ -606,6 +650,11 @@ def remove_mf34_from_file(filepath: str) -> bool:
     new_lines = lines[:start] + lines[end:]
     with open(filepath, 'w') as f:
         f.writelines(new_lines)
+
+    if update_directory:
+        from .update_directory import update_mf1_directory
+        update_mf1_directory(filepath)
+
     return True
 
 

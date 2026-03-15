@@ -16,6 +16,7 @@ class ENDF:
     files: Dict[int, MF] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
     mat: Optional[int] = None  # MAT number from ENDF file
+    _pendf: Optional[Dict] = field(default=None, repr=False)
     
     def add_file(self, mf: MF) -> None:
         """Add an MF file to this ENDF file"""
@@ -182,7 +183,7 @@ class ENDF:
                 # Get isotope ID (ZAID)
                 isotope_id = self.zaid if self.zaid is not None else int(mf34_mt._za)
                 
-                # Prepare kwargs for MF34CovMat.to_plot_data - remove parameters we're setting explicitly
+                # Prepare kwargs for LegendreCovariance.to_plot_data - remove parameters we're setting explicitly
                 styling_kwargs = {k: v for k, v in kwargs.items() if k not in ['order', 'mt', 'nuclide', 'uncertainty_type']}
                 
                 # Get uncertainty data from MF34 (returns tuple: (None, unc_data))
@@ -229,6 +230,34 @@ class ENDF:
         
         return plot_data, uncertainty_band
     
+    @property
+    def pendf(self) -> Optional[Dict]:
+        """Reconstructed pointwise cross sections (populated by reconstruct_xs())."""
+        return self._pendf
+
+    def reconstruct_xs(self, tolerance: float = 1e-3) -> Dict:
+        """Reconstruct pointwise cross sections from MF2 resonance parameters.
+
+        Results are stored in ``self.pendf`` as ``Dict[int, MF3MT]`` keyed by
+        MT number.  The original ``self.mf[3]`` data is preserved unchanged.
+
+        Parameters
+        ----------
+        tolerance : float
+            Linearization tolerance (default 0.1%).
+
+        Returns
+        -------
+        Dict[int, MF3MT]
+            Reconstructed cross sections.
+        """
+        from ..processing.reconr import reconr
+
+        mf2 = self.mf[2].mt[151]
+        mf3 = self.files.get(3)
+        self._pendf = reconr(mf2, mf3, tolerance=tolerance)
+        return self._pendf
+
     def __repr__(self):
         return f"ENDF({len(self.files)} files)"
     

@@ -12,6 +12,7 @@ from ..classes.mf import MF
 from ..classes.mf4.base import MF4MT
 from ..utils import parse_endf_id
 from ...utils import get_endf_logger
+from .update_directory import update_mf1_directory
 
 # Initialize logger for this module
 logger = get_endf_logger(__name__)
@@ -125,14 +126,16 @@ class ENDFWriter:
         logger.debug(f"Found {len(boundaries)} MF{mf_number}/MT{mt_number} sections at lines: {boundaries}")
         return boundaries
     
-    def replace_mf_section(self, modified_mf: MF, output_filepath: Optional[str] = None) -> bool:
+    def replace_mf_section(self, modified_mf: MF, output_filepath: Optional[str] = None,
+                           update_directory: bool = True) -> bool:
         """
         Replace an entire MF section with a modified version.
-        
+
         Args:
             modified_mf: The modified MF object with new content
             output_filepath: Output file path (if None, overwrites original)
-            
+            update_directory: If True, update MF1/MT451 directory after writing
+
         Returns:
             True if replacement succeeded, False otherwise
         """
@@ -168,22 +171,28 @@ class ENDFWriter:
                 f.writelines(new_lines)
             
             logger.debug(f"Successfully replaced MF{modified_mf.number} section in {output_path}")
+
+            if update_directory:
+                update_mf1_directory(output_path)
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Error replacing MF{modified_mf.number} section: {e}")
             return False
-    
-    def replace_mt_section(self, modified_mt: Union[MT, MT451, MF4MT], mf_number: int, 
-                          output_filepath: Optional[str] = None) -> bool:
+
+    def replace_mt_section(self, modified_mt: Union[MT, MT451, MF4MT], mf_number: int,
+                          output_filepath: Optional[str] = None,
+                          update_directory: bool = True) -> bool:
         """
         Replace a specific MT section within an MF section.
-        
+
         Args:
             modified_mt: The modified MT object with new content
             mf_number: The MF number containing this MT section
             output_filepath: Output file path (if None, overwrites original)
-            
+            update_directory: If True, update MF1/MT451 directory after writing
+
         Returns:
             True if replacement succeeded, False otherwise
         """
@@ -219,44 +228,52 @@ class ENDFWriter:
                 f.writelines(new_lines)
             
             logger.debug(f"Successfully replaced MF{mf_number}/MT{modified_mt.number} section in {output_path}")
+
+            if update_directory:
+                update_mf1_directory(output_path)
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Error replacing MF{mf_number}/MT{modified_mt.number} section: {e}")
             return False
 
 
 # Convenience functions for direct use without instantiating the class
-def replace_mf_section(original_filepath: str, modified_mf: MF, 
-                      output_filepath: Optional[str] = None) -> bool:
+def replace_mf_section(original_filepath: str, modified_mf: MF,
+                      output_filepath: Optional[str] = None,
+                      update_directory: bool = True) -> bool:
     """
     Replace an MF section in an ENDF file.
-    
+
     Args:
         original_filepath: Path to the original ENDF file
         modified_mf: The modified MF object
         output_filepath: Output file path (if None, overwrites original)
-        
+        update_directory: If True, update MF1/MT451 directory after writing
+
     Returns:
         True if replacement succeeded, False otherwise
     """
     writer = ENDFWriter(original_filepath)
-    return writer.replace_mf_section(modified_mf, output_filepath)
+    return writer.replace_mf_section(modified_mf, output_filepath, update_directory)
 
 
-def replace_mt_section(original_filepath: str, modified_mt: Union[MT, MT451, MF4MT], 
-                      mf_number: int, output_filepath: Optional[str] = None) -> bool:
+def replace_mt_section(original_filepath: str, modified_mt: Union[MT, MT451, MF4MT],
+                      mf_number: int, output_filepath: Optional[str] = None,
+                      update_directory: bool = True) -> bool:
     """
     Replace an MT section in an ENDF file.
-    
+
     Args:
         original_filepath: Path to the original ENDF file
         modified_mt: The modified MT object
         mf_number: The MF number containing this MT section
         output_filepath: Output file path (if None, overwrites original)
-        
+        update_directory: If True, update MF1/MT451 directory after writing
+
     Returns:
         True if replacement succeeded, False otherwise
     """
     writer = ENDFWriter(original_filepath)
-    return writer.replace_mt_section(modified_mt, mf_number, output_filepath)
+    return writer.replace_mt_section(modified_mt, mf_number, output_filepath, update_directory)

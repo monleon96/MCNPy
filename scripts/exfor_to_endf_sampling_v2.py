@@ -68,6 +68,8 @@ from scripts.exfor_utils import (
     compute_kw_reliability_alpha,
     # Energy binning
     compute_energy_bins_with_tof_resolution,
+    build_union_energy_grid,
+    remap_samples_to_endf_indices,
     # EXFOR data conversion (new API -> legacy format)
     build_exfor_cache_from_objects,
     # EXFOR filtering
@@ -80,8 +82,9 @@ from scripts.exfor_utils import (
     compute_bin_reliability_alpha,
     generate_cholesky_samples,
     cap_covariance_relative_uncertainty,
+    absolute_to_nominal_relative,
     regularize_near_zero_relative_covariance,
-    regularize_post_rescaling,
+    apply_between_experiment_floor,
     smooth_absent_order_uncertainties,
     log_rel_std_profile,
     cap_order_relative_uncertainty,
@@ -124,9 +127,12 @@ from scripts.resample_AD import (
     sample_legendre_coefficients,
     endf_normalize_legendre_coeffs,
     compute_angular_band_discrepancy,
+    sigma_eff_from_tau,
     smooth_tau_in_energy,
     apply_tau_prior_floor,
     compute_n_eff,
+    compute_angular_support_diagnostics,
+    compute_between_experiment_coeffs,
 )
 
 import time
@@ -155,7 +161,7 @@ EXFOR_DIRECTORY = "/share_snc/snc/JuanMonleon/EXFOR/data_v1/"
 EXFOR_DB_PATH = '/share_snc/snc/JuanMonleon/EXFOR/x4_iron_angular.db'
 
 # Output directory (all generated files go here)
-OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_20/"
+OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_27/"
 
 # -----------------------------------------------------------------------------
 # 2. DATA SOURCE CONFIGURATION
@@ -195,7 +201,7 @@ MULTIGROUP_SIGMA_RATIO_MAX = 2.0                 # Max sigma ratio within group 
 MULTIGROUP_MIN_WIDTH_FACTOR = 3.0                # Group width >= k * median(sigma_E)
 MULTIGROUP_RHO_HARD_MIN = 0.0                    # Hard veto: never merge below this
 MULTIGROUP_SIGMA_RATIO_HARD_MAX = 5.0            # Hard veto: never merge above this
-MULTIGROUP_RHO_SOFT_MIN = 0.5                    # Soft fallback: allow if group undersized
+MULTIGROUP_RHO_SOFT_MIN = 0.7                    # Soft fallback: allow if group undersized
 MULTIGROUP_SIGMA_RATIO_SOFT_MAX = 3.0            # Soft fallback: allow if group undersized
 MF34_COVARIANCE_TYPE = "multigroup"              # "fine", "multigroup", or "both"
 USE_ORIGINAL_MF34_GRID = False                   # Force multigroup grid from original MF34
@@ -212,68 +218,57 @@ MULTIGROUP_VARIANCE_CONSERVATISM = 66.67
 MULTIGROUP_REGROUP_AFTER_SMOOTH = True
 MULTIGROUP_REGROUP_SIGMA_RATIO_MAX = 2.5   # relaxed vs first-pass 2.0
 
-# --- Layer 1: Covariance diagonal cap ---
-# Caps excessive relative uncertainties in the covariance matrix.
-# Set APPLY_COVARIANCE_CAP = False to disable (preserves existing behavior).
-APPLY_COVARIANCE_CAP = False
-MAX_RELATIVE_STD_CAP = 1.0  # 100% relative uncertainty cap
+# --- Pre-processing: covariance diagonal cap (before abs→rel conversion) ---
+APPLY_COVARIANCE_CAP = False          # global rel_std cap (True to enable)
+MAX_RELATIVE_STD_CAP = 1.0            # max relative std when cap is enabled
 
-# --- Near-zero relative uncertainty regularization ---
-# Replaces explosive relative stds (caused by near-zero means) with
-# interpolated values from neighboring bins of the same Legendre order.
-# Applied via congruence transform (preserves correlations and PSD).
+# --- Pre-processing: near-zero regularization (during covariance construction) ---
+# Replaces explosive relative stds caused by near-zero means with
+# neighbor-interpolated values via congruence transform.
 REGULARIZE_NEAR_ZERO_REL_UNC = True
-NEAR_ZERO_SNR_THRESHOLD = 1.0   # Flag if |mean|/sigma_abs < this
-NEAR_ZERO_N_NEIGHBORS = 3       # Valid neighbors to seek on each side
+NEAR_ZERO_SNR_THRESHOLD = 1.0         # flag if |mean|/sigma_abs < this
+NEAR_ZERO_N_NEIGHBORS = 3             # valid neighbors to seek on each side
 
-# --- Post-rescaling regularization (bidirectional, SOFT fix) ---
-# Replaces blown-up/crushed stds with neighbor-interpolated values via
-# congruence transform. This is a SMOOTH fix (interpolation-based).
-# ORDER_REL_STD_CAPS below is the HARD cap applied after all smoothing.
-RESCALE_MAX_FACTOR = 3.0             # max |mc_mean/nominal| ratio (clips to [1/k, k])
-POST_RESCALING_MAX_REL_STD = 0.50    # flag & interpolate if rel_std > this
-POST_RESCALING_N_NEIGHBORS = 5      # neighbors each side (wider than near-zero: need to skip consecutive bad bins)
-POST_RESCALING_DEFLATION_THRESHOLD = 0.5  # flag if abs_std < 50% of MC abs_std
+# =============================================================================
+# MF34 POST-PROCESSING PIPELINE
+# Steps 1-5 below run sequentially after abs→rel conversion.
+# Set APPLY_COV_POSTPROCESSING = False to skip ALL steps.
+# =============================================================================
+APPLY_COV_POSTPROCESSING = False
 
-# --- Order-dependent relative-uncertainty HARD caps (1-indexed order -> max rel_std) ---
-# Final safety net applied AFTER regularization + smoothing.
-# Congruence transform: scales down but preserves correlations and PSD.
+# --- Step 1: Between-experiment scatter floor (FG level only, no config) ---
+
+# --- Step 2: Dip/spike smoothing & absent-order interpolation ---
+# Fills absent entries (rel_std < floor) and detects dips/spikes vs neighbors.
+# Set SMOOTH_DIP_FRACTION to None to disable dip detection.
+# Set SMOOTH_SPIKE_FACTOR to None to disable spike detection.
+SMOOTH_MIN_REL_STD = 0.005            # entries below this treated as absent
+SMOOTH_DIP_FRACTION = 0.50            # flag if < fraction * neighbor median (None = disabled)
+SMOOTH_SPIKE_FACTOR = 3.0             # flag if > factor * neighbor median (None = disabled)
+SMOOTH_DIP_N_NEIGHBORS = 3            # neighbors each side (FG level)
+SMOOTH_MEDIAN_FILL_THRESHOLD = 0.50   # if > this fraction absent, use flat median fill
+MG_SMOOTH_SPIKE_FACTOR = 2.0          # tighter spike threshold at MG/RG level
+MG_SMOOTH_DIP_N_NEIGHBORS = 5         # wider neighborhood at MG/RG level
+
+# --- Step 3: Spatial Gaussian smoothing of diagonal ---
+SMOOTH_DIAGONAL_WINDOW = 0            # Gaussian kernel window (0 = disabled, >=3 to enable)
+
+# --- Step 4: Hard cap per Legendre order ---
+# Final safety net: scales down entries exceeding cap via congruence transform.
+# Set to None to disable.
 ORDER_REL_STD_CAPS = {1: 0.50, 2: 0.50, 3: 0.40, 4: 0.35, 5: 0.25, 6: 0.20}
 
-# --- Absent-order smoothing / near-zero dip interpolation ---
-# Entries with rel_std below this floor are treated as absent and interpolated
-SMOOTH_MIN_REL_STD = 0.005              # 0.5% floor
-# Entries with rel_std < this fraction of neighbor median are flagged as dips
-SMOOTH_DIP_FRACTION = 0.50             # 50% of neighbor median
-SMOOTH_SPIKE_FACTOR = 3.0             # 3x neighbor median → flagged as spike
-SMOOTH_DIP_N_NEIGHBORS = 3            # neighbors each side for dip/spike detection
-# If > this fraction of bins are flagged for an order, use flat median fill
-# instead of linear interpolation (avoids zigzag from sparse anchors).
-# Applies to l>=3 where many bins may lack that order entirely.
-SMOOTH_MEDIAN_FILL_THRESHOLD = 0.50   # 50% absent → median fill
+# --- Step 5: Forward-fill absent orders ---
+FORWARD_FILL_REL_STD_ENABLED = False   # propagate last valid rel_std into absent bins
 
-# --- MG-level tighter smoothing (fewer bins → need stricter thresholds) ---
-MG_SMOOTH_SPIKE_FACTOR = 2.0         # 2x neighbor median at MG level
-MG_SMOOTH_DIP_N_NEIGHBORS = 5        # wider neighborhood at MG level
+# --- Diagnostic & file output ---
+VERBOSE_DIAGNOSTICS = True             # per-order percentile stats at every pipeline stage
+SAVE_CORRELATION_MATRICES = False      # save correlation alongside covariance
 
-# --- Final spatial Gaussian smoothing of diagonal ---
-# Applied before the hard cap to break serrated present/absent patterns.
-# Uses Gaussian-weighted moving average (sigma = window/4).
-SMOOTH_DIAGONAL_WINDOW = 11          # window size for Gaussian kernel (0 = disabled)
-
-# --- Diagnostic output ---
-# When True, logs per-order percentile statistics AND per-bin rel_std values
-# at every pipeline stage (FG/MG/RG × post-rescale/regularize/smooth/cap).
-VERBOSE_DIAGNOSTICS = True
-
-# --- File output options ---
-SAVE_CORRELATION_MATRICES = False       # Save correlation alongside covariance
-
-# --- Layer 2: Positivity-constrained projection ---
+# --- Post-processing: positivity-constrained projection ---
 # Projects MC samples to ensure non-negative angular distributions.
-# Set APPLY_POSITIVITY_PROJECTION = False to disable (preserves existing behavior).
 APPLY_POSITIVITY_PROJECTION = True
-POSITIVITY_CHECK_POINTS = 101  # Number of mu points in [-1, 1]
+POSITIVITY_CHECK_POINTS = 101          # number of mu points in [-1, 1]
 
 # -----------------------------------------------------------------------------
 # 3c. ACE COMMON OPTIONS (shared NJOY config, used by either pipeline)
@@ -288,8 +283,8 @@ ACE_SKIP_EXISTING = False                          # Skip samples with existing 
 # -----------------------------------------------------------------------------
 # 3d. MF34 SAMPLING (Pipeline B)
 # -----------------------------------------------------------------------------
-GENERATE_MF34_SAMPLES = True                       # Generate perturbed ENDF samples from MF34 covariance → endf/
-GENERATE_MF34_ACE = True                           # Generate ACE files for MF34 samples
+GENERATE_MF34_SAMPLES = False                       # Generate perturbed ENDF samples from MF34 covariance → endf/
+GENERATE_MF34_ACE = False                           # Generate ACE files for MF34 samples
 SAMPLING_RESOLUTION = "multigroup"                 # "fine" | "multigroup" (grid controlled by USE_ORIGINAL_MF34_GRID)
 SAMPLING_SPACE = "linear"                          # "linear" or "log"
 SAMPLING_DECOMPOSITION = "svd"                     # "svd", "cholesky", "eigen", "pca"
@@ -332,6 +327,8 @@ EXCLUDE_EXPERIMENTS = ["32246002"]
 # Minimum relative uncertainty floor (prevents unrealistically small errors from dominating)
 # Set to 0.0 to disable. e.g., 0.05 for 5% minimum uncertainty
 MIN_RELATIVE_UNCERTAINTY = 0.05
+# Uncertainty floor strategy: 'fixed' (simple floor) or 'bin_median' (replace with bin median)
+UNCERTAINTY_FLOOR_STRATEGY = 'bin_median'
 
 # -----------------------------------------------------------------------------
 # 6. METHOD-SPECIFIC PARAMETERS
@@ -347,9 +344,9 @@ USE_BAND_DISCREPANCY = True                      # Use band-based uncertainty (v
 MIN_POINTS_PER_BAND = 3                          # Minimum points to estimate τ_b per band
 MAX_TAU_FRACTION = 0.25                          # Cap τ_b at 25% of cross section
 TAU_SMOOTHING_WINDOW = 3                         # Moving median window for τ_b(E) smoothing
-TAU_PRIOR_FLOOR = True                           # Apply tau prior floor from multi-experiment bins
-TAU_PRIOR_MIN_EXPERIMENTS = 2                    # Min experiments to count as "well-estimated"
-TAU_PRIOR_PERCENTILE = 50                        # Percentile of well-estimated tau for baseline
+TAU_PRIOR_FLOOR = False                           # Apply tau prior floor from well-supported bins
+TAU_PRIOR_NEFF_THRESHOLD = 5.0                   # Min N_eff to count as "well-supported"
+TAU_PRIOR_PERCENTILE = 50                        # Percentile of well-supported tau for baseline
 RESCALE_UNC_BY_CHI2 = True                       # Apply Birge scaling when band discrepancy disabled
 ALLOW_SHRINK_UNC = True                          # Allow uncertainties to shrink (chi2_red < 1)
 
@@ -363,10 +360,27 @@ MIN_DEGREE_FOR_AVERAGING = 1                     # Minimum degree to consider (1
 USE_DEGREE_SAMPLING_IN_MC = True                 # Sample degree from degree_weights distribution
 
 # --- 6g. Energy Bin Method Specific  ---
-NORMALIZE_BY_N_POINTS = True                     # Equal weight per experiment (1/n_points weighting)
-MAX_EXP_WEIGHT_FRAC_BIN = 0.33                    # Cap per-experiment dominance (1.0 = disabled)
+NORMALIZE_BY_N_POINTS = True                     # Enable study-level sublinear weighting
+WEIGHT_GAMMA = 0.5                               # Sublinear power: 0=equal-per-study, 1=uniform-per-point, 0.5=sqrt
+MAX_EXP_WEIGHT_FRAC_BIN = 0.50                   # Cap per-study dominance (relaxed from 0.33 with gamma weighting)
 FREEZE_C0 = True                                # Fix c0 for shape-only refits
-MAX_SAMPLE_ORDER = None                            # Max Legendre order to sample (None for no freeze)
+MAX_SAMPLE_ORDER = 3                               # Publish covariance for l=1..3 only (higher orders cap-dominated)
+
+# --- Angular Quality Gate ---
+ANGULAR_QUALITY_GATE = True
+MIN_ANGULAR_POINTS = 4                              # Minimum total angular data points
+MIN_BANDS_COVERED = 3                               # Must have data in all 3 bands (F/M/B)
+MAX_BIN_EXPANSION = 3                               # Max expansion steps (1=±1 bins, 2=±2 bins)
+
+# --- Energy Grid Source ---
+# "endf"  — use ENDF MF4 Legendre energy grid (original behavior)
+# "union" — build grid from union of energies of selected EXFOR subentries
+ENERGY_GRID_SOURCE = "union"
+# Subentries + per-subentry energy range (min_MeV, max_MeV); None = use global bound
+UNION_GRID_SUBENTRIES = [
+    ("10571002", 0.847, 2.5),   # Kinney: up to 2.5 MeV
+    ("10886002", 2.5, 4),       # Smith: from 2.5 MeV onwards
+]
 
 # --- 6h. Correlation Method ---
 # "gaussian"        — Per-bin stochastic MC → Gaussian parametric energy correlations → Cholesky samples
@@ -375,7 +389,7 @@ MAX_SAMPLE_ORDER = None                            # Max Legendre order to sampl
 CORRELATION_METHOD = "hybrid"
 KW_MC_TWO_PASS = True                            # True: per-bin variance + KW correlations. False: single-pass.
 KW_MC_MIN_WEIGHT = 1e-3                          # Overlap weight threshold for kernel-weight MC
-KW_MIN_POINTS_REF = 5.0                          # Quality penalty: min median n_points for full alpha
+KW_MIN_POINTS_REF = None                         # Quality penalty threshold: set to max_order+1 at runtime
 
 # --- 6i. TOF Parameters (for energy resolution) ---
 TOF_PARAMETERS_FILE = "/share_snc/snc/JuanMonleon/EXFOR/exfor_tof_parameters.json"
@@ -572,6 +586,8 @@ def _mc_one_bin(args):
         max_sample_order,
         _apply_positivity_projection,
         _positivity_check_points,
+        frozen_tau_info,
+        mc_order_cap,
     ) = args
 
     energy_idx = nr_energy_idx
@@ -585,11 +601,30 @@ def _mc_one_bin(args):
     rng = np.random.default_rng(bin_seed)
     mc_weights = nr_mc_weights
 
+    # If frozen tau_info is available, pre-inflate uncertainties and disable
+    # band discrepancy re-estimation so MC uses the smoothed/floored tau
+    if frozen_tau_info and use_band_discrepancy:
+        from scripts.resample_AD import sigma_eff_from_tau
+        mu_arr = nr_mc_df['mu'].to_numpy()
+        sigma_arr = nr_mc_df['unc'].to_numpy()
+        inflated_unc = sigma_eff_from_tau(mu_arr, sigma_arr, frozen_tau_info)
+        nr_mc_df = nr_mc_df.copy()
+        nr_mc_df['unc'] = inflated_unc
+        use_band_discrepancy = False  # already applied via frozen tau
+
     use_degree_sampling = (
         use_degree_sampling_in_mc and
         nr_degree_weights is not None and
         len(nr_degree_weights) > 1
     )
+
+    # Combine global MAX_SAMPLE_ORDER with per-bin mc_order_cap
+    effective_sample_order = max_sample_order
+    if mc_order_cap is not None:
+        if effective_sample_order is not None:
+            effective_sample_order = min(effective_sample_order, mc_order_cap)
+        else:
+            effective_sample_order = mc_order_cap
 
     results = {}
     try:
@@ -633,15 +668,15 @@ def _mc_one_bin(args):
                     freeze_c0=freeze_c0,
                     sigma_norm=normalization_sigma,
                     norm_dist=norm_dist,
-                    max_sample_order=max_sample_order,
+                    max_sample_order=effective_sample_order,
                 )
                 for local_i, s_idx in enumerate(s_indices):
                     sample_coeffs = coef_df_batch.iloc[local_i].to_numpy()
                     if len(sample_coeffs) < max_degree + 1:
                         sample_coeffs = np.pad(sample_coeffs, (0, max_degree + 1 - len(sample_coeffs)))
                     # Restore frozen orders from nominal values
-                    if max_sample_order is not None:
-                        for l in range(max_sample_order + 1, len(sample_coeffs)):
+                    if effective_sample_order is not None:
+                        for l in range(effective_sample_order + 1, len(sample_coeffs)):
                             if l < len(nr_nominal_coeffs):
                                 sample_coeffs[l] = nr_nominal_coeffs[l]
                     if _apply_positivity_projection:
@@ -649,8 +684,8 @@ def _mc_one_bin(args):
                             frozen = {}
                             if freeze_c0:
                                 frozen[0] = sample_coeffs[0]
-                            if max_sample_order is not None and max_sample_order + 1 < len(sample_coeffs):
-                                frozen.update({i: sample_coeffs[i] for i in range(max_sample_order + 1, len(sample_coeffs))})
+                            if effective_sample_order is not None and effective_sample_order + 1 < len(sample_coeffs):
+                                frozen.update({i: sample_coeffs[i] for i in range(effective_sample_order + 1, len(sample_coeffs))})
                             sample_coeffs = project_to_positive_distribution(sample_coeffs, _positivity_check_points, frozen_indices=frozen or None)
                     endf_coeffs = endf_normalize_legendre_coeffs(sample_coeffs, include_a0=False)
                     results[s_idx] = endf_coeffs
@@ -681,7 +716,7 @@ def _mc_one_bin(args):
                 freeze_c0=freeze_c0,
                 sigma_norm=normalization_sigma,
                 norm_dist=norm_dist,
-                max_sample_order=max_sample_order,
+                max_sample_order=effective_sample_order,
             )
             for s_idx in range(n_samples):
                 sample_coeffs = coef_df.iloc[s_idx].to_numpy()
@@ -690,8 +725,8 @@ def _mc_one_bin(args):
                         frozen = {}
                         if freeze_c0:
                             frozen[0] = sample_coeffs[0]
-                        if max_sample_order is not None and max_sample_order + 1 < len(sample_coeffs):
-                            frozen.update({i: sample_coeffs[i] for i in range(max_sample_order + 1, len(sample_coeffs))})
+                        if effective_sample_order is not None and effective_sample_order + 1 < len(sample_coeffs):
+                            frozen.update({i: sample_coeffs[i] for i in range(effective_sample_order + 1, len(sample_coeffs))})
                         sample_coeffs = project_to_positive_distribution(sample_coeffs, _positivity_check_points, frozen_indices=frozen or None)
                 endf_coeffs = endf_normalize_legendre_coeffs(sample_coeffs, include_a0=False)
                 if len(endf_coeffs) < max_degree:
@@ -730,6 +765,12 @@ class NominalFitResult:
     kernel_diagnostics: Optional[KernelDiagnostics] = None
     degree_weights: Optional[Dict[int, float]] = None
     all_degrees_info: Optional[Dict[int, Dict]] = None
+    mc_order_cap: Optional[int] = None              # Adaptive MC-only order cap from angular support
+    between_exp_scatter: Optional[np.ndarray] = None  # Per-coefficient between-experiment scatter (ENDF a_l units)
+    between_exp_L_common: int = 0                      # Max order with valid scatter
+    skip_reason: Optional[str] = None
+    expanded_bins: int = 0                             # 0=original, 1=±1 expanded, 2=±2 expanded
+    endf_index: Optional[int] = None                   # Nearest ENDF grid index (for I/O when grid != ENDF)
 
 
 # Import the rest of the workflow functions from the original script
@@ -986,6 +1027,28 @@ def log_experiments_summary(
     logger.info("")
 
 
+def _check_angular_quality(exfor_df, min_points, min_bands):
+    """Check if angular data meets quality criteria.
+
+    Returns (passes: bool, reason: str).
+    """
+    n_pts = len(exfor_df)
+    if n_pts < min_points:
+        return False, f"n_pts={n_pts} < {min_points}"
+
+    mu = exfor_df['mu'].to_numpy()
+    has_F = np.any(mu > 0.5)
+    has_M = np.any((mu >= -0.5) & (mu <= 0.5))
+    has_B = np.any(mu < -0.5)
+    n_bands = int(has_F) + int(has_M) + int(has_B)
+
+    if n_bands < min_bands:
+        bands_str = "/".join(b for b, h in [("F", has_F), ("M", has_M), ("B", has_B)] if h)
+        return False, f"bands={bands_str} ({n_bands}/{min_bands})"
+
+    return True, ""
+
+
 def perform_nominal_fits(
     energy_bins: List[EnergyBinInfo],
     exfor_cache: Dict[float, List[Tuple[pd.DataFrame, Dict]]],
@@ -1004,8 +1067,12 @@ def perform_nominal_fits(
     exclude_experiments: Optional[List[str]] = None,
     min_relative_uncertainty: float = 0.0,
     tau_prior_floor: bool = True,
-    tau_prior_min_experiments: int = 2,
+    tau_prior_neff_threshold: float = 5.0,
     tau_prior_percentile: float = 50.0,
+    angular_quality_gate: bool = True,
+    min_angular_points: int = 4,
+    min_bands_covered: int = 3,
+    max_bin_expansion: int = 2,
     logger = None,
 ) -> List[NominalFitResult]:
     """Phase 1: Perform nominal fits using energy_bin method.
@@ -1019,9 +1086,16 @@ def perform_nominal_fits(
 
     logger = _get_logger()
     results = []
+    total_floor_floored = 0
+    total_floor_pts = 0
+    total_floor_bins = 0
+    floor_replacement_vals = []
+    gate_expanded_1 = 0  # Bins expanded by ±1
+    gate_expanded_2 = 0  # Bins expanded by ±2
+    gate_failed = 0      # Bins that failed quality gate after max expansion
 
-    for bin_info in energy_bins:
-        exfor_df, experiments_info, kernel_weights, diagnostics = filter_exfor_with_energy_bin(
+    for bin_idx, bin_info in enumerate(energy_bins):
+        exfor_df, experiments_info, kernel_weights, diagnostics, floor_stats = filter_exfor_with_energy_bin(
             exfor_cache=exfor_cache,
             sorted_energies=sorted_energies,
             bin_lower_mev=bin_info.bin_lower_mev,
@@ -1032,14 +1106,25 @@ def perform_nominal_fits(
             dedupe_per_experiment=True,
             exclude_experiments=exclude_experiments,
             min_relative_uncertainty=min_relative_uncertainty,
+            unc_floor_strategy=UNCERTAINTY_FLOOR_STRATEGY,
             normalize_by_n_points=NORMALIZE_BY_N_POINTS,
+            weight_gamma=WEIGHT_GAMMA,
             max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
+            logger=_logger,
         )
+
+        # Accumulate uncertainty floor stats
+        if floor_stats['n_floored'] > 0:
+            total_floor_floored += floor_stats['n_floored']
+            total_floor_pts += floor_stats['n_total']
+            total_floor_bins += 1
+            floor_replacement_vals.append(floor_stats['replacement_rel_unc'])
 
         if exfor_df.empty or len(exfor_df) < 3:
             results.append(NominalFitResult(
                 energy_mev=bin_info.energy_mev,
                 energy_index=bin_info.index,
+                endf_index=bin_info.endf_index,
                 exfor_df=pd.DataFrame(),
                 experiments_info=[],
                 kernel_weights=np.array([]),
@@ -1054,6 +1139,86 @@ def perform_nominal_fits(
             if logger:
                 logger.warning(f"E={bin_info.energy_mev:.4f} MeV: No EXFOR data (σE={bin_info.sigma_E_mev:.4f} MeV)")
             continue
+
+        # --- Angular Quality Gate ---
+        expansion_used = 0
+        if angular_quality_gate:
+            passes, reason = _check_angular_quality(exfor_df, min_angular_points, min_bands_covered)
+
+            if not passes:
+                expanded = False
+                for expansion in range(1, max_bin_expansion + 1):
+                    left_idx = max(0, bin_idx - expansion)
+                    right_idx = min(len(energy_bins) - 1, bin_idx + expansion)
+                    expanded_lower = energy_bins[left_idx].bin_lower_mev
+                    expanded_upper = energy_bins[right_idx].bin_upper_mev
+
+                    exfor_df_exp, exp_info_exp, kw_exp, diag_exp, floor_exp = filter_exfor_with_energy_bin(
+                        exfor_cache=exfor_cache,
+                        sorted_energies=sorted_energies,
+                        bin_lower_mev=expanded_lower,
+                        bin_upper_mev=expanded_upper,
+                        target_energy_mev=bin_info.energy_mev,
+                        m_proj_u=m_proj_u,
+                        m_targ_u=m_targ_u,
+                        dedupe_per_experiment=True,
+                        exclude_experiments=exclude_experiments,
+                        min_relative_uncertainty=min_relative_uncertainty,
+                        unc_floor_strategy=UNCERTAINTY_FLOOR_STRATEGY,
+                        normalize_by_n_points=NORMALIZE_BY_N_POINTS,
+                        weight_gamma=WEIGHT_GAMMA,
+                        max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
+                        logger=_logger,
+                    )
+
+                    passes_exp, reason_exp = _check_angular_quality(exfor_df_exp, min_angular_points, min_bands_covered)
+                    if passes_exp:
+                        exfor_df = exfor_df_exp
+                        experiments_info = exp_info_exp
+                        kernel_weights = kw_exp
+                        diagnostics = diag_exp
+                        if floor_exp['n_floored'] > 0:
+                            total_floor_floored += floor_exp['n_floored']
+                            total_floor_pts += floor_exp['n_total']
+                            total_floor_bins += 1
+                            floor_replacement_vals.append(floor_exp['replacement_rel_unc'])
+                        expansion_used = expansion
+                        if expansion == 1:
+                            gate_expanded_1 += 1
+                        else:
+                            gate_expanded_2 += 1
+                        if logger:
+                            logger.info(
+                                f"E={bin_info.energy_mev:.4f} MeV: expanded ±{expansion} bins "
+                                f"(idx {left_idx}-{right_idx}), now {len(exfor_df)} pts"
+                            )
+                        expanded = True
+                        break
+
+                if not expanded:
+                    gate_failed += 1
+                    if logger:
+                        logger.warning(
+                            f"E={bin_info.energy_mev:.4f} MeV: QUALITY GATE failed after "
+                            f"max expansion ({reason}) → interpolate"
+                        )
+                    results.append(NominalFitResult(
+                        energy_mev=bin_info.energy_mev,
+                        energy_index=bin_info.index,
+                        endf_index=bin_info.endf_index,
+                        exfor_df=pd.DataFrame(),
+                        experiments_info=[],
+                        kernel_weights=np.array([]),
+                        frozen_degree=0,
+                        nominal_coeffs=np.array([1.0]),
+                        sigma_eff=np.array([]),
+                        tau_info={'tau_F': 0.0, 'tau_M': 0.0, 'tau_B': 0.0},
+                        chi2_red=0.0,
+                        has_data=False,
+                        skip_reason=reason,
+                        kernel_diagnostics=None,
+                    ))
+                    continue
 
         bin_info.has_exfor_data = True
         bin_info.exfor_n_points = len(exfor_df)
@@ -1139,6 +1304,7 @@ def perform_nominal_fits(
         results.append(NominalFitResult(
             energy_mev=bin_info.energy_mev,
             energy_index=bin_info.index,
+            endf_index=bin_info.endf_index,
             exfor_df=exfor_df,
             experiments_info=experiments_info,
             kernel_weights=kernel_weights,
@@ -1151,11 +1317,30 @@ def perform_nominal_fits(
             kernel_diagnostics=diagnostics,
             degree_weights=degree_weights,
             all_degrees_info=all_degrees_info,
+            expanded_bins=expansion_used,
         ))
 
+        # Compute adaptive MC-only order cap from angular support diagnostics
+        support_diag = compute_angular_support_diagnostics(mu, kernel_weights, max_degree)
+        mc_cap = min(frozen_degree, support_diag['recommended_mc_order'])
+        results[-1].mc_order_cap = mc_cap
+
+        # Between-experiment scatter (for uncertainty floor)
+        n_unique_entries = exfor_df['entry'].nunique() if 'entry' in exfor_df.columns else 0
+        scatter_info = None
+        if len(exfor_df) >= 3 and n_unique_entries >= 2:
+            scatter_info = compute_between_experiment_coeffs(
+                exfor_df=exfor_df, degree=frozen_degree,
+                fixed_c0=nominal_coeffs[0],
+            )
+            if scatter_info is not None:
+                results[-1].between_exp_scatter = scatter_info['scatter']
+                results[-1].between_exp_L_common = scatter_info['L_common']
+
         if logger:
+            exp_tag = f" [expanded ±{expansion_used}]" if expansion_used > 0 else ""
             logger.info(
-                f"E = {bin_info.energy_mev:.4f} MeV (bin: [{bin_info.bin_lower_mev:.4f}, {bin_info.bin_upper_mev:.4f}] MeV):"
+                f"E = {bin_info.energy_mev:.4f} MeV (bin: [{bin_info.bin_lower_mev:.4f}, {bin_info.bin_upper_mev:.4f}] MeV){exp_tag}:"
             )
 
             # Experiments used (condensed - one line per experiment with ranges)
@@ -1173,6 +1358,23 @@ def perform_nominal_fits(
             logger.info(
                 f"  τ values: τ_F={tau_F:.4f}, τ_M={tau_M:.4f}, τ_B={tau_B:.4f}"
             )
+            if mc_cap < frozen_degree:
+                logger.info(
+                    f"  MC order cap: {mc_cap} (nominal L={frozen_degree}, "
+                    f"n_unique_mu={support_diag['n_unique_mu']}, cond={support_diag['legendre_cond']:.0f})"
+                )
+            # Between-experiment scatter diagnostic
+            r_last = results[-1]
+            if r_last.between_exp_scatter is not None:
+                sc = r_last.between_exp_scatter
+                sc_str = ", ".join(f"l={l+1}:{sc[l]:.4f}" for l in range(len(sc)))
+                n_qual = scatter_info['n_experiments'] if scatter_info else 0
+                logger.info(f"  [Between-exp] L_common={r_last.between_exp_L_common}, n_qual={n_qual}, scatter: {sc_str}")
+            if scatter_info is not None and scatter_info.get('skipped_experiments'):
+                for s_entry, s_reason in scatter_info['skipped_experiments']:
+                    logger.info(f"  [Between-exp skip] {s_entry}: {s_reason}")
+            elif n_unique_entries >= 2 and r_last.between_exp_scatter is None:
+                logger.info(f"  [Between-exp] skipped: <2 experiments passed angular quality gate")
             logger.info("")  # Blank line between bins
 
     if tau_smoothing_window > 1 and use_band_discrepancy:
@@ -1186,12 +1388,39 @@ def perform_nominal_fits(
     if tau_prior_floor and use_band_discrepancy:
         baselines = apply_tau_prior_floor(
             results,
-            min_experiments=tau_prior_min_experiments,
+            n_eff_threshold=tau_prior_neff_threshold,
             percentile=tau_prior_percentile,
         )
         if logger:
             logger.info(f"  Tau prior floor baselines: τ_F={baselines['tau_F']:.4f}, "
                         f"τ_M={baselines['tau_M']:.4f}, τ_B={baselines['tau_B']:.4f}")
+
+    # Recompute sigma_eff and N_eff after tau smoothing/floor
+    if (tau_smoothing_window > 1 or tau_prior_floor) and use_band_discrepancy:
+        for r in results:
+            if not r.has_data or r.interpolated:
+                continue
+            mu = r.exfor_df['mu'].to_numpy()
+            sigma = r.exfor_df['unc'].to_numpy()
+            r.sigma_eff = sigma_eff_from_tau(mu, sigma, r.tau_info)
+            r.kernel_diagnostics.n_eff = compute_n_eff(r.kernel_weights, r.sigma_eff)
+
+    # Log global uncertainty floor summary
+    if total_floor_floored > 0 and logger:
+        valid_repls = [v for v in floor_replacement_vals if not np.isnan(v)]
+        median_repl = float(np.median(valid_repls)) * 100 if valid_repls else 0.0
+        logger.info(f"  [Unc floor] Summary: {total_floor_floored}/{total_floor_pts} total pts "
+                    f"floored across {total_floor_bins} bins, "
+                    f"median replacement={median_repl:.1f}% (strategy={UNCERTAINTY_FLOOR_STRATEGY})")
+
+    # Log angular quality gate summary
+    total_expanded = gate_expanded_1 + gate_expanded_2
+    if angular_quality_gate and logger and (total_expanded > 0 or gate_failed > 0):
+        logger.info(
+            f"  [Quality gate] {total_expanded} bins expanded "
+            f"({gate_expanded_1} by ±1, {gate_expanded_2} by ±2), "
+            f"{gate_failed} bins failed → interpolate"
+        )
 
     return results
 
@@ -1415,7 +1644,7 @@ def run_exfor_to_endf_sampling_v2(
     max_tau_fraction: float = 0.25,
     tau_smoothing_window: int = 3,
     tau_prior_floor: bool = True,
-    tau_prior_min_experiments: int = 2,
+    tau_prior_neff_threshold: float = 5.0,
     tau_prior_percentile: float = 50.0,
     sigma_norm: float = 0.05,
     use_model_averaging: bool = True,
@@ -1451,15 +1680,16 @@ def run_exfor_to_endf_sampling_v2(
     # Experiment exclusion and uncertainty floor
     exclude_experiments: Optional[List[str]] = None,
     min_relative_uncertainty: float = 0.0,
+    # Energy grid source
+    energy_grid_source: str = ENERGY_GRID_SOURCE,
+    union_grid_subentries: Optional[List[Tuple[str, Optional[float], Optional[float]]]] = None,
     # Covariance cap (Layer 1) and positivity projection (Layer 2)
     apply_covariance_cap: bool = False,
     max_relative_std_cap: float = 1.0,
     regularize_near_zero: bool = True,
     near_zero_snr_threshold: float = 1.0,
     near_zero_n_neighbors: int = 3,
-    post_rescaling_max_rel_std: float = 1.0,
-    post_rescaling_n_neighbors: int = 5,
-    post_rescaling_deflation_threshold: float = 0.5,
+    apply_cov_postprocessing: bool = True,
     apply_positivity_projection: bool = False,
     positivity_check_points: int = 50,
     # File output options
@@ -1594,6 +1824,16 @@ def run_exfor_to_endf_sampling_v2(
     _logger.info("  Exclusions & Uncertainty:")
     _logger.info(f"    EXCLUDE_EXPERIMENTS     = {exclude_experiments if exclude_experiments else 'None'}")
     _logger.info(f"    MIN_RELATIVE_UNCERTAINTY = {min_relative_uncertainty} ({min_relative_uncertainty*100:.1f}%)")
+    _logger.info(f"    UNCERTAINTY_FLOOR_STRATEGY = {UNCERTAINTY_FLOOR_STRATEGY}")
+    _logger.info("")
+
+    # -- Energy Grid Source --
+    if union_grid_subentries is None:
+        union_grid_subentries = UNION_GRID_SUBENTRIES
+    _logger.info("  Energy Grid:")
+    _logger.info(f"    ENERGY_GRID_SOURCE      = {energy_grid_source}")
+    if energy_grid_source == "union":
+        _logger.info(f"    UNION_GRID_SUBENTRIES   = {union_grid_subentries}")
     _logger.info("")
 
     # -- Multigroup Covariance (only if enabled) --
@@ -1666,19 +1906,22 @@ def run_exfor_to_endf_sampling_v2(
     if regularize_near_zero:
         _logger.info(f"    NEAR_ZERO_SNR_THRESHOLD    = {near_zero_snr_threshold}")
         _logger.info(f"    NEAR_ZERO_N_NEIGHBORS      = {near_zero_n_neighbors}")
-    _logger.info(f"    POST_RESCALING_MAX_REL_STD = {post_rescaling_max_rel_std} ({post_rescaling_max_rel_std*100:.0f}%) [soft: neighbor interpolation]")
-    _logger.info(f"    POST_RESCALING_N_NEIGHBORS = {post_rescaling_n_neighbors}")
-    _logger.info(f"    POST_RESCALING_DEFLATION_THRESHOLD = {post_rescaling_deflation_threshold} ({post_rescaling_deflation_threshold*100:.0f}%)")
-    _logger.info(f"    ORDER_REL_STD_CAPS         = {ORDER_REL_STD_CAPS} [hard cap: final safety net]")
-    _logger.info(f"    SMOOTH_MIN_REL_STD         = {SMOOTH_MIN_REL_STD} ({SMOOTH_MIN_REL_STD*100:.1f}%)")
-    _logger.info(f"    SMOOTH_DIP_FRACTION         = {SMOOTH_DIP_FRACTION} ({SMOOTH_DIP_FRACTION*100:.0f}%)")
-    _logger.info(f"    SMOOTH_SPIKE_FACTOR         = {SMOOTH_SPIKE_FACTOR} ({SMOOTH_SPIKE_FACTOR:.1f}x) [FG level]")
+    _logger.info(f"    APPLY_COV_POSTPROCESSING    = {apply_cov_postprocessing}")
+    _dip_str = "None (disabled)" if SMOOTH_DIP_FRACTION is None else f"{SMOOTH_DIP_FRACTION} ({SMOOTH_DIP_FRACTION*100:.0f}%)"
+    _spike_str = "None (disabled)" if SMOOTH_SPIKE_FACTOR is None else f"{SMOOTH_SPIKE_FACTOR} ({SMOOTH_SPIKE_FACTOR:.1f}x)"
+    _caps_str = "None (disabled)" if ORDER_REL_STD_CAPS is None else str(ORDER_REL_STD_CAPS)
+    _smooth_w = SMOOTH_DIAGONAL_WINDOW or 0
+    _logger.info(f"    SMOOTH_MIN_REL_STD          = {SMOOTH_MIN_REL_STD} ({SMOOTH_MIN_REL_STD*100:.1f}%)")
+    _logger.info(f"    SMOOTH_DIP_FRACTION         = {_dip_str}")
+    _logger.info(f"    SMOOTH_SPIKE_FACTOR         = {_spike_str} [FG level]")
     _logger.info(f"    SMOOTH_DIP_N_NEIGHBORS      = {SMOOTH_DIP_N_NEIGHBORS} [FG level]")
     _logger.info(f"    SMOOTH_MEDIAN_FILL_THRESHOLD = {SMOOTH_MEDIAN_FILL_THRESHOLD} ({SMOOTH_MEDIAN_FILL_THRESHOLD*100:.0f}%)")
-    _logger.info(f"    MG_SMOOTH_SPIKE_FACTOR      = {MG_SMOOTH_SPIKE_FACTOR} ({MG_SMOOTH_SPIKE_FACTOR:.1f}x) [MG level]")
+    _mg_spike_str = "None (disabled)" if MG_SMOOTH_SPIKE_FACTOR is None else f"{MG_SMOOTH_SPIKE_FACTOR} ({MG_SMOOTH_SPIKE_FACTOR:.1f}x)"
+    _logger.info(f"    MG_SMOOTH_SPIKE_FACTOR      = {_mg_spike_str} [MG level]")
     _logger.info(f"    MG_SMOOTH_DIP_N_NEIGHBORS   = {MG_SMOOTH_DIP_N_NEIGHBORS} [MG level]")
-    _logger.info(f"    SMOOTH_DIAGONAL_WINDOW      = {SMOOTH_DIAGONAL_WINDOW} [Gaussian σ={SMOOTH_DIAGONAL_WINDOW/4:.1f}]")
-    _logger.info(f"    RESCALE_MAX_FACTOR          = {RESCALE_MAX_FACTOR} [scale clipped to [{1/RESCALE_MAX_FACTOR:.3f}, {RESCALE_MAX_FACTOR:.1f}]]")
+    _logger.info(f"    SMOOTH_DIAGONAL_WINDOW      = {_smooth_w} [Gaussian σ={_smooth_w/4:.1f}]")
+    _logger.info(f"    ORDER_REL_STD_CAPS          = {_caps_str}")
+    _logger.info(f"    FORWARD_FILL_REL_STD        = {FORWARD_FILL_REL_STD_ENABLED}")
     _logger.info(f"    VERBOSE_DIAGNOSTICS         = {verbose_diagnostics}")
     _logger.info(f"    APPLY_POSITIVITY_PROJECTION = {apply_positivity_projection}")
     if apply_positivity_projection:
@@ -1693,7 +1936,7 @@ def run_exfor_to_endf_sampling_v2(
     _logger.info(f"    TAU_SMOOTHING_WINDOW           = {tau_smoothing_window}")
     _logger.info(f"    TAU_PRIOR_FLOOR                = {tau_prior_floor}")
     if tau_prior_floor:
-        _logger.info(f"    TAU_PRIOR_MIN_EXPERIMENTS      = {tau_prior_min_experiments}")
+        _logger.info(f"    TAU_PRIOR_NEFF_THRESHOLD       = {tau_prior_neff_threshold}")
         _logger.info(f"    TAU_PRIOR_PERCENTILE           = {tau_prior_percentile}")
     _logger.info(f"    RESCALE_UNC_BY_CHI2            = {RESCALE_UNC_BY_CHI2}")
     _logger.info(f"    ALLOW_SHRINK_UNC               = {ALLOW_SHRINK_UNC}")
@@ -1715,9 +1958,15 @@ def run_exfor_to_endf_sampling_v2(
     # -- Energy Bin Method (6g) --
     _logger.info("  Energy Bin Method (6g):")
     _logger.info(f"    NORMALIZE_BY_N_POINTS          = {NORMALIZE_BY_N_POINTS}")
+    _logger.info(f"    WEIGHT_GAMMA                   = {WEIGHT_GAMMA}")
     _logger.info(f"    MAX_EXP_WEIGHT_FRAC_BIN        = {MAX_EXP_WEIGHT_FRAC_BIN}")
     _logger.info(f"    FREEZE_C0                      = {FREEZE_C0}")
     _logger.info(f"    MAX_SAMPLE_ORDER               = {MAX_SAMPLE_ORDER}")
+    _logger.info(f"    ANGULAR_QUALITY_GATE           = {ANGULAR_QUALITY_GATE}")
+    if ANGULAR_QUALITY_GATE:
+        _logger.info(f"    MIN_ANGULAR_POINTS             = {MIN_ANGULAR_POINTS}")
+        _logger.info(f"    MIN_BANDS_COVERED              = {MIN_BANDS_COVERED}")
+        _logger.info(f"    MAX_BIN_EXPANSION              = {MAX_BIN_EXPANSION}")
     _logger.info("")
 
     # -- Correlation Method (6h) --
@@ -1828,21 +2077,37 @@ def run_exfor_to_endf_sampling_v2(
     _logger.info("")
     _logger.info("[STEP 3] Computing energy bins with TOF-based resolution")
 
+    if energy_grid_source == "union":
+        grid_energies_ev = build_union_energy_grid(
+            exfor_cache=exfor_cache,
+            subentries=union_grid_subentries,
+            energy_min_mev=energy_min_mev,
+            energy_max_mev=energy_max_mev,
+        )
+        _logger.info(f"  Using union grid: {len(grid_energies_ev)} points")
+    else:
+        grid_energies_ev = energies_ev
+        _logger.info(f"  Using ENDF grid: {len(grid_energies_ev)} points")
+
     energy_bins = compute_energy_bins_with_tof_resolution(
-        energies_ev=energies_ev,
+        energies_ev=grid_energies_ev,
         energy_min_mev=energy_min_mev,
         energy_max_mev=energy_max_mev,
         delta_t_ns=DELTA_T_NS,
         flight_path_m=FLIGHT_PATH_M,
+        reference_grid_ev=energies_ev if energy_grid_source == "union" else None,
     )
 
     if not energy_bins:
         _logger.error(f"No energy points in range [{energy_min_mev}, {energy_max_mev}] MeV", console=True)
         return
 
+    # Map each bin to nearest ENDF energy (for original coeffs and ENDF writing)
     for bin_info in energy_bins:
-        if bin_info.index < len(original_coeffs):
-            bin_info.original_coeffs = list(original_coeffs[bin_info.index])
+        idx = int(np.argmin(np.abs(energies_ev - bin_info.energy_ev)))
+        bin_info.endf_index = idx
+        if idx < len(original_coeffs):
+            bin_info.original_coeffs = list(original_coeffs[idx])
 
     _logger.info(f"  Processing {len(energy_bins)} energy bins")
     print(f"[INFO] Processing {len(energy_bins)} energy bins")
@@ -1871,8 +2136,12 @@ def run_exfor_to_endf_sampling_v2(
         exclude_experiments=exclude_experiments,
         min_relative_uncertainty=min_relative_uncertainty,
         tau_prior_floor=tau_prior_floor,
-        tau_prior_min_experiments=tau_prior_min_experiments,
+        tau_prior_neff_threshold=tau_prior_neff_threshold,
         tau_prior_percentile=tau_prior_percentile,
+        angular_quality_gate=ANGULAR_QUALITY_GATE,
+        min_angular_points=MIN_ANGULAR_POINTS,
+        min_bands_covered=MIN_BANDS_COVERED,
+        max_bin_expansion=MAX_BIN_EXPANSION,
         logger=_logger,
     )
 
@@ -1953,6 +2222,8 @@ def run_exfor_to_endf_sampling_v2(
                 MAX_SAMPLE_ORDER,
                 apply_positivity_projection,
                 positivity_check_points,
+                nr.tau_info,
+                nr.mc_order_cap,
             ))
 
         if N_PROCS > 1:
@@ -2075,6 +2346,7 @@ def run_exfor_to_endf_sampling_v2(
             apply_positivity_projection=apply_positivity_projection,
             positivity_check_points=positivity_check_points,
             max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
+            weight_gamma=WEIGHT_GAMMA,
             logger=_logger,
         )
 
@@ -2112,6 +2384,8 @@ def run_exfor_to_endf_sampling_v2(
                     MAX_SAMPLE_ORDER,
                     apply_positivity_projection,
                     positivity_check_points,
+                    nr.tau_info,
+                    nr.mc_order_cap,
                 ))
 
             if N_PROCS > 1:
@@ -2140,13 +2414,13 @@ def run_exfor_to_endf_sampling_v2(
                     _valid_mask_kw[ie * max_degree + l] = True
 
             _snr_thr = near_zero_snr_threshold if regularize_near_zero else 0.0
-            cov_kw, _, _, _ = compute_covariance_from_samples(
+            cov_kw, _, _, _, _ = compute_covariance_from_samples(
                 all_samples=kw_samples, energy_indices=energy_indices_kw,
                 max_order=max_degree, valid_mask=_valid_mask_kw,
                 snr_threshold=_snr_thr, n_neighbors=near_zero_n_neighbors,
                 logger=_logger,
             )
-            cov_perbin, _, _, mc_mean_perbin = compute_covariance_from_samples(
+            cov_perbin, _, _, mc_mean_perbin, _ = compute_covariance_from_samples(
                 all_samples=all_samples_perbin, energy_indices=energy_indices_kw,
                 max_order=max_degree, valid_mask=_valid_mask_kw,
                 snr_threshold=_snr_thr, n_neighbors=near_zero_n_neighbors,
@@ -2182,7 +2456,7 @@ def run_exfor_to_endf_sampling_v2(
                     a = compute_kw_reliability_alpha(
                         kw_diag=kw_diag,
                         interpolated=nr.interpolated,
-                        min_points_ref=KW_MIN_POINTS_REF,
+                        min_points_ref=max_degree + 1,
                     )
                     alpha_per_energy.append(a)
 
@@ -2315,6 +2589,9 @@ def run_exfor_to_endf_sampling_v2(
             std_combined[std_combined == 0] = 1.0
             corr_matrix = cov_matrix / np.outer(std_combined, std_combined)
 
+            # Recover absolute covariance from MC-relative
+            cov_abs = cov_matrix * np.outer(mc_mean_params, mc_mean_params)
+
             var_total = np.diag(cov_matrix)
             mask = var_total > 0
             if np.any(mask):
@@ -2322,7 +2599,7 @@ def run_exfor_to_endf_sampling_v2(
         else:
             # Standard covariance from MC samples
             _snr_thr = near_zero_snr_threshold if regularize_near_zero else 0.0
-            cov_matrix, corr_matrix, param_labels, mc_mean_params = compute_covariance_from_samples(
+            cov_matrix, corr_matrix, param_labels, mc_mean_params, cov_abs = compute_covariance_from_samples(
                 all_samples=all_samples,
                 energy_indices=energy_indices,
                 max_order=max_degree,
@@ -2331,6 +2608,19 @@ def run_exfor_to_endf_sampling_v2(
                 n_neighbors=near_zero_n_neighbors,
                 logger=_logger,
             )
+
+        # Safety net: sanitize non-finite entries before multigroup collapse
+        n_nonfinite = int(np.sum(~np.isfinite(cov_matrix)))
+        if n_nonfinite > 0:
+            _logger.warning(f"  Covariance matrix has {n_nonfinite} non-finite entries — replacing with 0")
+            cov_matrix = np.where(np.isfinite(cov_matrix), cov_matrix, 0.0)
+            cov_matrix = (cov_matrix + cov_matrix.T) / 2.0  # re-symmetrize
+            # Also fix cov_abs and corr_matrix
+            cov_abs = np.where(np.isfinite(cov_abs), cov_abs, 0.0)
+            cov_abs = (cov_abs + cov_abs.T) / 2.0
+            std_fix = np.sqrt(np.maximum(np.diag(cov_abs), 0.0))
+            std_fix[std_fix == 0] = 1.0
+            corr_matrix = cov_abs / np.outer(std_fix, std_fix)
 
         # Validate covariance: check that diagonal values are non-trivial
         diag = np.diag(cov_matrix)
@@ -2424,6 +2714,9 @@ def run_exfor_to_endf_sampling_v2(
             else:
                 _logger.info("  No entries exceeded the cap — no capping applied, output is unchanged.")
 
+            # Keep cov_abs consistent with capped MC-relative covariance
+            cov_abs = cov_matrix * np.outer(mc_mean_params, mc_mean_params)
+
             # Recompute correlation from capped covariance
             std_capped = np.sqrt(np.maximum(np.diag(cov_matrix), 0.0))
             std_capped[std_capped == 0] = 1.0
@@ -2447,6 +2740,7 @@ def run_exfor_to_endf_sampling_v2(
         cov_matrix = cov_matrix[np.ix_(keep, keep)]
         corr_matrix = corr_matrix[np.ix_(keep, keep)]
         mc_mean_params = mc_mean_params[keep]
+        cov_abs = cov_abs[np.ix_(keep, keep)]
         param_labels = [param_labels[i] for i in keep]
         _logger.info(f"  Trimmed covariance from {max_degree} to {_eff} orders/bin "
                      f"(MAX_SAMPLE_ORDER={MAX_SAMPLE_ORDER}): {cov_matrix.shape[0]} params")
@@ -2520,6 +2814,24 @@ def run_exfor_to_endf_sampling_v2(
                 _logger.error(f"  Traceback:\n{traceback.format_exc()}")
                 multigroup_result = None
 
+    # Prepare samples for ENDF writing:
+    # With splice mode, samples use pipeline energy_index directly (no remapping needed).
+    # Without splice, remap to ENDF grid indices for in-place coefficient replacement.
+    use_splice = energy_bins is not None and len(energy_bins) > 0
+    splice_range = (energy_min_mev, energy_max_mev) if use_splice else None
+
+    if use_splice:
+        all_samples_endf = all_samples
+        _logger.info(f"  Using splice mode: pipeline grid will replace ENDF grid in "
+                      f"[{energy_min_mev:.3f}, {energy_max_mev:.3f}] MeV")
+    else:
+        idx_to_endf = {nr.energy_index: nr.endf_index
+                       for nr in nominal_results if nr.endf_index is not None}
+        if idx_to_endf:
+            all_samples_endf = remap_samples_to_endf_indices(all_samples, idx_to_endf)
+        else:
+            all_samples_endf = all_samples
+
     # Step 8: Write ENDF files
     average_file = None
     if generate_mc_mean_endf:
@@ -2531,8 +2843,10 @@ def run_exfor_to_endf_sampling_v2(
                 original_endf_file=endf_file,
                 mt_number=mt_number,
                 nominal_results=nominal_results,
-                all_samples=all_samples,
+                all_samples=all_samples_endf,
                 output_dir=str(output_path),
+                energy_bins=energy_bins if use_splice else None,
+                energy_range_mev=splice_range,
             )
             _logger.info(f"  Average ENDF: {average_file}")
         except Exception as e:
@@ -2549,6 +2863,8 @@ def run_exfor_to_endf_sampling_v2(
                 mt_number=mt_number,
                 nominal_results=nominal_results,
                 output_dir=str(output_path),
+                energy_bins=energy_bins if use_splice else None,
+                energy_range_mev=splice_range,
             )
             _logger.info(f"  Nominal ENDF: {nominal_file}")
         except Exception as e:
@@ -2563,9 +2879,11 @@ def run_exfor_to_endf_sampling_v2(
         output_files = write_endf_samples_batch(
             original_endf_file=endf_file,
             mt_number=mt_number,
-            all_samples=all_samples,
+            all_samples=all_samples_endf,
             output_dir=str(output_path),
             n_procs=N_PROCS,
+            energy_bins=energy_bins if use_splice else None,
+            energy_range_mev=splice_range,
         )
         _logger.info(f"  Written {len(output_files)} sample files")
 
@@ -2689,10 +3007,7 @@ def run_exfor_to_endf_sampling_v2(
             mt_data = mf4.sections.get(mt_number)
             all_energies_ev = np.array(mt_data.legendre_energies)
 
-            # Build nominal relative covariance for the nominal file.
-            # The cov_matrix is relative w.r.t. MC means (correct for average file).
-            # For the nominal file, we need relative w.r.t. nominal coefficients:
-            #   Cov_rel_nom(i,j) = Cov_rel_avg(i,j) * (mean_i/nom_i) * (mean_j/nom_j)
+            # Build nominal parameter vector
             nominal_params = np.zeros_like(mc_mean_params)
             for k, e_idx in enumerate(energy_indices):
                 nr = next((r for r in nominal_results if r.energy_index == e_idx), None)
@@ -2700,118 +3015,104 @@ def run_exfor_to_endf_sampling_v2(
                     endf_nom = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
                     n = min(len(endf_nom), max_degree)
                     nominal_params[k * max_degree: k * max_degree + n] = endf_nom[:n]
-            # Compute rescaling factors (skip near-zero params where ratio is meaningless)
-            scale = np.ones_like(mc_mean_params)
-            safe = np.abs(nominal_params) > 1e-30
-            scale[safe] = mc_mean_params[safe] / nominal_params[safe]
-            if regularize_near_zero and near_zero_snr_threshold > 0:
-                # For near-zero coefficients, mc_mean/nominal can explode even though
-                # both values are negligible. Clamp scale to 1.0 where either mean
-                # is indistinguishable from zero (abs value below median abs_std).
-                _abs_std = np.sqrt(np.maximum(np.diag(cov_matrix), 0.0)) * np.abs(mc_mean_params)
-                _abs_std_median = np.median(_abs_std[_abs_std > 0]) if np.any(_abs_std > 0) else 0.0
-                _near_zero = np.maximum(np.abs(mc_mean_params), np.abs(nominal_params)) < _abs_std_median
-                n_clamped = int(np.sum(_near_zero & safe))
-                scale[_near_zero] = 1.0
-                if n_clamped > 0:
-                    _logger.info(f"  Clamped {n_clamped} near-zero-mean rescaling factors to 1.0")
-            # Clip rescaling factors to bounded range to prevent variance explosion
-            n_clipped_fg = int(np.sum((scale < 1.0 / RESCALE_MAX_FACTOR) | (scale > RESCALE_MAX_FACTOR)))
-            scale = np.clip(scale, 1.0 / RESCALE_MAX_FACTOR, RESCALE_MAX_FACTOR)
-            if n_clipped_fg > 0:
-                _logger.info(f"  Clipped {n_clipped_fg} rescaling factors to [{1.0/RESCALE_MAX_FACTOR:.3f}, {RESCALE_MAX_FACTOR:.1f}]")
-            cov_matrix_nominal = cov_matrix * np.outer(scale, scale)
-            max_scale_dev = np.max(np.abs(scale[safe] - 1.0)) if np.any(safe) else 0.0
-            _logger.info(f"  Nominal vs MC-mean rescaling: max |scale-1| = {max_scale_dev:.6f}")
+
+            # Direct absolute-to-nominal conversion (no intermediate rescaling)
+            cov_matrix_nominal = absolute_to_nominal_relative(cov_abs, nominal_params)
+            _nom_rel_std = np.sqrt(np.maximum(np.diag(cov_matrix_nominal), 0.0))
+            _logger.info(f"  FG abs→nominal conversion: max rel_std = {np.max(_nom_rel_std)*100:.1f}%")
             if verbose_diagnostics:
-                log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-rescale", _logger, verbose=True)
+                log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-convert", _logger, verbose=True)
 
-            # MC absolute std (before rescaling) for deflation detection
-            _mc_rel_std = np.sqrt(np.maximum(np.diag(cov_matrix), 0.0))
-            _mc_abs_std = _mc_rel_std * np.abs(mc_mean_params)
-
-            # Post-rescaling regularization: bidirectional (cap + deflation)
-            cov_matrix_nominal, _pr_diag = regularize_post_rescaling(
-                cov_rel=cov_matrix_nominal,
-                max_order=max_degree,
-                max_rel_std=post_rescaling_max_rel_std,
-                n_neighbors=post_rescaling_n_neighbors,
-                mc_abs_std=_mc_abs_std,
-                nominal_means=nominal_params,
-                deflation_threshold=post_rescaling_deflation_threshold,
-                logger=_logger,
-            )
-            if verbose_diagnostics:
-                log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-regularize", _logger, verbose=True)
-
-            # Smooth absent-order uncertainties (interpolate for intermittent orders)
-            cov_matrix_nominal, _smooth_nom = smooth_absent_order_uncertainties(
-                cov_rel=cov_matrix_nominal,
-                valid_mask=valid_mask_s7,
-                max_order=max_degree,
-                min_rel_std=SMOOTH_MIN_REL_STD,
-                dip_fraction=SMOOTH_DIP_FRACTION,
-                spike_factor=SMOOTH_SPIKE_FACTOR,
-                dip_n_neighbors=SMOOTH_DIP_N_NEIGHBORS,
-                median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
-                logger=_logger,
-            )
-            cov_matrix, _smooth_avg = smooth_absent_order_uncertainties(
-                cov_rel=cov_matrix,
-                valid_mask=valid_mask_s7,
-                max_order=max_degree,
-                min_rel_std=SMOOTH_MIN_REL_STD,
-                dip_fraction=SMOOTH_DIP_FRACTION,
-                spike_factor=SMOOTH_SPIKE_FACTOR,
-                dip_n_neighbors=SMOOTH_DIP_N_NEIGHBORS,
-                median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
-                logger=_logger,
-            )
-            if verbose_diagnostics:
-                log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-smooth", _logger, verbose=True)
-
-            # Spatial smoothing: running median to break serrated patterns
-            # Applied BEFORE the hard cap so cap values don't contaminate natural values
-            if SMOOTH_DIAGONAL_WINDOW >= 3:
-                cov_matrix_nominal = smooth_diagonal_median(
+            if apply_cov_postprocessing:
+                # Step 1: Between-experiment scatter floor
+                cov_matrix_nominal, _bexp_nom = apply_between_experiment_floor(
                     cov_rel=cov_matrix_nominal,
+                    nominal_results=nominal_results,
+                    energy_indices=energy_indices,
                     max_order=max_degree,
-                    window=SMOOTH_DIAGONAL_WINDOW,
                     logger=_logger,
                 )
-                cov_matrix = smooth_diagonal_median(
+                cov_matrix, _bexp_avg = apply_between_experiment_floor(
                     cov_rel=cov_matrix,
+                    nominal_results=nominal_results,
+                    energy_indices=energy_indices,
                     max_order=max_degree,
-                    window=SMOOTH_DIAGONAL_WINDOW,
                     logger=_logger,
                 )
                 if verbose_diagnostics:
-                    log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-median", _logger, verbose=True)
+                    log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-between-exp", _logger, verbose=True)
 
-            # Order-dependent cap (l>=4 weakly constrained) — final safety net
-            if ORDER_REL_STD_CAPS:
-                cov_matrix_nominal, _cap_nom = cap_order_relative_uncertainty(
+                # Step 2: Dip/spike smoothing & absent-order interpolation
+                cov_matrix_nominal, _smooth_nom = smooth_absent_order_uncertainties(
                     cov_rel=cov_matrix_nominal,
+                    valid_mask=valid_mask_s7,
                     max_order=max_degree,
-                    order_caps=ORDER_REL_STD_CAPS,
+                    min_rel_std=SMOOTH_MIN_REL_STD,
+                    dip_fraction=SMOOTH_DIP_FRACTION,
+                    spike_factor=SMOOTH_SPIKE_FACTOR,
+                    dip_n_neighbors=SMOOTH_DIP_N_NEIGHBORS,
+                    median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
                     logger=_logger,
                 )
-                cov_matrix, _cap_avg = cap_order_relative_uncertainty(
+                cov_matrix, _smooth_avg = smooth_absent_order_uncertainties(
                     cov_rel=cov_matrix,
+                    valid_mask=valid_mask_s7,
                     max_order=max_degree,
-                    order_caps=ORDER_REL_STD_CAPS,
+                    min_rel_std=SMOOTH_MIN_REL_STD,
+                    dip_fraction=SMOOTH_DIP_FRACTION,
+                    spike_factor=SMOOTH_SPIKE_FACTOR,
+                    dip_n_neighbors=SMOOTH_DIP_N_NEIGHBORS,
+                    median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
                     logger=_logger,
                 )
-            if verbose_diagnostics:
-                log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-cap", _logger, verbose=True)
+                if verbose_diagnostics:
+                    log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-smooth", _logger, verbose=True)
 
-            # Forward-fill absent-order rel_std so plots don't show serrated
-            # drops to zero.  Nominal coefficients stay zero, so abs_unc = 0.
-            _logger.info("  Applying forward-fill to FG rel_std for absent orders...")
-            cov_matrix_nominal = forward_fill_rel_std(cov_matrix_nominal, max_degree, logger=_logger)
-            cov_matrix = forward_fill_rel_std(cov_matrix, max_degree, logger=_logger)
-            if verbose_diagnostics:
-                log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-ffill", _logger, verbose=True)
+                # Step 3: Spatial Gaussian smoothing (before hard cap)
+                if SMOOTH_DIAGONAL_WINDOW >= 3:
+                    cov_matrix_nominal = smooth_diagonal_median(
+                        cov_rel=cov_matrix_nominal,
+                        max_order=max_degree,
+                        window=SMOOTH_DIAGONAL_WINDOW,
+                        logger=_logger,
+                    )
+                    cov_matrix = smooth_diagonal_median(
+                        cov_rel=cov_matrix,
+                        max_order=max_degree,
+                        window=SMOOTH_DIAGONAL_WINDOW,
+                        logger=_logger,
+                    )
+                    if verbose_diagnostics:
+                        log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-median", _logger, verbose=True)
+
+                # Step 4: Order-dependent hard cap — final safety net
+                if ORDER_REL_STD_CAPS is not None:
+                    cov_matrix_nominal, _cap_nom = cap_order_relative_uncertainty(
+                        cov_rel=cov_matrix_nominal,
+                        max_order=max_degree,
+                        order_caps=ORDER_REL_STD_CAPS,
+                        logger=_logger,
+                    )
+                    cov_matrix, _cap_avg = cap_order_relative_uncertainty(
+                        cov_rel=cov_matrix,
+                        max_order=max_degree,
+                        order_caps=ORDER_REL_STD_CAPS,
+                        logger=_logger,
+                    )
+                if verbose_diagnostics:
+                    log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-cap", _logger, verbose=True)
+
+                # Step 5: Forward-fill absent-order rel_std
+                if FORWARD_FILL_REL_STD_ENABLED:
+                    _logger.info("  Applying forward-fill to FG rel_std for absent orders...")
+                    cov_matrix_nominal = forward_fill_rel_std(cov_matrix_nominal, max_degree, logger=_logger)
+                    cov_matrix = forward_fill_rel_std(cov_matrix, max_degree, logger=_logger)
+                else:
+                    _logger.info("  Forward-fill DISABLED (FORWARD_FILL_REL_STD_ENABLED=False)")
+                if verbose_diagnostics:
+                    log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-ffill", _logger, verbose=True)
+            else:
+                _logger.info("  Post-processing DISABLED (APPLY_COV_POSTPROCESSING=False)")
 
             # Read original MF34 from reference file (if present)
             # Use mf34_source_file if provided, otherwise fall back to endf_file
@@ -2869,6 +3170,11 @@ def run_exfor_to_endf_sampling_v2(
             # Write fine-grid MF34 if requested
             if mf34_covariance_type in ("fine", "both"):
                 if average_file:
+                    _logger.info(f"  Pre-MF34 check (fine avg): cov shape={cov_matrix.shape}, "
+                                 f"inf={np.sum(np.isinf(cov_matrix))}, "
+                                 f"nan={np.sum(np.isnan(cov_matrix))}, "
+                                 f"grid len={len(energy_grid_ev)}, "
+                                 f"grid finite={np.all(np.isfinite(energy_grid_ev))}")
                     mf34_fine_avg = create_mf34_from_covariance(
                         cov_matrix=cov_matrix,
                         energy_grid_ev=energy_grid_ev,
@@ -2883,6 +3189,11 @@ def run_exfor_to_endf_sampling_v2(
                     _logger.info(f"  Fine MF34 added to average: {average_file}")
 
                 if nominal_file:
+                    _logger.info(f"  Pre-MF34 check (fine nom): cov shape={cov_matrix_nominal.shape}, "
+                                 f"inf={np.sum(np.isinf(cov_matrix_nominal))}, "
+                                 f"nan={np.sum(np.isnan(cov_matrix_nominal))}, "
+                                 f"grid len={len(energy_grid_ev)}, "
+                                 f"grid finite={np.all(np.isfinite(energy_grid_ev))}")
                     mf34_fine_nom = create_mf34_from_covariance(
                         cov_matrix=cov_matrix_nominal,
                         energy_grid_ev=energy_grid_ev,
@@ -2914,115 +3225,108 @@ def run_exfor_to_endf_sampling_v2(
                     for pos in valid_positions:
                         for l in range(max_degree):
                             flat_indices.append(pos * max_degree + l)
-                    mc_mean_for_mg = mc_mean_params[np.array(flat_indices)]
+                    flat_indices = np.array(flat_indices)
+                    mc_mean_for_mg = mc_mean_params[flat_indices]
+                    cov_abs_for_mg = cov_abs[np.ix_(flat_indices, flat_indices)]
                 else:
                     mc_mean_for_mg = mc_mean_params
+                    cov_abs_for_mg = cov_abs
 
                 mc_mean_grouped = A @ mc_mean_for_mg
-                nom_mean_grouped = multigroup_result.mean_grouped  # based on nominal coeffs
-                mg_scale = np.ones_like(mc_mean_grouped)
-                mg_safe = np.abs(nom_mean_grouped) > 1e-30
-                mg_scale[mg_safe] = mc_mean_grouped[mg_safe] / nom_mean_grouped[mg_safe]
-                if regularize_near_zero and near_zero_snr_threshold > 0:
-                    mg_abs_std = np.sqrt(np.maximum(np.diag(multigroup_result.cov_grouped), 0.0)) * np.abs(mc_mean_grouped)
-                    mg_abs_med = np.median(mg_abs_std[mg_abs_std > 0]) if np.any(mg_abs_std > 0) else 0.0
-                    mg_near_zero = np.maximum(np.abs(mc_mean_grouped), np.abs(nom_mean_grouped)) < mg_abs_med
-                    mg_scale[mg_near_zero] = 1.0
-                # Clip MG rescaling factors
-                _n_clipped_mg = int(np.sum((mg_scale < 1.0 / RESCALE_MAX_FACTOR) | (mg_scale > RESCALE_MAX_FACTOR)))
-                mg_scale = np.clip(mg_scale, 1.0 / RESCALE_MAX_FACTOR, RESCALE_MAX_FACTOR)
-                if _n_clipped_mg > 0:
-                    _logger.info(f"  MG: clipped {_n_clipped_mg} rescaling factors to [{1.0/RESCALE_MAX_FACTOR:.3f}, {RESCALE_MAX_FACTOR:.1f}]")
-                cov_grouped_nominal = multigroup_result.cov_grouped * np.outer(mg_scale, mg_scale)
+
+                # Build nominal parameter vector for non-interpolated bins
+                nom_params_for_mg = np.zeros_like(mc_mean_for_mg)
+                for k, vi in enumerate(valid_indices):
+                    nr = nominal_results[vi]
+                    if nr.has_data:
+                        endf_nom = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
+                        n = min(len(endf_nom), max_degree)
+                        nom_params_for_mg[k * max_degree: k * max_degree + n] = endf_nom[:n]
+                nom_mean_grouped = A @ nom_params_for_mg
+
+                # Collapse absolute covariance through aggregation matrix
+                cov_abs_grouped = A @ cov_abs_for_mg @ A.T
+
+                # Direct absolute-to-nominal conversion
+                cov_grouped_nominal = absolute_to_nominal_relative(cov_abs_grouped, nom_mean_grouped)
+                _mg_nom_rel_std = np.sqrt(np.maximum(np.diag(cov_grouped_nominal), 0.0))
+                _logger.info(f"  MG abs→nominal conversion: max rel_std = {np.max(_mg_nom_rel_std)*100:.1f}%")
                 if verbose_diagnostics:
-                    log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-rescale", _logger, verbose=True)
+                    log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-convert", _logger, verbose=True)
 
-                # MC absolute std at multigroup level (before rescaling)
-                _mg_mc_rel_std = np.sqrt(np.maximum(np.diag(multigroup_result.cov_grouped), 0.0))
-                _mg_mc_abs_std = _mg_mc_rel_std * np.abs(mc_mean_grouped)
-
-                # Post-rescaling regularization at multigroup level (bidirectional)
-                cov_grouped_nominal, _mg_pr_diag = regularize_post_rescaling(
-                    cov_rel=cov_grouped_nominal,
-                    max_order=max_degree,
-                    max_rel_std=post_rescaling_max_rel_std,
-                    n_neighbors=post_rescaling_n_neighbors,
-                    mc_abs_std=_mg_mc_abs_std,
-                    nominal_means=nom_mean_grouped,
-                    deflation_threshold=post_rescaling_deflation_threshold,
-                    logger=_logger,
-                )
-                if verbose_diagnostics:
-                    log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-regularize", _logger, verbose=True)
-
-                # Smooth absent-order uncertainties at multigroup level
-                # Use valid_mask_grouped from collapse to identify truly absent orders
-                _mg_valid = multigroup_result.valid_mask_grouped
-                cov_grouped_nominal, _mg_smooth_nom = smooth_absent_order_uncertainties(
-                    cov_rel=cov_grouped_nominal,
-                    valid_mask=_mg_valid,
-                    max_order=max_degree,
-                    min_rel_std=SMOOTH_MIN_REL_STD,
-                    dip_fraction=SMOOTH_DIP_FRACTION,
-                    spike_factor=MG_SMOOTH_SPIKE_FACTOR,
-                    dip_n_neighbors=MG_SMOOTH_DIP_N_NEIGHBORS,
-                    median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
-                    logger=_logger,
-                )
-                multigroup_result.cov_grouped, _mg_smooth_avg = smooth_absent_order_uncertainties(
-                    cov_rel=multigroup_result.cov_grouped,
-                    valid_mask=_mg_valid,
-                    max_order=max_degree,
-                    min_rel_std=SMOOTH_MIN_REL_STD,
-                    dip_fraction=SMOOTH_DIP_FRACTION,
-                    spike_factor=MG_SMOOTH_SPIKE_FACTOR,
-                    dip_n_neighbors=MG_SMOOTH_DIP_N_NEIGHBORS,
-                    median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
-                    logger=_logger,
-                )
-                if verbose_diagnostics:
-                    log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-smooth", _logger, verbose=True)
-
-                # Spatial smoothing at MG level (before cap)
-                if SMOOTH_DIAGONAL_WINDOW >= 3:
-                    cov_grouped_nominal = smooth_diagonal_median(
+                if apply_cov_postprocessing:
+                    # Step 2: Dip/spike smoothing & absent-order interpolation (MG)
+                    _mg_valid = multigroup_result.valid_mask_grouped
+                    cov_grouped_nominal, _mg_smooth_nom = smooth_absent_order_uncertainties(
                         cov_rel=cov_grouped_nominal,
+                        valid_mask=_mg_valid,
                         max_order=max_degree,
-                        window=SMOOTH_DIAGONAL_WINDOW,
+                        min_rel_std=SMOOTH_MIN_REL_STD,
+                        dip_fraction=SMOOTH_DIP_FRACTION,
+                        spike_factor=MG_SMOOTH_SPIKE_FACTOR,
+                        dip_n_neighbors=MG_SMOOTH_DIP_N_NEIGHBORS,
+                        median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
                         logger=_logger,
                     )
-                    multigroup_result.cov_grouped = smooth_diagonal_median(
+                    multigroup_result.cov_grouped, _mg_smooth_avg = smooth_absent_order_uncertainties(
                         cov_rel=multigroup_result.cov_grouped,
+                        valid_mask=_mg_valid,
                         max_order=max_degree,
-                        window=SMOOTH_DIAGONAL_WINDOW,
+                        min_rel_std=SMOOTH_MIN_REL_STD,
+                        dip_fraction=SMOOTH_DIP_FRACTION,
+                        spike_factor=MG_SMOOTH_SPIKE_FACTOR,
+                        dip_n_neighbors=MG_SMOOTH_DIP_N_NEIGHBORS,
+                        median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
                         logger=_logger,
                     )
                     if verbose_diagnostics:
-                        log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-median", _logger, verbose=True)
+                        log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-smooth", _logger, verbose=True)
 
-                # Order-dependent cap at multigroup level — final safety net
-                if ORDER_REL_STD_CAPS:
-                    cov_grouped_nominal, _mg_cap_nom = cap_order_relative_uncertainty(
-                        cov_rel=cov_grouped_nominal,
-                        max_order=max_degree,
-                        order_caps=ORDER_REL_STD_CAPS,
-                        logger=_logger,
-                    )
-                    multigroup_result.cov_grouped, _mg_cap_avg = cap_order_relative_uncertainty(
-                        cov_rel=multigroup_result.cov_grouped,
-                        max_order=max_degree,
-                        order_caps=ORDER_REL_STD_CAPS,
-                        logger=_logger,
-                    )
-                if verbose_diagnostics:
-                    log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-cap", _logger, verbose=True)
+                    # Spatial smoothing at MG level (before cap)
+                    if SMOOTH_DIAGONAL_WINDOW >= 3:
+                        cov_grouped_nominal = smooth_diagonal_median(
+                            cov_rel=cov_grouped_nominal,
+                            max_order=max_degree,
+                            window=SMOOTH_DIAGONAL_WINDOW,
+                            logger=_logger,
+                        )
+                        multigroup_result.cov_grouped = smooth_diagonal_median(
+                            cov_rel=multigroup_result.cov_grouped,
+                            max_order=max_degree,
+                            window=SMOOTH_DIAGONAL_WINDOW,
+                            logger=_logger,
+                        )
+                        if verbose_diagnostics:
+                            log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-median", _logger, verbose=True)
 
-                # Forward-fill absent-order rel_std at MG level
-                _logger.info("  Applying forward-fill to MG rel_std for absent orders...")
-                cov_grouped_nominal = forward_fill_rel_std(cov_grouped_nominal, max_degree, logger=_logger)
-                multigroup_result.cov_grouped = forward_fill_rel_std(multigroup_result.cov_grouped, max_degree, logger=_logger)
-                if verbose_diagnostics:
-                    log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-ffill", _logger, verbose=True)
+                    # Step 4: Hard cap (MG)
+                    if ORDER_REL_STD_CAPS is not None:
+                        cov_grouped_nominal, _mg_cap_nom = cap_order_relative_uncertainty(
+                            cov_rel=cov_grouped_nominal,
+                            max_order=max_degree,
+                            order_caps=ORDER_REL_STD_CAPS,
+                            logger=_logger,
+                        )
+                        multigroup_result.cov_grouped, _mg_cap_avg = cap_order_relative_uncertainty(
+                            cov_rel=multigroup_result.cov_grouped,
+                            max_order=max_degree,
+                            order_caps=ORDER_REL_STD_CAPS,
+                            logger=_logger,
+                        )
+                    if verbose_diagnostics:
+                        log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-cap", _logger, verbose=True)
+
+                    # Forward-fill absent-order rel_std at MG level
+                    if FORWARD_FILL_REL_STD_ENABLED:
+                        _logger.info("  Applying forward-fill to MG rel_std for absent orders...")
+                        cov_grouped_nominal = forward_fill_rel_std(cov_grouped_nominal, max_degree, logger=_logger)
+                        multigroup_result.cov_grouped = forward_fill_rel_std(multigroup_result.cov_grouped, max_degree, logger=_logger)
+                    else:
+                        _logger.info("  Forward-fill DISABLED at MG level")
+                    if verbose_diagnostics:
+                        log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-ffill", _logger, verbose=True)
+                else:
+                    _logger.info("  MG post-processing DISABLED (APPLY_COV_POSTPROCESSING=False)")
 
             # --- Second-pass regrouping after smoothing ---
             if (multigroup_regroup_after_smooth
@@ -3055,19 +3359,8 @@ def run_exfor_to_endf_sampling_v2(
                     for _l in range(1, min(_nr.frozen_degree, max_degree) + 1):
                         _rg_valid_mask[_mg_idx(_i, _l, max_degree)] = True
 
-                # Slice fine cov to non-interpolated bins (same as perform_adaptive_multigroup_collapse)
-                _rg_all_data_idx = [i for i, nr in enumerate(nominal_results) if nr.has_data]
-                if len(_rg_all_data_idx) != _rg_n_fine:
-                    _rg_data_set = {v: pos for pos, v in enumerate(_rg_all_data_idx)}
-                    _rg_positions = [_rg_data_set[vi] for vi in _rg_valid_idx]
-                    _rg_flat = []
-                    for _pos in _rg_positions:
-                        for _l in range(max_degree):
-                            _rg_flat.append(_pos * max_degree + _l)
-                    _rg_flat = np.array(_rg_flat)
-                    _rg_cov_fine = cov_matrix_nominal[np.ix_(_rg_flat, _rg_flat)]
-                else:
-                    _rg_cov_fine = cov_matrix_nominal
+                # Use absolute covariance sliced to non-interpolated bins for re-collapse
+                _rg_cov_fine = cov_abs_for_mg
 
                 merged = try_merge_adjacent_multigroups(
                     multigroup_result=multigroup_result,
@@ -3093,107 +3386,89 @@ def run_exfor_to_endf_sampling_v2(
                     # Recompute nominal-relative grouped cov with new A
                     A = multigroup_result.aggregation_matrix
                     mc_mean_grouped = A @ mc_mean_for_mg
-                    nom_mean_grouped = multigroup_result.mean_grouped
-                    mg_scale = np.ones_like(mc_mean_grouped)
-                    mg_safe = np.abs(nom_mean_grouped) > 1e-30
-                    mg_scale[mg_safe] = mc_mean_grouped[mg_safe] / nom_mean_grouped[mg_safe]
-                    if regularize_near_zero and near_zero_snr_threshold > 0:
-                        mg_abs_std = np.sqrt(np.maximum(np.diag(multigroup_result.cov_grouped), 0.0)) * np.abs(mc_mean_grouped)
-                        mg_abs_med = np.median(mg_abs_std[mg_abs_std > 0]) if np.any(mg_abs_std > 0) else 0.0
-                        mg_near_zero = np.maximum(np.abs(mc_mean_grouped), np.abs(nom_mean_grouped)) < mg_abs_med
-                        mg_scale[mg_near_zero] = 1.0
-                    # Clip RG rescaling factors
-                    _n_clipped_rg = int(np.sum((mg_scale < 1.0 / RESCALE_MAX_FACTOR) | (mg_scale > RESCALE_MAX_FACTOR)))
-                    mg_scale = np.clip(mg_scale, 1.0 / RESCALE_MAX_FACTOR, RESCALE_MAX_FACTOR)
-                    if _n_clipped_rg > 0:
-                        _logger.info(f"  RG: clipped {_n_clipped_rg} rescaling factors to [{1.0/RESCALE_MAX_FACTOR:.3f}, {RESCALE_MAX_FACTOR:.1f}]")
-                    cov_grouped_nominal = multigroup_result.cov_grouped * np.outer(mg_scale, mg_scale)
-                    if verbose_diagnostics:
-                        log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-rescale", _logger, verbose=True)
+                    nom_mean_grouped = A @ nom_params_for_mg
 
-                    # Post-rescaling regularization after regroup (same as first-pass MG)
-                    _rg_mc_rel_std = np.sqrt(np.maximum(np.diag(multigroup_result.cov_grouped), 0.0))
-                    _rg_mc_abs_std = _rg_mc_rel_std * np.abs(mc_mean_grouped)
-                    cov_grouped_nominal, _ = regularize_post_rescaling(
-                        cov_rel=cov_grouped_nominal,
-                        max_order=max_degree,
-                        max_rel_std=post_rescaling_max_rel_std,
-                        n_neighbors=post_rescaling_n_neighbors,
-                        mc_abs_std=_rg_mc_abs_std,
-                        nominal_means=nom_mean_grouped,
-                        deflation_threshold=post_rescaling_deflation_threshold,
-                        logger=_logger,
-                    )
-                    if verbose_diagnostics:
-                        log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-regularize", _logger, verbose=True)
+                    # Re-collapse absolute covariance through new aggregation matrix
+                    cov_abs_grouped = A @ cov_abs_for_mg @ A.T
 
-                    # Re-apply smoothing + capping on merged result
-                    _mg_valid = multigroup_result.valid_mask_grouped
-                    cov_grouped_nominal, _ = smooth_absent_order_uncertainties(
-                        cov_rel=cov_grouped_nominal,
-                        valid_mask=_mg_valid,
-                        max_order=max_degree,
-                        min_rel_std=SMOOTH_MIN_REL_STD,
-                        dip_fraction=SMOOTH_DIP_FRACTION,
-                        spike_factor=MG_SMOOTH_SPIKE_FACTOR,
-                        dip_n_neighbors=MG_SMOOTH_DIP_N_NEIGHBORS,
-                        median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
-                        logger=_logger,
-                    )
-                    multigroup_result.cov_grouped, _ = smooth_absent_order_uncertainties(
-                        cov_rel=multigroup_result.cov_grouped,
-                        valid_mask=_mg_valid,
-                        max_order=max_degree,
-                        min_rel_std=SMOOTH_MIN_REL_STD,
-                        dip_fraction=SMOOTH_DIP_FRACTION,
-                        spike_factor=MG_SMOOTH_SPIKE_FACTOR,
-                        dip_n_neighbors=MG_SMOOTH_DIP_N_NEIGHBORS,
-                        median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
-                        logger=_logger,
-                    )
+                    # Direct absolute-to-nominal conversion
+                    cov_grouped_nominal = absolute_to_nominal_relative(cov_abs_grouped, nom_mean_grouped)
+                    _rg_nom_rel_std = np.sqrt(np.maximum(np.diag(cov_grouped_nominal), 0.0))
+                    _logger.info(f"  RG abs→nominal conversion: max rel_std = {np.max(_rg_nom_rel_std)*100:.1f}%")
                     if verbose_diagnostics:
-                        log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-smooth", _logger, verbose=True)
+                        log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-convert", _logger, verbose=True)
 
-                    # Spatial smoothing at RG level (before cap)
-                    if SMOOTH_DIAGONAL_WINDOW >= 3:
-                        cov_grouped_nominal = smooth_diagonal_median(
+                    if apply_cov_postprocessing:
+                        # Step 2: Dip/spike smoothing & absent-order interpolation (RG)
+                        _mg_valid = multigroup_result.valid_mask_grouped
+                        cov_grouped_nominal, _ = smooth_absent_order_uncertainties(
                             cov_rel=cov_grouped_nominal,
+                            valid_mask=_mg_valid,
                             max_order=max_degree,
-                            window=SMOOTH_DIAGONAL_WINDOW,
+                            min_rel_std=SMOOTH_MIN_REL_STD,
+                            dip_fraction=SMOOTH_DIP_FRACTION,
+                            spike_factor=MG_SMOOTH_SPIKE_FACTOR,
+                            dip_n_neighbors=MG_SMOOTH_DIP_N_NEIGHBORS,
+                            median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
                             logger=_logger,
                         )
-                        multigroup_result.cov_grouped = smooth_diagonal_median(
+                        multigroup_result.cov_grouped, _ = smooth_absent_order_uncertainties(
                             cov_rel=multigroup_result.cov_grouped,
+                            valid_mask=_mg_valid,
                             max_order=max_degree,
-                            window=SMOOTH_DIAGONAL_WINDOW,
+                            min_rel_std=SMOOTH_MIN_REL_STD,
+                            dip_fraction=SMOOTH_DIP_FRACTION,
+                            spike_factor=MG_SMOOTH_SPIKE_FACTOR,
+                            dip_n_neighbors=MG_SMOOTH_DIP_N_NEIGHBORS,
+                            median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
                             logger=_logger,
                         )
                         if verbose_diagnostics:
-                            log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-median", _logger, verbose=True)
+                            log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-smooth", _logger, verbose=True)
 
-                    # Order-dependent cap at RG level — final safety net
-                    if ORDER_REL_STD_CAPS:
-                        cov_grouped_nominal, _ = cap_order_relative_uncertainty(
-                            cov_rel=cov_grouped_nominal,
-                            max_order=max_degree,
-                            order_caps=ORDER_REL_STD_CAPS,
-                            logger=_logger,
-                        )
-                        multigroup_result.cov_grouped, _ = cap_order_relative_uncertainty(
-                            cov_rel=multigroup_result.cov_grouped,
-                            max_order=max_degree,
-                            order_caps=ORDER_REL_STD_CAPS,
-                            logger=_logger,
-                        )
-                    if verbose_diagnostics:
-                        log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-cap", _logger, verbose=True)
+                        # Spatial smoothing at RG level (before cap)
+                        if SMOOTH_DIAGONAL_WINDOW >= 3:
+                            cov_grouped_nominal = smooth_diagonal_median(
+                                cov_rel=cov_grouped_nominal,
+                                max_order=max_degree,
+                                window=SMOOTH_DIAGONAL_WINDOW,
+                                logger=_logger,
+                            )
+                            multigroup_result.cov_grouped = smooth_diagonal_median(
+                                cov_rel=multigroup_result.cov_grouped,
+                                max_order=max_degree,
+                                window=SMOOTH_DIAGONAL_WINDOW,
+                                logger=_logger,
+                            )
+                            if verbose_diagnostics:
+                                log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-median", _logger, verbose=True)
 
-                    # Forward-fill absent-order rel_std at RG level
-                    _logger.info("  Applying forward-fill to RG rel_std for absent orders...")
-                    cov_grouped_nominal = forward_fill_rel_std(cov_grouped_nominal, max_degree, logger=_logger)
-                    multigroup_result.cov_grouped = forward_fill_rel_std(multigroup_result.cov_grouped, max_degree, logger=_logger)
-                    if verbose_diagnostics:
-                        log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-ffill", _logger, verbose=True)
+                        # Step 4: Hard cap (RG)
+                        if ORDER_REL_STD_CAPS is not None:
+                            cov_grouped_nominal, _ = cap_order_relative_uncertainty(
+                                cov_rel=cov_grouped_nominal,
+                                max_order=max_degree,
+                                order_caps=ORDER_REL_STD_CAPS,
+                                logger=_logger,
+                            )
+                            multigroup_result.cov_grouped, _ = cap_order_relative_uncertainty(
+                                cov_rel=multigroup_result.cov_grouped,
+                                max_order=max_degree,
+                                order_caps=ORDER_REL_STD_CAPS,
+                                logger=_logger,
+                            )
+                        if verbose_diagnostics:
+                            log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-cap", _logger, verbose=True)
+
+                        # Forward-fill absent-order rel_std at RG level
+                        if FORWARD_FILL_REL_STD_ENABLED:
+                            _logger.info("  Applying forward-fill to RG rel_std for absent orders...")
+                            cov_grouped_nominal = forward_fill_rel_std(cov_grouped_nominal, max_degree, logger=_logger)
+                            multigroup_result.cov_grouped = forward_fill_rel_std(multigroup_result.cov_grouped, max_degree, logger=_logger)
+                        else:
+                            _logger.info("  Forward-fill DISABLED at RG level")
+                        if verbose_diagnostics:
+                            log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-ffill", _logger, verbose=True)
 
                     _logger.info(f"  Regrouped: {n_old} -> {len(multigroup_result.groups)} groups")
 
@@ -3201,6 +3476,11 @@ def run_exfor_to_endf_sampling_v2(
             if mf34_covariance_type in ("multigroup", "both") and cov_grouped_nominal is not None:
                 # For multigroup, write to separate files with _mg suffix
                 if average_file:
+                    _logger.info(f"  Pre-MF34 check (MG avg): cov shape={multigroup_result.cov_grouped.shape}, "
+                                 f"inf={np.sum(np.isinf(multigroup_result.cov_grouped))}, "
+                                 f"nan={np.sum(np.isnan(multigroup_result.cov_grouped))}, "
+                                 f"grid len={len(multigroup_result.group_boundaries_ev)}, "
+                                 f"grid finite={np.all(np.isfinite(multigroup_result.group_boundaries_ev))}")
                     mf34_mg_avg = create_mf34_from_covariance(
                         cov_matrix=multigroup_result.cov_grouped,
                         energy_grid_ev=multigroup_result.group_boundaries_ev,
@@ -3221,6 +3501,11 @@ def run_exfor_to_endf_sampling_v2(
                     _logger.info(f"  Multigroup MF34 written to: {mg_avg_file}")
 
                 if nominal_file:
+                    _logger.info(f"  Pre-MF34 check (MG nom): cov shape={cov_grouped_nominal.shape}, "
+                                 f"inf={np.sum(np.isinf(cov_grouped_nominal))}, "
+                                 f"nan={np.sum(np.isnan(cov_grouped_nominal))}, "
+                                 f"grid len={len(multigroup_result.group_boundaries_ev)}, "
+                                 f"grid finite={np.all(np.isfinite(multigroup_result.group_boundaries_ev))}")
                     mf34_mg_nom = create_mf34_from_covariance(
                         cov_matrix=cov_grouped_nominal,
                         energy_grid_ev=multigroup_result.group_boundaries_ev,
@@ -3264,6 +3549,11 @@ def run_exfor_to_endf_sampling_v2(
                         base_dir = Path(nominal_file).parent
                         sampling_file = str(base_dir / f"{base_stem}{suffix}.endf")
                         shutil.copy(nominal_file, sampling_file)
+                        _logger.info(f"  Pre-MF34 check (fine nom): cov shape={cov_matrix_nominal.shape}, "
+                                     f"inf={np.sum(np.isinf(cov_matrix_nominal))}, "
+                                     f"nan={np.sum(np.isnan(cov_matrix_nominal))}, "
+                                     f"grid len={len(energy_grid_ev)}, "
+                                     f"grid finite={np.all(np.isfinite(energy_grid_ev))}")
                         mf34_fine_obj = create_mf34_from_covariance(
                             cov_matrix=cov_matrix_nominal,
                             energy_grid_ev=energy_grid_ev,
@@ -3288,6 +3578,11 @@ def run_exfor_to_endf_sampling_v2(
                         base_dir = Path(nominal_file).parent
                         sampling_file = str(base_dir / f"{base_stem}{suffix}.endf")
                         shutil.copy(nominal_file, sampling_file)
+                        _logger.info(f"  Pre-MF34 check (MG sampling): cov shape={cov_grouped_nominal.shape}, "
+                                     f"inf={np.sum(np.isinf(cov_grouped_nominal))}, "
+                                     f"nan={np.sum(np.isnan(cov_grouped_nominal))}, "
+                                     f"grid len={len(multigroup_result.group_boundaries_ev)}, "
+                                     f"grid finite={np.all(np.isfinite(multigroup_result.group_boundaries_ev))}")
                         mf34_mg_obj = create_mf34_from_covariance(
                             cov_matrix=cov_grouped_nominal,
                             energy_grid_ev=multigroup_result.group_boundaries_ev,
@@ -3311,6 +3606,7 @@ def run_exfor_to_endf_sampling_v2(
 
         except Exception as e:
             _logger.error(f"Failed to write MF34: {str(e)}", console=True)
+            _logger.error(f"  Traceback:\n{traceback.format_exc()}")
             mf34_sample_source = None
 
     else:
@@ -3428,15 +3724,16 @@ if __name__ == "__main__":
         # Experiment exclusion and uncertainty floor
         exclude_experiments=EXCLUDE_EXPERIMENTS,
         min_relative_uncertainty=MIN_RELATIVE_UNCERTAINTY,
+        # Energy grid source
+        energy_grid_source=ENERGY_GRID_SOURCE,
+        union_grid_subentries=UNION_GRID_SUBENTRIES,
         # Covariance cap (Layer 1) and positivity projection (Layer 2)
         apply_covariance_cap=APPLY_COVARIANCE_CAP,
         max_relative_std_cap=MAX_RELATIVE_STD_CAP,
         regularize_near_zero=REGULARIZE_NEAR_ZERO_REL_UNC,
         near_zero_snr_threshold=NEAR_ZERO_SNR_THRESHOLD,
         near_zero_n_neighbors=NEAR_ZERO_N_NEIGHBORS,
-        post_rescaling_max_rel_std=POST_RESCALING_MAX_REL_STD,
-        post_rescaling_n_neighbors=POST_RESCALING_N_NEIGHBORS,
-        post_rescaling_deflation_threshold=POST_RESCALING_DEFLATION_THRESHOLD,
+        apply_cov_postprocessing=APPLY_COV_POSTPROCESSING,
         apply_positivity_projection=APPLY_POSITIVITY_PROJECTION,
         positivity_check_points=POSITIVITY_CHECK_POINTS,
         # File output options

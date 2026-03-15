@@ -319,8 +319,9 @@ def plot_energy_sensitivity(
     if ax is None:
         plot_settings = setup_plot_style(style=style, figsize=figsize, ax=ax)
         ax = plot_settings['ax']
-        fig = plot_settings['_fig']
-        colors = plot_settings['_colors']
+        fig = plot_settings['fig']
+        prop_cycle = plt.rcParams['axes.prop_cycle']
+        colors = prop_cycle.by_key().get('color', ['C0'])
     else:
         prop_cycle = plt.rcParams['axes.prop_cycle']
         colors = prop_cycle.by_key().get('color', ['C0'])
@@ -430,6 +431,6 @@ def plot_energy_sensitivity(
         print(f"The following sensitivities are all 0: MT {mt_list}")
 
     if plot_settings is not None:
-        finalize_plot(fig, plot_settings['_notebook_mode'])
+        finalize_plot(fig, ax)
 
     return ax

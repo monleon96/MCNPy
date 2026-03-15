@@ -131,7 +131,7 @@ for cov_path in cov_paths:
         cov = kika.read_njoy_covmat(cov_path)
     else:
         missing_paths.append(cov_path)
-        cov = kika.cov.covmat.CovMat()
+        cov = kika.cov.cross_section_covariance.CrossSectionCovariance()
     covmatlist.append(cov)
 
 if missing_paths:

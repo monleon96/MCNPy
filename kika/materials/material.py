@@ -16,6 +16,10 @@ _DENSITY_UNIT_ALIASES: Dict[str, str] = {
     "kg/m3": "kg/m3",
     "kg/m^3": "kg/m3",
     "kg/m³": "kg/m3",
+    "atoms/b-cm": "atoms/b-cm",
+    "atoms/barn-cm": "atoms/b-cm",
+    "a/b-cm": "atoms/b-cm",
+    "atoms/b·cm": "atoms/b-cm",
 }
 
 _DENSITY_CONVERSIONS: Dict[tuple[str, str], float] = {
@@ -605,8 +609,8 @@ class Material:
         None
         """
         normalized_unit = _normalize_density_unit(unit)
-        if normalized_unit not in {"g/cc", "kg/m3"}:
-            raise ValueError(f"Unsupported density unit '{unit}'. Use 'g/cc' or 'kg/m3'.")
+        if normalized_unit not in {"g/cc", "kg/m3", "atoms/b-cm"}:
+            raise ValueError(f"Unsupported density unit '{unit}'. Use 'g/cc', 'kg/m3', or 'atoms/b-cm'.")
         self.density = float(density)
         self.density_unit = normalized_unit
 
@@ -645,10 +649,32 @@ class Material:
         if self.density is None or self.density_unit is None:
             raise ValueError("Density or density_unit not set.")
         target_unit = _normalize_density_unit(unit)
-        if target_unit not in {"g/cc", "kg/m3"}:
-            raise ValueError(f"Unsupported density unit '{unit}'. Use 'g/cc' or 'kg/m3'.")
-        factor = _DENSITY_CONVERSIONS[(self.density_unit, target_unit)]
-        return self.density * factor
+        if target_unit not in {"g/cc", "kg/m3", "atoms/b-cm"}:
+            raise ValueError(f"Unsupported density unit '{unit}'. Use 'g/cc', 'kg/m3', or 'atoms/b-cm'.")
+
+        # Direct conversion between g/cc and kg/m3
+        if self.density_unit != "atoms/b-cm" and target_unit != "atoms/b-cm":
+            factor = _DENSITY_CONVERSIONS[(self.density_unit, target_unit)]
+            return self.density * factor
+
+        # Identity
+        if self.density_unit == target_unit:
+            return self.density
+
+        # Composition-aware conversions involving atoms/b-cm
+        if self.density_unit == "atoms/b-cm" and target_unit in ("g/cc", "kg/m3"):
+            mass_density = self._calculate_mass_density()
+            if mass_density is None:
+                raise ValueError("Cannot convert atoms/b-cm to g/cc: insufficient composition data.")
+            if target_unit == "kg/m3":
+                return mass_density * 1000.0
+            return mass_density
+
+        if self.density_unit in ("g/cc", "kg/m3") and target_unit == "atoms/b-cm":
+            atomic_density = self._calculate_atomic_density()
+            if atomic_density is None:
+                raise ValueError("Cannot convert to atoms/b-cm: insufficient composition data.")
+            return atomic_density
 
     def convert_density(self, unit: str) -> None:
         """Convert density in-place to the requested unit.
@@ -1049,11 +1075,12 @@ class Material:
     def to_serpent(self) -> str:
         """Serialise the material as a Serpent material card.
 
-        Serpent format:
-        mat <name> <density> [tmp <T>]
-            <zaid>.<lib> <fraction>
+        Serpent format::
 
-        The material name is used if set, otherwise 'mat<id>' is used.
+            mat <name> <density> [rgb R G B] [tmp <T>] [moder <lib> <ZA>]
+                <zaid>.<lib> <fraction>
+
+        The material name is used if set, otherwise ``'mat<id>'``.
         Density uses negative values for mass density (g/cc) and positive
         for atomic density (atoms/b-cm), following Serpent convention.
 
@@ -1061,83 +1088,90 @@ class Material:
         -------
         str
             Serpent material card formatted as a multi-line string.
-
-        Notes
-        -----
-        - If density is not set, it defaults to 1.0 g/cc (negative in Serpent).
-        - Weight fractions are output as negative, atomic fractions as positive.
-        - Temperature is included with 'tmp' keyword if set.
         """
         output_lines = []
 
-        # Determine material name for Serpent (use name if available, else mat<id>)
         mat_name = self.name if self.name else f"mat{self.id}"
-        # Serpent doesn't allow spaces in material names
         mat_name = mat_name.replace(" ", "_")
 
-        # Build the mat line
-        # Serpent uses negative density for g/cc, positive for atoms/b-cm
-        if self.density is not None and self.density_unit is not None:
-            density_gcc = self.density_in("g/cc")
-            serpent_density = -density_gcc  # Negative for mass density
+        # Density: preserve original unit
+        if self.metadata.get("serpent_density_sum"):
+            density_str = "sum"
+        elif self.density is not None and self.density_unit is not None:
+            if self.density_unit == "atoms/b-cm":
+                density_str = f"{self.density:.6e}"
+            else:
+                density_gcc = self._mass_density_gcc()
+                density_str = f"{-density_gcc:.6e}"
         else:
-            serpent_density = -1.0  # Default placeholder
+            density_str = "-1.000000e+00"
 
-        mat_line = f"mat {mat_name} {serpent_density:.6e}"
+        mat_line = f"mat {mat_name} {density_str}"
 
-        # Add temperature if set
+        # Serpent modifiers
+        if self.metadata.get("rgb"):
+            r, g, b = self.metadata["rgb"]
+            mat_line += f" rgb {r} {g} {b}"
+
         if self.temperature is not None:
             mat_line += f" tmp {self.temperature:.1f}"
+
+        if self.metadata.get("tms") is not None:
+            mat_line += f" tms {self.metadata['tms']:.1f}"
+
+        if self.metadata.get("tft") is not None:
+            tmin, tmax = self.metadata["tft"]
+            mat_line += f" tft {tmin:.1f} {tmax:.1f}"
+
+        if self.metadata.get("moder"):
+            for lib_name, za in self.metadata["moder"]:
+                mat_line += f" moder {lib_name} {za}"
+
+        if self.metadata.get("burn") is not None:
+            mat_line += f" burn {self.metadata['burn']}"
+
+        if self.metadata.get("vol") is not None:
+            mat_line += f" vol {self.metadata['vol']:.6e}"
+
+        if self.metadata.get("fix") is not None:
+            fix_id, fix_t = self.metadata["fix"]
+            mat_line += f" fix {fix_id} {fix_t:.1f}"
 
         output_lines.append(mat_line)
 
         # Output nuclides
-        # Serpent uses same sign convention for fractions as MCNP
         sign = -1.0 if self.is_weight else 1.0
 
         for symbol, nuclide in sorted(self.nuclide.items()):
             zaid = nuclide.zaid
 
-            # Check for nuclide-specific library
             lib_suffix = None
             if nuclide.libs:
-                # Prefer nlib for neutrons
                 lib_suffix = nuclide.libs.get('nlib', next(iter(nuclide.libs.values()), None))
             elif self.libs:
                 lib_suffix = self.libs.get('nlib', next(iter(self.libs.values()), None))
 
-            # Format ZAID with library if available
             if lib_suffix:
                 zaid_str = f"{zaid}.{lib_suffix}"
             else:
                 zaid_str = str(zaid)
 
-            # Add nuclide line with indentation
             fraction_str = f"{sign * nuclide.fraction:.6e}"
-            output_lines.append(f"    {zaid_str:<12} {fraction_str:>14}")
+            output_lines.append(f"{zaid_str:<12} {fraction_str:>14}")
 
         return "\n".join(output_lines)
 
-    def _calculate_atomic_density(self) -> Optional[float]:
-        """Calculate atomic density in atoms/barn-cm from mass density.
+    def _effective_avg_atomic_mass(self) -> Optional[float]:
+        """Return the effective average atomic mass for this material.
 
-        Uses Avogadro's number and the effective molecular weight of the material.
+        For atomic fractions: M_eff = sum(x_i * M_i) / sum(x_i)
+        For weight fractions: M_eff = sum(w_i) / sum(w_i / M_i)
 
         Returns
         -------
         float or None
-            Atomic density in atoms/b-cm, or None if calculation is not possible.
+            Average atomic mass in g/mol, or None if not calculable.
         """
-        if self.density is None or self.density_unit is None:
-            return None
-
-        # Get mass density in g/cc
-        density_gcc = self.density_in("g/cc")
-
-        # Calculate effective atomic/molecular weight
-        # For atomic fractions: M_eff = sum(x_i * M_i)
-        # For weight fractions: 1/M_eff = sum(w_i / M_i)
-
         total_weight = 0.0
         total_fraction = 0.0
 
@@ -1149,7 +1183,7 @@ class Material:
             if self.is_atomic:
                 total_weight += nuclide.fraction * atomic_mass
                 total_fraction += nuclide.fraction
-            else:  # weight fraction
+            else:
                 total_weight += nuclide.fraction / atomic_mass
                 total_fraction += nuclide.fraction
 
@@ -1157,20 +1191,76 @@ class Material:
             return None
 
         if self.is_atomic:
-            # For atomic fractions: average atomic mass
-            avg_atomic_mass = total_weight / total_fraction
+            return total_weight / total_fraction
         else:
-            # For weight fractions: harmonic mean
-            avg_atomic_mass = total_fraction / total_weight
+            return total_fraction / total_weight
 
-        # Avogadro's number
-        N_A = 6.02214076e23  # atoms/mol
-        # Conversion: 1 barn = 1e-24 cm^2, so atoms/b-cm = atoms/cm^3 * 1e-24
+    def _mass_density_gcc(self) -> Optional[float]:
+        """Return mass density in g/cc without going through density_in (avoids recursion).
 
-        # atomic_density = (density * N_A / M) * 1e-24
+        Returns
+        -------
+        float or None
+        """
+        if self.density is None or self.density_unit is None:
+            return None
+        if self.density_unit == "g/cc":
+            return self.density
+        if self.density_unit == "kg/m3":
+            return self.density * 0.001
+        return None  # atoms/b-cm cannot be converted without composition
+
+    def _calculate_atomic_density(self) -> Optional[float]:
+        """Calculate atomic density in atoms/barn-cm from mass density.
+
+        Returns
+        -------
+        float or None
+            Atomic density in atoms/b-cm, or None if calculation is not possible.
+        """
+        if self.density is None or self.density_unit is None:
+            return None
+
+        if self.density_unit == "atoms/b-cm":
+            return self.density
+
+        density_gcc = self._mass_density_gcc()
+        if density_gcc is None:
+            return None
+
+        avg_atomic_mass = self._effective_avg_atomic_mass()
+        if avg_atomic_mass is None:
+            return None
+
+        N_A = 6.02214076e23
         atomic_density = (density_gcc * N_A / avg_atomic_mass) * 1e-24
-
         return atomic_density
+
+    def _calculate_mass_density(self) -> Optional[float]:
+        """Calculate mass density in g/cc from atomic density.
+
+        Returns
+        -------
+        float or None
+            Mass density in g/cc, or None if calculation is not possible.
+        """
+        if self.density is None or self.density_unit is None:
+            return None
+
+        if self.density_unit in ("g/cc", "kg/m3"):
+            return self._mass_density_gcc()
+
+        if self.density_unit != "atoms/b-cm":
+            return None
+
+        avg_atomic_mass = self._effective_avg_atomic_mass()
+        if avg_atomic_mass is None:
+            return None
+
+        N_A = 6.02214076e23
+        # Reverse of: atomic_density = (density_gcc * N_A / M) * 1e-24
+        density_gcc = (self.density * avg_atomic_mass / N_A) * 1e24
+        return density_gcc
 
     def __str__(self) -> str:
         """Return a user-friendly string representation of the material.
@@ -1634,6 +1724,71 @@ class MaterialCollection:
 
         input_obj = read_mcnp(path)
         return input_obj.materials
+
+    @classmethod
+    def from_serpent(cls, path: str) -> MaterialCollection:
+        """Create a MaterialCollection from a Serpent input file.
+
+        Parameters
+        ----------
+        path : str
+            Path to Serpent input file.
+
+        Returns
+        -------
+        MaterialCollection
+            Collection of materials parsed from the file.
+        """
+        from .parse_serpent import read_serpent_materials
+
+        return read_serpent_materials(path)
+
+    @property
+    def by_name(self) -> Dict[str, Material]:
+        """Return materials indexed by name.
+
+        Useful for Serpent materials which use string identifiers.
+
+        Returns
+        -------
+        dict of str to Material
+            Materials keyed by their name attribute.
+        """
+        return {mat.name: mat for mat in self.by_id.values() if mat.name}
+
+    def write_to_serpent(self, input_filepath: str,
+                         output_filepath: Optional[str] = None) -> None:
+        """Update materials in a Serpent input file.
+
+        Reads the original file, replaces material definitions with updated
+        versions, and preserves all non-material content.
+
+        Parameters
+        ----------
+        input_filepath : str
+            Path to the original Serpent input file.
+        output_filepath : str, optional
+            Path for the output file. If None, updates the input file in place.
+        """
+        from .parse_serpent import _find_material_spans
+
+        if output_filepath is None:
+            output_filepath = input_filepath
+
+        with open(input_filepath, 'r') as f:
+            lines = f.readlines()
+
+        spans = _find_material_spans(lines)
+        name_to_mat = self.by_name
+
+        # Process in reverse to maintain line positions
+        for mat_name, start, end in reversed(spans):
+            if mat_name in name_to_mat:
+                replacement = name_to_mat[mat_name].to_serpent() + "\n"
+                lines[start:end] = [replacement]
+
+        with open(output_filepath, 'w') as f:
+            f.writelines(lines)
 
     def __str__(self) -> str:
         """Return a user-friendly string representation of the collection.

@@ -569,7 +569,7 @@ def perturb_seprate_ACE_files(
         _logger.info(f"\n{subseparator}\n")
 
         # Convert energy grid from eV to MeV for ACE (ACE energies are in MeV)
-        # CovMat now stores energies in eV by default
+        # CrossSectionCovariance now stores energies in eV by default
         energy_grid_eV = cov.energy_grid
         if cov.energy_unit == 'eV':
             energy_grid = [e / 1e6 for e in energy_grid_eV]  # Convert eV to MeV

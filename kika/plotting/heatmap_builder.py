@@ -16,7 +16,7 @@ from .plot_builder import PlotBuilder, _NOT_SET
 from .plot_data import (
     HeatmapPlotData,
     CovarianceHeatmapData,
-    MF34HeatmapData
+    LegendreHeatmapData
 )
 from ._backend_utils import _configure_figure_interactivity
 
@@ -160,7 +160,7 @@ class HeatmapBuilder(PlotBuilder):
             (cropped_matrix, new_x_edges, new_y_edges, new_block_info,
              cropped_energy_grid, cropped_uncertainty_data)
         """
-        from .plot_data import CovarianceHeatmapData, MF34HeatmapData
+        from .plot_data import CovarianceHeatmapData, LegendreHeatmapData
 
         # Get mask_value for reapplying after cropping
         mask_value = getattr(heatmap_data, 'mask_value', None)
@@ -294,8 +294,8 @@ class HeatmapBuilder(PlotBuilder):
 
             return cropped_M, new_x_edges, new_y_edges, new_block_info, cropped_energy_grid, cropped_uncertainty
 
-        # Handle MF34HeatmapData
-        elif isinstance(heatmap_data, MF34HeatmapData):
+        # Handle LegendreHeatmapData
+        elif isinstance(heatmap_data, LegendreHeatmapData):
             block_info = getattr(heatmap_data, 'block_info', None) or {}
             legendre_list = block_info.get('legendre_coeffs', heatmap_data.legendre_coeffs)
             energy_grids = heatmap_data.energy_grids
@@ -575,7 +575,7 @@ class HeatmapBuilder(PlotBuilder):
         tuple
             (cropped_matrix, new_x_edges, new_y_edges, new_block_info, cropped_energy_grid)
         """
-        from .plot_data import CovarianceHeatmapData, MF34HeatmapData
+        from .plot_data import CovarianceHeatmapData, LegendreHeatmapData
 
         block_info = getattr(heatmap_data, 'block_info', None)
         if block_info is None:
@@ -669,7 +669,7 @@ class HeatmapBuilder(PlotBuilder):
 
             return cropped_M, new_x_edges, new_y_edges, new_block_info, cropped_energy_grid
 
-        elif isinstance(heatmap_data, MF34HeatmapData):
+        elif isinstance(heatmap_data, LegendreHeatmapData):
             legendre_list = block_info.get('legendre_coeffs', heatmap_data.legendre_coeffs)
             ranges_dict = block_info.get('ranges', {})
             energy_grids = heatmap_data.energy_grids
@@ -784,7 +784,7 @@ class HeatmapBuilder(PlotBuilder):
         Parameters
         ----------
         heatmap_data : HeatmapPlotData
-            Heatmap data object (CovarianceHeatmapData or MF34HeatmapData)
+            Heatmap data object (CovarianceHeatmapData or LegendreHeatmapData)
         show_uncertainties : bool, default True
             Whether to show uncertainty panels above the heatmap
         show_energy_ticks : bool, default True
@@ -901,7 +901,7 @@ class HeatmapBuilder(PlotBuilder):
         matplotlib.figure.Figure
             The completed heatmap figure
         """
-        from .plot_data import CovarianceHeatmapData, MF34HeatmapData, HeatmapPlotData
+        from .plot_data import CovarianceHeatmapData, LegendreHeatmapData, HeatmapPlotData
         from .heatmap_utils import (
             setup_energy_group_ticks,
             setup_energy_group_ticks_single_block,
@@ -960,7 +960,7 @@ class HeatmapBuilder(PlotBuilder):
 
         # Check for symmetric matrix (covariance/correlation matrices)
         symmetric_matrix = isinstance(heatmap_data, CovarianceHeatmapData) or (
-            isinstance(heatmap_data, MF34HeatmapData) and getattr(heatmap_data, "is_diagonal", False))
+            isinstance(heatmap_data, LegendreHeatmapData) and getattr(heatmap_data, "is_diagonal", False))
 
         # Get user-specified energy limits
         user_x_lim = getattr(self, "_x_lim", None)
@@ -1133,7 +1133,7 @@ class HeatmapBuilder(PlotBuilder):
             # No energy filtering needed - data is already cropped (or not limited)
             pending_block_labels = self._setup_covariance_heatmap_ticks(fig, ax_heatmap, heatmap_data, full_xlim, full_ylim,
                                                   None, None)
-        elif isinstance(heatmap_data, MF34HeatmapData):
+        elif isinstance(heatmap_data, LegendreHeatmapData):
             # No energy filtering needed - data is already cropped (or not limited)
             pending_block_labels = self._setup_mf34_heatmap_ticks(fig, ax_heatmap, heatmap_data, full_xlim, full_ylim,
                                            None, None)
@@ -1185,7 +1185,7 @@ class HeatmapBuilder(PlotBuilder):
         # Calculate number of MTs/blocks for layout adjustment
         if isinstance(heatmap_data, CovarianceHeatmapData) and heatmap_data.block_info:
             num_blocks = len(heatmap_data.block_info.get('mts', [1]))
-        elif isinstance(heatmap_data, MF34HeatmapData) and heatmap_data.block_info:
+        elif isinstance(heatmap_data, LegendreHeatmapData) and heatmap_data.block_info:
             num_blocks = len(heatmap_data.legendre_coeffs)
         else:
             num_blocks = 1
@@ -1383,13 +1383,13 @@ class HeatmapBuilder(PlotBuilder):
         self,
         fig: plt.Figure,
         ax: plt.Axes,
-        data: 'MF34HeatmapData',
+        data: 'LegendreHeatmapData',
         full_xlim: Tuple[float, float],
         full_ylim: Tuple[float, float],
         energy_x_lim: Optional[Tuple[float, float]] = None,
         energy_y_lim: Optional[Tuple[float, float]] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Setup ticks for MF34HeatmapData with Legendre labels and energy axes.
+        """Setup ticks for LegendreHeatmapData with Legendre labels and energy axes.
 
         Returns pending block labels info to be drawn after fig.subplots_adjust().
         """
@@ -1817,7 +1817,7 @@ class HeatmapBuilder(PlotBuilder):
         heatmap_data: 'HeatmapPlotData'
     ) -> None:
         """Draw light grid lines separating MT/L submatrices."""
-        from .plot_data import CovarianceHeatmapData, MF34HeatmapData
+        from .plot_data import CovarianceHeatmapData, LegendreHeatmapData
 
         ranges_x = []
         ranges_y = []
@@ -1860,7 +1860,7 @@ class HeatmapBuilder(PlotBuilder):
                     if row_rng is not None:
                         ranges_y.append(tuple(row_rng))
 
-        elif isinstance(heatmap_data, MF34HeatmapData):
+        elif isinstance(heatmap_data, LegendreHeatmapData):
             info = heatmap_data.block_info or {}
             legendre_list = info.get('legendre_coeffs', heatmap_data.legendre_coeffs)
             energy_ranges = info.get('energy_ranges', {}) or {}
@@ -1927,7 +1927,7 @@ class HeatmapBuilder(PlotBuilder):
 
         Returns pending block labels info to be drawn after fig.subplots_adjust().
         """
-        from .plot_data import CovarianceHeatmapData, MF34HeatmapData
+        from .plot_data import CovarianceHeatmapData, LegendreHeatmapData
 
         if not cropped_block_info:
             return None
@@ -2069,7 +2069,7 @@ class HeatmapBuilder(PlotBuilder):
         x_limits: Optional[Tuple[float, float]] = None
     ) -> None:
         """Draw uncertainty panels above heatmap."""
-        from .plot_data import CovarianceHeatmapData, MF34HeatmapData
+        from .plot_data import CovarianceHeatmapData, LegendreHeatmapData
 
         uncertainty_data = heatmap_data.uncertainty_data
         if not uncertainty_data:
@@ -2156,7 +2156,7 @@ class HeatmapBuilder(PlotBuilder):
 
         keys = sorted(uncertainty_data.keys())
 
-        if isinstance(heatmap_data, MF34HeatmapData):
+        if isinstance(heatmap_data, LegendreHeatmapData):
             edges_map = {}
             if heatmap_data.block_info:
                 edges_map = heatmap_data.block_info.get("edges_transformed", {}) or {}
@@ -2353,7 +2353,7 @@ class HeatmapBuilder(PlotBuilder):
         cropped_uncertainty_data: Optional[Dict] = None
     ) -> None:
         """Draw uncertainty panels for cropped multi-block heatmaps."""
-        from .plot_data import CovarianceHeatmapData, MF34HeatmapData
+        from .plot_data import CovarianceHeatmapData, LegendreHeatmapData
 
         # Use cropped uncertainty data if provided, otherwise fall back to original
         if cropped_uncertainty_data is not None:

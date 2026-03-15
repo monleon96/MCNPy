@@ -398,3 +398,106 @@ def test_fraction_conversion_with_natural_elements():
     # Verify expanded isotope atomic fractions sum to the original atomic fractions
     assert abs(c_atomic_sum - expected_c_atomic) < 1e-10
     assert abs(fe_atomic_sum - expected_fe_atomic) < 1e-10
+
+
+# ── Serpent material tests ──────────────────────────────────────────────────
+
+SERPENT_INPUT = "/share_snc/snc/JuanMonleon/serpent/PWRSphere.sss2"
+
+
+def test_serpent_material_parsing():
+    """Test parsing materials from a Serpent input file."""
+    from kika.materials import MaterialCollection
+
+    mc = MaterialCollection.from_serpent(SERPENT_INPUT)
+
+    # Should find 3 materials
+    assert len(mc) == 3
+
+    # Check by_name accessor
+    assert set(mc.by_name.keys()) == {"AIR", "WATER", "SS304"}
+
+    # AIR: atomic density
+    air = mc.by_name["AIR"]
+    assert air.name == "AIR"
+    assert air.density == pytest.approx(5.3248e-05)
+    assert air.density_unit == "atoms/b-cm"
+    assert len(air.nuclide) == 2
+    assert air.fraction_type == "ao"
+    assert air.metadata["rgb"] == (0, 128, 0)
+
+    # WATER: atomic density
+    water = mc.by_name["WATER"]
+    assert water.density == pytest.approx(7.18825e-02)
+    assert water.density_unit == "atoms/b-cm"
+    assert len(water.nuclide) == 4
+    assert water.nuclide["H1"].fraction == pytest.approx(6.666630e-01)
+    assert water.metadata["rgb"] == (0, 0, 255)
+
+    # SS304: mass density (negative in Serpent → stored as g/cc)
+    ss = mc.by_name["SS304"]
+    assert ss.density == pytest.approx(7.85)
+    assert ss.density_unit == "g/cc"
+    assert len(ss.nuclide) == 36
+    assert ss.nuclide["Fe56"].fraction == pytest.approx(0.8810613)
+    assert ss.nuclide["C13"].fraction == pytest.approx(1.022318e-04)
+    assert ss.metadata["rgb"] == (255, 0, 0)
+
+    # All nuclides should have 06c library
+    for mat in mc:
+        for nuclide in mat.nuclide.values():
+            assert nuclide.libs.get("nlib") == "06c"
+
+
+def test_serpent_roundtrip():
+    """Test parse → export → re-parse roundtrip."""
+    from kika.materials import MaterialCollection, read_serpent_materials
+
+    mc1 = MaterialCollection.from_serpent(SERPENT_INPUT)
+    text1 = mc1.to_serpent()
+
+    # Re-parse from the exported text
+    lines = [l + "\n" for l in text1.split("\n")]
+    mc2 = read_serpent_materials(lines)
+    text2 = mc2.to_serpent()
+
+    # Exact text match
+    assert text1 == text2
+
+    # Verify density values preserved
+    for m1, m2 in zip(mc1, mc2):
+        assert m1.density == pytest.approx(m2.density)
+        assert m1.density_unit == m2.density_unit
+        assert m1.metadata.get("rgb") == m2.metadata.get("rgb")
+
+        # All nuclide fractions match
+        for sym in m1.nuclide:
+            n1 = m1.nuclide[sym]
+            n2 = m2.nuclide[n1.zaid]
+            assert n1.fraction == pytest.approx(n2.fraction)
+
+
+def test_serpent_mcnp_interop():
+    """Test Serpent→MCNP export and fraction conversion."""
+    from kika.materials import MaterialCollection
+
+    mc = MaterialCollection.from_serpent(SERPENT_INPUT)
+
+    # MCNP export should work
+    mcnp_text = mc.to_mcnp()
+    assert "m1" in mcnp_text
+    assert "KIKA_MAT_NAME: AIR" in mcnp_text
+    assert "KIKA_DENSITY:" in mcnp_text
+
+    # Fraction type conversion roundtrip
+    ss = mc.by_name["SS304"]
+    orig_fracs = {n.zaid: n.fraction for n in ss.nuclide.values()}
+
+    ss.to_weight_fraction()
+    assert ss.fraction_type == "wo"
+
+    ss.to_atomic_fraction()
+    assert ss.fraction_type == "ao"
+
+    for n in ss.nuclide.values():
+        assert n.fraction == pytest.approx(orig_fracs[n.zaid], rel=1e-6)

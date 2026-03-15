@@ -1,7 +1,7 @@
 """
 Plotting functions for multigroup covariance data and Legendre coefficients.
 
-This module provides plotting capabilities for MGMF34CovMat objects,
+This module provides plotting capabilities for MultigroupLegendreCovariance objects,
 including visualization of multigroup Legendre coefficients and comparison
 with continuous ENDF data.
 """
@@ -12,10 +12,10 @@ import warnings
 from matplotlib.colors import TwoSlopeNorm
 from typing import List, Optional, Union, Tuple, Dict, Any, TYPE_CHECKING
 from kika.plotting.styles import setup_plot_style, format_axes
-from ..mf34_covmat import MF34CovMat
+from ..legendre_covariance import LegendreCovariance
 
 if TYPE_CHECKING:
-    from .mg_mf34_covmat import MGMF34CovMat
+    from .mg_legendre_covariance import MultigroupLegendreCovariance
 
 
 def _generate_unique_labels(mg_list, labels):
@@ -25,7 +25,7 @@ def _generate_unique_labels(mg_list, labels):
     Parameters
     ----------
     mg_list : list
-        List of MGMF34CovMat objects
+        List of MultigroupLegendreCovariance objects
     labels : None, str, or list of str
         Label specification
         
@@ -70,7 +70,7 @@ def _get_energy_group_centers(energy_grid: np.ndarray) -> np.ndarray:
 
 
 def plot_mg_legendre_coefficients(
-    mg_covmat: Union["MGMF34CovMat", List["MGMF34CovMat"]],
+    mg_covmat: Union["MultigroupLegendreCovariance", List["MultigroupLegendreCovariance"]],
     isotope: int,
     mt: int,
     orders: Optional[Union[int, List[int]]] = None,
@@ -85,14 +85,14 @@ def plot_mg_legendre_coefficients(
     **kwargs
 ) -> plt.Figure:
     """
-    Plot multigroup Legendre coefficients from MGMF34CovMat object(s).
+    Plot multigroup Legendre coefficients from MultigroupLegendreCovariance object(s).
     
     This function plots the group-averaged Legendre coefficients as a function
     of energy group centers, optionally including uncertainty bands.
     
     Parameters
     ----------
-    mg_covmat : MGMF34CovMat or list of MGMF34CovMat
+    mg_covmat : MultigroupLegendreCovariance or list of MultigroupLegendreCovariance
         Multigroup covariance matrix object(s) containing Legendre coefficients
     isotope : int
         Isotope ID to plot
@@ -136,7 +136,7 @@ def plot_mg_legendre_coefficients(
     # Validate inputs
     for i, mg_obj in enumerate(mg_list):
         if mg_obj.num_groups == 0:
-            raise ValueError(f"MGMF34CovMat object {i+1} has no energy groups")
+            raise ValueError(f"MultigroupLegendreCovariance object {i+1} has no energy groups")
     
     # Setup plot style
     plot_kwargs = setup_plot_style(style=style, figsize=figsize, **kwargs)
@@ -321,7 +321,7 @@ def _plot_mg_uncertainty_bands(
     ----------
     ax : matplotlib.axes.Axes
         Target axes
-    mg_obj : MGMF34CovMat
+    mg_obj : MultigroupLegendreCovariance
         Multigroup covariance object
     isotope, mt, order : int
         Selection identifiers
@@ -385,7 +385,7 @@ def _plot_mg_uncertainty_bands(
 
 
 def plot_mg_vs_endf_comparison(
-    mg_covmat: "MGMF34CovMat",
+    mg_covmat: "MultigroupLegendreCovariance",
     endf: object,
     isotope: int,
     mt: int,
@@ -408,7 +408,7 @@ def plot_mg_vs_endf_comparison(
     
     Parameters
     ----------
-    mg_covmat : MGMF34CovMat
+    mg_covmat : MultigroupLegendreCovariance
         Multigroup covariance matrix object
     endf : ENDF object
         Original ENDF data object containing MF4 data
@@ -788,8 +788,8 @@ def plot_mg_vs_endf_comparison(
 
 
 def plot_mg_vs_endf_uncertainties_comparison(
-    mg_covmat: "MGMF34CovMat",
-    endf_data: Union["MF34CovMat", object],
+    mg_covmat: "MultigroupLegendreCovariance",
+    endf_data: Union["LegendreCovariance", object],
     isotope: int,
     mt: int,
     orders: Optional[Union[int, List[int]]] = None,
@@ -809,12 +809,12 @@ def plot_mg_vs_endf_uncertainties_comparison(
     
     Parameters
     ----------
-    mg_covmat : MGMF34CovMat
+    mg_covmat : MultigroupLegendreCovariance
         Multigroup covariance matrix object
-    endf_data : MF34CovMat or ENDF object
+    endf_data : LegendreCovariance or ENDF object
         Either:
-        - MF34CovMat: Original ENDF MF34 covariance data object
-        - ENDF object: ENDF object containing MF34 data (will extract MF34CovMat automatically)
+        - LegendreCovariance: Original ENDF MF34 covariance data object
+        - ENDF object: ENDF object containing MF34 data (will extract LegendreCovariance automatically)
     isotope : int
         Isotope ID to plot
     mt : int
@@ -841,7 +841,7 @@ def plot_mg_vs_endf_uncertainties_comparison(
     plt.Figure
         The matplotlib figure containing the plot
     """
-    # Handle endf_data parameter - convert to MF34CovMat if needed and capture MF4 for absolute uncertainties
+    # Handle endf_data parameter - convert to LegendreCovariance if needed and capture MF4 for absolute uncertainties
     endf_mf4_mt = None
     if hasattr(endf_data, 'mf') and 34 in endf_data.mf:
         # This is an ENDF object
@@ -853,7 +853,7 @@ def plot_mg_vs_endf_uncertainties_comparison(
         if 4 in endf_data.mf and mt in endf_data.mf[4].mt:
             endf_mf4_mt = endf_data.mf[4].mt[mt]
     else:
-        # Assume this is already a MF34CovMat object (no MF4 info for absolute uncertainties)
+        # Assume this is already a LegendreCovariance object (no MF4 info for absolute uncertainties)
         endf_mf34_covmat = endf_data
     
     # Setup plot style
@@ -1147,7 +1147,7 @@ def plot_mg_vs_endf_uncertainties_comparison(
 
 
 def plot_mg_covariance_heatmap(
-    mg_covmat: "MGMF34CovMat",
+    mg_covmat: "MultigroupLegendreCovariance",
     isotope: int,
     mt: int,
     orders: Optional[Union[int, List[int]]] = None,
@@ -1174,7 +1174,7 @@ def plot_mg_covariance_heatmap(
     
     Parameters
     ----------
-    mg_covmat : MGMF34CovMat
+    mg_covmat : MultigroupLegendreCovariance
         Multigroup covariance matrix object
     isotope : int
         Isotope ID to plot

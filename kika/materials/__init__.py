@@ -37,6 +37,7 @@ Examples
 
 from .material import Nuclide, NuclideAccessor, Material, MaterialCollection
 from .parse_mcnp import read_material
+from .parse_serpent import read_serpent_materials
 
 __all__ = [
     'Nuclide',
@@ -44,4 +45,5 @@ __all__ = [
     'Material',
     'MaterialCollection',
     'read_material',
+    'read_serpent_materials',
 ]

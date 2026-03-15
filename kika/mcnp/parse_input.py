@@ -86,15 +86,18 @@ def _read_PERT(lines, start_index):
     
     return Pert(id=pert_num, particle=particle, **pert_attrs), i + 1
 
-def read_mcnp(file_path):
+def read_mcnp(file_path, pert_metadata=None):
     """Reads and parses an MCNP input file.
 
     This function reads an MCNP input file and parses its contents, focusing on
-    PERT cards and material definitions. It creates an Input object containing 
+    PERT cards and material definitions. It creates an Input object containing
     all parsed data.
 
     :param file_path: Path to the MCNP input file
     :type file_path: str
+    :param pert_metadata: Optional list of (start_pert, end_pert, zaid, material) tuples.
+        Assigns zaid and original_material to PERT cards in the range [start_pert, end_pert].
+    :type pert_metadata: list of tuple, optional
 
     :returns: An Input object containing all parsed data
     :rtype: Input
@@ -102,10 +105,10 @@ def read_mcnp(file_path):
     inst = Input()  # instance of the input class
     inst.perturbation = Perturbation()
     inst.materials = MaterialCollection()
-    
+
     with open(file_path, 'r') as f:
         lines = f.readlines()
-    
+
     i = 0
     current_zaid = None
     current_original_mat = None
@@ -131,5 +134,13 @@ def read_mcnp(file_path):
                 inst.materials.by_id[material_obj.id] = material_obj
         else:
             i += 1
-            
+
+    # Apply explicit pert_metadata if provided
+    if pert_metadata is not None:
+        for start, end, zaid, material in pert_metadata:
+            for pert_id, pert_obj in inst.perturbation.pert.items():
+                if start <= pert_id <= end:
+                    pert_obj.zaid = zaid
+                    pert_obj.original_material = material
+
     return inst

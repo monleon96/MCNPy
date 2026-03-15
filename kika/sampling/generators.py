@@ -6,7 +6,7 @@ import scipy.sparse as sp
 import scipy.sparse.csgraph as cs
 from typing import List, Sequence, Optional, Tuple, Dict, Any
 
-from kika.cov.covmat import CovMat
+from kika.cov.cross_section_covariance import CrossSectionCovariance
 from kika.cov.decomposition import (
     verify_cholesky_decomposition,
     verify_eigen_decomposition, 
@@ -552,7 +552,7 @@ def generate_endf_samples(
     """
     Draw multiplicative perturbation factors for ENDF angular distribution data (MF34).
     
-    This function is specifically designed for MF34CovMat objects which contain
+    This function is specifically designed for LegendreCovariance objects which contain
     covariance data for angular distributions with (isotope, reaction, legendre) triplets.
     
     Note: Unlike the standard generate_samples function, this does not include
@@ -561,7 +561,7 @@ def generate_endf_samples(
 
     Parameters
     ----------
-    mf34_cov : MF34CovMat
+    mf34_cov : LegendreCovariance
         MF34 angular distribution covariance matrix object
     n_samples : int
         Number of perturbation factor samples to generate

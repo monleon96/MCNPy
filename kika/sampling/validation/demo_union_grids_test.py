@@ -12,13 +12,13 @@ import numpy as np
 # Add the KIKA path
 sys.path.insert(0, '/home/MONLEON-JUAN/KIKA')
 
-from kika.cov.mf34_covmat import MF34CovMat
+from kika.cov.legendre_covariance import LegendreCovariance
 from test_union_grids_validation import run_comprehensive_validation
 
 
 def create_test_mf34_data():
-    """Create a simple test MF34CovMat for demonstration."""
-    mf34 = MF34CovMat()
+    """Create a simple test LegendreCovariance for demonstration."""
+    mf34 = LegendreCovariance()
     
     # Add some test matrices with different energy grids
     isotope = 92235

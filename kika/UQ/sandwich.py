@@ -14,8 +14,8 @@ import warnings
 import logging
 
 from kika.sensitivities.sdf import SDFData, SDFReactionData
-from kika.cov.covmat import CovMat
-from kika.cov.multigroup.mg_mf34_covmat import MGMF34CovMat
+from kika.cov.cross_section_covariance import CrossSectionCovariance
+from kika.cov.multigroup.mg_legendre_covariance import MultigroupLegendreCovariance
 from kika._constants import MT_TO_REACTION, ATOMIC_NUMBER_TO_SYMBOL
 
 # Set up logging
@@ -238,23 +238,23 @@ def _format_nuclide(zaid: int) -> str:
 
 def _merge_covariance_matrices(
     sens_data: List[SDFReactionData],
-    cov_mat_list: List[CovMat],
+    cov_mat_list: List[CrossSectionCovariance],
     verbose: bool
-) -> Tuple[Optional[CovMat], Set[int]]:
-    """Merge multiple CovMat objects into one, checking for missing isotopes.
+) -> Tuple[Optional[CrossSectionCovariance], Set[int]]:
+    """Merge multiple CrossSectionCovariance objects into one, checking for missing isotopes.
     
     Parameters
     ----------
     sens_data : List[SDFReactionData]
         Sensitivity data to check against
-    cov_mat_list : List[CovMat]
+    cov_mat_list : List[CrossSectionCovariance]
         List of covariance matrices to merge
     verbose : bool
         Whether to print detailed information
         
     Returns
     -------
-    merged_cov_mat : CovMat or None
+    merged_cov_mat : CrossSectionCovariance or None
         Merged covariance matrix, or None if no data found
     missing_isotopes : Set[int]
         Set of ZAIDs that were not found in any covariance matrix
@@ -316,8 +316,8 @@ def _merge_covariance_matrices(
                 merged_reaction_cols.append(cov_mat.reaction_cols[i])
                 merged_matrices.append(cov_mat.matrices[i])
     
-    # Create merged CovMat object
-    merged_cov_mat = CovMat(
+    # Create merged CrossSectionCovariance object
+    merged_cov_mat = CrossSectionCovariance(
         energy_grid=base_mat.energy_grid,
         isotope_rows=merged_isotope_rows,
         reaction_rows=merged_reaction_rows,
@@ -331,23 +331,23 @@ def _merge_covariance_matrices(
 
 def _merge_legendre_covariance_matrices(
     sens_data: List[SDFReactionData],
-    cov_mat_list: List[MGMF34CovMat],
+    cov_mat_list: List[MultigroupLegendreCovariance],
     verbose: bool
-) -> Tuple[Optional[MGMF34CovMat], Set[int]]:
-    """Merge multiple MGMF34CovMat objects into one, checking for missing isotopes.
+) -> Tuple[Optional[MultigroupLegendreCovariance], Set[int]]:
+    """Merge multiple MultigroupLegendreCovariance objects into one, checking for missing isotopes.
     
     Parameters
     ----------
     sens_data : List[SDFReactionData]
         Sensitivity data to check against
-    cov_mat_list : List[MGMF34CovMat]
+    cov_mat_list : List[MultigroupLegendreCovariance]
         List of Legendre covariance matrices to merge
     verbose : bool
         Whether to print detailed information
         
     Returns
     -------
-    merged_cov_mat : MGMF34CovMat or None
+    merged_cov_mat : MultigroupLegendreCovariance or None
         Merged Legendre covariance matrix, or None if no data found
     missing_isotopes : Set[int]
         Set of ZAIDs that were not found in any covariance matrix
@@ -408,8 +408,8 @@ def _merge_legendre_covariance_matrices(
                 merged_reaction_cols.append(cov_mat.reaction_cols[i])
                 merged_matrices.append(cov_mat.relative_matrices[i])
     
-    # Create merged MGMF34CovMat object
-    merged_cov_mat = MGMF34CovMat(
+    # Create merged MultigroupLegendreCovariance object
+    merged_cov_mat = MultigroupLegendreCovariance(
         energy_grid=base_mat.energy_grid,
         isotope_rows=merged_isotope_rows,
         reaction_rows=merged_reaction_rows,
@@ -424,8 +424,8 @@ def _merge_legendre_covariance_matrices(
 
 def sandwich_uncertainty_propagation(
     sdf_data: SDFData,
-    cov_mat: Optional[Union[CovMat, List[CovMat]]] = None,
-    legendre_cov_mat: Optional[Union[MGMF34CovMat, List[MGMF34CovMat]]] = None,
+    cov_mat: Optional[Union[CrossSectionCovariance, List[CrossSectionCovariance]]] = None,
+    legendre_cov_mat: Optional[Union[MultigroupLegendreCovariance, List[MultigroupLegendreCovariance]]] = None,
     reaction_filter: Optional[Dict[int, List[int]]] = None,
     energy_tolerance: float = 1e-6,
     verbose: bool = False
@@ -441,8 +441,8 @@ def sandwich_uncertainty_propagation(
     - Multiple covariance matrices for different isotopes
     
     The function supports both cross-section and Legendre moment sensitivities:
-    - Cross-section sensitivities (MT < 1000) use the regular CovMat covariance matrix
-    - Legendre moment sensitivities (MT >= 4000) use the MGMF34CovMat covariance matrix
+    - Cross-section sensitivities (MT < 1000) use the regular CrossSectionCovariance covariance matrix
+    - Legendre moment sensitivities (MT >= 4000) use the MultigroupLegendreCovariance covariance matrix
     - Both types can be provided simultaneously for mixed propagation
     
     Parameters
@@ -451,13 +451,13 @@ def sandwich_uncertainty_propagation(
         Sensitivity data containing sensitivity coefficients for various reactions.
         Can contain both cross-section sensitivities (MT < 1000) and Legendre 
         moment sensitivities (MT >= 4000, where MT = 4000 + L order).
-    cov_mat : CovMat or List[CovMat], optional
+    cov_mat : CrossSectionCovariance or List[CrossSectionCovariance], optional
         Covariance matrix data for nuclear cross sections (in relative form).
         Used for cross-section sensitivities (MT < 1000).
-        Can be a single CovMat or a list of CovMat objects for different isotopes.
+        Can be a single CrossSectionCovariance or a list of CrossSectionCovariance objects for different isotopes.
         When a list is provided, the function will search for each isotope's data
         across all provided matrices.
-    legendre_cov_mat : MGMF34CovMat or List[MGMF34CovMat], optional
+    legendre_cov_mat : MultigroupLegendreCovariance or List[MultigroupLegendreCovariance], optional
         Covariance matrix data for Legendre moments (in relative form).
         Used for Legendre moment sensitivities (MT >= 4000).
         Can be a single matrix or a list of matrices for different isotopes.
@@ -508,8 +508,8 @@ def sandwich_uncertainty_propagation(
         raise ValueError("At least one covariance matrix (cov_mat or legendre_cov_mat) must be provided")
     
     # Convert single matrices to lists for uniform handling
-    cov_mat_list = [cov_mat] if isinstance(cov_mat, CovMat) else (cov_mat if cov_mat is not None else [])
-    legendre_cov_mat_list = [legendre_cov_mat] if isinstance(legendre_cov_mat, MGMF34CovMat) else (legendre_cov_mat if legendre_cov_mat is not None else [])
+    cov_mat_list = [cov_mat] if isinstance(cov_mat, CrossSectionCovariance) else (cov_mat if cov_mat is not None else [])
+    legendre_cov_mat_list = [legendre_cov_mat] if isinstance(legendre_cov_mat, MultigroupLegendreCovariance) else (legendre_cov_mat if legendre_cov_mat is not None else [])
     
     # Validate that provided covariance matrices contain data
     for i, cm in enumerate(cov_mat_list):
@@ -819,14 +819,14 @@ def _try_energy_grid_matching(
 
 def _find_matching_reactions(
     sens_data: List[SDFReactionData],
-    cov_mat: CovMat,
+    cov_mat: CrossSectionCovariance,
     reaction_filter: Optional[Dict[int, List[int]]],
     verbose: bool,
     description: str = "reactions"
 ) -> List[Tuple[int, int]]:
     """Find reactions that exist in both sensitivity and covariance data."""
     
-    # Get available reactions from covariance matrix using CovMat's built-in method
+    # Get available reactions from covariance matrix using CrossSectionCovariance's built-in method
     cov_reactions = set()
     cov_reactions_by_isotope = cov_mat.reactions_by_isotope()
     for isotope, reactions in cov_reactions_by_isotope.items():
@@ -878,7 +878,7 @@ def _find_matching_reactions(
 
 def _find_matching_legendre_reactions(
     sens_data: List[SDFReactionData],
-    cov_mat: MGMF34CovMat,
+    cov_mat: MultigroupLegendreCovariance,
     reaction_filter: Optional[Dict[int, List[int]]],
     verbose: bool
 ) -> List[Tuple[int, int, int]]:
@@ -891,7 +891,7 @@ def _find_matching_legendre_reactions(
     """
     
     # Get available reactions from Legendre covariance matrix
-    # Build reactions_by_isotope directly from the MGMF34CovMat attributes
+    # Build reactions_by_isotope directly from the MultigroupLegendreCovariance attributes
     cov_reactions_by_isotope = {}
     for i, iso in enumerate(cov_mat.isotope_rows):
         if iso not in cov_reactions_by_isotope:
@@ -962,7 +962,7 @@ def _find_matching_legendre_reactions(
 
 def _build_matrices(
     sdf_data: SDFData,
-    cov_mat: CovMat,
+    cov_mat: CrossSectionCovariance,
     matching_reactions: List[Tuple[int, int]],
     energy_mapping: Dict[int, int],
     verbose: bool
@@ -1186,7 +1186,7 @@ def _build_combined_matrices(
 
 def _build_legendre_matrices(
     sens_data: List[SDFReactionData],
-    cov_mat: MGMF34CovMat,
+    cov_mat: MultigroupLegendreCovariance,
     matching_reactions: List[Tuple[int, int, int]],
     energy_mapping: Dict[int, int],
     verbose: bool
@@ -1197,7 +1197,7 @@ def _build_legendre_matrices(
     ----------
     sens_data : List[SDFReactionData]
         Legendre sensitivity data
-    cov_mat : MGMF34CovMat
+    cov_mat : MultigroupLegendreCovariance
         Legendre covariance matrix
     matching_reactions : List[Tuple[int, int, int]]
         List of (zaid, mt_base, legendre_order) tuples
@@ -1244,7 +1244,7 @@ def _build_legendre_matrices(
                     vector_idx = i * n_groups + sens_group
                     sensitivity_vector[vector_idx] = reaction_data.sensitivity[sens_group]
     
-    # Build covariance matrix from MGMF34CovMat
+    # Build covariance matrix from MultigroupLegendreCovariance
     covariance_matrix = np.zeros((total_size, total_size))
     
     # Map covariance matrix blocks

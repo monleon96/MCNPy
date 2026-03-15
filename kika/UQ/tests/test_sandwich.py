@@ -11,11 +11,11 @@ in kika/UQ/sandwich.py. Tests include:
 
 2. Legendre moment only sensitivity data (TestSandwichFormulaLegendre)
    - P1 and P2 Legendre moments (MT >= 4000)
-   - MGMF34CovMat covariance matrices
+   - MultigroupLegendreCovariance covariance matrices
 
 3. Mixed cross-section and Legendre sensitivity data (TestSandwichFormulaMixed)
    - Combined XS and Legendre sensitivities in same SDFData
-   - Both CovMat and MGMF34CovMat provided
+   - Both CrossSectionCovariance and MultigroupLegendreCovariance provided
 
 4. Edge cases and error handling (TestSandwichFormulaEdgeCases)
    - Missing covariance matrices
@@ -53,8 +53,8 @@ from typing import List, Dict
 import warnings
 
 from kika.sensitivities.sdf import SDFData, SDFReactionData
-from kika.cov.covmat import CovMat
-from kika.cov.multigroup.mg_mf34_covmat import MGMF34CovMat
+from kika.cov.cross_section_covariance import CrossSectionCovariance
+from kika.cov.multigroup.mg_legendre_covariance import MultigroupLegendreCovariance
 from kika.UQ.sandwich import (
     sandwich_uncertainty_propagation,
     UncertaintyResult,
@@ -99,9 +99,9 @@ class TestSandwichFormulaBasic:
         
         return sdf_data
     
-    def create_simple_cov_mat_xs(self) -> CovMat:
-        """Create a simple CovMat for cross-section data."""
-        cov_mat = CovMat()
+    def create_simple_cov_mat_xs(self) -> CrossSectionCovariance:
+        """Create a simple CrossSectionCovariance for cross-section data."""
+        cov_mat = CrossSectionCovariance()
         
         # Set energy grid (must match SDF)
         cov_mat.energy_grid = [2.0e7, 1.0e6, 0.0]
@@ -192,7 +192,7 @@ class TestSandwichFormulaBasic:
         )
         
         # Create simple 1x1 covariance matrix
-        cov_mat = CovMat()
+        cov_mat = CrossSectionCovariance()
         cov_mat.energy_grid = [2.0e7, 0.0]
         cov_mat.isotope_rows = [26056]
         cov_mat.isotope_cols = [26056]
@@ -256,7 +256,7 @@ class TestSandwichFormulaBasic:
         )
         
         # Create simple covariance matrices for hand calculation
-        cov_mat = CovMat()
+        cov_mat = CrossSectionCovariance()
         cov_mat.energy_grid = [2.0e7, 1.0e6, 0.0]
         cov_mat.isotope_rows = [26056, 26056, 26056, 26056]
         cov_mat.isotope_cols = [26056, 26056, 26056, 26056]
@@ -350,7 +350,7 @@ class TestSandwichFormulaBasic:
         )
         
         # Create covariance matrices with known correlation
-        cov_mat = CovMat()
+        cov_mat = CrossSectionCovariance()
         cov_mat.energy_grid = [2.0e7, 0.0]
         cov_mat.isotope_rows = [26056, 26056, 26056, 26056]
         cov_mat.isotope_cols = [26056, 26056, 26056, 26056]
@@ -444,12 +444,12 @@ class TestSandwichFormulaLegendre:
         
         return sdf_data
     
-    def create_simple_mgmf34_cov_mat(self) -> MGMF34CovMat:
-        """Create a simple MGMF34CovMat for Legendre moment data."""
+    def create_simple_mgmf34_cov_mat(self) -> MultigroupLegendreCovariance:
+        """Create a simple MultigroupLegendreCovariance for Legendre moment data."""
         
-        # Create MGMF34CovMat - need to check its structure first
+        # Create MultigroupLegendreCovariance - need to check its structure first
         # For now, create a minimal structure based on common patterns
-        mgmf34_cov = MGMF34CovMat()
+        mgmf34_cov = MultigroupLegendreCovariance()
         
         # Set basic attributes
         mgmf34_cov.energy_grid = np.array([2.0e7, 1.0e6, 0.0])
@@ -722,7 +722,7 @@ class TestContributionCalculations:
             data=[fe56_elastic]
         )
         
-        cov_mat = CovMat()
+        cov_mat = CrossSectionCovariance()
         cov_mat.energy_grid = [2.0e7, 0.0]
         cov_mat.isotope_rows = [26056]
         cov_mat.isotope_cols = [26056]

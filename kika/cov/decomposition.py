@@ -2,7 +2,7 @@
 Shared matrix decomposition methods for covariance matrix classes.
 
 This module provides decomposition functionality that can be used by both
-CovMat and MF34CovMat classes without code duplication.
+CrossSectionCovariance and LegendreCovariance classes without code duplication.
 """
 
 import numpy as np

@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 
 from kika._constants import MT_TO_REACTION, ENDF_MAT_TO_ZAID, ZAID_TO_ENDF_MAT
-from kika.cov.covmat import CovMat
-from kika.cov.mf34_covmat import MF34CovMat
+from kika.cov.cross_section_covariance import CrossSectionCovariance
+from kika.cov.legendre_covariance import LegendreCovariance
 from kika.endf.utils import (
     parse_number, parse_line, parse_endf_id,
     format_endf_number, format_endf_data_line,
@@ -165,9 +165,9 @@ def _detect_endianness(file_path: str) -> str:
 # Public API — COVERX (text or binary, auto-detected)
 # ---------------------------------------------------------------------------
 
-def read_coverx(file_path: str, ascending: bool = True, energy_unit: str = 'eV') -> CovMat:
+def read_coverx(file_path: str, ascending: bool = True, energy_unit: str = 'eV') -> CrossSectionCovariance:
     """
-    Read a COVERX covariance file (text or binary) and return a CovMat object.
+    Read a COVERX covariance file (text or binary) and return a CrossSectionCovariance object.
 
     The format is auto-detected: if the first bytes are printable ASCII the
     file is treated as text; otherwise it is parsed as a Fortran unformatted
@@ -184,7 +184,7 @@ def read_coverx(file_path: str, ascending: bool = True, energy_unit: str = 'eV')
 
     Returns
     -------
-    CovMat
+    CrossSectionCovariance
         Parsed covariance data
 
     Raises
@@ -204,9 +204,9 @@ def read_coverx(file_path: str, ascending: bool = True, energy_unit: str = 'eV')
 # COVERX text parser (formerly read_scale_covmat)
 # ---------------------------------------------------------------------------
 
-def _read_coverx_text(file_path: str, ascending: bool = True, energy_unit: str = 'eV') -> CovMat:
+def _read_coverx_text(file_path: str, ascending: bool = True, energy_unit: str = 'eV') -> CrossSectionCovariance:
     """
-    Read a SCALE covariance matrix text file and convert it to a CovMat object.
+    Read a SCALE covariance matrix text file and convert it to a CrossSectionCovariance object.
 
     Parameters
     ----------
@@ -219,8 +219,8 @@ def _read_coverx_text(file_path: str, ascending: bool = True, energy_unit: str =
 
     Returns
     -------
-    CovMat
-        CovMat object containing the parsed covariance data
+    CrossSectionCovariance
+        CrossSectionCovariance object containing the parsed covariance data
 
     Raises
     ------
@@ -236,8 +236,8 @@ def _read_coverx_text(file_path: str, ascending: bool = True, energy_unit: str =
     # Parse the group number from the second line
     num_groups = int(file_lines[1].split()[0])
 
-    # Create CovMat object
-    covmat = CovMat(num_groups, energy_unit=energy_unit)
+    # Create CrossSectionCovariance object
+    covmat = CrossSectionCovariance(num_groups, energy_unit=energy_unit)
 
     # Determine the energy grid based on the number of groups
     potential_grids = {
@@ -279,7 +279,7 @@ def _read_coverx_text(file_path: str, ascending: bool = True, energy_unit: str =
                     if ascending:
                         matrix = np.flipud(np.fliplr(matrix))
 
-                    # Add to CovMat object
+                    # Add to CrossSectionCovariance object
                     covmat.add_matrix(isotope_row, reaction_row, isotope_col, reaction_col, matrix)
             except (ValueError, IndexError):
                 # Skip lines with invalid data
@@ -296,9 +296,9 @@ def _read_coverx_text(file_path: str, ascending: bool = True, energy_unit: str =
 # COVERX binary parser
 # ---------------------------------------------------------------------------
 
-def _read_coverx_binary(file_path: str, ascending: bool = True, energy_unit: str = 'eV') -> CovMat:
+def _read_coverx_binary(file_path: str, ascending: bool = True, energy_unit: str = 'eV') -> CrossSectionCovariance:
     """
-    Read a binary COVERX covariance file and return a CovMat object.
+    Read a binary COVERX covariance file and return a CrossSectionCovariance object.
 
     Supports both big-endian and little-endian Fortran unformatted files
     (endianness is auto-detected).
@@ -314,7 +314,7 @@ def _read_coverx_binary(file_path: str, ascending: bool = True, energy_unit: str
 
     Returns
     -------
-    CovMat
+    CrossSectionCovariance
         Parsed covariance data
 
     Raises
@@ -359,7 +359,7 @@ def _read_coverx_binary(file_path: str, ascending: bool = True, energy_unit: str
                 xs_data[(matid, mtid)] = xs
 
         # --- Covariance matrix blocks (nmtrix total) ----------------------
-        covmat = CovMat(num_groups=ngroup, energy_unit=energy_unit)
+        covmat = CrossSectionCovariance(num_groups=ngroup, energy_unit=energy_unit)
 
         # Use predefined SCALE grids when available (consistent with text parser)
         potential_grids = {
@@ -439,14 +439,14 @@ def _read_coverx_binary(file_path: str, ascending: bool = True, energy_unit: str
 # ---------------------------------------------------------------------------
 
 def _write_coverx_binary(
-    data: CovMat, file_path: str, title: str = '', endian: str = '>'
+    data: CrossSectionCovariance, file_path: str, title: str = '', endian: str = '>'
 ) -> None:
     """
-    Write a :class:`CovMat` to a binary COVERX file (Fortran unformatted).
+    Write a :class:`CrossSectionCovariance` to a binary COVERX file (Fortran unformatted).
 
     Parameters
     ----------
-    data : CovMat
+    data : CrossSectionCovariance
         Covariance data to write.
     file_path : str
         Output file path.
@@ -576,16 +576,16 @@ def _write_e15_values(f, values: list) -> None:
         f.write(''.join(buf) + '\n')
 
 
-def _write_coverx_text(data: CovMat, file_path: str, title: str = '') -> None:
+def _write_coverx_text(data: CrossSectionCovariance, file_path: str, title: str = '') -> None:
     """
-    Write a :class:`CovMat` to a text COVERX file.
+    Write a :class:`CrossSectionCovariance` to a text COVERX file.
 
     The output mirrors the format of SCALE text covariance files
     (e.g. ``scale.rev05.44groupcov.txt``).
 
     Parameters
     ----------
-    data : CovMat
+    data : CrossSectionCovariance
         Covariance data to write.
     file_path : str
         Output file path.
@@ -655,15 +655,15 @@ def _write_coverx_text(data: CovMat, file_path: str, title: str = '') -> None:
 
 
 def write_coverx(
-    data: CovMat, file_path: str, fmt: str = 'binary',
+    data: CrossSectionCovariance, file_path: str, fmt: str = 'binary',
     title: str = '', endian: str = '>',
 ) -> None:
     """
-    Write a :class:`CovMat` to a COVERX covariance file (text or binary).
+    Write a :class:`CrossSectionCovariance` to a COVERX covariance file (text or binary).
 
     Parameters
     ----------
-    data : CovMat
+    data : CrossSectionCovariance
         Covariance data to write.
     file_path : str
         Output file path.
@@ -674,7 +674,7 @@ def write_coverx(
     endian : str, optional
         Endianness for binary format: ``'>'`` big-endian (default).
     """
-    if isinstance(data, MF34CovMat):
+    if isinstance(data, LegendreCovariance):
         raise TypeError(
             "COVERX format does not support MF34 (angular distribution) covariances. "
             "Use write_covfil() instead."
@@ -1017,9 +1017,9 @@ def _choose_boxer_ncf(controls: list) -> int:
 # Public API — BOXER format
 # ---------------------------------------------------------------------------
 
-def read_boxer(file_path: str, energy_unit: str = 'eV') -> CovMat:
+def read_boxer(file_path: str, energy_unit: str = 'eV') -> CrossSectionCovariance:
     """
-    Read a BOXER card-image (ASCII) covariance file and return a CovMat.
+    Read a BOXER card-image (ASCII) covariance file and return a CrossSectionCovariance.
 
     BOXER is produced by NJOY's COVR module. It stores energy boundaries,
     cross-section vectors, standard-deviation vectors, and covariance or
@@ -1034,7 +1034,7 @@ def read_boxer(file_path: str, energy_unit: str = 'eV') -> CovMat:
 
     Returns
     -------
-    CovMat
+    CrossSectionCovariance
         Parsed covariance data.
 
     Raises
@@ -1045,7 +1045,7 @@ def read_boxer(file_path: str, energy_unit: str = 'eV') -> CovMat:
     with open(file_path, 'r') as f:
         lines = f.readlines()
 
-    covmat = CovMat(energy_unit=energy_unit)
+    covmat = CrossSectionCovariance(energy_unit=energy_unit)
     stddevs: Dict[Tuple[int, int], np.ndarray] = {}  # for correlation→covariance
     cursor = 0
 
@@ -1177,16 +1177,16 @@ def _boxer_last_row_sym(total_elements: int, nrowh: int) -> int:
 
 
 def write_boxer(
-    data: CovMat, file_path: str,
+    data: CrossSectionCovariance, file_path: str,
     hlibid: str = '', hdescr: str = '',
     nvf: int = 10,
 ) -> None:
     """
-    Write a :class:`CovMat` to a BOXER card-image (ASCII) file.
+    Write a :class:`CrossSectionCovariance` to a BOXER card-image (ASCII) file.
 
     Parameters
     ----------
-    data : CovMat
+    data : CrossSectionCovariance
         Covariance data to write.
     file_path : str
         Output file path.
@@ -1197,7 +1197,7 @@ def write_boxer(
     nvf : int, optional
         Value format code (7–14). Default 10 (``1P8E10.3``).
     """
-    if isinstance(data, MF34CovMat):
+    if isinstance(data, LegendreCovariance):
         raise TypeError(
             "BOXER format does not support MF34 (angular distribution) covariances. "
             "Use write_covfil() instead."
@@ -1598,14 +1598,14 @@ def _parse_covfil_mf34(
     return blocks, cursor
 
 
-def read_covfil(file_path: str, energy_unit: str = 'eV') -> Union[CovMat, MF34CovMat]:
+def read_covfil(file_path: str, energy_unit: str = 'eV') -> Union[CrossSectionCovariance, LegendreCovariance]:
     """
     Parse an NJOY-generated COVFIL/GENDF covariance file.
 
-    Returns a :class:`CovMat` for MF33 files (cross-section covariances) or an
-    :class:`MF34CovMat` for MF34 files (angular-distribution covariances).
+    Returns a :class:`CrossSectionCovariance` for MF33 files (cross-section covariances) or an
+    :class:`LegendreCovariance` for MF34 files (angular-distribution covariances).
 
-    MF3 cross sections are stored in ``CovMat.cross_sections`` (MF33 case only).
+    MF3 cross sections are stored in ``CrossSectionCovariance.cross_sections`` (MF33 case only).
 
     Parameters
     ----------
@@ -1616,7 +1616,7 @@ def read_covfil(file_path: str, energy_unit: str = 'eV') -> Union[CovMat, MF34Co
 
     Returns
     -------
-    CovMat or MF34CovMat
+    CrossSectionCovariance or LegendreCovariance
         Parsed covariance data.
 
     Raises
@@ -1651,7 +1651,7 @@ def read_covfil(file_path: str, energy_unit: str = 'eV') -> Union[CovMat, MF34Co
 
     if peek_mf == 33:
         blocks, cursor = _parse_covfil_mf33(lines, cursor, ngrp, mat)
-        covmat = CovMat(num_groups=ngrp, energy_unit=energy_unit)
+        covmat = CrossSectionCovariance(num_groups=ngrp, energy_unit=energy_unit)
         covmat.energy_grid = energy_grid
         for iso_row, mt_row, iso_col, mt_col, matrix in blocks:
             covmat.add_matrix(iso_row, mt_row, iso_col, mt_col, matrix)
@@ -1664,7 +1664,7 @@ def read_covfil(file_path: str, energy_unit: str = 'eV') -> Union[CovMat, MF34Co
 
     elif peek_mf == 34:
         blocks34, cursor = _parse_covfil_mf34(lines, cursor, ngrp, mat, energy_grid)
-        mf34 = MF34CovMat(energy_unit=energy_unit)
+        mf34 = LegendreCovariance(energy_unit=energy_unit)
         for iso_row, mt_row, l_row, iso_col, mt_col, l_col, matrix in blocks34:
             mf34.add_matrix(
                 isotope_row=iso_row, reaction_row=mt_row, l_row=l_row,
@@ -1762,7 +1762,7 @@ def _write_tend(f) -> None:
     f.write(format_endf_data_line([], -1, 0, 0, 0) + '\n')
 
 
-def _write_covfil_mf33(covmat: CovMat, f, mat: int, za: float, awr: float) -> None:
+def _write_covfil_mf33(covmat: CrossSectionCovariance, f, mat: int, za: float, awr: float) -> None:
     """Write all MF33 covariance sections for *covmat*."""
     ngrp = covmat.num_groups
 
@@ -1834,7 +1834,7 @@ def _write_covfil_mf33(covmat: CovMat, f, mat: int, za: float, awr: float) -> No
         _write_send(f, mat, 33)
 
 
-def _write_covfil_mf34(mf34: MF34CovMat, f, mat: int, za: float, awr: float) -> None:
+def _write_covfil_mf34(mf34: LegendreCovariance, f, mat: int, za: float, awr: float) -> None:
     """Write all MF34 covariance sections for *mf34*."""
     # Group matrices by MT (row reaction) to form sections
     from collections import defaultdict
@@ -1912,17 +1912,17 @@ def _write_covfil_mf34(mf34: MF34CovMat, f, mat: int, za: float, awr: float) -> 
 
 
 def write_covfil(
-    data: Union[CovMat, MF34CovMat],
+    data: Union[CrossSectionCovariance, LegendreCovariance],
     file_path: str,
     tape_label: str = '',
     temperature: float = 0.0,
 ) -> None:
     """
-    Write a :class:`CovMat` or :class:`MF34CovMat` to an NJOY COVFIL/GENDF text file.
+    Write a :class:`CrossSectionCovariance` or :class:`LegendreCovariance` to an NJOY COVFIL/GENDF text file.
 
     Parameters
     ----------
-    data : CovMat or MF34CovMat
+    data : CrossSectionCovariance or LegendreCovariance
         Covariance data to write.
     file_path : str
         Output file path.
@@ -1931,7 +1931,7 @@ def write_covfil(
     temperature : float, optional
         Temperature in K written into MF1 MT451 CONT record. Default ``0.0``.
     """
-    is_mf33 = isinstance(data, CovMat)
+    is_mf33 = isinstance(data, CrossSectionCovariance)
 
     # Check for MAT overflow (COVFIL 4-char field: max 9999)
     bad_zaids = set()
@@ -2008,7 +2008,7 @@ def write_covfil(
         _write_send(f, mat, 1)
         _write_fend(f, mat)
 
-        # --- MF3: cross sections (CovMat only) ---
+        # --- MF3: cross sections (CrossSectionCovariance only) ---
         if is_mf33 and data.cross_sections:
             for (xs_zaid, xs_mt), xs_vals in sorted(data.cross_sections.items()):
                 seq = 1

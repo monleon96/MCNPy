@@ -15,7 +15,7 @@ import shutil
 import tempfile
 
 from kika.sampling.generators import generate_endf_samples
-from kika.cov.mf34_covmat import MF34CovMat
+from kika.cov.legendre_covariance import LegendreCovariance
 from kika.endf.parsers.parse_endf import parse_endf_file
 from kika.endf.writers.endf_writer import ENDFWriter
 from kika.endf.classes.mf4.polynomial import MF4MTLegendre
@@ -388,7 +388,7 @@ def _log_njoy_batch_results(njoy_results, file_key, file_index, temperatures, su
                 logger.error(f"[NJOY] File {file_index}:   {error}")
 
 
-def load_mf34_covariance(path: str) -> Optional[MF34CovMat]:
+def load_mf34_covariance(path: str) -> Optional[LegendreCovariance]:
     """
     Load MF34 covariance matrix from ENDF file containing MF34 section.
     
@@ -399,8 +399,8 @@ def load_mf34_covariance(path: str) -> Optional[MF34CovMat]:
         
     Returns
     -------
-    Optional[MF34CovMat]
-        Loaded MF34CovMat object or None if loading failed
+    Optional[LegendreCovariance]
+        Loaded LegendreCovariance object or None if loading failed
     """
     if not os.path.exists(path):
         if _get_logger():
@@ -422,8 +422,8 @@ def load_mf34_covariance(path: str) -> Optional[MF34CovMat]:
                 logger.error(f"[ENDF] [MF34] No MF34 section found in file: {path}")
             return None
         
-        # Convert all MT sections to MF34CovMat and combine them
-        combined_mf34_cov = MF34CovMat()
+        # Convert all MT sections to LegendreCovariance and combine them
+        combined_mf34_cov = LegendreCovariance()
         
         for mt_number, mt_data in mf34.sections.items():
             if hasattr(mt_data, 'to_ang_covmat'):
@@ -1368,16 +1368,16 @@ def _insert_boundary_discontinuity(
 
 
 def _filter_mf34_covariance(
-    mf34_cov: MF34CovMat, 
+    mf34_cov: LegendreCovariance, 
     mt_list: List[int], 
     legendre_coeffs: List[int]
-) -> MF34CovMat:
+) -> LegendreCovariance:
     """
     Filter MF34 covariance data by MT reactions and Legendre coefficients.
     
     Parameters
     ----------
-    mf34_cov : MF34CovMat
+    mf34_cov : LegendreCovariance
         Original MF34 covariance data
     mt_list : List[int]
         List of MT numbers to include (empty means all)
@@ -1386,7 +1386,7 @@ def _filter_mf34_covariance(
         
     Returns
     -------
-    MF34CovMat
+    LegendreCovariance
         Filtered covariance data
     """
     if _get_logger():
@@ -1394,7 +1394,7 @@ def _filter_mf34_covariance(
         if not legendre_coeffs or legendre_coeffs == [-1]:
             _get_logger().info(f"Using all available Legendre coefficients: {sorted(mf34_cov.legendre_indices)}")
     
-    filtered_cov = MF34CovMat()
+    filtered_cov = LegendreCovariance()
     
     # If mt_list is empty, use all available MTs
     available_mts = mt_list if mt_list else list(mf34_cov.reactions)
@@ -1501,7 +1501,7 @@ def _create_parameter_mapping(mf34_cov):
     
     Parameters
     ----------
-    mf34_cov : MF34CovMat
+    mf34_cov : LegendreCovariance
         MF34 covariance matrix object with union grids support
         
     Returns

@@ -16,8 +16,11 @@ import math
 import matplotlib.pyplot as plt
 
 
-def compute_sensitivity(inputfile: str, mctalfile: str, tally: int, zaid: int, label: str,
-                        material: Optional[int] = None) -> SensitivityData:
+def compute_sensitivity(inputfile: str, mctalfile: str, tally: int,
+                        zaid: int = None, label: str = '',
+                        material: Optional[int] = None,
+                        pert_metadata: Optional[List[Tuple[int, int, int, int]]] = None
+                        ) -> SensitivityData:
     """Compute sensitivity coefficients from MCNP input and output files.
 
     :param inputfile: Path to MCNP input file containing the PERT cards
@@ -26,18 +29,59 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int, zaid: int, l
     :type mctalfile: str
     :param tally: Tally number to analyze
     :type tally: int
-    :param zaid: ZAID of the nuclide being perturbed
-    :type zaid: int
+    :param zaid: ZAID of the nuclide being perturbed. If None and pert_metadata is
+        provided, extracted from the metadata (must be a single unique ZAID).
+    :type zaid: int, optional
     :param label: Label for the sensitivity data set
     :type label: str
     :param material: Optional material number to filter perturbations by.
         If None, all perturbations are used (backward-compatible behavior).
     :type material: int, optional
+    :param pert_metadata: Optional list of (start_pert, end_pert, zaid, material) tuples.
+        Assigns zaid and original_material to PERT cards in the given ranges.
+        When provided, zaid and material can be inferred from the metadata.
+    :type pert_metadata: list of tuple, optional
     :returns: Object containing computed sensitivity coefficients
     :rtype: SensitivityData
+    :raises ValueError: If ZAID metadata is missing and no pert_metadata is provided,
+        or if pert_metadata contains multiple ZAIDs (use compute_total_sensitivity instead).
     """
-    input = read_mcnp(inputfile)
+    input = read_mcnp(inputfile, pert_metadata=pert_metadata)
     mctal = read_mctal(mctalfile)
+
+    # Resolve zaid from pert_metadata if not explicitly provided
+    if pert_metadata is not None:
+        meta_zaids = sorted({z for _, _, z, _ in pert_metadata})
+        meta_mats = sorted({m for _, _, _, m in pert_metadata})
+        if zaid is None:
+            if len(meta_zaids) != 1:
+                raise ValueError(
+                    f"pert_metadata contains multiple ZAIDs {meta_zaids}. "
+                    "Pass zaid= explicitly or use compute_total_sensitivity()."
+                )
+            zaid = meta_zaids[0]
+        if material is None and len(meta_mats) == 1:
+            material = meta_mats[0]
+        elif material is None and len(meta_mats) > 1:
+            raise ValueError(
+                f"pert_metadata contains multiple materials {meta_mats}. "
+                "Pass material= explicitly or use compute_total_sensitivity()."
+            )
+
+    # Check that we have zaid info
+    if zaid is None:
+        raise ValueError(
+            "No zaid provided and no ZAID metadata found in PERT cards. "
+            "Provide pert_metadata=[(start, end, zaid, material), ...] "
+            "or add 'c kika:pert_zaid=ZAID pert_mat=MAT' comments to the input file."
+        )
+
+    if not input.perturbation.has_zaid_info:
+        raise ValueError(
+            "No ZAID metadata found in PERT cards. "
+            "Provide pert_metadata=[(start, end, zaid, material), ...] "
+            "or add 'c kika:pert_zaid=ZAID pert_mat=MAT' comments to the input file."
+        )
 
     pert_energies = input.perturbation.pert_energies
     reactions = input.perturbation.reactions_for_zaid(zaid)
@@ -222,8 +266,9 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int, zaid: int, l
 
 
 def compute_total_sensitivity(
-    inputfile: str, mctalfile: str, tally: int, zaid: int, label: str,
+    inputfile: str, mctalfile: str, tally: int, zaid: int = None, label: str = '',
     materials: Optional[List[int]] = None,
+    pert_metadata: Optional[List[Tuple[int, int, int, int]]] = None,
 ) -> SensitivityData:
     """Compute total sensitivity by summing contributions from multiple materials.
 
@@ -245,13 +290,17 @@ def compute_total_sensitivity(
         Path to MCNP MCTAL output file.
     tally : int
         Tally number to analyze.
-    zaid : int
-        ZAID of the nuclide being perturbed.
+    zaid : int, optional
+        ZAID of the nuclide being perturbed. If None and pert_metadata is
+        provided, extracted from the metadata (all entries must share the same ZAID).
     label : str
         Label for the resulting sensitivity data set.
     materials : list of int, optional
         Material IDs to sum over. If *None*, auto-detected from the PERT cards
-        in *inputfile*.
+        in *inputfile* (or from *pert_metadata* if provided).
+    pert_metadata : list of tuple, optional
+        List of (start_pert, end_pert, zaid, material) tuples. When provided,
+        zaid and materials are extracted from the metadata.
 
     Returns
     -------
@@ -264,9 +313,23 @@ def compute_total_sensitivity(
         If no materials are found, or perturbation energy grids differ
         between materials.
     """
+    # Extract zaid and materials from pert_metadata if provided
+    if pert_metadata is not None:
+        meta_zaids = sorted({z for _, _, z, _ in pert_metadata})
+        meta_mats = sorted({m for _, _, _, m in pert_metadata})
+        if zaid is None:
+            if len(meta_zaids) != 1:
+                raise ValueError(
+                    f"pert_metadata contains multiple ZAIDs {meta_zaids}. "
+                    "All entries must share the same ZAID for compute_total_sensitivity()."
+                )
+            zaid = meta_zaids[0]
+        if materials is None:
+            materials = meta_mats
+
     # Auto-detect materials from PERT cards if not provided
     if materials is None:
-        input_data = read_mcnp(inputfile)
+        input_data = read_mcnp(inputfile, pert_metadata=pert_metadata)
         materials = input_data.perturbation.materials_for_zaid(zaid)
 
     if not materials:
@@ -275,14 +338,20 @@ def compute_total_sensitivity(
     # Single material — delegate directly
     if len(materials) == 1:
         return compute_sensitivity(inputfile, mctalfile, tally, zaid, label,
-                                   material=materials[0])
+                                   material=materials[0],
+                                   pert_metadata=pert_metadata)
 
     # Compute per-material sensitivities
+    # When pert_metadata is provided, pass the relevant subset per material
     per_material = {}
     for mat in materials:
+        mat_metadata = None
+        if pert_metadata is not None:
+            mat_metadata = [(s, e, z, m) for s, e, z, m in pert_metadata if m == mat]
         per_material[mat] = compute_sensitivity(
             inputfile, mctalfile, tally, zaid,
             label=f"{label}_mat{mat}", material=mat,
+            pert_metadata=mat_metadata if mat_metadata else pert_metadata,
         )
 
     # Use the first material as reference for structure validation

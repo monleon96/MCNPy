@@ -18,9 +18,9 @@ def validate_union_grids_shape_alignment(mf34_cov):
     
     Parameters
     ----------
-    mf34_cov : MF34CovMat
+    mf34_cov : LegendreCovariance
         The MF34 covariance matrix object to validate
-        
+
     Returns
     -------
     bool
@@ -247,7 +247,7 @@ def run_comprehensive_validation(mf34_cov, sample_mt_numbers: List[int] = None):
     
     Parameters
     ----------
-    mf34_cov : MF34CovMat
+    mf34_cov : LegendreCovariance
         The MF34 covariance matrix object to validate
     sample_mt_numbers : List[int], optional
         List of MT numbers to test boundary logic for. If None, uses first available MT.

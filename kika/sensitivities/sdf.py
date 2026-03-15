@@ -5,7 +5,7 @@ import numpy as np
 from kika._constants import MT_TO_REACTION, ATOMIC_NUMBER_TO_SYMBOL
 from kika.sensitivities.sensitivity import SensitivityData
 from kika.energy_grids.utils import _identify_energy_grid
-from kika.plotting import MultigroupXSPlotData, UncertaintyBand
+from kika.plotting import MultigroupCrossSectionPlotData, UncertaintyBand
 
 
 @dataclass
@@ -117,10 +117,10 @@ class SDFReactionData:
         uncertainty_style: str = 'errorbar',
         label: str = None,
         **styling_kwargs
-    ) -> Union['MultigroupXSPlotData', Tuple['MultigroupXSPlotData', 'UncertaintyBand']]:
+    ) -> Union['MultigroupCrossSectionPlotData', Tuple['MultigroupCrossSectionPlotData', 'UncertaintyBand']]:
         """Convert sensitivity data for this reaction into PlotData objects.
 
-        Returns a :class:`~kika.plotting.MultigroupXSPlotData` (step plot) and,
+        Returns a :class:`~kika.plotting.MultigroupCrossSectionPlotData` (step plot) and,
         optionally, an :class:`~kika.plotting.UncertaintyBand` suitable for
         :class:`~kika.plotting.PlotBuilder`.
 
@@ -140,11 +140,11 @@ class SDFReactionData:
         :param label: Legend label. Auto-generated as ``"<nuclide> <reaction_name>"``
             (e.g. ``"Fe-56 (n,el)"``) when *None*.
         :type label: str, optional
-        :param styling_kwargs: Forwarded to ``MultigroupXSPlotData``
+        :param styling_kwargs: Forwarded to ``MultigroupCrossSectionPlotData``
             (``color``, ``linestyle``, ``linewidth``, etc.).
-        :returns: ``MultigroupXSPlotData`` when *uncertainty=False*,
-            or ``(MultigroupXSPlotData, UncertaintyBand)`` when *uncertainty=True*.
-        :rtype: MultigroupXSPlotData or Tuple[MultigroupXSPlotData, UncertaintyBand]
+        :returns: ``MultigroupCrossSectionPlotData`` when *uncertainty=False*,
+            or ``(MultigroupCrossSectionPlotData, UncertaintyBand)`` when *uncertainty=True*.
+        :rtype: MultigroupCrossSectionPlotData or Tuple[MultigroupCrossSectionPlotData, UncertaintyBand]
         """
         energies = np.asarray(pert_energies, dtype=float)
         sens = np.asarray(self.sensitivity, dtype=float)
@@ -163,7 +163,7 @@ class SDFReactionData:
         if label is None:
             label = f"{self.nuclide} {self.reaction_name}"
 
-        plot_data = MultigroupXSPlotData(
+        plot_data = MultigroupCrossSectionPlotData(
             x=x,
             y=y,
             label=label,
@@ -329,7 +329,7 @@ class SDFData:
         uncertainty_style: str = 'errorbar',
         label: str = None,
         **styling_kwargs
-    ) -> Union['MultigroupXSPlotData', Tuple['MultigroupXSPlotData', 'UncertaintyBand']]:
+    ) -> Union['MultigroupCrossSectionPlotData', Tuple['MultigroupCrossSectionPlotData', 'UncertaintyBand']]:
         """Convert a reaction's sensitivity data into PlotData objects.
 
         Look up a reaction either by *index* into :attr:`data` or by
@@ -353,9 +353,9 @@ class SDFData:
         :type uncertainty_style: str
         :param label: Legend label (auto-generated if *None*).
         :type label: str, optional
-        :param styling_kwargs: Forwarded to ``MultigroupXSPlotData``.
+        :param styling_kwargs: Forwarded to ``MultigroupCrossSectionPlotData``.
         :returns: See :meth:`SDFReactionData.to_plot_data`.
-        :rtype: MultigroupXSPlotData or Tuple[MultigroupXSPlotData, UncertaintyBand]
+        :rtype: MultigroupCrossSectionPlotData or Tuple[MultigroupCrossSectionPlotData, UncertaintyBand]
         :raises ValueError: If neither *index* nor *(zaid, mt)* is given, or if
             the requested reaction is not found.
         """

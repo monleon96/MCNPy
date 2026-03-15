@@ -11,14 +11,14 @@ The functions maintain API compatibility while using the new, cleaner implementa
 import matplotlib.pyplot as plt
 import numpy as np
 from typing import Union, List, Tuple, Optional
-from kika.cov.multigroup.mg_mf34_covmat import MGMF34CovMat
-from kika.cov.mf34_covmat import MF34CovMat
+from kika.cov.multigroup.mg_legendre_covariance import MultigroupLegendreCovariance
+from kika.cov.legendre_covariance import LegendreCovariance
 from kika.plotting.plot_builder import PlotBuilder
 from kika.plotting.heatmap_builder import HeatmapBuilder
 
 
 def endf_uncertainty_band(
-    endf_cov: MF34CovMat,
+    endf_cov: LegendreCovariance,
     mf4_mt,
     isotope: int,
     mt: int,
@@ -38,7 +38,7 @@ def endf_uncertainty_band(
 
     Parameters
     ----------
-    endf_cov : MF34CovMat
+    endf_cov : LegendreCovariance
         Continuous-energy covariance matrix (from ``MF34MT.to_ang_covmat()``).
     mf4_mt : MF4MT
         MF4 angular-distribution object (any concrete subclass).
@@ -121,7 +121,7 @@ def endf_uncertainty_band(
 
 
 def endf_uncertainty_step_data(
-    endf_cov: MF34CovMat,
+    endf_cov: LegendreCovariance,
     mf4_mt,
     isotope: int,
     mt: int,
@@ -138,7 +138,7 @@ def endf_uncertainty_step_data(
 
     Parameters
     ----------
-    endf_cov : MF34CovMat
+    endf_cov : LegendreCovariance
         Continuous-energy covariance matrix.
     mf4_mt : MF4MT or None
         MF4 angular-distribution object (needed when uncertainties are absolute).
@@ -214,7 +214,7 @@ def endf_uncertainty_step_data(
 
 
 def plot_mg_legendre_coefficients(
-    mg_covmat: MGMF34CovMat,
+    mg_covmat: MultigroupLegendreCovariance,
     nuclide: Union[int, str],
     mt: int,
     orders: Optional[Union[int, List[int]]] = None,
@@ -240,7 +240,7 @@ def plot_mg_legendre_coefficients(
 
     Parameters
     ----------
-    mg_covmat : MGMF34CovMat
+    mg_covmat : MultigroupLegendreCovariance
         The multigroup MF34 covariance matrix object
     nuclide : int or str
         Isotope identifier. Can be either:
@@ -408,7 +408,7 @@ def plot_mg_legendre_coefficients(
 
 
 def plot_mg_vs_endf_comparison(
-    mg_covmat: MGMF34CovMat,
+    mg_covmat: MultigroupLegendreCovariance,
     endf: object,
     nuclide: Union[int, str],
     mt: int,
@@ -438,7 +438,7 @@ def plot_mg_vs_endf_comparison(
 
     Parameters
     ----------
-    mg_covmat : MGMF34CovMat
+    mg_covmat : MultigroupLegendreCovariance
         The multigroup MF34 covariance matrix object
     endf : ENDF object
         ENDF object containing MF4 data
@@ -523,11 +523,11 @@ def plot_mg_vs_endf_comparison(
                 endf_cov = endf_obj.mf[34].mt[mt].to_ang_covmat()
             except Exception:
                 endf_cov = None
-    elif isinstance(endf_obj, MF34CovMat):
+    elif isinstance(endf_obj, LegendreCovariance):
         # Covariance provided, but we still need MF4 for coefficients
         endf_cov = endf_obj
     else:
-        raise ValueError("endf_covmat must be an ENDF object with MF4/34 data or an MF34CovMat paired with MF4 data")
+        raise ValueError("endf_covmat must be an ENDF object with MF4/34 data or an LegendreCovariance paired with MF4 data")
 
     if mf4_mt is None:
         raise ValueError("ENDF MF4 data is required to plot the continuous coefficients")
@@ -701,8 +701,8 @@ def plot_mg_vs_endf_comparison(
 
 
 def plot_mg_vs_endf_uncertainties_comparison(
-    mg_covmat: MGMF34CovMat,
-    endf: Union[MF34CovMat, object],
+    mg_covmat: MultigroupLegendreCovariance,
+    endf: Union[LegendreCovariance, object],
     nuclide: Union[int, str],
     mt: int,
     orders: Optional[Union[int, List[int]]] = None,
@@ -729,10 +729,10 @@ def plot_mg_vs_endf_uncertainties_comparison(
 
     Parameters
     ----------
-    mg_covmat : MGMF34CovMat
+    mg_covmat : MultigroupLegendreCovariance
         The multigroup MF34 covariance matrix object
-    endf : ENDF object or MF34CovMat
-        ENDF object containing MF34/MF4 data, or MF34CovMat for covariance-only comparison
+    endf : ENDF object or LegendreCovariance
+        ENDF object containing MF34/MF4 data, or LegendreCovariance for covariance-only comparison
     nuclide : int or str
         Isotope identifier. Can be either:
         - Integer ZAID (e.g., 92235 for U-235)
@@ -812,7 +812,7 @@ def plot_mg_vs_endf_uncertainties_comparison(
                 endf_cov = None
         if 4 in endf_obj.mf and mt in endf_obj.mf[4].mt:
             mf4_mt = endf_obj.mf[4].mt[mt]
-    elif isinstance(endf_obj, MF34CovMat):
+    elif isinstance(endf_obj, LegendreCovariance):
         endf_cov = endf_obj
     else:
         endf_cov = None
@@ -947,7 +947,7 @@ def plot_mg_vs_endf_uncertainties_comparison(
 
 
 def plot_mg_covariance_heatmap(
-    mg_covmat: MGMF34CovMat,
+    mg_covmat: MultigroupLegendreCovariance,
     nuclide: Union[int, str],
     mt: int,
     legendre_coeffs: Union[int, List[int], Tuple[int, int]],
@@ -973,7 +973,7 @@ def plot_mg_covariance_heatmap(
 
     Parameters
     ----------
-    mg_covmat : MGMF34CovMat
+    mg_covmat : MultigroupLegendreCovariance
         The multigroup MF34 covariance matrix object
     nuclide : int or str
         Isotope identifier. Can be either:

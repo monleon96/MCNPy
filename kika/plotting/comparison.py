@@ -50,7 +50,7 @@ _INTERPOLATION_DEFAULTS = {
     'CrossSectionPlotData': 'log-log',
     'AngularDistributionPlotData': 'lin-lin',
     'LegendreCoeffPlotData': 'log-log',
-    'MultigroupXSPlotData': 'lin-lin',
+    'MultigroupCrossSectionPlotData': 'lin-lin',
     'MultigroupUncertaintyPlotData': 'lin-lin',
 }
 

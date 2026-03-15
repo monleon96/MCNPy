@@ -120,6 +120,11 @@ class Perturbation:
             self.pert = PertCollection(self.pert)
     
     @property
+    def has_zaid_info(self) -> bool:
+        """True if at least one pert card has a ZAID assigned."""
+        return any(p.zaid is not None for p in self.pert.values())
+
+    @property
     def materials(self) -> List[int]:
         """Get unique material numbers from all perturbations.
 

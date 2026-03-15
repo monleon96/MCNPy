@@ -216,7 +216,7 @@ def _calculate_perturbed_density(original_material: Material, perturbed_material
     print(f"Density change: {mass_density:.4e} → {new_mass_density:.4e} g/cm³")
 
 
-def generate_PERTcards(inputfile, cell, reactions, material, energies=None, density=None,
+def generate_pert_cards(inputfile, cell, reactions, material, energies=None, density=None,
                        order=2, errors=False, in_place=True, nuclide=None,
                        pert_material=None, pert_density=None):
     """Generate PERT cards for MCNP sensitivity analysis.
@@ -302,7 +302,7 @@ def generate_PERTcards(inputfile, cell, reactions, material, energies=None, dens
     Examples
     --------
     >>> # Basic usage with single material
-    >>> kika.generate_PERTcards(
+    >>> kika.generate_pert_cards(
     ...     inputfile='input.i',
     ...     cell=[3, 5, 7],
     ...     reactions=[1, 2, 102],
@@ -311,7 +311,7 @@ def generate_PERTcards(inputfile, cell, reactions, material, energies=None, dens
     ... )
 
     >>> # Multiple materials with different cells
-    >>> kika.generate_PERTcards(
+    >>> kika.generate_pert_cards(
     ...     inputfile='input.i',
     ...     cell=[[3, 5], [7, 9]],
     ...     reactions=[1, 2, 102],
@@ -464,7 +464,7 @@ def generate_PERTcards(inputfile, cell, reactions, material, energies=None, dens
                     f"Material {mat_id} has no density defined. "
                     f"Please either:\n"
                     f"  1. Set the material density: material.set_density(value, 'g/cc')\n"
-                    f"  2. Provide density via the 'density' parameter in generate_PERTcards()"
+                    f"  2. Provide density via the 'density' parameter in generate_pert_cards()"
                 )
             
             # Convert to MCNP convention (negative for mass density)
@@ -740,3 +740,7 @@ def _format_mcnp_line(line, max_length=120):
         remaining = remaining[split_pos:].strip()
     
     return "\n".join(result)
+
+
+# Backward compatibility alias
+generate_PERTcards = generate_pert_cards

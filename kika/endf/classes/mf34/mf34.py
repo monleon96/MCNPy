@@ -7,7 +7,7 @@ import logging
 import time # Import time for performance checks
 
 from ..mt import MT
-from ....cov.mf34_covmat import MF34CovMat 
+from ....cov.legendre_covariance import LegendreCovariance 
 from ....utils.logging_utils import get_endf_logger
 import numpy as np # Make sure numpy is imported
 
@@ -542,9 +542,9 @@ class MF34MT(MT):
         return projected_matrix
 
 
-    def to_ang_covmat(self, energy_unit: str = 'eV', mf4_data=None) -> 'MF34CovMat':
+    def to_ang_covmat(self, energy_unit: str = 'eV', mf4_data=None) -> 'LegendreCovariance':
         """
-        Convert the MF34MT data to an MF34CovMat object, aggregating LIST records
+        Convert the MF34MT data to an LegendreCovariance object, aggregating LIST records
         per sub-subsection (L, L1 pair) according to ENDF rules for relative covariance.
 
         Parameters
@@ -559,7 +559,7 @@ class MF34MT(MT):
 
         Returns
         -------
-        MF34CovMat
+        LegendreCovariance
             Angular distribution covariance matrix object containing MxM relative matrices.
         """
         # Return cached result if available (avoids expensive recomputation)
@@ -572,11 +572,11 @@ class MF34MT(MT):
         _debug = logger.isEnabledFor(logging.DEBUG)
         if _debug:
             logger.debug(f"Starting to_ang_covmat for MF34 MT={self.number}")
-        from kika.cov.mf34_covmat import MF34CovMat # Local import
+        from kika.cov.legendre_covariance import LegendreCovariance # Local import
 
         isotope = int(self._za)
         reaction = self.number
-        ang_covmat = MF34CovMat(energy_unit=energy_unit)
+        ang_covmat = LegendreCovariance(energy_unit=energy_unit)
 
         # Process each subsection (MT1)
         logger.debug(f"Found {len(self._subsections)} subsections (MT1).")
@@ -831,7 +831,7 @@ class MF34MT(MT):
 
                 # Add the final aggregated MxM matrix for this sub-subsection (L, L1)
                 if _debug:
-                    logger.debug(f"Adding final matrix for L={l}, L1={l1} to MF34CovMat.")
+                    logger.debug(f"Adding final matrix for L={l}, L1={l1} to LegendreCovariance.")
                     logger.debug(f"Matrix metadata: is_relative={is_relative}, frame={frame}")
                 ang_covmat.add_matrix(
                     isotope, reaction, l,
@@ -852,7 +852,7 @@ class MF34MT(MT):
 
     @staticmethod
     def _populate_legendre_from_mf4(
-        ang_covmat: 'MF34CovMat',
+        ang_covmat: 'LegendreCovariance',
         mf4_data,
         isotope: int,
     ) -> None:
@@ -917,7 +917,7 @@ class MF34MT(MT):
         
         This is a convenience method to easily convert MF34 uncertainty data into
         a plottable format using the new plotting infrastructure. It automatically
-        converts the MF34MT data to an MF34CovMat and extracts the uncertainty
+        converts the MF34MT data to an LegendreCovariance and extracts the uncertainty
         for the specified Legendre order.
         
         Parameters
@@ -958,14 +958,14 @@ class MF34MT(MT):
         >>> from kika.plotting import PlotBuilder
         >>> fig = PlotBuilder().add_data(unc_data).build()
         """
-        # Convert to MF34CovMat
+        # Convert to LegendreCovariance
         mf34_covmat = self.to_ang_covmat()
         
         # Extract isotope and MT from this object
         isotope = int(self._za)
         mt = self.number
         
-        # Delegate to MF34CovMat's to_plot_data method (returns tuple)
+        # Delegate to LegendreCovariance's to_plot_data method (returns tuple)
         return mf34_covmat.to_plot_data(
             nuclide=isotope,
             mt=mt,

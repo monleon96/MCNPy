@@ -20,7 +20,7 @@ from .plot_data import (
     MultigroupUncertaintyPlotData,
     HeatmapPlotData,
     CovarianceHeatmapData,
-    MF34HeatmapData
+    LegendreHeatmapData
 )
 from .styles import (
     _get_color_palette,
@@ -597,7 +597,7 @@ class PlotBuilder:
         Parameters
         ----------
         heatmap_data : HeatmapPlotData
-            Heatmap data object (CovarianceHeatmapData or MF34HeatmapData)
+            Heatmap data object (CovarianceHeatmapData or LegendreHeatmapData)
         show_uncertainties : bool, default True
             Whether to show uncertainty panels above the heatmap
         **styling_overrides
@@ -706,7 +706,7 @@ class PlotBuilder:
         self,
         fig: plt.Figure,
         ax: plt.Axes,
-        data: 'MF34HeatmapData',
+        data: 'LegendreHeatmapData',
         full_xlim: Tuple[float, float],
         full_ylim: Tuple[float, float]
     ) -> None:
@@ -1179,7 +1179,7 @@ class PlotBuilder:
         heatmap_data: 'HeatmapPlotData'
     ) -> None:
         """Draw light grid lines separating MT/L submatrices."""
-        from .plot_data import CovarianceHeatmapData, MF34HeatmapData
+        from .plot_data import CovarianceHeatmapData, LegendreHeatmapData
 
         ranges_x = []
         ranges_y = []
@@ -1206,7 +1206,7 @@ class PlotBuilder:
                 if row_rng is not None:
                     ranges_y.append(tuple(row_rng))
 
-        elif isinstance(heatmap_data, MF34HeatmapData):
+        elif isinstance(heatmap_data, LegendreHeatmapData):
             info = heatmap_data.block_info or {}
             legendre_list = info.get('legendre_coeffs', heatmap_data.legendre_coeffs)
             energy_ranges = info.get('energy_ranges', {}) or {}
@@ -1258,7 +1258,7 @@ class PlotBuilder:
         x_limits : tuple, optional
             X-axis limits (start, end) in transformed coordinates to match heatmap zoom
         """
-        from .plot_data import CovarianceHeatmapData, MF34HeatmapData
+        from .plot_data import CovarianceHeatmapData, LegendreHeatmapData
         import numpy as np
         
         uncertainty_data = heatmap_data.uncertainty_data
@@ -1296,7 +1296,7 @@ class PlotBuilder:
         # Get sorted keys (MTs or Legendre orders)
         keys = sorted(uncertainty_data.keys())
         
-        if isinstance(heatmap_data, MF34HeatmapData):
+        if isinstance(heatmap_data, LegendreHeatmapData):
             # MF34 uncertainty panels
             # Use transformed energy coordinates matching the heatmap
             edges_map = {}
@@ -1418,7 +1418,7 @@ class PlotBuilder:
                     ax_u.spines[side].set_visible(False)
 
         elif isinstance(heatmap_data, CovarianceHeatmapData):
-            # CovMat uncertainty panels
+            # CrossSectionCovariance uncertainty panels
             energy_grid = heatmap_data.energy_grid
 
             if energy_grid is not None:

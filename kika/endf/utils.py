@@ -42,6 +42,9 @@ def format_endf_number(value: Union[int, float, None], width: int = 11) -> str:
     if value == 0:
         return " 0.000000+0"
 
+    if not math.isfinite(value):
+        raise ValueError(f"Cannot format non-finite ENDF value: {value}")
+
     sign_char = "-" if value < 0 else " "
     abs_val = abs(value)
     exponent = int(math.floor(math.log10(abs_val)))

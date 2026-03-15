@@ -11,14 +11,14 @@ the new, cleaner implementation.
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 from typing import Union, Sequence, Tuple, List, Optional
-from kika.cov.covmat import CovMat
-from kika.cov.mf34_covmat import MF34CovMat
+from kika.cov.cross_section_covariance import CrossSectionCovariance
+from kika.cov.legendre_covariance import LegendreCovariance
 from kika.plotting.heatmap_builder import HeatmapBuilder
 from kika.plotting.plot_builder import PlotBuilder
 
 
 def plot_covariance_heatmap(
-    covmat: CovMat,
+    covmat: CrossSectionCovariance,
     nuclide: Union[int, str, List[Union[int, str]]],
     mt: Union[int, Sequence[int], Tuple[int, int]],
     *,
@@ -52,7 +52,7 @@ def plot_covariance_heatmap(
 
     Parameters
     ----------
-    covmat : CovMat
+    covmat : CrossSectionCovariance
         The covariance matrix object
     nuclide : int, str, or list of int/str
         Isotope identifier(s). Can be:
@@ -216,7 +216,7 @@ def plot_covariance_heatmap(
 
 
 def plot_mf34_covariance_heatmap(
-    mf34_covmat: MF34CovMat,
+    mf34_covmat: LegendreCovariance,
     nuclide: Union[int, str],
     mt: int,
     legendre_coeffs: Union[int, List[int], Tuple[int, int]],
@@ -251,7 +251,7 @@ def plot_mf34_covariance_heatmap(
 
     Parameters
     ----------
-    mf34_covmat : MF34CovMat
+    mf34_covmat : LegendreCovariance
         The MF34 covariance matrix object
     nuclide : int or str
         Isotope identifier. Can be either:
@@ -422,7 +422,7 @@ def plot_mf34_covariance_heatmap(
 
 
 def plot_uncertainties(
-    covmat: CovMat,
+    covmat: CrossSectionCovariance,
     nuclide: Union[int, str, Sequence[Union[int, str]]],
     mt: Union[int, Sequence[int]],
     *,
@@ -447,7 +447,7 @@ def plot_uncertainties(
 
     Parameters
     ----------
-    covmat : CovMat
+    covmat : CrossSectionCovariance
         The covariance matrix object
     nuclide : int, str, or sequence of int/str
         Isotope ID(s) to plot (e.g., 92235 for U-235, 'U235')
@@ -608,7 +608,7 @@ def plot_uncertainties(
 
 
 def plot_multigroup_xs(
-    covmat: CovMat,
+    covmat: CrossSectionCovariance,
     nuclide: Union[int, str, Sequence[Union[int, str]]],
     mt: Union[int, Sequence[int]],
     *,
@@ -634,7 +634,7 @@ def plot_multigroup_xs(
 
     Parameters
     ----------
-    covmat : CovMat
+    covmat : CrossSectionCovariance
         The covariance matrix object
     nuclide : int, str, or sequence of int/str
         Isotope ID(s) to plot (e.g., 92235 for U-235, 'U235')

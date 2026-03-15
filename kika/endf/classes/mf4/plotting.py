@@ -152,7 +152,7 @@ def _plot_uncertainty_bands(ax, coeff_energies, coeff_values, mf34_covmat, isoto
         Energy values for coefficient data
     coeff_values : array-like  
         Coefficient values
-    mf34_covmat : MF34CovMat
+    mf34_covmat : LegendreCovariance
         Covariance matrix object
     isotope_id : int
         Isotope ID
@@ -682,7 +682,7 @@ def plot_legendre_coefficient_uncertainties_from_endf(
         # Extract uncertainties from MF34 data
         uncertainties = {}
         try:
-            # Use the existing to_ang_covmat method to convert MF34MT to MF34CovMat
+            # Use the existing to_ang_covmat method to convert MF34MT to LegendreCovariance
             mf34_mt = endf_obj.mf[34].mt[mt]
             mf34_covmat = mf34_mt.to_ang_covmat()
             

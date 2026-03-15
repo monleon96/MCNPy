@@ -10,7 +10,7 @@ from typing import Dict, Optional, Union, TypeVar, Tuple, List, Any, TYPE_CHECKI
 
 from .mt import MT
 from .mf1.mf1mt import MT451
-from ...cov.mf34_covmat import MF34CovMat
+from ...cov.legendre_covariance import LegendreCovariance
 
 if TYPE_CHECKING:
     from .mf2.mf2mt151 import MF2MT151
@@ -154,12 +154,12 @@ class MF:
         
         return result
         
-    def to_ang_covmat(self, energy_unit: str = 'eV', mf4_data=None) -> MF34CovMat:
+    def to_ang_covmat(self, energy_unit: str = 'eV', mf4_data=None) -> LegendreCovariance:
         """
-        Convert MF34 data to an MF34CovMat object that contains data from all MT sections.
+        Convert MF34 data to an LegendreCovariance object that contains data from all MT sections.
 
         This method aggregates angular covariance data from all MT sections in this MF file
-        (if it's MF34) and returns a combined MF34CovMat object.
+        (if it's MF34) and returns a combined LegendreCovariance object.
 
         Parameters
         ----------
@@ -171,7 +171,7 @@ class MF:
 
         Returns
         -------
-        MF34CovMat
+        LegendreCovariance
             Combined object containing data from all MT sections.
 
         Raises
@@ -184,17 +184,17 @@ class MF:
             raise ValueError(f"The to_ang_covmat method is only available for MF34, not MF{self.number}")
 
         # Import here to avoid circular imports
-        from ...cov.mf34_covmat import MF34CovMat
+        from ...cov.legendre_covariance import LegendreCovariance
 
-        # Create a new MF34CovMat object to store the combined data
-        combined_ang_covmat = MF34CovMat(energy_unit=energy_unit)
+        # Create a new LegendreCovariance object to store the combined data
+        combined_ang_covmat = LegendreCovariance(energy_unit=energy_unit)
 
         # Loop through all MT sections and combine their data
         for mt_number, mt_section in self.sections.items():
-            # Get the individual MF34CovMat for this MT section
+            # Get the individual LegendreCovariance for this MT section
             try:
                 # The MT section must be an MF34MT object with to_ang_covmat method
-                mt_ang_covmat: MF34CovMat = mt_section.to_ang_covmat(
+                mt_ang_covmat: LegendreCovariance = mt_section.to_ang_covmat(
                     energy_unit=energy_unit, mf4_data=mf4_data
                 )
                 
@@ -218,6 +218,6 @@ class MF:
                 )
             except (AttributeError, ValueError) as e:
                 # Catch potential errors if a section isn't a valid MF34MT or conversion fails
-                print(f"Warning: Could not convert MT{mt_number} to MF34CovMat: {e}")
+                print(f"Warning: Could not convert MT{mt_number} to LegendreCovariance: {e}")
 
         return combined_ang_covmat
