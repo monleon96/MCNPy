@@ -187,7 +187,7 @@ def read_material(lines: List[str], start_index: int) -> Tuple[Optional[Material
     while i < len(lines):
         line = lines[i].strip()
 
-        if line.startswith("c ") or not line:
+        if line.lower().startswith("c ") or line.lower() == "c" or not line:
             i += 1
             continue
 

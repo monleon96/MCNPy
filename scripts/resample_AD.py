@@ -83,10 +83,11 @@ def compute_angular_band_discrepancy(
     sigma: np.ndarray,
     y_fit: np.ndarray,
     min_points_per_band: int = 3,
-    max_tau_fraction: float = 0.25,
+    max_band_scale: float = 3.0,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """
-    Estimate per-band discrepancy τ_b and return effective uncertainties.
+    Estimate per-band multiplicative scale factor s_b and return effective
+    uncertainties.
 
     This replaces global Birge scaling with angular-band specific
     uncertainty inflation. The bands are:
@@ -97,10 +98,15 @@ def compute_angular_band_discrepancy(
     For each band b:
       1. Compute normalized residuals: r_i = (y_i - y_fit_i) / σ_i
       2. Compute robust scale: s_b = MAD-based estimate
-      3. If s_b > 1: τ_b = median(σ_b) * sqrt(s_b² - 1)
-      4. Apply ceiling: τ_b = min(τ_b, max_tau_fraction * median(y_b))
+      3. If s_b > 1: uncertainties are under-estimated; apply s_b as a
+         multiplicative scale factor.
+      4. Apply ceiling: s_b = min(s_b, max_band_scale).
 
-    The effective uncertainty is: σ²_i,eff = σ²_i + τ²_b
+    The effective uncertainty is: σ_eff,i = s_b · σ_i
+
+    This multiplicative model preserves the relative weights between data
+    points within a band: a well-measured point (small σ) retains more
+    influence on the fit than a poorly measured one.
 
     Parameters
     ----------
@@ -113,17 +119,18 @@ def compute_angular_band_discrepancy(
     y_fit : np.ndarray
         Fitted values from Legendre polynomial
     min_points_per_band : int
-        Minimum points required to estimate τ for a band.
-        If fewer, use the mid-band τ value.
-    max_tau_fraction : float
-        Cap τ_b at this fraction of median cross section in band.
+        Minimum points required to estimate s for a band.
+        If fewer, use the mid-band s value.
+    max_band_scale : float
+        Maximum allowed scale factor per band (safety cap).
 
     Returns
     -------
     sigma_eff : np.ndarray
-        Effective uncertainties with band discrepancy added in quadrature
+        Effective uncertainties scaled by band factors
     tau_info : Dict[str, float]
-        Dictionary with τ_F, τ_M, τ_B values for each band
+        Dictionary with per-band scale factors (s_F, s_M, s_B ≥ 1.0).
+        Keys are 'tau_F', 'tau_M', 'tau_B' for backward compatibility.
     """
     n = len(mu)
     sigma_eff = sigma.copy()
@@ -139,9 +146,10 @@ def compute_angular_band_discrepancy(
         'B': backward_mask,
     }
 
-    tau_values = {'tau_F': 0.0, 'tau_M': 0.0, 'tau_B': 0.0}
+    # Values are multiplicative scale factors (1.0 = no inflation)
+    tau_values = {'tau_F': 1.0, 'tau_M': 1.0, 'tau_B': 1.0}
 
-    # First pass: estimate τ for bands with enough points
+    # First pass: estimate scale factor for bands with enough points
     for band_name, mask in bands.items():
         n_band = np.sum(mask)
 
@@ -151,35 +159,26 @@ def compute_angular_band_discrepancy(
         # Normalized residuals in this band
         r_band = (y[mask] - y_fit[mask]) / sigma[mask]
 
-        # Robust scale estimate
+        # Robust scale estimate (MAD-based)
         s_band = robust_residual_scale(r_band)
 
-        if s_band <= 1.0:
-            tau_b = 0.0
-        else:
-            # τ_b = median(σ) * sqrt(s² - 1)
-            median_sigma = np.median(sigma[mask])
-            tau_b = median_sigma * np.sqrt(s_band**2 - 1)
+        # Apply: s_b = max(1, s_MAD), capped at max_band_scale
+        s_b = min(max(1.0, s_band), max_band_scale)
 
-        # Apply ceiling
-        median_y = np.median(np.abs(y[mask]))
-        tau_ceiling = max_tau_fraction * median_y
-        tau_b = min(tau_b, tau_ceiling)
+        tau_values[f'tau_{band_name}'] = s_b
 
-        tau_values[f'tau_{band_name}'] = tau_b
-
-    # Second pass: for bands with too few points, use mid-band τ
-    tau_mid = tau_values['tau_M']
+    # Second pass: for bands with too few points, use mid-band scale
+    s_mid = tau_values['tau_M']
     for band_name, mask in bands.items():
         n_band = np.sum(mask)
         if n_band < min_points_per_band and n_band > 0:
-            tau_values[f'tau_{band_name}'] = tau_mid
+            tau_values[f'tau_{band_name}'] = s_mid
 
-    # Apply τ to get effective uncertainties
+    # Apply multiplicative scaling
     for band_name, mask in bands.items():
-        tau_b = tau_values[f'tau_{band_name}']
-        if tau_b > 0:
-            sigma_eff[mask] = np.sqrt(sigma[mask]**2 + tau_b**2)
+        s_b = tau_values[f'tau_{band_name}']
+        if s_b > 1.0:
+            sigma_eff[mask] = sigma[mask] * s_b
 
     return sigma_eff, tau_values
 
@@ -189,14 +188,14 @@ def sigma_eff_from_tau(
     sigma: np.ndarray,
     tau_info: Dict[str, float],
 ) -> np.ndarray:
-    """Reconstruct sigma_eff from known tau values (no re-estimation).
+    """Reconstruct sigma_eff from known band scale factors (no re-estimation).
 
     Uses the same band definitions as compute_angular_band_discrepancy:
-      Forward:  mu > 0.5   -> tau_F
-      Mid:      |mu| <= 0.5 -> tau_M
-      Backward: mu < -0.5  -> tau_B
+      Forward:  mu > 0.5   -> tau_F (scale factor)
+      Mid:      |mu| <= 0.5 -> tau_M (scale factor)
+      Backward: mu < -0.5  -> tau_B (scale factor)
 
-    sigma_eff_i = sqrt(sigma_i^2 + tau_b^2)
+    sigma_eff_i = s_b * sigma_i  (multiplicative scaling)
     """
     sigma_eff = sigma.copy()
     bands = {
@@ -205,9 +204,9 @@ def sigma_eff_from_tau(
         'tau_B': mu < -0.5,
     }
     for key, mask in bands.items():
-        tau_b = tau_info.get(key, 0.0)
-        if tau_b > 0 and np.any(mask):
-            sigma_eff[mask] = np.sqrt(sigma[mask]**2 + tau_b**2)
+        s_b = tau_info.get(key, 1.0)
+        if s_b > 1.0 and np.any(mask):
+            sigma_eff[mask] = sigma[mask] * s_b
     return sigma_eff
 
 
@@ -316,7 +315,7 @@ def apply_tau_prior_floor(
         if r_neff >= n_eff_threshold:
             for b in bands:
                 val = r.tau_info.get(b, 0.0)
-                if val > 0.0:  # exclude zeros — floor would collapse otherwise
+                if val > 1.0:  # exclude neutral (no-inflation) values
                     well_estimated[b].append(val)
 
     # Step 2: Compute baseline per band (need >= 3 well-estimated bins)
@@ -333,7 +332,7 @@ def apply_tau_prior_floor(
         if r_neff < n_eff_threshold:
             updated = dict(r.tau_info)
             for b in bands:
-                updated[b] = max(updated.get(b, 0.0), baselines[b])
+                updated[b] = max(updated.get(b, 1.0), baselines[b])
             r.tau_info = updated
 
     return baselines
@@ -466,18 +465,18 @@ def compute_between_experiment_coeffs(
 ) -> Optional[Dict]:
     """Compute per-experiment Legendre coefficients and their weighted scatter.
 
-    For each qualifying experiment (>= min_points angular points), fit Legendre
-    polynomials independently with c0 frozen to the pooled value. Then compute
-    the weighted scatter of the resulting ENDF a_l coefficients across experiments.
+    For each qualifying experiment, fit Legendre polynomials at the same pooled
+    nominal order with c0 frozen to the pooled value. Then compute the weighted
+    scatter of the resulting ENDF a_l coefficients across experiments.
 
     This provides a "between-experiment" uncertainty floor analogous to the PDG
     external error: if independent measurements disagree beyond their internal
     errors, the uncertainty must reflect that disagreement.
 
-    An angular quality gate ensures that only experiments with sufficient angular
-    coverage and numerical stability contribute to the scatter estimate.  An
-    experiment with a handful of points at close angles cannot reliably determine
-    Legendre coefficients and would inflate the scatter artificially.
+    Experiments must have enough angular points to support the full pooled order
+    (n_pts >= degree + 2, since c0 is frozen). An angular quality gate further
+    ensures that only experiments with sufficient angular coverage and numerical
+    stability contribute to the scatter estimate.
 
     Parameters
     ----------
@@ -504,8 +503,8 @@ def compute_between_experiment_coeffs(
     -------
     dict or None
         If >= 2 qualifying experiments:
-        - 'scatter': np.ndarray of weighted scatter for l=1..L_common (ENDF a_l units)
-        - 'L_common': int, max order with valid scatter
+        - 'scatter': np.ndarray of weighted scatter for l=1..degree (ENDF a_l units)
+        - 'L_common': int, equal to degree (kept for API compatibility)
         - 'n_experiments': int, number of qualifying experiments
         - 'per_experiment': dict mapping entry -> (a_l array, n_points, weight_sum)
         - 'skipped_experiments': list of (entry, reason) for experiments that
@@ -532,10 +531,10 @@ def compute_between_experiment_coeffs(
         y = grp['value'].to_numpy()
         sigma = grp['unc'].to_numpy()
 
-        # Determine max fit order: need n_pts > L_j + 1 (c0 frozen -> L_j free params)
-        L_j = min(n_pts - 2, degree)
-        if L_j < 1:
-            skipped.append((entry_val, f"L_j<1 (n_pts={n_pts})"))
+        # Require enough points to support the full pooled order
+        # (c0 frozen -> degree free params, so need n_pts >= degree + 2)
+        if n_pts < degree + 2:
+            skipped.append((entry_val, f"too few points for pooled order (n_pts={n_pts} < {degree + 2})"))
             continue
 
         # --- Angular quality gate ---
@@ -554,7 +553,7 @@ def compute_between_experiment_coeffs(
         # (b) Condition number of per-experiment Legendre design matrix
         #     Catches ill-conditioning from any source (clustered angles,
         #     gaps, too few points for the order, etc.).
-        V = legvander(mu, L_j)
+        V = legvander(mu, degree)
         try:
             cond = float(np.linalg.cond(V))
         except Exception:
@@ -571,7 +570,7 @@ def compute_between_experiment_coeffs(
 
         try:
             coeffs, _chi2, _dof, _k = _weighted_ridge_fit(
-                mu, y, sigma, L_j,
+                mu, y, sigma, degree,
                 fixed_c0=fixed_c0,
                 ridge_lambda=ridge_lambda,
             )
@@ -584,8 +583,8 @@ def compute_between_experiment_coeffs(
     if len(per_experiment) < 2:
         return None
 
-    # Common order: min of all per-experiment fit orders
-    L_common = min(len(a_l) for a_l, _, _ in per_experiment.values())
+    # All experiments were fitted at the same pooled order
+    L_common = degree
     if L_common < 1:
         return None
 
@@ -1180,7 +1179,7 @@ def sample_legendre_coefficients(
     # angular-band discrepancy model
     use_band_discrepancy: bool = False,
     min_points_per_band: int = 3,
-    max_tau_fraction: float = 0.25,
+    max_band_scale: float = 3.0,
     # fixed-c0 mode (Improvement 1.2)
     freeze_c0: bool = False,
     fixed_c0_value: Optional[float] = None,
@@ -1228,8 +1227,8 @@ def sample_legendre_coefficients(
         Use angular-band discrepancy model instead of global Birge scaling
     min_points_per_band : int
         Minimum points per band for τ estimation
-    max_tau_fraction : float
-        Cap τ_b at this fraction of cross section
+    max_band_scale : float
+        Maximum multiplicative scale factor per angular band
     freeze_c0 : bool
         If True, fix c0 to either fixed_c0_value (if provided) or the nominal fit c0.
         This enables shape-only refits where MF3 is fixed and MF34 explains discrepancies.
@@ -1347,16 +1346,16 @@ def sample_legendre_coefficients(
     chi2_red = float(chi2_0 / max(1e-12, dof_0))
 
     # Compute effective uncertainties
-    tau_info = {'tau_F': 0.0, 'tau_M': 0.0, 'tau_B': 0.0}
+    tau_info = {'tau_F': 1.0, 'tau_M': 1.0, 'tau_B': 1.0}
 
     if use_band_discrepancy:
-        # Angular-band discrepancy model: compute τ_F, τ_M, τ_B
-        # Pass 1: estimate tau from nominal fit residuals
+        # Angular-band discrepancy model: compute per-band scale factors
+        # Pass 1: estimate scale from nominal fit residuals
         y_fit = legval(mu, coeffs0)
         sigma_eff, tau_info = compute_angular_band_discrepancy(
             mu=mu, y=y, sigma=sigma, y_fit=y_fit,
             min_points_per_band=min_points_per_band,
-            max_tau_fraction=max_tau_fraction,
+            max_band_scale=max_band_scale,
         )
         # IRLS step: refit nominal with inflated uncertainties so the central
         # fit adapts to problematic angular sectors (improves low-order coverage)
@@ -1368,12 +1367,12 @@ def sample_legendre_coefficients(
             external_weights=external_weights,
         )
         chi2_red = float(chi2_0 / max(1e-12, dof_0))
-        # Pass 2: recompute tau with updated fit
+        # Pass 2: recompute scale factors with updated fit
         y_fit = legval(mu, coeffs0)
         sigma_eff, tau_info = compute_angular_band_discrepancy(
             mu=mu, y=y, sigma=sigma, y_fit=y_fit,
             min_points_per_band=min_points_per_band,
-            max_tau_fraction=max_tau_fraction,
+            max_band_scale=max_band_scale,
         )
         scale = 1.0  # No global scaling when using band model
     elif rescale_unc_by_chi2:

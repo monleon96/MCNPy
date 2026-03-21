@@ -621,33 +621,52 @@ def parse_tally(tally_id, file_obj, start_pos, tfc=True, pert=True):
                 except (ValueError, IndexError) as e:
                     raise ValueError(f"Error parsing pert result/error pairs in tally {tally_id}: {str(e)}")
 
-            # Validate pert results using same expected lengths as unperturbed
+            # Validate pert results — expected count matches unperturbed
+            # (all dimensions contribute: cells × energy × etc.)
+            _ebc = lambda c: 1 if c == 0 else c
+            expected_pert_count = (
+                _ebc(tally.n_cells_surfaces) *
+                _ebc(tally.n_direct_bins) *
+                _ebc(tally.n_user_bins) *
+                _ebc(tally.n_segment_bins) *
+                _ebc(tally.n_multiplier_bins) *
+                _ebc(tally.n_cosine_bins) *
+                _ebc(tally.n_energy_bins) *
+                _ebc(tally.n_time_bins)
+            )
+
+            if len(pert_results) != expected_pert_count or len(pert_errors) != expected_pert_count:
+                raise ValueError(
+                    f"Expected {expected_pert_count} results/errors for pert "
+                    f"but found {len(pert_results)}/{len(pert_errors)} for tally {tally_id}"
+                )
+
+            pert_total_energy_values = None
+            n_pert_cells = _ebc(tally.n_cells_surfaces)
+
             if is_zero_bins:
-                if len(pert_results) != 1 or len(pert_errors) != 1:
-                    raise ValueError(
-                        f"Expected 1 result/error pair for zero bins pert case "
-                        f"but found {len(pert_results)}/{len(pert_errors)} for tally {tally_id}"
-                    )
                 pert_integral_result = pert_results[0]
                 pert_integral_error = pert_errors[0]
-            else:
-                expected_length = len(energies)
-                if is_total:
-                    if len(pert_results) != expected_length + 1 or len(pert_errors) != expected_length + 1:
-                        raise ValueError(
-                            f"Expected {expected_length + 1} results/errors for pert (total bin case) "
-                            f"but found {len(pert_results)}/{len(pert_errors)} for tally {tally_id}"
-                        )
+            elif is_total:
+                if n_pert_cells <= 1:
+                    # Single cell: last value is the total energy bin
                     pert_integral_result = pert_results.pop()
                     pert_integral_error = pert_errors.pop()
                 else:
-                    if len(pert_results) != expected_length or len(pert_errors) != expected_length:
-                        raise ValueError(
-                            f"Expected {expected_length} results/errors for pert but found "
-                            f"{len(pert_results)}/{len(pert_errors)} for tally {tally_id}"
-                        )
+                    # Multi-cell: separate total energy bins from regular results
+                    pert_results, pert_total_results = separate_total_energy_bins(
+                        pert_results, tally.n_energy_bins, True)
+                    pert_errors, pert_total_errors = separate_total_energy_bins(
+                        pert_errors, tally.n_energy_bins, True)
                     pert_integral_result = None
                     pert_integral_error = None
+                    pert_total_energy_values = {
+                        'results': pert_total_results,
+                        'errors': pert_total_errors
+                    }
+            else:
+                pert_integral_result = None
+                pert_integral_error = None
 
             # Parse pert TFC data - line already contains the TFC header
             if tfc:  # Use the same TFC flag for both main and pert data
@@ -697,6 +716,8 @@ def parse_tally(tally_id, file_obj, start_pos, tfc=True, pert=True):
             new_tally_pert = TallyPert(
                 tally_id=tally.tally_id,
                 name=tally.name,
+                n_cells_surfaces=tally.n_cells_surfaces,
+                cell_surface_ids=tally.cell_surface_ids.copy() if tally.cell_surface_ids else None,
                 energies=energies.copy(),
                 results=pert_results,
                 errors=pert_errors,
@@ -709,6 +730,8 @@ def parse_tally(tally_id, file_obj, start_pos, tfc=True, pert=True):
                 perturbation={},
                 perturbation_number=pert_index
             )
+            if pert_total_energy_values is not None:
+                new_tally_pert.total_energy_values = pert_total_energy_values
             tally.perturbation[pert_index] = new_tally_pert
 
     tally._end_pos = file_obj.tell()

@@ -161,7 +161,7 @@ EXFOR_DIRECTORY = "/share_snc/snc/JuanMonleon/EXFOR/data_v1/"
 EXFOR_DB_PATH = '/share_snc/snc/JuanMonleon/EXFOR/x4_iron_angular.db'
 
 # Output directory (all generated files go here)
-OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_27/"
+OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_32/"
 
 # -----------------------------------------------------------------------------
 # 2. DATA SOURCE CONFIGURATION
@@ -226,7 +226,7 @@ MAX_RELATIVE_STD_CAP = 1.0            # max relative std when cap is enabled
 # Replaces explosive relative stds caused by near-zero means with
 # neighbor-interpolated values via congruence transform.
 REGULARIZE_NEAR_ZERO_REL_UNC = True
-NEAR_ZERO_SNR_THRESHOLD = 1.0         # flag if |mean|/sigma_abs < this
+NEAR_ZERO_SNR_THRESHOLD = 1.0        # flag if |mean|/sigma_abs < this
 NEAR_ZERO_N_NEIGHBORS = 3             # valid neighbors to seek on each side
 
 # =============================================================================
@@ -341,9 +341,9 @@ N_SIGMA_CUTOFF = 3.0                             # Gaussian kernel cutoff (±n_s
 
 # --- 6d. Angular-Band Discrepancy ---
 USE_BAND_DISCREPANCY = True                      # Use band-based uncertainty (vs global Birge)
-MIN_POINTS_PER_BAND = 3                          # Minimum points to estimate τ_b per band
-MAX_TAU_FRACTION = 0.25                          # Cap τ_b at 25% of cross section
-TAU_SMOOTHING_WINDOW = 3                         # Moving median window for τ_b(E) smoothing
+MIN_POINTS_PER_BAND = 3                          # Minimum points to estimate s_b per band
+MAX_BAND_SCALE_FACTOR = 3.0                      # Max multiplicative scale per band (safety cap)
+TAU_SMOOTHING_WINDOW = 1                         # Moving median window for s_b(E) smoothing (1 = disabled)
 TAU_PRIOR_FLOOR = False                           # Apply tau prior floor from well-supported bins
 TAU_PRIOR_NEFF_THRESHOLD = 5.0                   # Min N_eff to count as "well-supported"
 TAU_PRIOR_PERCENTILE = 50                        # Percentile of well-supported tau for baseline
@@ -360,9 +360,8 @@ MIN_DEGREE_FOR_AVERAGING = 1                     # Minimum degree to consider (1
 USE_DEGREE_SAMPLING_IN_MC = True                 # Sample degree from degree_weights distribution
 
 # --- 6g. Energy Bin Method Specific  ---
-NORMALIZE_BY_N_POINTS = True                     # Enable study-level sublinear weighting
-WEIGHT_GAMMA = 0.5                               # Sublinear power: 0=equal-per-study, 1=uniform-per-point, 0.5=sqrt
-MAX_EXP_WEIGHT_FRAC_BIN = 0.80                   # Safety cap; rarely activates with corrected gamma
+NORMALIZE_BY_N_POINTS = True                     # Enable study-level GLS-ESS weighting
+MAX_EXP_WEIGHT_FRAC_BIN = 0.80                  # Safety cap per experiment
 FREEZE_C0 = True                                # Fix c0 for shape-only refits
 MAX_SAMPLE_ORDER = 3                               # Publish covariance for l=1..3 only (higher orders cap-dominated)
 
@@ -576,7 +575,7 @@ def _mc_one_bin(args):
         df_method,
         use_band_discrepancy,
         min_points_per_band,
-        max_tau_fraction,
+        max_band_scale,
         use_degree_sampling_in_mc,
         rescale_unc_by_chi2,
         allow_shrink_unc,
@@ -664,7 +663,7 @@ def _mc_one_bin(args):
                     random_state=bin_seed + deg * 1000,
                     use_band_discrepancy=use_band_discrepancy,
                     min_points_per_band=min_points_per_band,
-                    max_tau_fraction=max_tau_fraction,
+                    max_band_scale=max_band_scale,
                     freeze_c0=freeze_c0,
                     sigma_norm=normalization_sigma,
                     norm_dist=norm_dist,
@@ -712,7 +711,7 @@ def _mc_one_bin(args):
                 random_state=bin_seed,
                 use_band_discrepancy=use_band_discrepancy,
                 min_points_per_band=min_points_per_band,
-                max_tau_fraction=max_tau_fraction,
+                max_band_scale=max_band_scale,
                 freeze_c0=freeze_c0,
                 sigma_norm=normalization_sigma,
                 norm_dist=norm_dist,
@@ -1060,7 +1059,7 @@ def perform_nominal_fits(
     m_targ_u: float,
     use_band_discrepancy: bool,
     min_points_per_band: int,
-    max_tau_fraction: float,
+    max_band_scale: float,
     tau_smoothing_window: int,
     n_eff_warning_threshold: float = 5.0,
     min_degree_for_averaging: int = 3,
@@ -1108,7 +1107,7 @@ def perform_nominal_fits(
             min_relative_uncertainty=min_relative_uncertainty,
             unc_floor_strategy=UNCERTAINTY_FLOOR_STRATEGY,
             normalize_by_n_points=NORMALIZE_BY_N_POINTS,
-            weight_gamma=WEIGHT_GAMMA,
+            sigma_norm=NORMALIZATION_SIGMA,
             max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
             logger=_logger,
         )
@@ -1131,7 +1130,7 @@ def perform_nominal_fits(
                 frozen_degree=0,
                 nominal_coeffs=np.array([1.0]),
                 sigma_eff=np.array([]),
-                tau_info={'tau_F': 0.0, 'tau_M': 0.0, 'tau_B': 0.0},
+                tau_info={'tau_F': 1.0, 'tau_M': 1.0, 'tau_B': 1.0},
                 chi2_red=0.0,
                 has_data=False,
                 kernel_diagnostics=None,
@@ -1166,7 +1165,7 @@ def perform_nominal_fits(
                         min_relative_uncertainty=min_relative_uncertainty,
                         unc_floor_strategy=UNCERTAINTY_FLOOR_STRATEGY,
                         normalize_by_n_points=NORMALIZE_BY_N_POINTS,
-                        weight_gamma=WEIGHT_GAMMA,
+                        sigma_norm=NORMALIZATION_SIGMA,
                         max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
                         logger=_logger,
                     )
@@ -1212,7 +1211,7 @@ def perform_nominal_fits(
                         frozen_degree=0,
                         nominal_coeffs=np.array([1.0]),
                         sigma_eff=np.array([]),
-                        tau_info={'tau_F': 0.0, 'tau_M': 0.0, 'tau_B': 0.0},
+                        tau_info={'tau_F': 1.0, 'tau_M': 1.0, 'tau_B': 1.0},
                         chi2_red=0.0,
                         has_data=False,
                         skip_reason=reason,
@@ -1245,13 +1244,13 @@ def perform_nominal_fits(
             allow_shrink_unc=ALLOW_SHRINK_UNC,
             use_band_discrepancy=use_band_discrepancy,
             min_points_per_band=min_points_per_band,
-            max_tau_fraction=max_tau_fraction,
+            max_band_scale=max_band_scale,
         )
 
         frozen_degree = fit_info['degree']
         nominal_coeffs = coef_df.iloc[0].to_numpy()
         chi2_red = fit_info['chi2_red']
-        tau_info = fit_info.get('tau_info', {'tau_F': 0.0, 'tau_M': 0.0, 'tau_B': 0.0})
+        tau_info = fit_info.get('tau_info', {'tau_F': 1.0, 'tau_M': 1.0, 'tau_B': 1.0})
 
         all_degrees_info = fit_info.get('all_degrees_info', None)
         degree_weights = None
@@ -1275,16 +1274,16 @@ def perform_nominal_fits(
             sigma_eff, _ = compute_angular_band_discrepancy(
                 mu=mu, y=y, sigma=sigma, y_fit=y_fit,
                 min_points_per_band=min_points_per_band,
-                max_tau_fraction=max_tau_fraction,
+                max_band_scale=max_band_scale,
             )
-            tau_F = tau_info.get('tau_F', 0.0)
-            tau_M = tau_info.get('tau_M', 0.0)
-            tau_B = tau_info.get('tau_B', 0.0)
+            tau_F = tau_info.get('tau_F', 1.0)
+            tau_M = tau_info.get('tau_M', 1.0)
+            tau_B = tau_info.get('tau_B', 1.0)
         else:
             scale = max(1.0, np.sqrt(chi2_red))
             sigma_eff = sigma * scale
-            tau_F = tau_M = tau_B = 0.0
-            tau_info = {'tau_F': 0.0, 'tau_M': 0.0, 'tau_B': 0.0}
+            tau_F = tau_M = tau_B = 1.0
+            tau_info = {'tau_F': 1.0, 'tau_M': 1.0, 'tau_B': 1.0}
 
         bin_info.fitted_degree = frozen_degree
         bin_info.chi2_red = chi2_red
@@ -1311,7 +1310,7 @@ def perform_nominal_fits(
             frozen_degree=frozen_degree,
             nominal_coeffs=nominal_coeffs,
             sigma_eff=sigma_eff,
-            tau_info=tau_info if tau_info else {'tau_F': 0.0, 'tau_M': 0.0, 'tau_B': 0.0},
+            tau_info=tau_info if tau_info else {'tau_F': 1.0, 'tau_M': 1.0, 'tau_B': 1.0},
             chi2_red=chi2_red,
             has_data=True,
             kernel_diagnostics=diagnostics,
@@ -1356,7 +1355,7 @@ def perform_nominal_fits(
                 dw_str = " ".join(f"L{d}:{w:.0%}" for d, w in sorted(degree_weights.items()))
                 logger.info(f"  AICc weights: {dw_str}")
             logger.info(
-                f"  τ values: τ_F={tau_F:.4f}, τ_M={tau_M:.4f}, τ_B={tau_B:.4f}"
+                f"  Band scales: s_F={tau_F:.2f}, s_M={tau_M:.2f}, s_B={tau_B:.2f}"
             )
             if mc_cap < frozen_degree:
                 logger.info(
@@ -1392,8 +1391,8 @@ def perform_nominal_fits(
             percentile=tau_prior_percentile,
         )
         if logger:
-            logger.info(f"  Tau prior floor baselines: τ_F={baselines['tau_F']:.4f}, "
-                        f"τ_M={baselines['tau_M']:.4f}, τ_B={baselines['tau_B']:.4f}")
+            logger.info(f"  Band scale floor baselines: s_F={baselines['tau_F']:.2f}, "
+                        f"s_M={baselines['tau_M']:.2f}, s_B={baselines['tau_B']:.2f}")
 
     # Recompute sigma_eff and N_eff after tau smoothing/floor
     if (tau_smoothing_window > 1 or tau_prior_floor) and use_band_discrepancy:
@@ -1641,7 +1640,7 @@ def run_exfor_to_endf_sampling_v2(
     m_targ_u: float = 55.93494,
     use_band_discrepancy: bool = True,
     min_points_per_band: int = 3,
-    max_tau_fraction: float = 0.25,
+    max_band_scale: float = 3.0,
     tau_smoothing_window: int = 3,
     tau_prior_floor: bool = True,
     tau_prior_neff_threshold: float = 5.0,
@@ -1932,7 +1931,7 @@ def run_exfor_to_endf_sampling_v2(
     _logger.info("  Angular-Band Discrepancy (6d):")
     _logger.info(f"    USE_BAND_DISCREPANCY           = {use_band_discrepancy}")
     _logger.info(f"    MIN_POINTS_PER_BAND            = {min_points_per_band}")
-    _logger.info(f"    MAX_TAU_FRACTION               = {max_tau_fraction}")
+    _logger.info(f"    MAX_BAND_SCALE_FACTOR      = {max_band_scale}")
     _logger.info(f"    TAU_SMOOTHING_WINDOW           = {tau_smoothing_window}")
     _logger.info(f"    TAU_PRIOR_FLOOR                = {tau_prior_floor}")
     if tau_prior_floor:
@@ -1958,7 +1957,7 @@ def run_exfor_to_endf_sampling_v2(
     # -- Energy Bin Method (6g) --
     _logger.info("  Energy Bin Method (6g):")
     _logger.info(f"    NORMALIZE_BY_N_POINTS          = {NORMALIZE_BY_N_POINTS}")
-    _logger.info(f"    WEIGHT_GAMMA                   = {WEIGHT_GAMMA}")
+    _logger.info(f"    GLS-ESS weighting (sigma_norm  = {NORMALIZATION_SIGMA})")
     _logger.info(f"    MAX_EXP_WEIGHT_FRAC_BIN        = {MAX_EXP_WEIGHT_FRAC_BIN}")
     _logger.info(f"    FREEZE_C0                      = {FREEZE_C0}")
     _logger.info(f"    MAX_SAMPLE_ORDER               = {MAX_SAMPLE_ORDER}")
@@ -2129,7 +2128,7 @@ def run_exfor_to_endf_sampling_v2(
         m_targ_u=m_targ_u,
         use_band_discrepancy=use_band_discrepancy,
         min_points_per_band=min_points_per_band,
-        max_tau_fraction=max_tau_fraction,
+        max_band_scale=max_band_scale,
         tau_smoothing_window=tau_smoothing_window,
         n_eff_warning_threshold=n_eff_warning_threshold,
         min_degree_for_averaging=min_degree_for_averaging,
@@ -2212,7 +2211,7 @@ def run_exfor_to_endf_sampling_v2(
                 DF_METHOD,
                 use_band_discrepancy,
                 min_points_per_band,
-                max_tau_fraction,
+                max_band_scale,
                 USE_DEGREE_SAMPLING_IN_MC,
                 RESCALE_UNC_BY_CHI2,
                 ALLOW_SHRINK_UNC,
@@ -2340,13 +2339,13 @@ def run_exfor_to_endf_sampling_v2(
             base_seed=base_seed,
             use_band_discrepancy=use_band_discrepancy,
             min_points_per_band=min_points_per_band,
-            max_tau_fraction=max_tau_fraction,
+            max_band_scale=max_band_scale,
             freeze_c0=FREEZE_C0,
             max_sample_order=MAX_SAMPLE_ORDER,
             apply_positivity_projection=apply_positivity_projection,
             positivity_check_points=positivity_check_points,
             max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
-            weight_gamma=WEIGHT_GAMMA,
+            min_relative_uncertainty=MIN_RELATIVE_UNCERTAINTY,
             logger=_logger,
         )
 
@@ -2374,7 +2373,7 @@ def run_exfor_to_endf_sampling_v2(
                     DF_METHOD,
                     use_band_discrepancy,
                     min_points_per_band,
-                    max_tau_fraction,
+                    max_band_scale,
                     USE_DEGREE_SAMPLING_IN_MC,
                     RESCALE_UNC_BY_CHI2,
                     ALLOW_SHRINK_UNC,
@@ -3023,6 +3022,20 @@ def run_exfor_to_endf_sampling_v2(
             if verbose_diagnostics:
                 log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-convert", _logger, verbose=True)
 
+            # Near-zero regularization on nominal-relative covariance
+            if regularize_near_zero:
+                cov_matrix_nominal, _nz_nom_diag = regularize_near_zero_relative_covariance(
+                    cov_rel=cov_matrix_nominal,
+                    mean_params=nominal_params,
+                    cov_abs=cov_abs,
+                    max_order=max_degree,
+                    snr_threshold=near_zero_snr_threshold,
+                    n_neighbors=near_zero_n_neighbors,
+                    logger=_logger,
+                )
+                if verbose_diagnostics:
+                    log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-nz-nom", _logger, verbose=True)
+
             if apply_cov_postprocessing:
                 # Step 1: Between-experiment scatter floor
                 cov_matrix_nominal, _bexp_nom = apply_between_experiment_floor(
@@ -3254,6 +3267,20 @@ def run_exfor_to_endf_sampling_v2(
                 if verbose_diagnostics:
                     log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-convert", _logger, verbose=True)
 
+                # Near-zero regularization on nominal-relative covariance (MG)
+                if regularize_near_zero:
+                    cov_grouped_nominal, _ = regularize_near_zero_relative_covariance(
+                        cov_rel=cov_grouped_nominal,
+                        mean_params=nom_mean_grouped,
+                        cov_abs=cov_abs_grouped,
+                        max_order=max_degree,
+                        snr_threshold=near_zero_snr_threshold,
+                        n_neighbors=near_zero_n_neighbors,
+                        logger=_logger,
+                    )
+                    if verbose_diagnostics:
+                        log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-nz-nom", _logger, verbose=True)
+
                 if apply_cov_postprocessing:
                     # Step 2: Dip/spike smoothing & absent-order interpolation (MG)
                     _mg_valid = multigroup_result.valid_mask_grouped
@@ -3397,6 +3424,20 @@ def run_exfor_to_endf_sampling_v2(
                     _logger.info(f"  RG abs→nominal conversion: max rel_std = {np.max(_rg_nom_rel_std)*100:.1f}%")
                     if verbose_diagnostics:
                         log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-convert", _logger, verbose=True)
+
+                    # Near-zero regularization on nominal-relative covariance (RG)
+                    if regularize_near_zero:
+                        cov_grouped_nominal, _ = regularize_near_zero_relative_covariance(
+                            cov_rel=cov_grouped_nominal,
+                            mean_params=nom_mean_grouped,
+                            cov_abs=cov_abs_grouped,
+                            max_order=max_degree,
+                            snr_threshold=near_zero_snr_threshold,
+                            n_neighbors=near_zero_n_neighbors,
+                            logger=_logger,
+                        )
+                        if verbose_diagnostics:
+                            log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-nz-nom", _logger, verbose=True)
 
                     if apply_cov_postprocessing:
                         # Step 2: Dip/spike smoothing & absent-order interpolation (RG)
@@ -3688,7 +3729,7 @@ if __name__ == "__main__":
         m_targ_u=M_TARG_U,
         use_band_discrepancy=USE_BAND_DISCREPANCY,
         min_points_per_band=MIN_POINTS_PER_BAND,
-        max_tau_fraction=MAX_TAU_FRACTION,
+        max_band_scale=MAX_BAND_SCALE_FACTOR,
         tau_smoothing_window=TAU_SMOOTHING_WINDOW,
         sigma_norm=NORMALIZATION_SIGMA,
         use_model_averaging=USE_MODEL_AVERAGING,

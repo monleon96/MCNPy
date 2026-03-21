@@ -794,26 +794,51 @@ def _try_energy_grid_matching(
     cov_array: np.ndarray, 
     tolerance: float
 ) -> Dict[int, int]:
-    """Try to match energy grids with given arrays and tolerance."""
+    """Try to match energy grids with given arrays and tolerance.
+
+    Supports two cases:
+    1. Same length grids — exact 1:1 match (existing behavior).
+    2. Sensitivity grid is a contiguous subset of the covariance grid — maps
+       each sensitivity group to the corresponding covariance group.
+    """
     energy_mapping = {}
-    
-    # For multigroup data, check if the grids are approximately the same
-    if len(sens_array) != len(cov_array):
-        return energy_mapping  # Different number of boundaries, can't match
-    
-    # Check if all boundaries match within tolerance
-    all_match = True
-    for i in range(len(sens_array)):
-        if abs(sens_array[i] - cov_array[i]) > tolerance:
-            all_match = False
-            break
-    
-    if all_match:
-        # If all boundaries match, create 1:1 mapping for energy groups
-        n_groups = len(sens_array) - 1  # Number of groups = boundaries - 1
-        for i in range(n_groups):
-            energy_mapping[i] = i
-    
+
+    # Case 1: Same length — exact match
+    if len(sens_array) == len(cov_array):
+        all_match = True
+        for i in range(len(sens_array)):
+            if abs(sens_array[i] - cov_array[i]) > tolerance:
+                all_match = False
+                break
+        if all_match:
+            for i in range(len(sens_array) - 1):
+                energy_mapping[i] = i
+            return energy_mapping
+
+    # Case 2: Sensitivity grid is a contiguous subset of covariance grid
+    if len(sens_array) < len(cov_array):
+        # Find where the first sensitivity boundary matches in the covariance grid
+        start_idx = None
+        for c_idx in range(len(cov_array)):
+            if abs(sens_array[0] - cov_array[c_idx]) <= tolerance:
+                start_idx = c_idx
+                break
+
+        if start_idx is not None:
+            n_sens = len(sens_array)
+            # Check that all consecutive sensitivity boundaries match
+            if start_idx + n_sens <= len(cov_array):
+                all_match = True
+                for i in range(n_sens):
+                    if abs(sens_array[i] - cov_array[start_idx + i]) > tolerance:
+                        all_match = False
+                        break
+
+                if all_match:
+                    # Map: sens group i → cov group (start_idx + i)
+                    for i in range(n_sens - 1):
+                        energy_mapping[i] = start_idx + i
+
     return energy_mapping
 
 

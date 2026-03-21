@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 def compute_sensitivity(inputfile: str, mctalfile: str, tally: int,
                         zaid: int = None, label: str = '',
                         material: Optional[int] = None,
+                        cell: int = 0,
                         pert_metadata: Optional[List[Tuple[int, int, int, int]]] = None
                         ) -> SensitivityData:
     """Compute sensitivity coefficients from MCNP input and output files.
@@ -37,6 +38,10 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int,
     :param material: Optional material number to filter perturbations by.
         If None, all perturbations are used (backward-compatible behavior).
     :type material: int, optional
+    :param cell: Cell ID to use for multi-cell tallies. Default is 0, which is
+        the total-over-cells bin in MCNP (added by the T parameter in the tally
+        definition). For single-cell tallies this parameter is ignored.
+    :type cell: int
     :param pert_metadata: Optional list of (start_pert, end_pert, zaid, material) tuples.
         Assigns zaid and original_material to PERT cards in the given ranges.
         When provided, zaid and material can be inferred from the metadata.
@@ -46,10 +51,10 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int,
     :raises ValueError: If ZAID metadata is missing and no pert_metadata is provided,
         or if pert_metadata contains multiple ZAIDs (use compute_total_sensitivity instead).
     """
-    input = read_mcnp(inputfile, pert_metadata=pert_metadata)
+    input_data = read_mcnp(inputfile, pert_metadata=pert_metadata)
     mctal = read_mctal(mctalfile)
 
-    # Resolve zaid from pert_metadata if not explicitly provided
+    # Resolve zaid and material from pert_metadata if not explicitly provided
     if pert_metadata is not None:
         meta_zaids = sorted({z for _, _, z, _ in pert_metadata})
         meta_mats = sorted({m for _, _, _, m in pert_metadata})
@@ -76,30 +81,79 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int,
             "or add 'c kika:pert_zaid=ZAID pert_mat=MAT' comments to the input file."
         )
 
-    if not input.perturbation.has_zaid_info:
+    if not input_data.perturbation.has_zaid_info:
         raise ValueError(
             "No ZAID metadata found in PERT cards. "
             "Provide pert_metadata=[(start, end, zaid, material), ...] "
             "or add 'c kika:pert_zaid=ZAID pert_mat=MAT' comments to the input file."
         )
 
-    pert_energies = input.perturbation.pert_energies
-    reactions = input.perturbation.reactions_for_zaid(zaid)
-    group_dict_first = input.perturbation._group_perts_by_reaction(2, material=material, zaid=zaid)
-    
+    # Guard: if no material specified and multiple materials exist, raise error
+    if material is None:
+        detected_mats = input_data.perturbation.materials_for_zaid(zaid)
+        if len(detected_mats) > 1:
+            raise ValueError(
+                f"Multiple materials {detected_mats} found for ZAID {zaid}. "
+                "Use compute_total_sensitivity() to sum across materials, "
+                "or pass material= to select a single material."
+            )
+        elif len(detected_mats) == 1:
+            material = detected_mats[0]
+
+    return _compute_sensitivity_impl(input_data, mctal, tally, zaid, label, material, cell)
+
+
+def _compute_sensitivity_impl(input_data, mctal, tally: int,
+                              zaid: int, label: str,
+                              material: Optional[int] = None,
+                              cell: int = 0) -> SensitivityData:
+    """Core sensitivity computation on pre-parsed MCNP input and mctal data.
+
+    This is the internal implementation shared by ``compute_sensitivity`` and
+    ``compute_total_sensitivity``.  Callers are responsible for parsing files
+    and validating *zaid* / *material* before calling this function.
+
+    Parameters
+    ----------
+    cell : int
+        Cell ID to select for multi-cell tallies. Default 0 (total-over-cells
+        in MCNP, added by the T parameter in the tally definition).
+    """
+    pert_energies = input_data.perturbation.pert_energies
+    reactions = input_data.perturbation.reactions_for_zaid(zaid)
+    group_dict_first = input_data.perturbation._group_perts_by_reaction(2, material=material, zaid=zaid)
+
     # Check if second-order perturbations are available
-    # Use a more reliable method to check for method 3 perturbations
     has_second_order = False
     try:
-        group_dict_second = input.perturbation._group_perts_by_reaction(3, material=material, zaid=zaid)
-        has_second_order = bool(group_dict_second)  # True if dictionary is not empty
+        group_dict_second = input_data.perturbation._group_perts_by_reaction(3, material=material, zaid=zaid)
+        has_second_order = bool(group_dict_second)
     except:
         group_dict_second = {}
-    
-    energy = mctal.tally[tally].energies 
-    r0 = np.array(mctal.tally[tally].results)
-    e0 = np.array(mctal.tally[tally].errors)
-    
+
+    tally_obj = mctal.tally[tally]
+    energy = tally_obj.energies
+    n_energies = len(energy)
+
+    # Handle multi-cell tallies: select requested cell
+    n_cells = tally_obj.n_cells_surfaces if tally_obj.n_cells_surfaces > 0 else 1
+    cell_offset = 0
+    cell_idx = 0
+    if n_cells > 1:
+        if tally_obj.cell_surface_ids and cell in tally_obj.cell_surface_ids:
+            cell_idx = tally_obj.cell_surface_ids.index(cell)
+        else:
+            raise ValueError(
+                f"Cell {cell} not found in tally {tally}. "
+                f"Available cells: {tally_obj.cell_surface_ids}"
+            )
+        cell_offset = cell_idx * n_energies
+
+    all_r0 = np.array(tally_obj.results)
+    all_e0 = np.array(tally_obj.errors)
+    r0 = all_r0[cell_offset:cell_offset + n_energies]
+    e0 = all_e0[cell_offset:cell_offset + n_energies]
+
     # Prepare all the data first before creating the SensitivityData object
     full_data = {}
     coefficients = {}  # Store Taylor coefficients by energy and reaction
@@ -107,7 +161,7 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int,
     for i in range(len(energy)):            # Loop over detector energies
         energy_data = {}
         coeff_data = {}
-        
+
         # Calculate energy boundaries for the energy string
         if i == 0:
             lower_bound = 0.0
@@ -116,18 +170,18 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int,
         upper_bound = energy[i]
         # Format energy as string in the required format
         energy_str = f"{lower_bound:.2e}_{upper_bound:.2e}"
-        
+
         for rxn in reactions:               # Loop over unique reaction
             # First-order processing
             sensCoef = np.zeros(len(group_dict_first[rxn]))
             sensErr = np.zeros(len(group_dict_first[rxn]))
-            
+
             for j, pert in enumerate(group_dict_first[rxn]):
-                c1 = mctal.tally[tally].perturbation[pert].results[i]
-                e1 = mctal.tally[tally].perturbation[pert].errors[i]
+                c1 = tally_obj.perturbation[pert].results[cell_offset + i]
+                e1 = tally_obj.perturbation[pert].errors[cell_offset + i]
                 sensCoef[j] = c1/r0[i]
                 sensErr[j] = np.sqrt(e0[i]**2 + e1**2)
-            
+
             # Store first-order coefficients
             energy_data[rxn] = Coefficients(
                 energy=energy_str,
@@ -138,27 +192,27 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int,
                 r0=float(r0[i]),
                 e0=float(e0[i])
             )
-            
+
             # Second-order processing (if available)
             if has_second_order and rxn in group_dict_second:
                 c2_values = []
                 c1_values = []  # Store the actual Taylor coefficients c1
                 c1_errors = []  # Store errors of Taylor coefficients c1
                 c2_errors = []  # Store errors of Taylor coefficients c2
-                
+
                 for j, pert in enumerate(group_dict_second[rxn]):
                     # Get first-order Taylor coefficient directly (not the sensitivity)
-                    c1 = mctal.tally[tally].perturbation[group_dict_first[rxn][j]].results[i]
-                    c1_err = mctal.tally[tally].perturbation[group_dict_first[rxn][j]].errors[i]
+                    c1 = tally_obj.perturbation[group_dict_first[rxn][j]].results[cell_offset + i]
+                    c1_err = tally_obj.perturbation[group_dict_first[rxn][j]].errors[cell_offset + i]
                     c1_values.append(c1)
                     c1_errors.append(c1_err)
-                    
+
                     # Get second-order Taylor coefficient directly
-                    c2 = mctal.tally[tally].perturbation[pert].results[i]
-                    c2_err = mctal.tally[tally].perturbation[pert].errors[i]
+                    c2 = tally_obj.perturbation[pert].results[cell_offset + i]
+                    c2_err = tally_obj.perturbation[pert].errors[cell_offset + i]
                     c2_values.append(c2)
                     c2_errors.append(c2_err)
-                
+
                 # Calculate the ratio c2/c1 directly for each energy bin
                 ratio_values = []
                 for j in range(len(c1_values)):
@@ -166,7 +220,7 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int,
                         ratio_values.append(c2_values[j] / c1_values[j])
                     else:
                         ratio_values.append(float('nan'))
-                
+
                 coeff_data[rxn] = TaylorCoefficients(
                     energy=energy_str,
                     reaction=rxn,
@@ -177,29 +231,45 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int,
                     c1_errors=c1_errors,
                     c2_errors=c2_errors
                 )
-        
+
         full_data[energy_str] = energy_data
         if coeff_data:  # Only add if there are any coefficients
             coefficients[energy_str] = coeff_data
 
     # Process integral results if available
-    if mctal.tally[tally].integral_result is not None:
+    has_integral = False
+    integral_r0 = None
+    integral_e0 = None
+
+    if n_cells <= 1 and tally_obj.integral_result is not None:
+        has_integral = True
+        integral_r0 = tally_obj.integral_result
+        integral_e0 = tally_obj.integral_error
+    elif n_cells > 1 and hasattr(tally_obj, 'total_energy_values') and tally_obj.total_energy_values:
+        has_integral = True
+        integral_r0 = tally_obj.total_energy_values['results'][cell_idx]
+        integral_e0 = tally_obj.total_energy_values['errors'][cell_idx]
+
+    if has_integral:
         integral_data = {}
         integral_coeff_data = {}
-        integral_r0 = mctal.tally[tally].integral_result
-        integral_e0 = mctal.tally[tally].integral_error
-        
+
         for rxn in reactions:
             sensCoef_int = np.zeros(len(group_dict_first[rxn]))
             sensErr_int = np.zeros(len(group_dict_first[rxn]))
-            
+
             # Process first-order coefficients for integral results
             for j, pert in enumerate(group_dict_first[rxn]):
-                c1_int = mctal.tally[tally].perturbation[pert].integral_result
-                e1_int = mctal.tally[tally].perturbation[pert].integral_error
+                pert_obj = tally_obj.perturbation[pert]
+                if n_cells > 1 and hasattr(pert_obj, 'total_energy_values') and pert_obj.total_energy_values:
+                    c1_int = pert_obj.total_energy_values['results'][cell_idx]
+                    e1_int = pert_obj.total_energy_values['errors'][cell_idx]
+                else:
+                    c1_int = pert_obj.integral_result
+                    e1_int = pert_obj.integral_error
                 sensCoef_int[j] = c1_int / integral_r0
                 sensErr_int[j] = np.sqrt(integral_e0**2 + e1_int**2)
-            
+
             integral_data[rxn] = Coefficients(
                 energy="integral",
                 reaction=rxn,
@@ -209,27 +279,37 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int,
                 r0=integral_r0,
                 e0=integral_e0
             )
-            
+
             # Process second-order coefficients for integral results (if available)
             if has_second_order and rxn in group_dict_second:
                 c2_values_int = []
                 c1_values_int = []  # Store the actual Taylor coefficients
                 c1_errors_int = []  # Store errors of Taylor coefficients c1
                 c2_errors_int = []  # Store errors of Taylor coefficients c2
-                
+
                 for j, pert in enumerate(group_dict_second[rxn]):
                     # Get first-order Taylor coefficient directly
-                    c1_int_val = mctal.tally[tally].perturbation[group_dict_first[rxn][j]].integral_result
-                    c1_int_err = mctal.tally[tally].perturbation[group_dict_first[rxn][j]].integral_error
+                    pert1_obj = tally_obj.perturbation[group_dict_first[rxn][j]]
+                    if n_cells > 1 and hasattr(pert1_obj, 'total_energy_values') and pert1_obj.total_energy_values:
+                        c1_int_val = pert1_obj.total_energy_values['results'][cell_idx]
+                        c1_int_err = pert1_obj.total_energy_values['errors'][cell_idx]
+                    else:
+                        c1_int_val = pert1_obj.integral_result
+                        c1_int_err = pert1_obj.integral_error
                     c1_values_int.append(c1_int_val)
                     c1_errors_int.append(c1_int_err)
-                    
+
                     # Get second-order Taylor coefficient directly
-                    c2_int_val = mctal.tally[tally].perturbation[pert].integral_result
-                    c2_int_err = mctal.tally[tally].perturbation[pert].integral_error
+                    pert2_obj = tally_obj.perturbation[pert]
+                    if n_cells > 1 and hasattr(pert2_obj, 'total_energy_values') and pert2_obj.total_energy_values:
+                        c2_int_val = pert2_obj.total_energy_values['results'][cell_idx]
+                        c2_int_err = pert2_obj.total_energy_values['errors'][cell_idx]
+                    else:
+                        c2_int_val = pert2_obj.integral_result
+                        c2_int_err = pert2_obj.integral_error
                     c2_values_int.append(c2_int_val)
                     c2_errors_int.append(c2_int_err)
-                
+
                 # Calculate ratios for integral results
                 ratio_values_int = []
                 for j in range(len(c1_values_int)):
@@ -237,7 +317,7 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int,
                         ratio_values_int.append(c2_values_int[j] / c1_values_int[j])
                     else:
                         ratio_values_int.append(float('nan'))
-                
+
                 integral_coeff_data[rxn] = TaylorCoefficients(
                     energy="integral",
                     reaction=rxn,
@@ -248,11 +328,11 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int,
                     c1_errors=c1_errors_int,
                     c2_errors=c2_errors_int
                 )
-        
+
         full_data["integral"] = integral_data
         if integral_coeff_data:
             coefficients["integral"] = integral_coeff_data
-    
+
     # Create SensitivityData object after all data is prepared
     return SensitivityData(
         tally_id=tally,
@@ -268,6 +348,7 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int,
 def compute_total_sensitivity(
     inputfile: str, mctalfile: str, tally: int, zaid: int = None, label: str = '',
     materials: Optional[List[int]] = None,
+    cell: int = 0,
     pert_metadata: Optional[List[Tuple[int, int, int, int]]] = None,
 ) -> SensitivityData:
     """Compute total sensitivity by summing contributions from multiple materials.
@@ -298,6 +379,10 @@ def compute_total_sensitivity(
     materials : list of int, optional
         Material IDs to sum over. If *None*, auto-detected from the PERT cards
         in *inputfile* (or from *pert_metadata* if provided).
+    cell : int
+        Cell ID to use for multi-cell tallies. Default is 0, which is the
+        total-over-cells bin in MCNP (added by the T parameter in the tally
+        definition). For single-cell tallies this parameter is ignored.
     pert_metadata : list of tuple, optional
         List of (start_pert, end_pert, zaid, material) tuples. When provided,
         zaid and materials are extracted from the metadata.
@@ -313,6 +398,10 @@ def compute_total_sensitivity(
         If no materials are found, or perturbation energy grids differ
         between materials.
     """
+    # Parse files once — shared across all per-material computations
+    input_data = read_mcnp(inputfile, pert_metadata=pert_metadata)
+    mctal = read_mctal(mctalfile)
+
     # Extract zaid and materials from pert_metadata if provided
     if pert_metadata is not None:
         meta_zaids = sorted({z for _, _, z, _ in pert_metadata})
@@ -329,29 +418,22 @@ def compute_total_sensitivity(
 
     # Auto-detect materials from PERT cards if not provided
     if materials is None:
-        input_data = read_mcnp(inputfile, pert_metadata=pert_metadata)
         materials = input_data.perturbation.materials_for_zaid(zaid)
 
     if not materials:
         raise ValueError("No materials found in perturbation cards")
 
-    # Single material — delegate directly
+    # Single material — delegate directly (reuse already-parsed data)
     if len(materials) == 1:
-        return compute_sensitivity(inputfile, mctalfile, tally, zaid, label,
-                                   material=materials[0],
-                                   pert_metadata=pert_metadata)
+        return _compute_sensitivity_impl(input_data, mctal, tally, zaid, label,
+                                         material=materials[0], cell=cell)
 
-    # Compute per-material sensitivities
-    # When pert_metadata is provided, pass the relevant subset per material
+    # Compute per-material sensitivities using pre-parsed data
     per_material = {}
     for mat in materials:
-        mat_metadata = None
-        if pert_metadata is not None:
-            mat_metadata = [(s, e, z, m) for s, e, z, m in pert_metadata if m == mat]
-        per_material[mat] = compute_sensitivity(
-            inputfile, mctalfile, tally, zaid,
-            label=f"{label}_mat{mat}", material=mat,
-            pert_metadata=mat_metadata if mat_metadata else pert_metadata,
+        per_material[mat] = _compute_sensitivity_impl(
+            input_data, mctal, tally, zaid,
+            label=f"{label}_mat{mat}", material=mat, cell=cell,
         )
 
     # Use the first material as reference for structure validation

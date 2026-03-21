@@ -228,9 +228,9 @@ class EnergyBinInfo:
     experiments_used: List[Dict] = field(default_factory=list)  # List of experiments used
     fitted_degree: int = 0               # Fitted Legendre degree
     chi2_red: float = 0.0                # Reduced chi-squared of fit
-    tau_F: float = 0.0                   # Forward band discrepancy
-    tau_M: float = 0.0                   # Mid band discrepancy
-    tau_B: float = 0.0                   # Backward band discrepancy
+    tau_F: float = 1.0                   # Forward band scale factor (≥1.0)
+    tau_M: float = 1.0                   # Mid band scale factor (≥1.0)
+    tau_B: float = 1.0                   # Backward band scale factor (≥1.0)
     interpolated: bool = False           # Whether coefficients were interpolated
     endf_index: Optional[int] = None     # Nearest index in original ENDF grid (for I/O)
 
@@ -259,7 +259,7 @@ class KernelDiagnostics:
     weight_span_ratio: float                        # weight_span_95 / sigma_E
     n_experiments: int                              # Number of experiments contributing
     max_experiment_weight_frac: float               # Largest single experiment weight fraction
-    experiment_weights: Dict[str, float]            # {exp_key: weight_frac} before capping
+    experiment_weights: Dict[str, float]            # {entry.subentry: weight_frac} before capping
     n_points_dropped: int                           # Points dropped by min weight threshold
     capping_applied: bool                           # Whether experiment capping was applied
 
@@ -932,7 +932,7 @@ def filter_exfor_with_energy_bin(
     unc_floor_strategy: str = "bin_median",
     # Per-experiment weighting options
     normalize_by_n_points: bool = False,
-    weight_gamma: float = 0.5,                    # Sublinear power: W_j = n_j^gamma
+    sigma_norm: float = 0.05,                     # Normalization uncertainty for GLS-ESS weighting
     max_experiment_weight_fraction: float = 1.0,  # 1.0 = disabled
     logger=None,
 ) -> Tuple[pd.DataFrame, List[Dict], np.ndarray, KernelDiagnostics, Dict]:
@@ -1038,7 +1038,7 @@ def filter_exfor_with_energy_bin(
         else:
             selected_data.extend(candidates)
 
-    # Step 2b: Count total points per study for sublinear weighting
+    # Step 2b: Count total points per study for GLS-ESS weighting
     # Group by entry (study-level), not entry.subentry
     study_n_points_map: Dict[str, int] = {}
     if normalize_by_n_points:
@@ -1059,14 +1059,9 @@ def filter_exfor_with_energy_bin(
 
         n_points = len(df['angle'])
 
-        # Determine kernel weight per point: sublinear study-level budgeting
-        # W_j = n_j^gamma, per-point weight = W_j / n_j = n_j^(gamma - 1)
-        if normalize_by_n_points and entry in study_n_points_map:
-            n_j = study_n_points_map[entry]
-            kernel_weight = n_j ** (weight_gamma - 1.0)
-        else:
-            # Uniform weight for bin method (no weighting)
-            kernel_weight = 1.0
+        # Placeholder weight — GLS-ESS weights are computed after the
+        # uncertainty floor so that ρ_j uses post-floor σ_stat values.
+        kernel_weight = 1.0
 
         # Extract metadata (same as Gaussian kernel method)
         frame = meta.get('angle_frame', 'CM').upper()
@@ -1160,6 +1155,31 @@ def filter_exfor_with_energy_bin(
             strategy=unc_floor_strategy, logger=logger,
         )
 
+    # Compute GLS-ESS per-point weights using post-floor uncertainties
+    # Group by (entry, subentry) because normalization perturbations are drawn per subentry
+    if normalize_by_n_points and sigma_norm > 0 and len(result) > 0:
+        unique_pairs = result[['entry', 'subentry']].drop_duplicates()
+        for _, row in unique_pairs.iterrows():
+            entry_val, sub_val = row['entry'], row['subentry']
+            mask = ((result['entry'] == entry_val) & (result['subentry'] == sub_val)).values
+            vals = result.loc[mask, 'value'].to_numpy()
+            uncs = result.loc[mask, 'unc'].to_numpy()
+            rel_arr = uncs / np.maximum(np.abs(vals), 1e-30)
+            finite = np.isfinite(rel_arr)
+            rel_unc = np.sqrt(np.nanmean(rel_arr[finite]**2)) if finite.any() else 0.0
+            if not np.isfinite(rel_unc) or rel_unc <= 0:
+                rel_unc = min_relative_uncertainty if min_relative_uncertainty > 0 else sigma_norm
+            rho = sigma_norm**2 / (sigma_norm**2 + rel_unc**2)
+            n_j = int(mask.sum())
+            g = 1.0 / (1.0 + max(n_j - 1, 0) * rho)
+            kernel_weights[mask] = g
+            result.loc[mask, 'kernel_weight'] = g
+        # Update experiments_info with new weights (match by entry AND subentry)
+        for exp in experiments_info:
+            emask = (result['entry'] == exp['entry']) & (result['subentry'] == exp['subentry'])
+            if emask.any():
+                exp['kernel_weight'] = float(kernel_weights[emask.values][0])
+
     # Apply per-experiment weight capping if requested (Improvement 1.1)
     capping_applied = False
     if max_experiment_weight_fraction < 1.0:
@@ -1170,23 +1190,23 @@ def filter_exfor_with_energy_bin(
         # (e.g. compute_between_experiment_coeffs reads grp['kernel_weight'])
         result['kernel_weight'] = kernel_weights
         for exp in experiments_info:
-            mask = result['entry'] == exp['entry']
+            mask = (result['entry'] == exp['entry']) & (result['subentry'] == exp['subentry'])
             if mask.any():
                 exp['kernel_weight'] = float(kernel_weights[mask.values][0])
     else:
-        # Compute study-level weight fractions (for logging)
+        # Compute weight fractions per (entry, subentry) for logging
         exp_weight_fracs = {}
         total_weight = float(np.sum(kernel_weights))
         if total_weight > 1e-30:
-            seen_entries = set()
+            seen_keys = set()
             for exp in experiments_info:
-                entry_key = str(exp['entry'])
-                if entry_key in seen_entries:
+                es_key = f"{exp['entry']}.{exp['subentry']}"
+                if es_key in seen_keys:
                     continue
-                seen_entries.add(entry_key)
-                exp_mask = (result['entry'] == exp['entry'])
+                seen_keys.add(es_key)
+                exp_mask = (result['entry'] == exp['entry']) & (result['subentry'] == exp['subentry'])
                 exp_total = float(np.sum(kernel_weights[exp_mask.values]))
-                exp_weight_fracs[entry_key] = exp_total / total_weight
+                exp_weight_fracs[es_key] = exp_total / total_weight
 
     # Compute diagnostics
     # N_eff = (sum w)^2 / sum(w^2)
@@ -1387,14 +1407,14 @@ def apply_per_experiment_weight_cap(
     uncertainties from dominating the fit.
 
     The WLS effective weight per point is kernel_weight_i / sigma_i^2.  The cap
-    is applied to the WLS effective fraction per study (grouped by entry).
+    is applied to the WLS effective fraction per study (grouped by entry.subentry).
     When a study exceeds the cap, its kernel weights are scaled down so the
     combined WLS fraction respects the limit.
 
     Parameters
     ----------
     exfor_df : pd.DataFrame
-        EXFOR data with 'entry' and 'unc' columns.
+        EXFOR data with 'entry', 'subentry', and 'unc' columns.
     kernel_weights : np.ndarray
         Kernel weights (one per data point).
     max_experiment_weight_fraction : float
@@ -1413,10 +1433,11 @@ def apply_per_experiment_weight_cap(
     if len(kernel_weights) == 0:
         return kernel_weights.copy(), {}, False
 
-    # Build study key for each point (group by entry, not entry.subentry)
+    # Build study key for each point (group by entry.subentry)
     entries = exfor_df['entry'].values
+    subentries = exfor_df['subentry'].values
     n_points = len(kernel_weights)
-    exp_keys = np.array([str(entries[i]) for i in range(n_points)])
+    exp_keys = np.array([f"{entries[i]}.{subentries[i]}" for i in range(n_points)])
 
     sigma = exfor_df['unc'].values.astype(float)
     # Guard against zero/tiny sigma
@@ -1646,7 +1667,7 @@ def precompute_overlap_weights(
     # For each bin, collect ALL datasets with non-trivial overlap weight.
     # Multiple energies from the same experiment are kept — each with its own
     # raw CDF overlap weight — so the fit benefits from the full angular
-    # coverage and cross-bin bridging.  The gamma-based per-point weighting
+    # coverage and cross-bin bridging.  The GLS-ESS per-point weighting
     # in _run_one_kw_sample handles study-level budgeting.
     overlap_weights: Dict[int, List[Tuple[Dict, float]]] = {}
     for bin_info in energy_bins:
@@ -1691,7 +1712,7 @@ def _run_one_kw_sample(args_tuple):
         base_seed,
         use_band_discrepancy,
         min_points_per_band,
-        max_tau_fraction,
+        max_band_scale,
         freeze_c0,
         max_sample_order,
         apply_positivity_projection,
@@ -1699,7 +1720,7 @@ def _run_one_kw_sample(args_tuple):
         nominal_coeffs_by_bin,
         frozen_degrees_by_bin,
         max_experiment_weight_fraction,
-        weight_gamma,
+        min_relative_uncertainty,
         tau_info_by_bin,
         mc_order_cap_by_bin,
     ) = args_tuple
@@ -1722,6 +1743,21 @@ def _run_one_kw_sample(args_tuple):
                     experiment_norms[exp_id] = 1.0
 
     # Step 2: Perturb all datasets (shared across bins)
+    # Build per-dataset tau from the bin with highest overlap weight so that
+    # the noise amplitude matches the band-inflated sigma_eff used in Pass 1.
+    dataset_primary_tau: Dict[str, Dict[str, float]] = {}
+    if use_band_discrepancy and tau_info_by_bin:
+        _best_w: Dict[str, float] = {}
+        for bin_idx, datasets_and_weights in overlap_weights.items():
+            bin_tau = tau_info_by_bin.get(bin_idx)
+            if bin_tau is None:
+                continue
+            for ds, w in datasets_and_weights:
+                e_key = f"{ds['experiment_id']}_{ds['exfor_energy_mev']:.6f}"
+                if e_key not in _best_w or w > _best_w[e_key]:
+                    _best_w[e_key] = w
+                    dataset_primary_tau[e_key] = bin_tau
+
     perturbed_datasets = {}
     for bin_idx, datasets_and_weights in overlap_weights.items():
         for ds, w in datasets_and_weights:
@@ -1735,7 +1771,16 @@ def _run_one_kw_sample(args_tuple):
             norm_factor = experiment_norms.get(exp_id, 1.0)
             values = df['value'].to_numpy() * norm_factor
             unc = df['unc'].to_numpy()
-            noise = rng.normal(0, unc)
+            # Inflate noise amplitude with band scale factors (consistent
+            # with Pass 1 which draws noise from sigma_eff, not raw unc)
+            if e_key in dataset_primary_tau:
+                from .resample_AD import sigma_eff_from_tau
+                noise_sigma = sigma_eff_from_tau(
+                    df['mu'].to_numpy(), unc, dataset_primary_tau[e_key],
+                )
+            else:
+                noise_sigma = unc
+            noise = rng.normal(0, noise_sigma)
             perturbed_datasets[e_key] = {
                 'mu': df['mu'].to_numpy(),
                 'value': values + noise,
@@ -1755,14 +1800,14 @@ def _run_one_kw_sample(args_tuple):
                 sample_coeffs[bin_idx] = endf_normalize_legendre_coeffs(nom, include_a0=False)
             continue
 
-        # Build combined weighted DataFrame with study-level sublinear budgeting
-        # Find core dataset per study: highest overlap weight in this bin.
-        # Use only its angular point count for gamma, matching the nominal
+        # Build combined weighted DataFrame with study-level GLS-ESS budgeting
+        # Find core dataset per study (entry.subentry): highest overlap weight in this bin.
+        # Use only its angular point count for GLS-ESS, matching the nominal
         # path's dedup-to-one-energy behavior.
         study_core_n: Dict[str, int] = {}
         study_core_w: Dict[str, float] = {}
         for ds, w in datasets_and_weights:
-            study_id = ds['experiment_id'].split('.')[0]
+            study_id = ds['experiment_id']  # full entry.subentry
             e_key = f"{ds['experiment_id']}_{ds['exfor_energy_mev']:.6f}"
             pert = perturbed_datasets.get(e_key)
             if pert is not None:
@@ -1777,7 +1822,7 @@ def _run_one_kw_sample(args_tuple):
 
         for ds, w in datasets_and_weights:
             exp_id = ds['experiment_id']
-            study_id = exp_id.split('.')[0]
+            study_id = exp_id  # full entry.subentry
             e_key = f"{exp_id}_{ds['exfor_energy_mev']:.6f}"
             pert = perturbed_datasets.get(e_key)
             if pert is None:
@@ -1786,22 +1831,31 @@ def _run_one_kw_sample(args_tuple):
             all_mu.append(pert['mu'])
             all_values.append(pert['value'])
             all_unc.append(pert['unc'])
-            # Sublinear per-point weight using core dataset's angular point count
+            # GLS-ESS per-point weight using core dataset's post-floor uncertainties
             n_study = study_core_n.get(study_id, n_pts)
-            per_point_w = w * (n_study ** (weight_gamma - 1.0))
+            unc_arr = pert['unc']
+            val_arr = np.maximum(np.abs(pert['value']), 1e-30)
+            rel_arr = unc_arr / val_arr
+            finite = np.isfinite(rel_arr)
+            rel_unc = float(np.sqrt(np.nanmean(rel_arr[finite]**2))) if finite.any() else 0.0
+            if not np.isfinite(rel_unc) or rel_unc <= 0:
+                rel_unc = min_relative_uncertainty if min_relative_uncertainty > 0 else sigma_norm
+            rel_unc = max(rel_unc, min_relative_uncertainty)  # floor for ρ consistency
+            rho = sigma_norm**2 / (sigma_norm**2 + rel_unc**2)
+            g = 1.0 / (1.0 + max(n_study - 1, 0) * rho)
+            per_point_w = w * g
             all_weights.append(np.full(n_pts, per_point_w))
 
-        # Apply per-study weight capping (group by entry, not entry.subentry)
+        # Apply per-study weight capping (group by entry.subentry)
         if all_mu and max_experiment_weight_fraction < 1.0:
             weights_arr = np.concatenate(all_weights)
-            # Track study (entry) id per point
+            # Track study (entry.subentry) id per point
             exp_ids = []
             for ds, w in datasets_and_weights:
                 e_key = f"{ds['experiment_id']}_{ds['exfor_energy_mev']:.6f}"
                 pert = perturbed_datasets.get(e_key)
                 if pert is not None:
-                    # Extract entry from "entry.subentry" format
-                    study_id = ds['experiment_id'].split('.')[0]
+                    study_id = ds['experiment_id']  # full entry.subentry
                     exp_ids.extend([study_id] * len(pert['mu']))
             exp_ids = np.array(exp_ids)
             total_w = weights_arr.sum()
@@ -1885,7 +1939,7 @@ def _run_one_kw_sample(args_tuple):
                 stochastic=False,
                 use_band_discrepancy=fit_use_band_discrepancy,
                 min_points_per_band=min_points_per_band,
-                max_tau_fraction=max_tau_fraction,
+                max_band_scale=max_band_scale,
                 freeze_c0=freeze_c0,
             )
             coeffs = coef_df.iloc[0].to_numpy()
@@ -1938,13 +1992,13 @@ def run_mc_with_kernel_weights(
     base_seed: int,
     use_band_discrepancy: bool = True,
     min_points_per_band: int = 3,
-    max_tau_fraction: float = 0.05,
+    max_band_scale: float = 3.0,
     freeze_c0: bool = True,
     max_sample_order: Optional[int] = None,
     apply_positivity_projection: bool = False,
     positivity_check_points: int = 101,
     max_experiment_weight_fraction: float = 1.0,
-    weight_gamma: float = 0.5,
+    min_relative_uncertainty: float = 0.05,
     logger=None,
 ) -> Dict[int, Dict[int, np.ndarray]]:
     """Orchestrate kernel-weighted multi-bin MC sampling.
@@ -1973,8 +2027,8 @@ def run_mc_with_kernel_weights(
         Random seed.
     max_experiment_weight_fraction : float
         Maximum allowed weight fraction per study (1.0 = disabled).
-    weight_gamma : float
-        Sublinear power for study-level budgeting (0=equal-per-study, 1=uniform).
+    min_relative_uncertainty : float
+        Minimum relative uncertainty (floor) for GLS-ESS ρ computation.
     logger : optional
         Logger instance.
 
@@ -2018,7 +2072,7 @@ def run_mc_with_kernel_weights(
             base_seed,
             use_band_discrepancy,
             min_points_per_band,
-            max_tau_fraction,
+            max_band_scale,
             freeze_c0,
             max_sample_order,
             apply_positivity_projection,
@@ -2026,7 +2080,7 @@ def run_mc_with_kernel_weights(
             nominal_coeffs_by_bin,
             frozen_degrees_by_bin,
             max_experiment_weight_fraction,
-            weight_gamma,
+            min_relative_uncertainty,
             tau_info_by_bin,
             mc_order_cap_by_bin,
         )

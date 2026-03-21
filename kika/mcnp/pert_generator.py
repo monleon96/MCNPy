@@ -216,7 +216,8 @@ def _calculate_perturbed_density(original_material: Material, perturbed_material
     print(f"Density change: {mass_density:.4e} → {new_mass_density:.4e} g/cm³")
 
 
-def generate_pert_cards(inputfile, cell, reactions, material, energies=None, density=None,
+def generate_pert_cards(inputfile, cell, reactions, material, energies=None,
+                       energy_range=None, density=None,
                        order=2, errors=False, in_place=True, nuclide=None,
                        pert_material=None, pert_density=None):
     """Generate PERT cards for MCNP sensitivity analysis.
@@ -255,6 +256,12 @@ def generate_pert_cards(inputfile, cell, reactions, material, energies=None, den
         Energy bin boundaries in eV, must be in ascending order. Used in consecutive
         pairs to define energy bins. If None, ERG keyword is omitted (energy-integrated).
         Built-in grids available via ``kika.energy_grids`` (e.g., SCALE44, VITAMINJ175).
+    energy_range : tuple of (float or None, float or None), optional
+        Filters ``energies`` to only include boundaries within the range [min, max].
+        Either bound can be None to leave it open. For example,
+        ``energy_range=(0.05, None)`` keeps boundaries >= 0.05 MeV.
+        Ignored if ``energies`` is None.
+        Raises ValueError if filtering leaves fewer than 2 boundaries.
     density : float or list[float], optional
         Override density value(s) for RHO in PERT cards. If None (default), uses the
         density from the material definition in the input file. Following MCNP convention:
@@ -337,7 +344,19 @@ def generate_pert_cards(inputfile, cell, reactions, material, energies=None, den
         for i in range(len(energies) - 1):
             if energies[i] >= energies[i + 1]:
                 raise ValueError(f"Energy values must be in ascending order. Found {energies[i]} >= {energies[i + 1]} at positions {i} and {i + 1}")
-    
+
+    # Apply energy_range filter if provided
+    if energies is not None and energy_range is not None:
+        e_min, e_max = energy_range
+        filtered = [e for e in energies
+                    if (e_min is None or e >= e_min) and (e_max is None or e <= e_max)]
+        if len(filtered) < 2:
+            raise ValueError(
+                f"energy_range={energy_range} leaves {len(filtered)} boundary(ies) "
+                f"from the {len(energies)}-boundary grid — need at least 2 for one bin"
+            )
+        energies = filtered
+
     # Convert material to list to determine number of materials
     if isinstance(material, list):
         material_list = material
@@ -438,23 +457,45 @@ def generate_pert_cards(inputfile, cell, reactions, material, energies=None, den
         if user_density is not None:
             # User provided density - use it, but warn if different from material's density
             if mat_density is not None:
-                # Compare densities properly (convert to same unit for comparison)
+                # Convert both to atomic density (atoms/barn-cm) for comparison
                 # User density: negative = g/cm³, positive = atoms/barn-cm
                 # Material density is stored as positive with unit info
-                
-                # Convert material density to MCNP convention for comparison
-                if mat_density_unit == 'g/cc':
-                    mat_density_mcnp = -abs(mat_density)  # Mass density is negative in MCNP
+                user_is_mass = user_density < 0
+                mat_is_mass = mat_density_unit == 'g/cc'
+
+                if user_is_mass or mat_is_mass:
+                    # Need average atomic mass to convert between units
+                    avg_A = 0.0
+                    total_frac = sum(nuc.fraction for nuc in mat_obj.nuclide.values())
+                    if total_frac > 0:
+                        for _, nuc in mat_obj.nuclide.items():
+                            frac = nuc.fraction / total_frac
+                            a = ATOMIC_MASS.get(nuc.zaid, float(nuc.zaid % 1000) if nuc.zaid % 1000 > 0 else 1.0)
+                            avg_A += frac * a
+
+                    if avg_A > 0:
+                        # Convert user density to atomic
+                        if user_is_mass:
+                            user_atomic = abs(user_density) * N_AVOGADRO / avg_A * 1e-24
+                        else:
+                            user_atomic = user_density
+                        # Convert material density to atomic
+                        if mat_is_mass:
+                            mat_atomic = mat_density * N_AVOGADRO / avg_A * 1e-24
+                        else:
+                            mat_atomic = mat_density
+
+                        rel_diff = abs((user_atomic - mat_atomic) / mat_atomic) if mat_atomic > 1e-10 else 0.0
+                    else:
+                        rel_diff = 0.0  # Can't compare without atomic mass info
                 else:
-                    mat_density_mcnp = abs(mat_density)   # Atomic density is positive
-                
-                # Check if they're effectively the same (within 0.1% tolerance)
-                if abs(user_density) > 1e-10 and abs(mat_density_mcnp) > 1e-10:
-                    rel_diff = abs((user_density - mat_density_mcnp) / mat_density_mcnp)
-                    if rel_diff > 0.001:  # More than 0.1% difference
-                        print(f"WARNING: Material {mat_id} - User-provided density ({user_density:.6e}) "
-                              f"differs from material's density ({mat_density_mcnp:.6e}). "
-                              f"Using user-provided value.")
+                    # Both are atomic density — compare directly
+                    rel_diff = abs((user_density - mat_density) / mat_density) if mat_density > 1e-10 else 0.0
+
+                if rel_diff > 0.001:  # More than 0.1% difference
+                    print(f"WARNING: Material {mat_id} - User-provided density ({user_density:.6e}) "
+                          f"differs from material's density ({mat_density:.6e} {mat_density_unit}). "
+                          f"Using user-provided value.")
             
             resolved_density_list.append(user_density)
         else:
@@ -551,7 +592,7 @@ def generate_pert_cards(inputfile, cell, reactions, material, energies=None, den
         
         # Format cell parameter to string
         if isinstance(cell_iter, list):
-            cell_str = ','.join(map(str, cell_iter))
+            cell_str = ' '.join(map(str, cell_iter))
         else:
             cell_str = str(cell_iter)
         
@@ -689,7 +730,7 @@ def perturb_materials(materials: MaterialCollection, material_ids: List[int],
     return results
 
 
-def _format_mcnp_line(line, max_length=120):
+def _format_mcnp_line(line, max_length=80):
     """Helper function to format MCNP input lines to stay under the character limit.
 
     :param line: The full line to format
@@ -705,12 +746,12 @@ def _format_mcnp_line(line, max_length=120):
     
     result = []
     remaining = line.strip()
-    
+
     while remaining:
         # If this is not the first line, add 5 spaces for indentation
         indent = 5 if result else 0
         available = max_length - indent
-        
+
         if len(remaining) <= available:
             # The remaining content fits in one line
             if indent:
@@ -718,24 +759,25 @@ def _format_mcnp_line(line, max_length=120):
             else:
                 result.append(remaining)
             break
-        
-        # Find a good splitting point
-        split_pos = available
-        
+
+        # Reserve 2 characters for the " &" continuation marker
+        split_available = available - 2
+        split_pos = split_available
+
         # Try to find a space to split on
         while split_pos > 0 and remaining[split_pos] != " ":
             split_pos -= 1
-        
+
         if split_pos == 0:
             # No good space found, force split at available length
-            split_pos = available
-        
+            split_pos = split_available
+
         # Add the current line with a continuation character
         if indent:
             result.append(" " * indent + remaining[:split_pos].rstrip() + " &")
         else:
             result.append(remaining[:split_pos].rstrip() + " &")
-        
+
         # Process the remaining part
         remaining = remaining[split_pos:].strip()
     
