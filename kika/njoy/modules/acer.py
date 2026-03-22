@@ -2,16 +2,10 @@
 
 from __future__ import annotations
 
-from ._base import Lines, _get, parse_iprint, parse_card_values, parse_quoted_string
+from ._base import Lines, _get, resolve_mat, resolve_temp, parse_iprint, parse_card_values, parse_quoted_string
 
 
 def generate(p: dict) -> Lines:
-    import sys
-    print(f"[ACER DEBUG] __file__ = {__file__}", file=sys.stderr, flush=True)
-    print(f"[ACER DEBUG] iopt raw = {p.get('iopt')!r}", file=sys.stderr, flush=True)
-
-    from ..isotopes import get_mat_number
-
     nendf = p.get("nendf", "")
     npend = p.get("npend", "")
     ngend = p.get("ngend", "")
@@ -23,14 +17,25 @@ def generate(p: dict) -> Lines:
         iprint = 1  # default
 
     itype = _get(p, "itype", 1)
-    suff = float(_get(p, "suff", 0.0))
+
+    # Handle suff: may be a placeholder string like "{SUFF}"
+    raw_suff = _get(p, "suff", 0.0)
+    if isinstance(raw_suff, str) and raw_suff.startswith("{"):
+        suff_str = raw_suff
+    else:
+        suff = float(raw_suff)
+        if suff > 0:
+            suff_trunc = int(suff * 100) / 100
+            suff_str = f"{suff_trunc:g}"
+            if suff_str.startswith("0."):
+                suff_str = suff_str[1:]  # "0.02" → ".02"
+        elif suff < 0:
+            suff_str = str(suff)
+        else:
+            suff_str = ".00"
+
     iopt = _get(p, "iopt", "1")
     abs_iopt = abs(int(iopt))
-
-    print(f"[ACER DEBUG] abs_iopt={abs_iopt}, type={type(abs_iopt)}", file=sys.stderr, flush=True)
-
-    suff_trunc = int(suff * 100) / 100 if suff > 0 else suff
-    suff_str = f"{suff_trunc:g}"
 
     # nxtra iz,aw pairs
     nxtra_pairs = p.get("nxtra", [])
@@ -38,10 +43,10 @@ def generate(p: dict) -> Lines:
 
     # Resolve isotope/MAT only for modes that need it
     if abs_iopt not in (7, 8):
-        isotope = p.get("matd", "U235")
-        mat_num = get_mat_number(isotope)
-        tempd = p.get("tempd", "")
-        hk = f"{isotope} @ {tempd} K ACE data"
+        isotope = p.get("matd", "")
+        mat_num = resolve_mat(p, "matd")
+        tempd = resolve_temp(p, "tempd")
+        hk = f"{isotope or '{ISOTOPE}'} @ {tempd} K ACE data"
     else:
         isotope = None
         mat_num = None

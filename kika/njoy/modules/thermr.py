@@ -2,25 +2,20 @@
 
 from __future__ import annotations
 
-from ._base import Lines, parse_iprint
+from ._base import Lines, resolve_mat, resolve_temps, parse_iprint
 
 
 def generate(p: dict) -> Lines:
-    from ..isotopes import get_mat_number
-
     nendf = p.get("nendf", "")
     nin = p.get("nin", "")
     nout = p.get("nout", "")
 
     matde = int(p.get("matde", 0))
-    matdp_str = p.get("matdp", "U235")
-    matdp = get_mat_number(matdp_str)
+    matdp = resolve_mat(p, "matdp")
 
     nbin = int(p.get("nbin", 8))
 
-    temp_str = str(p.get("temperatures", "293.6"))
-    temps = temp_str.split()
-    ntemp = len(temps)
+    temps, ntemp = resolve_temps(p, "temperatures")
 
     iin = int(p.get("iin", 2))
     icoh = int(p.get("icoh", 0))

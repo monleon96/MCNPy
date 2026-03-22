@@ -1041,13 +1041,24 @@ class Material:
 
         # Add density comment if density is set
         if self.density is not None and self.density_unit is not None:
-            density_gcc = self.density_in("g/cc")
-            # Calculate atomic density (atoms/b-cm) if we have the molecular weight
-            atomic_density = self._calculate_atomic_density()
-            if atomic_density is not None:
-                main_line += f"  $ KIKA_DENSITY: {density_gcc:.6e} g/cc, {atomic_density:.6e} atoms/b-cm"
-            else:
-                main_line += f"  $ KIKA_DENSITY: {density_gcc:.6e} g/cc"
+            try:
+                density_gcc = self.density_in("g/cc")
+                atomic_density = self._calculate_atomic_density()
+                if atomic_density is not None:
+                    main_line += f"  $ KIKA_DENSITY: {density_gcc:.6e} g/cc, {atomic_density:.6e} atoms/b-cm"
+                else:
+                    main_line += f"  $ KIKA_DENSITY: {density_gcc:.6e} g/cc"
+            except (ValueError, TypeError):
+                # Conversion to g/cc may fail for atoms/b-cm without sufficient
+                # composition data — output what we have
+                if self.density_unit == "atoms/b-cm":
+                    mass_density = self._calculate_mass_density()
+                    if mass_density is not None:
+                        main_line += f"  $ KIKA_DENSITY: {mass_density:.6e} g/cc, {self.density:.6e} atoms/b-cm"
+                    else:
+                        main_line += f"  $ KIKA_DENSITY: {self.density:.6e} atoms/b-cm"
+                else:
+                    main_line += f"  $ KIKA_DENSITY: {self.density:.6e} {self.density_unit}"
 
         output_lines.append(main_line)
 
@@ -1102,7 +1113,10 @@ class Material:
                 density_str = f"{self.density:.6e}"
             else:
                 density_gcc = self._mass_density_gcc()
-                density_str = f"{-density_gcc:.6e}"
+                if density_gcc is not None:
+                    density_str = f"{-density_gcc:.6e}"
+                else:
+                    density_str = f"{-self.density:.6e}"
         else:
             density_str = "-1.000000e+00"
 

@@ -2,21 +2,16 @@
 
 from __future__ import annotations
 
-from ._base import Lines, parse_card_values
+from ._base import Lines, resolve_mat, resolve_temps, fmt_float, parse_card_values
 
 
 def generate(p: dict) -> Lines:
-    from ..isotopes import get_mat_number
-
     nendf = p.get("nendf", "")
     nin = p.get("nin", "")
     nout = p.get("nout", "")
 
-    mat_str = p.get("mat", "U235")
-    mat_num = get_mat_number(mat_str)
-    temp2_str = str(p.get("temp2", ""))
-    temps = temp2_str.split()
-    ntemp2 = len(temps)
+    mat_num = resolve_mat(p, "mat")
+    temps, ntemp2 = resolve_temps(p, "temp2")
 
     errthn = float(p.get("errthn", "0.001"))
     user_thnmax = p.get("thnmax")
@@ -46,19 +41,19 @@ def generate(p: dict) -> Lines:
     card2_line = " ".join(card2_parts) + " /"
 
     # Build Card 3 with dependencies
-    card3_parts = [str(errthn)]
+    card3_parts = [fmt_float(errthn)]
     if user_errint is not None:
         if user_errmax is None:
             user_errmax = 10 * errthn
         if user_thnmax is None:
             user_thnmax = 1
-        card3_parts.extend([str(user_thnmax), str(user_errmax), str(user_errint)])
+        card3_parts.extend([fmt_float(user_thnmax), fmt_float(user_errmax), fmt_float(user_errint)])
     elif user_errmax is not None:
         if user_thnmax is None:
             user_thnmax = 1
-        card3_parts.extend([str(user_thnmax), str(user_errmax)])
+        card3_parts.extend([fmt_float(user_thnmax), fmt_float(user_errmax)])
     elif user_thnmax is not None:
-        card3_parts.append(str(user_thnmax))
+        card3_parts.append(fmt_float(user_thnmax))
 
     card3_line = " ".join(card3_parts) + " /"
 

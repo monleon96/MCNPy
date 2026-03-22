@@ -11,9 +11,9 @@ def generate(p: dict) -> Lines:
     title = p.get("title", "thermal scattering law via leapr")
 
     # Derive counts from list lengths
-    alphas = p["alphas"]
-    betas = p["betas"]
-    temperatures = p["temperatures"]
+    alphas = p.get("alphas") or []
+    betas = p.get("betas") or []
+    temperatures = p.get("temperatures") or []
     nalpha = len(alphas)
     nbeta = len(betas)
     ntempr = len(temperatures)

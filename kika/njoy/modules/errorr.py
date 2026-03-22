@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-from ._base import Lines, parse_iprint, parse_card_values
+from ._base import Lines, resolve_mat, parse_iprint, fmt_float, parse_card_values, format_multiline_card
 
 
 def generate(p: dict) -> Lines:
-    from ..isotopes import get_mat_number
-
     nendf = p.get("nendf", "")
     npend = p.get("npend", "")
     ngout = p.get("ngout", 0)
     nout = p.get("nout", "")
 
-    mat_str = p.get("matd", "U235")
-    matd = get_mat_number(mat_str)
+    matd = resolve_mat(p, "matd")
 
     ign = int(p.get("ign", 1))
     iwt = int(p.get("iwt", 6))
@@ -24,7 +21,11 @@ def generate(p: dict) -> Lines:
     iprint_val = iprint if iprint is not None else 1
 
     mprint = int(p.get("mprint", 0))
-    tempin = float(p.get("tempin", 300.0))
+    raw_tempin = p.get("tempin")
+    if raw_tempin is None or str(raw_tempin).strip() == "":
+        tempin = "{TEMP}"
+    else:
+        tempin = fmt_float(raw_tempin)
 
     # Card 7 parameters
     iread = int(p.get("iread", 0))
@@ -47,15 +48,15 @@ def generate(p: dict) -> Lines:
             str(int(irespr) if irespr is not None else 1),
             str(int(legord) if legord is not None else 0),
             str(int(ifissp) if ifissp is not None else 0),
-            str(float(efmean) if efmean is not None else 0.0),
-            str(dap),
+            fmt_float(float(efmean) if efmean is not None else 0.0),
+            fmt_float(dap),
         ])
     elif efmean is not None:
         card7_parts.extend([
             str(int(irespr) if irespr is not None else 1),
             str(int(legord) if legord is not None else 0),
             str(int(ifissp) if ifissp is not None else 0),
-            str(efmean),
+            fmt_float(efmean),
         ])
     elif ifissp is not None:
         card7_parts.extend([
@@ -82,17 +83,17 @@ def generate(p: dict) -> Lines:
 
     # Card 12a/12b: custom energy group boundaries (only when ign=1 or 19)
     if ign in (1, 19):
-        if egn is None:
-            raise ValueError(
-                "ign=1 requires custom neutron group boundaries ('egn')."
-            )
-        if isinstance(egn, list):
-            egn_values = [str(e) for e in egn]
+        if egn is None or (isinstance(egn, str) and not egn.strip()):
+            lines.append("{NGN} /")
+            lines.append("{EGN} /")
         else:
-            egn_values = str(egn).split()
-        ngn = len(egn_values) - 1
-        lines.append(f"{ngn} /")
-        lines.append(" ".join(egn_values) + " /")
+            if isinstance(egn, list):
+                egn_values = [str(e) for e in egn]
+            else:
+                egn_values = str(egn).split()
+            ngn = len(egn_values) - 1
+            lines.append(f"{ngn} /")
+            lines.extend(format_multiline_card(egn_values))
 
     return lines
 

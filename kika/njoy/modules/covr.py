@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._base import Lines, parse_card_values, parse_quoted_string
+from ._base import Lines, resolve_mat, parse_card_values, parse_quoted_string
 
 
 def generate(p: dict) -> Lines:
@@ -11,11 +11,36 @@ def generate(p: dict) -> Lines:
     cases = p.get("cases") or []
     ncase = len(cases)
 
+    # NJOY forces ncase >= 1, so we must always provide at least one case card.
+    # Default to the material from matb when no cases are explicitly given.
+    if not cases:
+        mat = resolve_mat(p, "matb")
+        cases = [[mat]]
+        ncase = 1
+
     if nout > 0:
         # ── Library mode ──
         matype = p.get("matype", 3)
         hlibid = p.get("hlibid", "")
         hdescr = p.get("hdescr", "")
+
+        # Auto-fill library ID and description from pipeline context
+        if not hlibid:
+            isotope = p.get("matb", "")
+            if isinstance(isotope, str) and isotope and not isotope.startswith("{"):
+                hlibid = isotope[:6]
+        if not hdescr:
+            parts = []
+            isotope = p.get("matb", "")
+            if isinstance(isotope, str) and isotope and not isotope.startswith("{"):
+                parts.append(isotope)
+            temp = p.get("_covTemp")
+            if temp is not None:
+                parts.append(f"{temp}K")
+            mfcov = p.get("mfcov")
+            if mfcov:
+                parts.append(f"MF{mfcov}")
+            hdescr = " ".join(parts)[:21]
 
         lines: Lines = [
             "-- produce covariance library",

@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-from ._base import Lines, parse_iprint, parse_card_values, parse_quoted_string
+from ._base import Lines, resolve_mat, resolve_temps, parse_iprint, fmt_float, parse_card_values, parse_quoted_string, format_multiline_card
 
 
 def generate(p: dict) -> Lines:
-    from ..isotopes import get_mat_number
-
     nendf = p.get("nendf", "")
     npend = p.get("npend", "")
     ngout1 = p.get("ngout1", 0)
     ngout2 = p.get("ngout2", "")
 
-    mat_str = p.get("matb", "U235")
-    matb = get_mat_number(mat_str)
+    matb = resolve_mat(p, "matb")
 
     ign = int(p["ign"])
     igg = int(p.get("igg", 0))
@@ -37,15 +34,14 @@ def generate(p: dict) -> Lines:
         )
 
     # Temperatures and sigma-zero values
-    temp_str = str(p.get("temperatures", "293.6"))
-    temps = temp_str.split()
-    ntemp = len(temps)
+    temps, ntemp = resolve_temps(p, "temperatures")
 
     sigz_str = str(p.get("sigz", "1e10"))
     sigz_values = sigz_str.split()
     nsigz = len(sigz_values)
 
-    title = p.get("title", f"multigroup data for {mat_str}")
+    mat_label = p.get("matb", "") or "{ISOTOPE}"
+    title = p.get("title", f"multigroup data for {mat_label}")
 
     # Card 2: matb ign igg iwt lord ntemp nsigz [iprint] [ismooth]
     iprint = parse_iprint(p.get("iprint"))
@@ -76,17 +72,17 @@ def generate(p: dict) -> Lines:
     # Card 6a/6b: custom neutron group boundaries (only when ign=1)
     if ign == 1:
         egn = p.get("egn")
-        if egn is None:
-            raise ValueError(
-                "ign=1 requires custom neutron group boundaries ('egn')."
-            )
-        if isinstance(egn, list):
-            egn_values = [str(e) for e in egn]
+        if egn is None or (isinstance(egn, str) and not egn.strip()):
+            lines.append("{NGN} /")
+            lines.append("{EGN} /")
         else:
-            egn_values = str(egn).split()
-        ngn = len(egn_values) - 1
-        lines.append(f"{ngn} /")
-        lines.append(" ".join(egn_values) + " /")
+            if isinstance(egn, list):
+                egn_values = [str(e) for e in egn]
+            else:
+                egn_values = str(egn).split()
+            ngn = len(egn_values) - 1
+            lines.append(f"{ngn} /")
+            lines.extend(format_multiline_card(egn_values))
 
     # Card 7a/7b: custom photon group boundaries (only when igg=1)
     if igg == 1:
@@ -101,7 +97,7 @@ def generate(p: dict) -> Lines:
             egg_values = str(egg).split()
         ngg = len(egg_values) - 1
         lines.append(f"{ngg} /")
-        lines.append(" ".join(egg_values) + " /")
+        lines.extend(format_multiline_card(egg_values))
 
     # Card 8c: analytic flux params (only when |iwt|=4)
     if abs(iwt) == 4:
@@ -113,19 +109,30 @@ def generate(p: dict) -> Lines:
             raise ValueError(
                 "iwt=4 requires analytic flux parameters: eb, tb, ec, tc."
             )
-        lines.append(f"{eb} {tb} {ec} {tc} /")
+        lines.append(f"{fmt_float(eb)} {fmt_float(tb)} {fmt_float(ec)} {fmt_float(tc)} /")
 
-    # Card 9: reaction list
+    # Card 9: reaction list — repeated for each temperature.
+    # GROUPR reads reaction cards inside its temperature loop
+    # (do itemp=1,ntemp), so we must output one set per temperature.
+    def _append_reactions(lines: Lines, reactions) -> None:
+        if reactions:
+            for rxn in reactions:
+                mfd = rxn[0]
+                mtd = rxn[1] if len(rxn) > 1 else 0
+                mtname = rxn[2] if len(rxn) > 2 else None
+                if mtname is not None:
+                    lines.append(f"{mfd} {mtd} '{mtname}' /")
+                elif mtd:
+                    lines.append(f"{mfd} {mtd} /")
+                else:
+                    lines.append(f"{mfd} /")
+        else:
+            lines.append("3 /")
+        lines.append("0 /")
+
     reactions = p.get("reactions")
-    if reactions:
-        for rxn in reactions:
-            mfd, mtd = rxn[0], rxn[1]
-            mtname = rxn[2] if len(rxn) > 2 else None
-            if mtname is not None:
-                lines.append(f"{mfd} {mtd} '{mtname}' /")
-            else:
-                lines.append(f"{mfd} {mtd} /")
-    lines.append("0 /")
+    for _ in range(ntemp):
+        _append_reactions(lines, reactions)
 
     # Card 10: material terminator
     lines.append("0 /")

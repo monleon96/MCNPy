@@ -29,10 +29,10 @@ def generate(p: dict) -> Lines:
     ivers = int(p.get("ivers", 0))
     huse = p.get("huse", "")
 
-    hsetid = p.get("hsetid", ["matxs library"])
-    particles = p["particles"]
-    data_types = p["data_types"]
-    materials = p["materials"]
+    hsetid = p.get("hsetid") or ["matxs library"]
+    particles = p.get("particles") or []
+    data_types = p.get("data_types") or []
+    materials = p.get("materials") or []
 
     npart = len(particles)
     ntype = len(data_types)

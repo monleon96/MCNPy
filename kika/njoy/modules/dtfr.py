@@ -46,8 +46,8 @@ def generate(p: dict) -> Lines:
 
     if iedit == 0:
         # Card 3: nlmax ng iptotl ipingp itabl ned ntherm
-        edit_names: list[str] = p.get("edit_names", [])
-        edits: list[list] = p.get("edits", [])
+        edit_names: list[str] = p.get("edit_names") or []
+        edits: list[list] = p.get("edits") or []
         ned = len(edits)
 
         # iptotl: derive from edit_names if not explicit
@@ -98,7 +98,7 @@ def generate(p: dict) -> Lines:
     lines.append(f"{nptabl} {ngp} /")
 
     # Card 8: materials (repeating, terminated by /)
-    materials: list[dict] = p.get("materials", [])
+    materials: list[dict] = p.get("materials") or []
     for mat_entry in materials:
         name = mat_entry.get("name", "")
         isotope = mat_entry.get("isotope", mat_entry.get("mat", ""))

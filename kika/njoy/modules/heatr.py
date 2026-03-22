@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-from ._base import Lines, parse_iprint
+from ._base import Lines, resolve_mat, parse_iprint
 
 
 def generate(p: dict) -> Lines:
-    from ..isotopes import get_mat_number
-
     nendf = p.get("nendf", "")
     nin = p.get("nin", "")
     nout = p.get("nout", "")
     nplot = p.get("nplot") or "0"
 
-    mat_str = p.get("matd", "U235")
-    mat_num = get_mat_number(mat_str)
+    mat_num = resolve_mat(p, "matd")
     mtk_str = str(p.get("mtk", ""))
     mtk_list = mtk_str.split()
     npk = len(mtk_list)

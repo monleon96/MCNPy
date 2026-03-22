@@ -2,32 +2,26 @@
 
 from __future__ import annotations
 
-from ._base import Lines, parse_card_values, parse_quoted_string
+from ._base import Lines, resolve_mat, fmt_float, parse_card_values, parse_quoted_string
 
 
-def _fmt(v) -> str:
-    """Format a numeric value, using integer notation for whole numbers."""
-    f = float(v)
-    if f == int(f) and abs(f) < 1e15:
-        return str(int(f))
-    return str(f)
+# Alias for brevity
+_fmt = fmt_float
 
 
 def generate(p: dict) -> Lines:
-    from ..isotopes import get_mat_number
-
     nendf = p.get("nendf", "")
     npend = p.get("npend", "")
 
-    isotope = p.get("mat", "U235")
-    mat = get_mat_number(isotope)
+    isotope = p.get("mat", "")
+    mat = resolve_mat(p, "mat")
 
     try:
         tempr = float(p["tempr"]) if p.get("tempr") is not None else 0.0
     except (ValueError, TypeError):
         tempr = 0.0
 
-    label = f"reconstructed data for {isotope} @ {_fmt(tempr)} K"
+    label = f"reconstructed data for {isotope or '{ISOTOPE}'} @ {_fmt(tempr)} K"
 
     tolerance = float(p.get("err", "0.001"))
     user_errmax = p.get("errmax")

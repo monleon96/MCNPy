@@ -34,7 +34,7 @@ def generate(p: dict) -> Lines:
     maxord = int(p.get("maxord", 0))
     ifopt = int(p.get("ifopt", 1))
 
-    isotopes = p["isotopes"]
+    isotopes = p.get("isotopes") or []
     niso = len(isotopes)
 
     lines: Lines = [
