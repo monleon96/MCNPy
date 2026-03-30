@@ -15,6 +15,7 @@ Author: Generated for kika project
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
 
@@ -110,25 +111,16 @@ def find_adaptive_group_boundaries(
     fine_bin_widths_mev: np.ndarray,
     max_order: int,
     rho_min: float = 0.90,
-    sigma_ratio_max: float = 1.7,
-    min_width_factor: float = 2.0,
-    rho_hard_min: float = 0.0,
-    sigma_ratio_hard_max: float = 5.0,
-    rho_soft_min: float = 0.5,
-    sigma_ratio_soft_max: float = 3.0,
+    sigma_ratio_max: float = 2.0,
     logger=None,
+    diagnostics_file: Optional[Path] = None,
 ) -> Tuple[List[List[int]], List[GroupInfo]]:
     """
     Find group boundaries using l=1 correlation structure only.
 
     Algorithm (greedy merging):
     1. Start at i=0
-    2. Extend group [i0, i1] using tiered decision logic:
-       a. Hard veto: never merge if rho < rho_hard_min or ratio > sigma_ratio_hard_max
-       b. Normal accept: merge if rho >= rho_min and ratio <= sigma_ratio_max
-       c. Soft fallback: merge if group undersized AND rho >= rho_soft_min
-          AND ratio <= sigma_ratio_soft_max
-       d. Otherwise: stop extending
+    2. Extend group [i0, i1]: merge if rho >= rho_min and ratio <= sigma_ratio_max
     3. Finalize group, start next at i1+1
 
     Parameters
@@ -146,13 +138,16 @@ def find_adaptive_group_boundaries(
     max_order : int
         Maximum Legendre order (L)
     rho_min : float
-        Minimum correlation to allow merging (default 0.90)
+        Minimum l=1 adjacent correlation to allow merging (default 0.90)
     sigma_ratio_max : float
-        Maximum sigma ratio within group (default 1.7)
-    min_width_factor : float
-        Minimum group width as multiple of median sigma_E (default 2.0)
+        Maximum l=1 sigma ratio within group (default 2.0)
     logger : optional
         Logger for diagnostics
+    diagnostics_file : Path, optional
+        If provided, write per-boundary merge decisions to this CSV file.
+        Each row is an adjacent pair (i, i+1) with correlation, sigma_ratio,
+        individual sigmas, and the merge decision. Useful for post-processing
+        to evaluate the effect of different thresholds without re-running.
 
     Returns
     -------
@@ -162,32 +157,37 @@ def find_adaptive_group_boundaries(
     """
     n_fine = len(fine_energies_mev)
 
-    # Handle edge case: sigma_E might have zeros
-    valid_sigma_E = sigma_E_mev[sigma_E_mev > 0]
-    if len(valid_sigma_E) > 0:
-        median_sigma_E = np.median(valid_sigma_E)
-    else:
-        # Fallback: use 1% of mean energy
-        median_sigma_E = 0.01 * np.mean(fine_energies_mev)
-
-    min_width = min_width_factor * median_sigma_E
-
     if logger:
         logger.info(f"  Grouping parameters:")
         logger.info(f"    rho_min = {rho_min}")
         logger.info(f"    sigma_ratio_max = {sigma_ratio_max}")
-        logger.info(f"    min_width_factor = {min_width_factor}")
-        logger.info(f"    rho_hard_min = {rho_hard_min}")
-        logger.info(f"    sigma_ratio_hard_max = {sigma_ratio_hard_max}")
-        logger.info(f"    rho_soft_min = {rho_soft_min}")
-        logger.info(f"    sigma_ratio_soft_max = {sigma_ratio_soft_max}")
-        logger.info(f"    median(sigma_E) = {median_sigma_E:.4f} MeV")
-        logger.info(f"    min_width = {min_width:.4f} MeV")
+
+    # Pre-compute per-bin l=1 sigma for diagnostics
+    sigma_l1_per_bin = np.array([
+        np.sqrt(max(cov_matrix[idx(i, 1, max_order), idx(i, 1, max_order)], 0.0))
+        for i in range(n_fine)
+    ])
+
+    # Pre-compute all adjacent l=1 correlations for diagnostics
+    adj_rho = np.array([
+        corr_matrix[idx(i, 1, max_order), idx(i + 1, 1, max_order)]
+        for i in range(n_fine - 1)
+    ])
+
+    # Write diagnostics CSV header
+    diag_fh = None
+    if diagnostics_file is not None:
+        diag_fh = open(diagnostics_file, "w")
+        diag_fh.write(
+            "bin_i,bin_j,E_i_MeV,E_j_MeV,rho_adj,sigma_i,sigma_j,"
+            "sigma_ratio_pair,sigma_ratio_group,merged,group_id\n"
+        )
 
     groups = []
     group_info_list = []
 
     i0 = 0
+    current_group_id = 0
     while i0 < n_fine:
         i1 = i0
 
@@ -195,45 +195,37 @@ def find_adaptive_group_boundaries(
         min_corr_in_group = 1.0
 
         while i1 + 1 < n_fine:
-            # Check l=1 adjacent correlation
-            idx_i1 = idx(i1, 1, max_order)
-            idx_i1_next = idx(i1 + 1, 1, max_order)
-            rho = corr_matrix[idx_i1, idx_i1_next]
+            rho = adj_rho[i1]
 
             # Check l=1 sigma ratio in [i0, i1+1]
-            sigmas_l1 = []
-            for i in range(i0, i1 + 2):
-                var_i = cov_matrix[idx(i, 1, max_order), idx(i, 1, max_order)]
-                if var_i > 0:
-                    sigmas_l1.append(np.sqrt(var_i))
+            sigmas_l1 = [s for s in sigma_l1_per_bin[i0:i1 + 2] if s > 0]
 
             if len(sigmas_l1) >= 2:
                 ratio = max(sigmas_l1) / min(sigmas_l1)
             else:
                 ratio = 1.0
 
-            # Check current group width
-            current_width = sum(fine_bin_widths_mev[i0:i1 + 2])
-
-            # Decision logic (tiered: hard veto → normal accept → soft fallback)
-            should_extend = False
-
-            if rho < rho_hard_min or ratio > sigma_ratio_hard_max:
-                # Hard veto: never merge across clearly bad boundaries
-                should_extend = False
-            elif rho >= rho_min and ratio <= sigma_ratio_max:
-                # Normal accept: quality criteria met
-                should_extend = True
-                min_corr_in_group = min(min_corr_in_group, rho)
-            elif current_width < min_width and rho >= rho_soft_min and ratio <= sigma_ratio_soft_max:
-                # Soft fallback: group is undersized and boundary is only mildly bad
-                should_extend = True
-                min_corr_in_group = min(min_corr_in_group, rho)
+            # Pairwise sigma ratio for diagnostics
+            s_i = sigma_l1_per_bin[i1]
+            s_j = sigma_l1_per_bin[i1 + 1]
+            if s_i > 0 and s_j > 0:
+                pair_ratio = max(s_i, s_j) / min(s_i, s_j)
             else:
-                # Stop extending
-                should_extend = False
+                pair_ratio = 1.0
 
-            if should_extend:
+            # Merge if both criteria met
+            merged = rho >= rho_min and ratio <= sigma_ratio_max
+
+            if diag_fh is not None:
+                diag_fh.write(
+                    f"{i1},{i1+1},{fine_energies_mev[i1]:.6f},"
+                    f"{fine_energies_mev[i1+1]:.6f},{rho:.6f},"
+                    f"{s_i:.6e},{s_j:.6e},{pair_ratio:.4f},"
+                    f"{ratio:.4f},{int(merged)},{current_group_id}\n"
+                )
+
+            if merged:
+                min_corr_in_group = min(min_corr_in_group, rho)
                 i1 += 1
             else:
                 break
@@ -246,14 +238,9 @@ def find_adaptive_group_boundaries(
         group_width = sum(fine_bin_widths_mev[i0:i1 + 1])
 
         # Final sigma ratio for the group
-        sigmas_l1_final = []
-        for i in group_indices:
-            var_i = cov_matrix[idx(i, 1, max_order), idx(i, 1, max_order)]
-            if var_i > 0:
-                sigmas_l1_final.append(np.sqrt(var_i))
-
-        if len(sigmas_l1_final) >= 2:
-            final_ratio = max(sigmas_l1_final) / min(sigmas_l1_final)
+        sigmas_pos = [s for s in sigma_l1_per_bin[i0:i1 + 1] if s > 0]
+        if len(sigmas_pos) >= 2:
+            final_ratio = max(sigmas_pos) / min(sigmas_pos)
         else:
             final_ratio = 1.0
 
@@ -274,10 +261,27 @@ def find_adaptive_group_boundaries(
         group_info_list.append(info)
 
         # Move to next group
+        current_group_id += 1
         i0 = i1 + 1
+
+    if diag_fh is not None:
+        diag_fh.close()
+        if logger:
+            logger.info(f"  Boundary decisions written to: {diagnostics_file}")
 
     if logger:
         logger.info(f"  Found {len(groups)} multigroups from {n_fine} fine bins")
+        # Summary statistics
+        multi_bin = [g for g in group_info_list if g.n_fine_bins > 1]
+        single_bin = len(group_info_list) - len(multi_bin)
+        if multi_bin:
+            rhos = [g.min_correlation_l1 for g in multi_bin]
+            srs = [g.sigma_ratio for g in multi_bin]
+            logger.info(f"    Single-bin groups: {single_bin}, multi-bin groups: {len(multi_bin)}")
+            logger.info(f"    Multi-bin min_rho: min={min(rhos):.3f}, mean={np.mean(rhos):.3f}")
+            logger.info(f"    Multi-bin sigma_ratio: max={max(srs):.2f}, mean={np.mean(srs):.2f}")
+        else:
+            logger.info(f"    All {single_bin} groups are single-bin (no merges)")
         for info in group_info_list:
             logger.info(
                 f"    Group {info.group_index}: bins {info.fine_indices[0]}-{info.fine_indices[-1]} "
@@ -306,7 +310,7 @@ def try_merge_adjacent_multigroups(
     max_order: int,
     rho_min: float = 0.90,
     sigma_ratio_max: float = 2.5,
-    variance_conservatism: float = 50.0,
+    variance_percentile: float = 50.0,
     valid_mask: Optional[np.ndarray] = None,
     logger=None,
 ) -> Optional[MultigroupResult]:
@@ -341,8 +345,8 @@ def try_merge_adjacent_multigroups(
         Minimum l=1 adjacent correlation to allow merge.
     sigma_ratio_max : float
         Maximum l=1 sigma ratio within candidate merged group.
-    variance_conservatism : float
-        Conservatism parameter for percentile variance scaling.
+    variance_percentile : float
+        Maximum percentile of fine-bin variances used as target (50-95).
     valid_mask : np.ndarray, optional
         Boolean mask for fitted parameters (n_fine * max_order).
     logger : optional
@@ -372,12 +376,8 @@ def try_merge_adjacent_multigroups(
     merged_sigmas = [mg_sigma_l1[0]]  # track l=1 sigmas contributing to current group
 
     n_merges = 0
+    regroup_decisions = []  # (g_prev, g, rho, sr, merged)
     for g in range(1, n_groups):
-        prev_g = len(merged_groups) - 1  # index in merged list
-        # Original group indices for correlation lookup
-        orig_prev = prev_g + n_merges  # not needed — use g-1 in original indexing
-        # Actually we need the original indices. Track them:
-        # Since we scan left-to-right, the "previous original group" is g-1
         # l=1 adjacent correlation between original group g-1 and g
         rho_adj = corr_mg[idx(g - 1, 1, max_order), idx(g, 1, max_order)]
 
@@ -390,7 +390,11 @@ def try_merge_adjacent_multigroups(
         else:
             sr = 1.0
 
-        if rho_adj >= rho_min and sr <= sigma_ratio_max:
+        merged = rho_adj >= rho_min and sr <= sigma_ratio_max
+        regroup_decisions.append((g - 1, g, rho_adj, sr,
+                                  mg_sigma_l1[g - 1], mg_sigma_l1[g], merged))
+
+        if merged:
             # Merge: extend current group with fine bins from group g
             merged_groups[-1].extend(groups[g])
             merged_sigmas.append(mg_sigma_l1[g])
@@ -399,6 +403,14 @@ def try_merge_adjacent_multigroups(
             # Start new group
             merged_groups.append(list(groups[g]))
             merged_sigmas = [mg_sigma_l1[g]]
+
+    if logger:
+        logger.info(f"  Regroup scan ({n_groups - 1} boundaries, rho_min={rho_min}, "
+                     f"sigma_ratio_max={sigma_ratio_max}):")
+        for g_prev, g_curr, rho, sr, s_prev, s_curr, did_merge in regroup_decisions:
+            tag = "MERGE" if did_merge else "SPLIT"
+            logger.info(f"    [{tag}] G{g_prev}-G{g_curr}: rho={rho:.3f}, "
+                         f"sr={sr:.2f}, sigma=({s_prev:.3e},{s_curr:.3e})")
 
     if n_merges == 0:
         if logger:
@@ -428,7 +440,7 @@ def try_merge_adjacent_multigroups(
         cov_fine=cov_fine,
         groups=merged_groups,
         max_order=max_order,
-        variance_conservatism=variance_conservatism,
+        variance_percentile=variance_percentile,
         fine_bin_widths_mev=fine_bin_widths_mev,
         valid_mask=valid_mask,
         logger=logger,
@@ -708,7 +720,7 @@ def apply_percentile_variance_scaling(
     cov_fine: np.ndarray,
     groups: List[List[int]],
     max_order: int,
-    variance_conservatism: float = 50.0,
+    variance_percentile: float = 50.0,
     fine_bin_widths_mev: Optional[np.ndarray] = None,
     valid_mask: Optional[np.ndarray] = None,
     logger=None,
@@ -729,18 +741,21 @@ def apply_percentile_variance_scaling(
     lower percentile (closer to 50, i.e. less inflation), while groups that lose
     more variance from averaging get a higher percentile.  The mapping is:
 
-        p_max = min(variance_conservatism * 1.5 - 25, 95)
-        group_pct = p_max - q * (p_max - 50)
+        group_pct = variance_percentile - q * (variance_percentile - 50)
 
-    ``variance_conservatism`` thus controls the conservatism *range* rather than
-    being applied literally.  When ``variance_conservatism = 50``, p_max = 50 and
-    every group receives percentile 50 (no-op).
+    So ``variance_percentile`` is the maximum percentile applied to groups with
+    the worst quality score (q -> 0).  Well-behaved groups (q -> 1) always get
+    percentile 50 (the median, i.e. no inflation).
+
+    - 50 = no compensation (every group gets the median)
+    - 67 = moderate: worst groups get 67th percentile, good groups ~50th
+    - 80 = aggressive: worst groups get 80th percentile
 
     A no-deflation guard ensures scale factors are always >= 1.0 — this step
     compensates for averaging-induced variance shrinkage, never introduces it.
 
     When ``fine_bin_widths_mev`` is None, falls back to uniform
-    ``variance_conservatism`` for all groups (backward compatible).
+    ``variance_percentile`` for all groups (backward compatible).
 
     Parameters
     ----------
@@ -752,9 +767,10 @@ def apply_percentile_variance_scaling(
         Fine bin indices per group
     max_order : int
         Maximum Legendre order
-    variance_conservatism : float
-        Controls conservatism range for adaptive scaling (0-100).
-        When fine_bin_widths_mev is None, applied uniformly.
+    variance_percentile : float
+        Maximum percentile of fine-bin variances used as target (50-95).
+        50 = median only (no compensation), 67 = moderate, 80 = aggressive.
+        When fine_bin_widths_mev is None, applied uniformly to all groups.
     fine_bin_widths_mev : np.ndarray, optional
         Width of each fine bin in MeV.  Enables adaptive per-group percentile.
     logger : optional
@@ -769,12 +785,11 @@ def apply_percentile_variance_scaling(
     n_params = n_groups * max_order
 
     adaptive = fine_bin_widths_mev is not None
-    if adaptive:
-        p_max = min(variance_conservatism * 1.5 - 25.0, 95.0)
+    p_max = np.clip(variance_percentile, 50.0, 95.0)
 
     # Build scaling factors
     scale_factors = np.ones(n_params)
-    group_percentiles = np.full(n_groups, variance_conservatism)
+    group_percentiles = np.full(n_groups, p_max)
     group_quality_scores = np.full(n_groups, np.nan)
 
     for g_idx, fine_indices in enumerate(groups):
@@ -788,7 +803,7 @@ def apply_percentile_variance_scaling(
             group_pct = np.clip(group_pct, 50.0, p_max)
             group_percentiles[g_idx] = group_pct
         else:
-            group_pct = variance_conservatism
+            group_pct = p_max
 
         for order in range(1, max_order + 1):
             g_param = idx(g_idx, order, max_order)
@@ -849,14 +864,14 @@ def apply_percentile_variance_scaling(
         max_scale = np.max(scale_factors)
         if adaptive:
             valid_q = group_quality_scores[~np.isnan(group_quality_scores)]
-            logger.info(f"  Adaptive variance compensation (conservatism={variance_conservatism}, p_max={p_max:.1f}%):")
+            logger.info(f"  Adaptive variance compensation (variance_percentile={p_max:.1f}%):")
             if len(valid_q) > 0:
                 logger.info(f"    Quality scores: mean={np.mean(valid_q):.3f}, "
                             f"min={np.min(valid_q):.3f}, max={np.max(valid_q):.3f}")
             logger.info(f"    Per-group percentiles: mean={np.mean(group_percentiles):.1f}, "
                         f"min={np.min(group_percentiles):.1f}, max={np.max(group_percentiles):.1f}")
         else:
-            logger.info(f"  Variance compensation (conservatism={variance_conservatism}):")
+            logger.info(f"  Variance compensation (variance_percentile={p_max:.1f}%):")
         logger.info(f"    Scale factors: mean={avg_scale:.2f}, min={min_scale:.2f}, max={max_scale:.2f}")
         if len(retention_before) > 0:
             logger.info(f"    Variance retention before: {np.mean(retention_before):.0f}% (mean), "
@@ -1088,17 +1103,13 @@ def perform_adaptive_multigroup_collapse(
     energy_bins: List,      # List[EnergyBinInfo]
     max_order: int,
     rho_min: float = 0.90,
-    sigma_ratio_max: float = 1.7,
-    min_width_factor: float = 2.0,
-    rho_hard_min: float = 0.0,
-    sigma_ratio_hard_max: float = 5.0,
-    rho_soft_min: float = 0.5,
-    sigma_ratio_soft_max: float = 3.0,
-    variance_conservatism: float = 50.0,
+    sigma_ratio_max: float = 2.0,
+    variance_percentile: float = 50.0,
     logger=None,
     apply_covariance_cap: bool = False,
     max_relative_std_cap: float = 1.0,
     forced_group_boundaries_mev: Optional[np.ndarray] = None,
+    diagnostics_file: Optional[Path] = None,
 ) -> MultigroupResult:
     """
     Main entry point for adaptive multigroup covariance collapse.
@@ -1124,16 +1135,14 @@ def perform_adaptive_multigroup_collapse(
     max_order : int
         Maximum Legendre order
     rho_min : float
-        Minimum correlation to merge (default 0.90)
+        Minimum l=1 adjacent correlation to merge (default 0.90)
     sigma_ratio_max : float
-        Maximum sigma ratio within group (default 1.7)
-    min_width_factor : float
-        Group width >= k * median(sigma_E) (default 2.0)
-    variance_conservatism : float
-        Controls how aggressively averaging-induced variance loss is compensated (50-100).
-        - 50 = no compensation (default)
-        - 66-75 = moderate adaptive compensation
-        - 90-100 = aggressive compensation (most conservative)
+        Maximum l=1 sigma ratio within group (default 2.0)
+    variance_percentile : float
+        Maximum percentile of fine-bin variances used as target (50-95).
+        - 50 = median only, no compensation (default)
+        - 67 = moderate: worst groups get 67th percentile, good groups ~50th
+        - 80 = aggressive: worst groups get 80th percentile
         This rescales the grouped covariance diagonal to preserve uncertainty
         magnitudes while maintaining the correlation structure from averaging.
     logger : optional
@@ -1252,6 +1261,8 @@ def perform_adaptive_multigroup_collapse(
         if len(below_indices) > 0:
             if logger:
                 logger.info(f"  Adaptive grouping for {len(below_indices)} bins below forced range")
+            _diag_below = (diagnostics_file.parent / (diagnostics_file.stem + "_below.csv")
+                           if diagnostics_file else None)
             sub_groups, sub_info = find_adaptive_group_boundaries(
                 corr_matrix=corr_matrix,
                 cov_matrix=cov_matrix,
@@ -1261,12 +1272,8 @@ def perform_adaptive_multigroup_collapse(
                 max_order=max_order,
                 rho_min=rho_min,
                 sigma_ratio_max=sigma_ratio_max,
-                min_width_factor=min_width_factor,
-                rho_hard_min=rho_hard_min,
-                sigma_ratio_hard_max=sigma_ratio_hard_max,
-                rho_soft_min=rho_soft_min,
-                sigma_ratio_soft_max=sigma_ratio_soft_max,
                 logger=logger,
+                diagnostics_file=_diag_below,
             )
             # Filter to only groups that contain bins below forced range
             for g, gi in zip(sub_groups, sub_info):
@@ -1293,6 +1300,8 @@ def perform_adaptive_multigroup_collapse(
         if len(above_indices) > 0:
             if logger:
                 logger.info(f"  Adaptive grouping for {len(above_indices)} bins above forced range")
+            _diag_above = (diagnostics_file.parent / (diagnostics_file.stem + "_above.csv")
+                           if diagnostics_file else None)
             sub_groups, sub_info = find_adaptive_group_boundaries(
                 corr_matrix=corr_matrix,
                 cov_matrix=cov_matrix,
@@ -1302,12 +1311,8 @@ def perform_adaptive_multigroup_collapse(
                 max_order=max_order,
                 rho_min=rho_min,
                 sigma_ratio_max=sigma_ratio_max,
-                min_width_factor=min_width_factor,
-                rho_hard_min=rho_hard_min,
-                sigma_ratio_hard_max=sigma_ratio_hard_max,
-                rho_soft_min=rho_soft_min,
-                sigma_ratio_soft_max=sigma_ratio_soft_max,
                 logger=logger,
+                diagnostics_file=_diag_above,
             )
             # Filter to only groups that contain bins above forced range
             for g, gi in zip(sub_groups, sub_info):
@@ -1334,12 +1339,8 @@ def perform_adaptive_multigroup_collapse(
             max_order=max_order,
             rho_min=rho_min,
             sigma_ratio_max=sigma_ratio_max,
-            min_width_factor=min_width_factor,
-            rho_hard_min=rho_hard_min,
-            sigma_ratio_hard_max=sigma_ratio_hard_max,
-            rho_soft_min=rho_soft_min,
-            sigma_ratio_soft_max=sigma_ratio_soft_max,
             logger=logger,
+            diagnostics_file=diagnostics_file,
         )
 
     n_groups = len(groups)
@@ -1367,7 +1368,7 @@ def perform_adaptive_multigroup_collapse(
         cov_fine=cov_matrix,
         groups=groups,
         max_order=max_order,
-        variance_conservatism=variance_conservatism,
+        variance_percentile=variance_percentile,
         fine_bin_widths_mev=fine_bin_widths_mev,
         valid_mask=valid_mask_mg,
         logger=logger,

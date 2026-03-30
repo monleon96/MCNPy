@@ -1185,7 +1185,7 @@ def sample_legendre_coefficients(
     fixed_c0_value: Optional[float] = None,
     # correlated normalization uncertainty (Improvement 1.3)
     sigma_norm: float = 0.0,
-    norm_group_cols: Tuple[str, ...] = ("entry", "subentry"),
+    norm_group_cols: Tuple[str, ...] = ("entry",),
     norm_dist: Literal["lognormal", "normal"] = "lognormal",
     # freeze higher-order coefficients during MC sampling
     max_sample_order: Optional[int] = None,
@@ -1238,7 +1238,7 @@ def sample_legendre_coefficients(
         Per-experiment normalization uncertainty (e.g., 0.05 for 5%).
         Applies correlated multiplicative noise per experiment group in MC sampling.
     norm_group_cols : Tuple[str, ...]
-        Column names used to group data by experiment (default: ("entry", "subentry"))
+        Column names used to group data by experiment (default: ("entry",))
     norm_dist : str
         Distribution for normalization factor: "lognormal" (default, always positive)
         or "normal" (can go negative for large sigma_norm).

@@ -78,6 +78,7 @@ from scripts.exfor_utils import (
     compute_covariance_from_samples,
     extract_ll_prime_correlations,
     build_gaussian_correlation_covariance,
+    build_gaussian_relevance_matrix,
     _extract_correlation_matrix,
     compute_bin_reliability_alpha,
     generate_cholesky_samples,
@@ -196,13 +197,8 @@ N_SAMPLES = 100                                   # Number of MC samples
 # 3b. MULTIGROUP COVARIANCE OPTIONS
 # -----------------------------------------------------------------------------
 GENERATE_MULTIGROUP_COVARIANCE = True           # Enable adaptive multigroup collapse
-MULTIGROUP_RHO_MIN = 0.90                        # Min correlation to merge (0.85-0.95)
-MULTIGROUP_SIGMA_RATIO_MAX = 2.0                 # Max sigma ratio within group (1.5-2.0)
-MULTIGROUP_MIN_WIDTH_FACTOR = 3.0                # Group width >= k * median(sigma_E)
-MULTIGROUP_RHO_HARD_MIN = 0.0                    # Hard veto: never merge below this
-MULTIGROUP_SIGMA_RATIO_HARD_MAX = 5.0            # Hard veto: never merge above this
-MULTIGROUP_RHO_SOFT_MIN = 0.7                    # Soft fallback: allow if group undersized
-MULTIGROUP_SIGMA_RATIO_SOFT_MAX = 3.0            # Soft fallback: allow if group undersized
+MULTIGROUP_RHO_MIN = 0.90                        # Min l=1 adjacent correlation to merge
+MULTIGROUP_SIGMA_RATIO_MAX = 2.0                 # Max l=1 sigma ratio within group
 MF34_COVARIANCE_TYPE = "multigroup"              # "fine", "multigroup", or "both"
 USE_ORIGINAL_MF34_GRID = False                   # Force multigroup grid from original MF34
 MERGE_ORIGINAL_MF34 = True                      # Merge pipeline MF34 with original (full range) or pipeline-only
@@ -210,9 +206,9 @@ MERGE_ORIGINAL_MF34 = True                      # Merge pipeline MF34 with origi
 # Variance conservatism for multigroup collapse
 # Controls how aggressively averaging-induced variance loss is compensated:
 # - 50 = no compensation (collapsed variance as-is)
-# - 66-75 = moderate compensation (adaptive per group quality)
-# - 90-100 = aggressive compensation (most conservative)
-MULTIGROUP_VARIANCE_CONSERVATISM = 66.67
+# Maximum percentile of fine-bin variances used as target after grouping (50-95).
+# 50 = median only (no compensation), 67 = moderate, 80 = aggressive.
+MULTIGROUP_VARIANCE_PERCENTILE = 67
 
 # Second-pass regrouping after smoothing
 MULTIGROUP_REGROUP_AFTER_SMOOTH = True
@@ -341,7 +337,7 @@ N_SIGMA_CUTOFF = 3.0                             # Gaussian kernel cutoff (±n_s
 
 # --- 6d. Angular-Band Discrepancy ---
 USE_BAND_DISCREPANCY = True                      # Use band-based uncertainty (vs global Birge)
-MIN_POINTS_PER_BAND = 3                          # Minimum points to estimate s_b per band
+MIN_POINTS_PER_BAND = 5                          # Minimum points to estimate s_b per band
 MAX_BAND_SCALE_FACTOR = 3.0                      # Max multiplicative scale per band (safety cap)
 TAU_SMOOTHING_WINDOW = 1                         # Moving median window for s_b(E) smoothing (1 = disabled)
 TAU_PRIOR_FLOOR = False                           # Apply tau prior floor from well-supported bins
@@ -378,14 +374,14 @@ ENERGY_GRID_SOURCE = "union"
 # Subentries + per-subentry energy range (min_MeV, max_MeV); None = use global bound
 UNION_GRID_SUBENTRIES = [
     ("10571002", 0.847, 2.5),   # Kinney: up to 2.5 MeV
-    ("10886002", 2.5, 4),       # Smith: from 2.5 MeV onwards
+    ("23365005", 2.5, 4),       # Pirovano: from 2.5 MeV onwards
 ]
 
 # --- 6h. Correlation Method ---
 # "gaussian"        — Per-bin stochastic MC → Gaussian parametric energy correlations → Cholesky samples
 # "kernel_weight_mc" — Kernel-weighted multi-bin MC → correlations from shared perturbed datasets
 # "hybrid"          — KW two-pass + Gaussian blend weighted by per-bin reliability (alpha from n_eff)
-CORRELATION_METHOD = "hybrid"
+CORRELATION_METHOD = "kernel_weight_mc"
 KW_MC_TWO_PASS = True                            # True: per-bin variance + KW correlations. False: single-pass.
 KW_MC_MIN_WEIGHT = 1e-3                          # Overlap weight threshold for kernel-weight MC
 KW_MIN_POINTS_REF = None                         # Quality penalty threshold: set to max_order+1 at runtime
@@ -1659,13 +1655,8 @@ def run_exfor_to_endf_sampling_v2(
     # Multigroup covariance options
     generate_multigroup_covariance: bool = False,
     multigroup_rho_min: float = 0.90,
-    multigroup_sigma_ratio_max: float = 1.7,
-    multigroup_min_width_factor: float = 2.0,
-    multigroup_rho_hard_min: float = 0.0,
-    multigroup_sigma_ratio_hard_max: float = 5.0,
-    multigroup_rho_soft_min: float = 0.5,
-    multigroup_sigma_ratio_soft_max: float = 3.0,
-    multigroup_variance_conservatism: float = 50.0,
+    multigroup_sigma_ratio_max: float = 2.0,
+    multigroup_variance_percentile: float = 50.0,
     multigroup_regroup_after_smooth: bool = True,
     multigroup_regroup_sigma_ratio_max: float = 2.5,
     mf34_covariance_type: str = "fine",
@@ -1841,13 +1832,8 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info(f"    GENERATE_MULTIGROUP_COVARIANCE = {generate_multigroup_covariance}")
         _logger.info(f"    MULTIGROUP_RHO_MIN             = {multigroup_rho_min}")
         _logger.info(f"    MULTIGROUP_SIGMA_RATIO_MAX     = {multigroup_sigma_ratio_max}")
-        _logger.info(f"    MULTIGROUP_MIN_WIDTH_FACTOR    = {multigroup_min_width_factor}")
-        _logger.info(f"    MULTIGROUP_RHO_HARD_MIN        = {multigroup_rho_hard_min}")
-        _logger.info(f"    MULTIGROUP_SIGMA_RATIO_HARD_MAX = {multigroup_sigma_ratio_hard_max}")
-        _logger.info(f"    MULTIGROUP_RHO_SOFT_MIN        = {multigroup_rho_soft_min}")
-        _logger.info(f"    MULTIGROUP_SIGMA_RATIO_SOFT_MAX = {multigroup_sigma_ratio_soft_max}")
         _logger.info(f"    MF34_COVARIANCE_TYPE           = {mf34_covariance_type}")
-        _logger.info(f"    MULTIGROUP_VARIANCE_CONSERVATISM = {multigroup_variance_conservatism}")
+        _logger.info(f"    MULTIGROUP_VARIANCE_PERCENTILE = {multigroup_variance_percentile}")
         _logger.info("")
 
     # -- ACE Common Options --
@@ -2487,8 +2473,30 @@ def run_exfor_to_endf_sampling_v2(
                 # Pairwise alpha: min(alpha_i, alpha_j) — conservative
                 alpha_ij = np.minimum(alpha_param[:, None], alpha_param[None, :])
 
+                # Range-aware blend: only apply Gaussian where it has an
+                # opinion (short-range, within a few sigma_E).  At long range
+                # the Gaussian decay → 0, so blending would just dilute the
+                # KW correlations for no reason.
+                #
+                # g_ij = Gaussian relevance ∈ [0, 1]:
+                #   g ≈ 1 for |dE| << sigma_E  (Gaussian model informative)
+                #   g → 0 for |dE| >> sigma_E  (Gaussian model contributes nothing)
+                #
+                # Effective blend weight for Gaussian:
+                #   w_gauss_ij = (1 - alpha_ij) * g_ij
+                #
+                # So: corr_hyb = (1 - w_gauss) * corr_kw + w_gauss * corr_gauss
+                #   Short-range: g≈1 → standard alpha blend
+                #   Long-range:  g≈0 → corr_hyb ≈ corr_kw (KW passes through)
+                g_ij = build_gaussian_relevance_matrix(
+                    energy_bins=energy_bins,
+                    energy_indices=energy_indices_kw,
+                    max_order=max_degree,
+                )
+                w_gauss_ij = (1.0 - alpha_ij) * g_ij
+
                 # Hybrid blend
-                corr_hyb = alpha_ij * corr_kw + (1.0 - alpha_ij) * corr_gauss
+                corr_hyb = (1.0 - w_gauss_ij) * corr_kw + w_gauss_ij * corr_gauss
                 corr_hyb = (corr_hyb + corr_hyb.T) / 2.0
                 np.fill_diagonal(corr_hyb, 1.0)
                 corr_hyb = np.clip(corr_hyb, -1.0, 1.0)
@@ -2504,15 +2512,23 @@ def run_exfor_to_endf_sampling_v2(
                     cov_combined = (cov_combined + cov_combined.T) / 2.0
                     _logger.info(f"  Hybrid blend: PSD projection applied (min_eig={min_eig:.2e})")
 
-                # Log alpha statistics
+                # Log alpha and range-aware blend statistics
                 n_interp = int(np.sum(alpha_per_energy == 0.0))
                 n_data = len(alpha_per_energy) - n_interp
                 if n_data > 0:
                     data_alphas = alpha_per_energy[alpha_per_energy > 0.0]
-                    _logger.info(f"  Hybrid blend: {n_data} data bins (alpha mean={np.mean(data_alphas):.3f}, "
+                    # Effective KW weight: fraction of matrix where KW dominates
+                    off_diag = ~np.eye(n_params, dtype=bool)
+                    mean_w_gauss = float(np.mean(w_gauss_ij[off_diag]))
+                    mean_w_kw = 1.0 - mean_w_gauss
+                    _logger.info(f"  Hybrid blend (range-aware): {n_data} data bins "
+                                 f"(alpha mean={np.mean(data_alphas):.3f}, "
                                  f"median={np.median(data_alphas):.3f}, "
                                  f"min={np.min(data_alphas):.3f}, max={np.max(data_alphas):.3f}), "
                                  f"{n_interp} interpolated bins (alpha=0)")
+                    _logger.info(f"  Range-aware weights: mean KW weight={mean_w_kw:.3f}, "
+                                 f"mean Gaussian weight={mean_w_gauss:.3f} "
+                                 f"(long-range KW correlations preserved)")
                 else:
                     _logger.info(f"  Hybrid blend: all {n_interp} bins interpolated (pure Gaussian)")
             else:  # pure kernel_weight_mc
@@ -2778,16 +2794,12 @@ def run_exfor_to_endf_sampling_v2(
                     max_order=max_degree,
                     rho_min=multigroup_rho_min,
                     sigma_ratio_max=multigroup_sigma_ratio_max,
-                    min_width_factor=multigroup_min_width_factor,
-                    rho_hard_min=multigroup_rho_hard_min,
-                    sigma_ratio_hard_max=multigroup_sigma_ratio_hard_max,
-                    rho_soft_min=multigroup_rho_soft_min,
-                    sigma_ratio_soft_max=multigroup_sigma_ratio_soft_max,
-                    variance_conservatism=multigroup_variance_conservatism,
+                    variance_percentile=multigroup_variance_percentile,
                     logger=_logger,
                     apply_covariance_cap=apply_covariance_cap,
                     max_relative_std_cap=max_relative_std_cap,
                     forced_group_boundaries_mev=forced_grid,
+                    diagnostics_file=output_path / "multigroup_boundary_decisions.csv",
                 )
 
                 # Log and save results
@@ -3401,7 +3413,7 @@ def run_exfor_to_endf_sampling_v2(
                     max_order=max_degree,
                     rho_min=multigroup_rho_min,
                     sigma_ratio_max=multigroup_regroup_sigma_ratio_max,
-                    variance_conservatism=multigroup_variance_conservatism,
+                    variance_percentile=multigroup_variance_percentile,
                     valid_mask=_rg_valid_mask,
                     logger=_logger,
                 )
@@ -3746,12 +3758,7 @@ if __name__ == "__main__":
         generate_multigroup_covariance=GENERATE_MULTIGROUP_COVARIANCE,
         multigroup_rho_min=MULTIGROUP_RHO_MIN,
         multigroup_sigma_ratio_max=MULTIGROUP_SIGMA_RATIO_MAX,
-        multigroup_min_width_factor=MULTIGROUP_MIN_WIDTH_FACTOR,
-        multigroup_rho_hard_min=MULTIGROUP_RHO_HARD_MIN,
-        multigroup_sigma_ratio_hard_max=MULTIGROUP_SIGMA_RATIO_HARD_MAX,
-        multigroup_rho_soft_min=MULTIGROUP_RHO_SOFT_MIN,
-        multigroup_sigma_ratio_soft_max=MULTIGROUP_SIGMA_RATIO_SOFT_MAX,
-        multigroup_variance_conservatism=MULTIGROUP_VARIANCE_CONSERVATISM,
+        multigroup_variance_percentile=MULTIGROUP_VARIANCE_PERCENTILE,
         multigroup_regroup_after_smooth=MULTIGROUP_REGROUP_AFTER_SMOOTH,
         multigroup_regroup_sigma_ratio_max=MULTIGROUP_REGROUP_SIGMA_RATIO_MAX,
         mf34_covariance_type=MF34_COVARIANCE_TYPE,

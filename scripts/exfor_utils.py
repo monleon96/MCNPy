@@ -1156,7 +1156,8 @@ def filter_exfor_with_energy_bin(
         )
 
     # Compute GLS-ESS per-point weights using post-floor uncertainties
-    # Group by (entry, subentry) because normalization perturbations are drawn per subentry
+    # Group by (entry, subentry): each subentry is a distinct measurement for weighting,
+    # even though normalization perturbations are drawn per entry (shared calibration bias)
     if normalize_by_n_points and sigma_norm > 0 and len(result) > 0:
         unique_pairs = result[['entry', 'subentry']].drop_duplicates()
         for _, row in unique_pairs.iterrows():
@@ -1727,20 +1728,22 @@ def _run_one_kw_sample(args_tuple):
 
     rng = np.random.default_rng(base_seed + s_idx)
 
-    # Step 1: Draw shared normalization factors per experiment
-    experiment_norms = {}
+    # Step 1: Draw shared normalization factors per EXFOR entry
+    # All subentries from the same entry share one normalization factor
+    # (same lab/setup => same systematic calibration bias)
+    entry_norms = {}
     for bin_idx, datasets_and_weights in overlap_weights.items():
         for ds, w in datasets_and_weights:
-            exp_id = ds['experiment_id']
-            if exp_id not in experiment_norms:
+            entry_id = ds['experiment_id'].split('.')[0]
+            if entry_id not in entry_norms:
                 if norm_dist == "lognormal" and sigma_norm > 0:
-                    experiment_norms[exp_id] = rng.lognormal(
+                    entry_norms[entry_id] = rng.lognormal(
                         mean=-0.5 * sigma_norm**2, sigma=sigma_norm
                     )
                 elif sigma_norm > 0:
-                    experiment_norms[exp_id] = rng.normal(1.0, sigma_norm)
+                    entry_norms[entry_id] = rng.normal(1.0, sigma_norm)
                 else:
-                    experiment_norms[exp_id] = 1.0
+                    entry_norms[entry_id] = 1.0
 
     # Step 2: Perturb all datasets (shared across bins)
     # Build per-dataset tau from the bin with highest overlap weight so that
@@ -1768,7 +1771,8 @@ def _run_one_kw_sample(args_tuple):
             df = ds['exfor_df']
             if df.empty:
                 continue
-            norm_factor = experiment_norms.get(exp_id, 1.0)
+            entry_id = exp_id.split('.')[0]
+            norm_factor = entry_norms.get(entry_id, 1.0)
             values = df['value'].to_numpy() * norm_factor
             unc = df['unc'].to_numpy()
             # Inflate noise amplitude with band scale factors (consistent
@@ -3255,6 +3259,74 @@ def _extract_correlation_matrix(cov: np.ndarray) -> np.ndarray:
     corr = cov / np.outer(std_safe, std_safe)
     np.fill_diagonal(corr, 1.0)
     return np.clip(corr, -1.0, 1.0)
+
+
+def build_gaussian_relevance_matrix(
+    energy_bins: List,
+    energy_indices: List[int],
+    max_order: int,
+) -> np.ndarray:
+    """Compute pairwise Gaussian-model relevance for range-aware hybrid blend.
+
+    Returns a matrix g_ij in [0, 1] indicating how much the Gaussian energy-
+    correlation model "has an opinion" about the (i, j) parameter pair.
+    g_ij ≈ 1 for nearby bins (|dE| << sigma_E) where the Gaussian decay
+    provides a meaningful alternative to KW correlations, and g_ij → 0 for
+    distant bins where the Gaussian model contributes nothing (rho_E → 0).
+
+    The relevance is defined as rho_E(dE, sigma_eff) — the same Gaussian
+    decay kernel used inside ``build_gaussian_correlation_covariance``.
+    Same-energy pairs get relevance = 1 (the Gaussian model keeps the
+    stochastic cross-order correlation there).
+
+    Parameters
+    ----------
+    energy_bins : list
+        EnergyBinInfo objects with energy_mev and sigma_E_mev.
+    energy_indices : list of int
+        Energy indices for the parameter layout.
+    max_order : int
+        Legendre orders per energy bin.
+
+    Returns
+    -------
+    np.ndarray, shape (n_params, n_params)
+        Symmetric matrix with values in [0, 1].
+    """
+    n_energies = len(energy_indices)
+    n = n_energies * max_order
+    bin_by_idx = {b.index: b for b in energy_bins}
+
+    # Build per-parameter energy and sigma_E arrays
+    param_energies = np.zeros(n)
+    param_sigma_E = np.zeros(n)
+    param_e_pos = np.zeros(n, dtype=int)
+
+    for p in range(n):
+        e_pos = p // max_order
+        param_e_pos[p] = e_pos
+        if e_pos < n_energies and energy_indices[e_pos] in bin_by_idx:
+            ebin = bin_by_idx[energy_indices[e_pos]]
+            param_energies[p] = ebin.energy_mev
+            param_sigma_E[p] = ebin.sigma_E_mev
+
+    # Fallback for zero sigma_E
+    if np.any(param_sigma_E > 0):
+        median_sigma = np.median(param_sigma_E[param_sigma_E > 0])
+    else:
+        median_sigma = 0.01
+    param_sigma_E[param_sigma_E <= 0] = median_sigma
+
+    # Gaussian decay: same kernel as build_gaussian_correlation_covariance
+    sigma_eff_mat = (param_sigma_E[:, None] + param_sigma_E[None, :]) / 2.0
+    dE_mat = param_energies[:, None] - param_energies[None, :]
+    relevance = np.exp(-dE_mat**2 / (2.0 * sigma_eff_mat**2))
+
+    # Same-energy pairs: Gaussian model fully applies (keeps stochastic corr)
+    same_e = param_e_pos[:, None] == param_e_pos[None, :]
+    relevance[same_e] = 1.0
+
+    return relevance
 
 
 def build_gaussian_correlation_covariance(
