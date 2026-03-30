@@ -11,7 +11,7 @@ from typing import Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from kika.ace.classes.ace import Ace
-    from kika.endf.classes.mf1.mf1mt import MT451
+    from kika.endf.classes.mf1.mf1mt451 import MF1MT451
 
 
 @dataclass
@@ -44,7 +44,7 @@ class NuclideInfo:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_endf(cls, mt451: "MT451") -> "NuclideInfo":
+    def from_endf(cls, mt451: "MF1MT451") -> "NuclideInfo":
         """Create from an ENDF ``MT451`` object.
 
         Parameters

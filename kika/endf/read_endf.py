@@ -6,7 +6,7 @@ from typing import List, Optional, Union
 
 from .classes.endf import ENDF
 from .parsers.parse_endf import parse_endf_file, parse_mf_from_file, MF_PARSERS
-from .classes.mf1.mf1mt import MT451
+from .classes.mf1.mf1mt451 import MF1MT451
 from .classes.mf2.mf2mt151 import MF2MT151
 from .classes.mf3.mf3mt import MF3MT
 from .classes.mf4.base import MF4MT
@@ -65,7 +65,7 @@ def read_endf(filepath: str, mf_numbers: Optional[Union[int, List[int]]] = None)
     return endf
 
 
-def read_mt451(filepath: str) -> Optional['MT451']:
+def read_mt451(filepath: str) -> Optional['MF1MT451']:
     """
     Read only the MT451 (General Information) section from an ENDF file.
     

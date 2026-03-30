@@ -6,7 +6,7 @@ Contains helper functions for handling the specific formatting requirements of E
 import re
 from typing import Dict,Union, List, Optional, Tuple, Sequence, Any
 from .classes.mt import MT
-from .classes.mf1.mf1mt import MT451
+from .classes.mf1.mf1mt451 import MF1MT451
 from .classes.mf import MF
 import numpy as np
 import math
@@ -839,6 +839,80 @@ def format_tab1(c1, c2, l1, l2, interp_pairs, x_data, y_data, mat, mf, mt, start
     # Data pairs
     dp_lines, line_num = format_data_pairs(x_data, y_data, mat, mf, mt, line_num)
     result_lines.extend(dp_lines)
+
+    return result_lines, line_num
+
+
+def parse_tab2(lines, start):
+    """
+    Parse a TAB2 record starting at *start*.
+
+    A TAB2 record consists of a header line (C1..C6) followed by NR
+    interpolation (NBT, INT) pairs.  Unlike TAB1, it carries no x/y
+    data — NZ (C6) indicates how many sub-records follow.
+
+    Parameters
+    ----------
+    lines : list of str
+        ENDF lines.
+    start : int
+        Index of the TAB2 header line.
+
+    Returns
+    -------
+    header : dict
+        Parsed header fields (C1..C6, MAT, MF, MT).
+    interp_pairs : list of tuple(int, int)
+    next_idx : int
+    """
+    header = parse_line(lines[start])
+    nr = int(header.get("C5", 0) or 0)
+    idx = start + 1
+    interp_pairs = []
+    if nr > 0:
+        interp_pairs, idx = parse_interp_pairs(lines, idx, nr)
+    return header, interp_pairs, idx
+
+
+def format_tab2(c1, c2, l1, l2, interp_pairs, nz, mat, mf, mt, start_line):
+    """
+    Format a TAB2 record to ENDF lines.
+
+    Parameters
+    ----------
+    c1, c2 : float
+        Header float fields.
+    l1, l2 : int
+        Header integer fields (positions C3, C4).
+    interp_pairs : list of tuple(int, int)
+        Interpolation (NBT, INT) pairs.
+    nz : int
+        Number of sub-records (written to C6).
+    mat, mf, mt : int
+    start_line : int
+
+    Returns
+    -------
+    lines : list of str
+    next_line_num : int
+    """
+    nr = len(interp_pairs)
+    line_num = start_line
+    result_lines = []
+
+    header = format_endf_data_line(
+        [c1, c2, l1, l2, nr, nz],
+        mat, mf, mt, line_num,
+        formats=[ENDF_FORMAT_FLOAT, ENDF_FORMAT_FLOAT,
+                 ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT_ZERO,
+                 ENDF_FORMAT_INT, ENDF_FORMAT_INT],
+    )
+    result_lines.append(header)
+    line_num += 1
+
+    if nr > 0:
+        ip_lines, line_num = format_interp_pairs(interp_pairs, mat, mf, mt, line_num)
+        result_lines.extend(ip_lines)
 
     return result_lines, line_num
 

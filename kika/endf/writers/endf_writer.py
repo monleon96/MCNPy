@@ -7,7 +7,7 @@ in ENDF files while preserving the rest of the file content.
 import os
 from typing import Dict, List, Optional, Union, Tuple
 from ..classes.mt import MT
-from ..classes.mf1.mf1mt import MT451
+from ..classes.mf1.mf1mt451 import MF1MT451
 from ..classes.mf import MF
 from ..classes.mf4.base import MF4MT
 from ..utils import parse_endf_id
@@ -181,7 +181,7 @@ class ENDFWriter:
             logger.error(f"Error replacing MF{modified_mf.number} section: {e}")
             return False
 
-    def replace_mt_section(self, modified_mt: Union[MT, MT451, MF4MT], mf_number: int,
+    def replace_mt_section(self, modified_mt: Union[MT, MF1MT451, MF4MT], mf_number: int,
                           output_filepath: Optional[str] = None,
                           update_directory: bool = True) -> bool:
         """
@@ -259,7 +259,7 @@ def replace_mf_section(original_filepath: str, modified_mf: MF,
     return writer.replace_mf_section(modified_mf, output_filepath, update_directory)
 
 
-def replace_mt_section(original_filepath: str, modified_mt: Union[MT, MT451, MF4MT],
+def replace_mt_section(original_filepath: str, modified_mt: Union[MT, MF1MT451, MF4MT],
                       mf_number: int, output_filepath: Optional[str] = None,
                       update_directory: bool = True) -> bool:
     """

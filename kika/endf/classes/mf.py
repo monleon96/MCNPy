@@ -9,14 +9,19 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, Union, TypeVar, Tuple, List, Any, TYPE_CHECKING
 
 from .mt import MT
-from .mf1.mf1mt import MT451
+from .mf1.mf1mt451 import MF1MT451
 from ...cov.legendre_covariance import LegendreCovariance
 
 if TYPE_CHECKING:
     from .mf2.mf2mt151 import MF2MT151
     from .mf3.mf3mt import MF3MT
+    from .mf1.mf1mt452 import MF1MT452
+    from .mf1.mf1mt455 import MF1MT455
+    from .mf1.mf1mt456 import MF1MT456
+    from .mf1.mf1mt458 import MF1MT458
+    from .mf1.mf1mt460 import MF1MT460
 
-# Type for any MT section class (MT, MT451, etc.)
+# Type for any MT section class (MT, MF1MT451, etc.)
 MTSection = TypeVar('MTSection', bound=MT)
 
 @dataclass
@@ -25,10 +30,10 @@ class MF:
     Data class representing an MF file in ENDF format.
     """
     number: int
-    sections: Dict[int, Union[MT, MT451, 'MF2MT151', 'MF3MT']] = field(default_factory=dict)
+    sections: Dict[int, Union[MT, MF1MT451, 'MF2MT151', 'MF3MT', 'MF1MT452', 'MF1MT455', 'MF1MT456', 'MF1MT458', 'MF1MT460']] = field(default_factory=dict)
     num_lines: int = 0  # Number of lines in this MF section
     
-    def add_section(self, section: Union[MT, MT451, 'MF2MT151', 'MF3MT']) -> None:
+    def add_section(self, section: Union[MT, MF1MT451, 'MF2MT151', 'MF3MT', 'MF1MT452', 'MF1MT455', 'MF1MT456', 'MF1MT458', 'MF1MT460']) -> None:
         """
         Add an MT section to this MF file
         
@@ -37,7 +42,7 @@ class MF:
         """
         self.sections[section.number] = section
     
-    def get_section(self, mt_number: int) -> Optional[Union[MT, MT451, 'MF2MT151', 'MF3MT']]:
+    def get_section(self, mt_number: int) -> Optional[Union[MT, MF1MT451, 'MF2MT151', 'MF3MT', 'MF1MT452', 'MF1MT455', 'MF1MT456', 'MF1MT458', 'MF1MT460']]:
         """
         Get an MT section by number
         
@@ -50,7 +55,7 @@ class MF:
         return self.sections.get(mt_number)
     
     @property
-    def mt(self) -> Dict[int, Union[MT, MT451, 'MF2MT151', 'MF3MT']]:
+    def mt(self) -> Dict[int, Union[MT, MF1MT451, 'MF2MT151', 'MF3MT', 'MF1MT452', 'MF1MT455', 'MF1MT456', 'MF1MT458', 'MF1MT460']]:
         """Direct access to MT sections dictionary"""
         return self.sections
     
@@ -110,7 +115,7 @@ class MF:
     def __repr__(self):
         return f"MF({self.number}, {len(self.sections)} sections)"
     
-    def __getitem__(self, mt_number: int) -> Union[MT, MT451, 'MF2MT151', 'MF3MT']:
+    def __getitem__(self, mt_number: int) -> Union[MT, MF1MT451, 'MF2MT151', 'MF3MT', 'MF1MT452', 'MF1MT455', 'MF1MT456', 'MF1MT458', 'MF1MT460']:
         """Allow accessing MT sections like: mf[451]"""
         if mt_number not in self.sections:
             raise KeyError(f"MT section {mt_number} not found in MF{self.number}")
