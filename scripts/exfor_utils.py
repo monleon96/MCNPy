@@ -86,13 +86,13 @@ class DualLogger:
         if console:
             print(f"[INFO] {msg}")
 
-    def warning(self, msg: str, console: bool = False):
-        self.logger.warning(f"[WARNING] {msg}")
+    def warning(self, msg: str, console: bool = True):
+        self.logger.warning(msg)
         if console:
             print(f"[WARNING] {msg}")
 
-    def error(self, msg: str, console: bool = False):
-        self.logger.error(f"[ERROR] {msg}")
+    def error(self, msg: str, console: bool = True):
+        self.logger.error(msg)
         if console:
             print(f"[ERROR] {msg}")
 
@@ -3259,6 +3259,41 @@ def _extract_correlation_matrix(cov: np.ndarray) -> np.ndarray:
     corr = cov / np.outer(std_safe, std_safe)
     np.fill_diagonal(corr, 1.0)
     return np.clip(corr, -1.0, 1.0)
+
+
+def inject_within_bin_correlations(
+    corr_cross: np.ndarray,
+    cov_perbin: np.ndarray,
+    n_energies: int,
+    block_size: int,
+) -> np.ndarray:
+    """Replace within-bin diagonal blocks of a correlation matrix with Pass-1 values.
+
+    Parameters
+    ----------
+    corr_cross : np.ndarray
+        Correlation matrix whose off-diagonal (cross-bin) blocks are kept.
+    cov_perbin : np.ndarray
+        Full covariance matrix from the per-bin MC pass, used to extract
+        within-bin cross-order correlations.
+    n_energies : int
+        Number of energy bins.
+    block_size : int
+        Number of Legendre orders per bin (max_degree).
+
+    Returns
+    -------
+    np.ndarray
+        Correlation matrix with within-bin blocks from Pass 1 and
+        cross-bin blocks from *corr_cross*.
+    """
+    corr_perbin = _extract_correlation_matrix(cov_perbin)
+    corr_out = corr_cross.copy()
+    for ie in range(n_energies):
+        s = ie * block_size
+        e = s + block_size
+        corr_out[s:e, s:e] = corr_perbin[s:e, s:e]
+    return corr_out
 
 
 def build_gaussian_relevance_matrix(

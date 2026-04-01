@@ -39,6 +39,7 @@ import shutil
 import logging
 import pandas as pd
 import json
+import time
 from typing import List, Union, Optional, Dict, Tuple
 from multiprocessing import Pool
 from datetime import datetime
@@ -198,19 +199,13 @@ def perturb_seprate_ACE_files(
     _set_logger(_logger)
     
     # Console: Basic start message
-    print(f"[INFO] Starting ACE perturbation job")
-    print(f"[INFO] Log file: {log_file}")
-    print(f"[INFO] Root directory: {os.path.abspath(root_dir)}")
-    
-    # Print run parameters as metadata TO LOG FILE
-    separator = "=" * 80
-    _logger.info(f"\n{separator}")
-    _logger.info(f"[ACE] [PARAMETERS] Run Configuration")
-    _logger.info(f"{separator}")
-    
-    # Format and print input files
+    _logger.info(f"[INFO] [ACE] Starting ACE perturbation job", console=True)
+    _logger.info(f"[INFO] [ACE] Log file: {log_file}", console=True)
+    _logger.info(f"[INFO] [ACE] Root directory: {os.path.abspath(root_dir)}", console=True)
+
+    # Format input values for config dump
     formatted_temps = ", ".join(f"{t:.1f}K" for t in temperatures)
-    
+
     if isinstance(cov_files, str):
         cov_files = [cov_files]
         formatted_cov = cov_files[0]
@@ -218,13 +213,13 @@ def perturb_seprate_ACE_files(
         formatted_cov = f"{len(cov_files)} files"
         if len(cov_files) <= 3:
             formatted_cov = ", ".join(os.path.basename(f) for f in cov_files)
-    
+
     # Format ZAID list
     if len(zaids) <= 10:
         formatted_zaids = ", ".join(str(zaid) for zaid in zaids)
     else:
         formatted_zaids = f"{len(zaids)} ZAIDs: {', '.join(str(zaid) for zaid in zaids[:5])}..."
-    
+
     # Format MT list
     if len(mt_list) == 0:
         formatted_mt = "All available MTs"
@@ -232,34 +227,33 @@ def perturb_seprate_ACE_files(
         formatted_mt = ", ".join(str(mt) for mt in mt_list)
     else:
         formatted_mt = f"{len(mt_list)} MTs: {', '.join(str(mt) for mt in mt_list[:5])}..."
-    
-    # Print all parameters TO LOG FILE
-    _logger.info(f"  Root directory:        {os.path.abspath(root_dir)}")
-    _logger.info(f"  Temperatures:          {formatted_temps}")
-    _logger.info(f"  ZAID numbers:          {formatted_zaids}")
-    _logger.info(f"  Covariance files:      {formatted_cov}")
-    _logger.info(f"  MT numbers:            {formatted_mt}")
-    _logger.info(f"  Number of samples:     {num_samples}")
-    _logger.info(f"  Sampling space:        {space}")
-    _logger.info(f"  Decomposition method:  {decomposition_method}")
-    _logger.info(f"  Sampling method:       {sampling_method}")
-    _logger.info(f"  Random seed:           {seed if seed is not None else 'Random'}")
-    _logger.info(f"  Parallel processes:    {nprocs}")
-    _logger.info(f"  Mode:                  {'Dry run (factors only)' if dry_run else 'Full ACE perturbation'}")
-    _logger.info(f"  Autofix covariance:    {autofix if autofix is not None else 'None (no autofix)'}")
-    _logger.info(f"  High value threshold:  {high_val_thresh}")
-    _logger.info(f"  Accept tolerance:      {accept_tol}")
-    _logger.info(f"  Remove blocks:         {remove_blocks if remove_blocks else 'None'}")
-    _logger.info(f"  Verbose output:        {verbose}")
+
+    # CONFIG section
+    _logger.info(f"#== CONFIG ============================================================")
+    _logger.info(f"  ROOT_DIR = {os.path.abspath(root_dir)}")
+    _logger.info(f"  TEMPERATURES = {formatted_temps}")
+    _logger.info(f"  ZAIDS = {formatted_zaids}")
+    _logger.info(f"  COV_FILES = {formatted_cov}")
+    _logger.info(f"  MT_NUMBERS = {formatted_mt}")
+    _logger.info(f"  NUM_SAMPLES = {num_samples}")
+    _logger.info(f"  SPACE = {space}")
+    _logger.info(f"  DECOMPOSITION_METHOD = {decomposition_method}")
+    _logger.info(f"  SAMPLING_METHOD = {sampling_method}")
+    _logger.info(f"  SEED = {seed if seed is not None else 'Random'}")
+    _logger.info(f"  NPROCS = {nprocs}")
+    _logger.info(f"  MODE = {'Dry run (factors only)' if dry_run else 'Full ACE perturbation'}")
+    _logger.info(f"  AUTOFIX = {autofix if autofix is not None else 'None'}")
+    _logger.info(f"  HIGH_VAL_THRESH = {high_val_thresh}")
+    _logger.info(f"  ACCEPT_TOL = {accept_tol}")
+    _logger.info(f"  REMOVE_BLOCKS = {remove_blocks if remove_blocks else 'None'}")
+    _logger.info(f"  VERBOSE = {verbose}")
     if energy_ranges is not None:
         formatted_ranges = ", ".join(f"[{lo:.4e}, {hi:.4e}] eV" for lo, hi in energy_ranges)
-        _logger.info(f"  Energy ranges:         {formatted_ranges}")
+        _logger.info(f"  ENERGY_RANGES = {formatted_ranges}")
     else:
-        _logger.info(f"  Energy ranges:         None (all energies)")
-
-    # Print timestamp
-    _logger.info(f"  Timestamp:             {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    _logger.info(f"{separator}\n")
+        _logger.info(f"  ENERGY_RANGES = None (all energies)")
+    _logger.info(f"  TIMESTAMP = {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    _logger.info(f"#== END CONFIG ========================================================")
 
     # normalize inputs (already done for cov_files, need for zaids)
     if isinstance(cov_files, str):
@@ -283,28 +277,32 @@ def perturb_seprate_ACE_files(
 
     # Initialize master perturbation matrix directory for incremental updates
     matrix_dir = _initialize_master_perturbation_matrix(output_dir, timestamp, num_samples)
-    _logger.info(f"[MATRIX] [INIT] Initialized matrix directory: {os.path.basename(matrix_dir)}")
+    _logger.info(f"  [INFO] [ACE] Initialized matrix directory: {os.path.basename(matrix_dir)}")
 
     # Console: Show progress
-    print(f"[INFO] Processing {len(zaids)} isotope(s)")
-    print(f"[INFO] Matrix directory: {os.path.basename(matrix_dir)}")
+    _logger.info(f"[INFO] [ACE] Processing {len(zaids)} isotope(s)", console=True)
+    _logger.info(f"[INFO] [ACE] Matrix directory: {os.path.basename(matrix_dir)}", console=True)
+
+    # Track total job time
+    _job_t0 = time.time()
 
     # Handle case where there's only one covariance file for multiple ZAIDs
     if len(cov_files) == 1 and len(zaids) > 1:
         # Use the same covariance file for all ZAIDs
         cov_files = cov_files * len(zaids)
-        _logger.info(f"[ACE] [COV] Using single covariance file for all {len(zaids)} isotopes: {os.path.basename(cov_files[0])}")
+        _logger.info(f"  [INFO] [ACE] Using single covariance file for all {len(zaids)} isotopes: {os.path.basename(cov_files[0])}")
+
+    _warning_counts = {}  # Collect warnings for WARNINGS section
 
     for i, (zaid, cov_file) in enumerate(zip(zaids, cov_files)):
 
         # ====== Start of ZAID processing ======
-        separator = "=" * 80
-        _logger.info(f"\n{separator}")
-        _logger.info(f"[ACE] [PROCESSING] ZAID {zaid}")
-        _logger.info(f"{separator}\n")
+        _step_num = i + 1
+        _step_t0 = time.time()
+        _logger.info(f"#-- STEP {_step_num}: Process ZAID {zaid} ------------------------------------------------")
 
         # Console: Basic progress
-        print(f"\n[INFO] Processing isotope {i+1}/{len(zaids)}: ZAID {zaid}")
+        _logger.info(f"[INFO] [ACE] Processing isotope {_step_num}/{len(zaids)}: ZAID {zaid}", console=True)
 
         # Find a representative ACE file to read structure and MT numbers
         # Look for any sample file to get the ACE structure
@@ -326,13 +324,13 @@ def perturb_seprate_ACE_files(
                     break
         
         if ace_file is None:
-            _logger.error(f"[ACE] [ERROR] No representative ACE file found for ZAID {zaid}")
+            _logger.error(f"  [ERROR] [ACE] No representative ACE file found for ZAID {zaid}")
             # Show the exact temperature directories that were searched
             searched_paths = []
             for temp in temperatures:
                 temp_str = str(temp).rstrip('0').rstrip('.') if '.' in str(temp) else str(temp)
                 searched_paths.append(f"{root_dir}/ace/{temp_str}/{zaid}/0001/")
-            _logger.error(f"  Looked in: {searched_paths}")
+            _logger.error(f"  [ERROR] [ACE] Looked in: {searched_paths}")
             summary_data[zaid] = {
                 "representative_ace": "Not found",
                 "cov_file": os.path.basename(cov_file),
@@ -351,13 +349,15 @@ def perturb_seprate_ACE_files(
                 "warnings": [f"No representative ACE file found"]
             }
             skipped_isotopes[zaid] = "No representative ACE file found"
-            _logger.info(f"\n{separator}\n")
-            print(f"[ERROR] No ACE files found for ZAID {zaid}")
+            _warning_counts[f"ZAID {zaid}: no ACE file"] = 1
+            _step_elapsed = time.time() - _step_t0
+            _logger.info(f"#-- END STEP {_step_num} (elapsed: {_step_elapsed:.1f}s) -------------------------------------")
+            _logger.info(f"  [ERROR] [ACE] No ACE files found for ZAID {zaid}", console=True)
             continue
 
         # Check if ACE file exists
         if not os.path.exists(ace_file):
-            _logger.error(f"[ACE] [ERROR] Representative ACE file not found: {ace_file}")
+            _logger.error(f"  [ERROR] [ACE] Representative ACE file not found: {ace_file}")
             summary_data[zaid] = {
                 "representative_ace": os.path.basename(ace_file),
                 "cov_file": os.path.basename(cov_file),
@@ -376,8 +376,10 @@ def perturb_seprate_ACE_files(
                 "warnings": [f"Representative ACE file not found: {os.path.basename(ace_file)}"]
             }
             skipped_isotopes[zaid] = f"Representative ACE file not found: {os.path.basename(ace_file)}"
-            _logger.info(f"\n{separator}\n")
-            print(f"[ERROR] Representative ACE file not found for ZAID {zaid}")
+            _warning_counts[f"ZAID {zaid}: ACE file not found"] = 1
+            _step_elapsed = time.time() - _step_t0
+            _logger.info(f"#-- END STEP {_step_num} (elapsed: {_step_elapsed:.1f}s) -------------------------------------")
+            _logger.info(f"  [ERROR] [ACE] Representative ACE file not found for ZAID {zaid}", console=True)
             continue
 
         # Read ACE file first to get ZAID and structure
@@ -387,7 +389,8 @@ def perturb_seprate_ACE_files(
 
         # Verify ZAID matches
         if actual_zaid != zaid:
-            _logger.warning(f"[ACE] [WARNING] ZAID mismatch: requested {zaid}, found {actual_zaid} in {ace_file}")
+            _logger.warning(f"  [WARN] [ACE] ZAID mismatch: requested {zaid}, found {actual_zaid} in {ace_file}")
+            _warning_counts[f"ZAID {zaid}: mismatch"] = _warning_counts.get(f"ZAID {zaid}: mismatch", 0) + 1
 
         # Initialize summary information for this isotope
         summary_data[zaid] = {
@@ -410,34 +413,33 @@ def perturb_seprate_ACE_files(
         
         cov = load_covariance(cov_file)
         if cov is None:
-            _logger.error(f"[ACE] [ERROR] Unable to load a valid covariance matrix for {cov_file}")
+            _logger.error(f"  [ERROR] [ACE] Unable to load a valid covariance matrix for {cov_file}")
             summary_data[zaid]["warnings"].append(f"No valid covariance file found: {os.path.basename(cov_file)}")
             skipped_isotopes[zaid] = "No valid covariance file found"
-            _logger.info(f"\n{separator}\n")
-            _logger.error(f"Failed to load covariance for {os.path.basename(ace_file)}", console=False)
-            print(f"[ERROR] Failed to load covariance for {os.path.basename(ace_file)}")
+            _warning_counts[f"ZAID {zaid}: no covariance"] = 1
+            _step_elapsed = time.time() - _step_t0
+            _logger.info(f"#-- END STEP {_step_num} (elapsed: {_step_elapsed:.1f}s) -------------------------------------")
+            _logger.info(f"  [ERROR] [ACE] Failed to load covariance for {os.path.basename(ace_file)}", console=True)
             continue
 
-        _logger.info(f"  Covariance file: {cov_file}")
-        _logger.info(f"  Isotope: {zaid}")
-        
-        subseparator = "-" * 60
-        _logger.info(f"\n{subseparator}")
+        _logger.info(f"  [INFO] [ACE] Covariance file: {cov_file}")
+        _logger.info(f"  [INFO] [ACE] Isotope: {zaid}")
 
         # Check if the covariance matrix is empty (no data)
         if cov.num_matrices == 0:
-            _logger.info(f"[ACE] [SKIP] No covariance found in {zaid}. Skipping.")
+            _logger.info(f"  [WARN] [ACE] No covariance found in {zaid}. Skipping.")
             summary_data[zaid]["warnings"].append("No covariance data found in matrix")
             skipped_isotopes[zaid] = "No covariance data found in matrix"
-            _logger.info(f"\n{separator}\n")
-            _logger.warning(f"No covariance data for {os.path.basename(ace_file)}", console=False)
-            print(f"[WARNING] No covariance data for {os.path.basename(ace_file)}")
+            _warning_counts[f"ZAID {zaid}: empty covariance"] = 1
+            _step_elapsed = time.time() - _step_t0
+            _logger.info(f"#-- END STEP {_step_num} (elapsed: {_step_elapsed:.1f}s) -------------------------------------")
+            _logger.info(f"  [WARN] [ACE] No covariance data for {os.path.basename(ace_file)}", console=True)
             continue
 
         # Apply user-specified block removals before clean_cov
         if remove_blocks and zaid in remove_blocks:
-            _logger.info(f"[ACE] [BLOCK REMOVAL] Applying user-specified block removals for isotope {zaid}")
-            
+            _logger.info(f"  [INFO] [ACE] Applying user-specified block removals for isotope {zaid}")
+
             # Normalize the removal specification to a list of tuples
             removal_spec = remove_blocks[zaid]
             if isinstance(removal_spec, tuple):
@@ -446,36 +448,34 @@ def perturb_seprate_ACE_files(
             else:
                 # Should be a list of tuples
                 blocks_to_remove = list(removal_spec)
-            
-            _logger.info(f"  Blocks to remove: {blocks_to_remove}")
-            
+
+            _logger.info(f"  [INFO] [ACE] Blocks to remove: {blocks_to_remove}")
+
             # Get reactions before removal for comparison
             reactions_before = cov.reactions_by_isotope(zaid)
-            _logger.info(f"  Reactions before removal: {sorted(reactions_before)}")
-            
+            _logger.info(f"  [INFO] [ACE] Reactions before removal: {sorted(reactions_before)}")
+
             # Apply the removal
             try:
                 cov = cov.remove_matrix(isotope=zaid, reaction_pairs=blocks_to_remove)
-                
+
                 # Get reactions after removal
                 reactions_after = cov.reactions_by_isotope(zaid)
-                _logger.info(f"  Reactions after removal:  {sorted(reactions_after)}")
-                
+                _logger.info(f"  [INFO] [ACE] Reactions after removal:  {sorted(reactions_after)}")
+
                 # Track removed reactions for the summary
                 removed_reactions = set(reactions_before) - set(reactions_after)
                 for mt in removed_reactions:
                     summary_data[zaid]["removed_mts"][mt] = f"User-specified block removal: {blocks_to_remove}"
-                
+
                 if removed_reactions:
-                    _logger.info(f"  Successfully removed reactions: {sorted(removed_reactions)}")
+                    _logger.info(f"  [INFO] [ACE] Successfully removed reactions: {sorted(removed_reactions)}")
                 else:
-                    _logger.info(f"  No reactions were removed (blocks may not have existed)")
-                    
+                    _logger.info(f"  [INFO] [ACE] No reactions were removed (blocks may not have existed)")
+
             except Exception as e:
-                _logger.error(f"[ACE] [ERROR] Failed to remove blocks {blocks_to_remove}: {str(e)}")
+                _logger.error(f"  [ERROR] [ACE] Failed to remove blocks {blocks_to_remove}: {str(e)}")
                 summary_data[zaid]["warnings"].append(f"Failed to remove user-specified blocks: {str(e)}")
-            
-            _logger.info(f"\n{subseparator}")
 
         cov = cov.clean_cov(zaid)
 
@@ -561,19 +561,18 @@ def perturb_seprate_ACE_files(
             cov = cov.remove_matrix(zaid, to_remove)
 
         # Print available MT numbers TO LOG FILE
-        _logger.info(f"[ACE] [MT SELECTION]")
-        _logger.info(f"  MTs in ACE file:          {mt_in_ace}")
-        _logger.info(f"  MTs in covariance matrix: {mt_in_cov}")
-        _logger.info(f"  MTs to be perturbed:      {mt_perturb}")
-        
-        _logger.info(f"\n{subseparator}\n")
+        _logger.info(f"  [INFO] [ACE] MT selection:")
+        _logger.info(f"  [INFO] [ACE]   MTs in ACE file:          {mt_in_ace}")
+        _logger.info(f"  [INFO] [ACE]   MTs in covariance matrix: {mt_in_cov}")
+        _logger.info(f"  [INFO] [ACE]   MTs to be perturbed:      {mt_perturb}")
+        _logger.info(f">> mt_count = {len(mt_perturb)}")
 
         # Convert energy grid from eV to MeV for ACE (ACE energies are in MeV)
         # CrossSectionCovariance now stores energies in eV by default
         energy_grid_eV = cov.energy_grid
         if cov.energy_unit == 'eV':
             energy_grid = [e / 1e6 for e in energy_grid_eV]  # Convert eV to MeV
-            _logger.info(f"  Converted energy grid from eV to MeV for ACE compatibility")
+            _logger.info(f"  [INFO] [ACE] Converted energy grid from eV to MeV for ACE compatibility")
         elif cov.energy_unit == 'MeV':
             energy_grid = energy_grid_eV
         else:
@@ -583,7 +582,7 @@ def perturb_seprate_ACE_files(
         pre_autofix_mts = list(mt_perturb)
         
         # Console: Show sample generation start
-        print(f"[INFO] Generating {num_samples} samples for ZAID {zaid}")
+        _logger.info(f"  [INFO] [ACE] Generating {num_samples} samples for ZAID {zaid}", console=True)
         
         try:
             factors, mt_perturb_final, fix_info = generate_samples(
@@ -606,30 +605,32 @@ def perturb_seprate_ACE_files(
             
             if isinstance(e, SoftAutofixWarning):
                 # Soft autofix failed threshold but decomposition also failed
-                _logger.error(f"[ACE] [ERROR] Soft autofix warning for isotope {zaid}")
-                _logger.error(f"  Error details: {str(e)}")
-                
+                _logger.error(f"  [ERROR] [ACE] Soft autofix warning for isotope {zaid}")
+                _logger.error(f"  [ERROR] [ACE] Error details: {str(e)}")
+
                 summary_data[zaid]["warnings"].append(f"Soft autofix failed to meet eigenvalue threshold and decomposition failed")
                 summary_data[zaid]["autofix_info"]["converged"] = False
                 summary_data[zaid]["autofix_info"]["soft_threshold_warning"] = True
                 skipped_isotopes[zaid] = str(e)
-                
-                _logger.info(f"\n{separator}\n")
-                _logger.error(f"Soft autofix and decomposition failed for {os.path.basename(ace_file)}", console=False)
-                print(f"[ERROR] Soft autofix and decomposition failed for {os.path.basename(ace_file)}")
+                _warning_counts[f"ZAID {zaid}: soft autofix failed"] = 1
+
+                _step_elapsed = time.time() - _step_t0
+                _logger.info(f"#-- END STEP {_step_num} (elapsed: {_step_elapsed:.1f}s) -------------------------------------")
+                _logger.info(f"  [ERROR] [ACE] Soft autofix and decomposition failed for {os.path.basename(ace_file)}", console=True)
                 continue
             elif isinstance(e, CovarianceFixError):
-                _logger.error(f"[ACE] [ERROR] Covariance matrix fixing failed for isotope {zaid}")
-                _logger.error(f"  Error details: {str(e)}")
-                _logger.error(f"  Suggestion: Try processing isotope {zaid} separately with autofix='medium' or 'hard'")
-                
+                _logger.error(f"  [ERROR] [ACE] Covariance matrix fixing failed for isotope {zaid}")
+                _logger.error(f"  [ERROR] [ACE] Error details: {str(e)}")
+                _logger.error(f"  [ERROR] [ACE] Suggestion: Try processing isotope {zaid} separately with autofix='medium' or 'hard'")
+
                 summary_data[zaid]["warnings"].append(f"Covariance matrix could not be fixed to meet eigenvalue threshold")
                 summary_data[zaid]["autofix_info"]["converged"] = False
                 skipped_isotopes[zaid] = str(e)
-                
-                _logger.info(f"\n{separator}\n")
-                _logger.error(f"Covariance fix failed for {os.path.basename(ace_file)}", console=False)
-                print(f"[ERROR] Covariance fix failed for {os.path.basename(ace_file)}")
+                _warning_counts[f"ZAID {zaid}: covariance fix failed"] = 1
+
+                _step_elapsed = time.time() - _step_t0
+                _logger.info(f"#-- END STEP {_step_num} (elapsed: {_step_elapsed:.1f}s) -------------------------------------")
+                _logger.info(f"  [ERROR] [ACE] Covariance fix failed for {os.path.basename(ace_file)}", console=True)
                 continue
             else:
                 # Re-raise other exceptions
@@ -663,13 +664,15 @@ def perturb_seprate_ACE_files(
             factors = _mask_factors_by_energy_range_ace(
                 factors, mt_perturb_final, energy_grid, energy_ranges, space
             )
-            _logger.info(f"[ACE] [ENERGY FILTER] Applied energy range masking for {zaid}")
+            _logger.info(f"  [INFO] [ACE] Applied energy range masking for {zaid}")
 
         # Store final perturbed MTs
         summary_data[zaid]["mt_perturbed"] = mt_perturb_final if mt_perturb_final else []
 
         # Store factors data for master matrix generation
         if mt_perturb_final and factors is not None:
+            _logger.info(f">> factors_shape = {factors.shape}")
+            _logger.info(f">> samples_generated = {factors.shape[0]}")
             all_factors_data[zaid] = {
                 'factors': factors.astype(np.float32),  # Convert to float32 for consistency
                 'mt_numbers': mt_perturb_final,
@@ -681,28 +684,25 @@ def perturb_seprate_ACE_files(
                 matrix_dir, zaid, factors, mt_perturb_final, energy_grid, verbose
             )
 
-        # =====================================================================
-        #  DRY‑RUN
-        # =====================================================================
+        # DRY-RUN
         if dry_run:
-            _logger.info(f"\n[ACE] [DRY-RUN] Generating only perturbation factors (no ACE files will be written)")
-            
+            _logger.info(f"  [INFO] [ACE] Dry-run: generating only perturbation factors (no ACE files will be written)")
+
             # For dry run, create summary for all samples across all temperatures
             processed_samples_by_temp_dry = {temp: list(range(num_samples)) for temp in temperatures}
-            
+
             # Note: Summary text files are no longer generated - parquet file contains all data
-            
-            _logger.info(f"\n{separator}\n")
-            print(f"[INFO] Completed dry run for ZAID {zaid}")
+
+            _step_elapsed = time.time() - _step_t0
+            _logger.info(f"#-- END STEP {_step_num} (elapsed: {_step_elapsed:.1f}s) -------------------------------------")
+            _logger.info(f"  [INFO] [ACE] Completed dry run for ZAID {zaid}", console=True)
             continue
 
-        # =====================================================================
-        #  FULL processing (ACE perturbation in-place)
-        # =====================================================================
-        _logger.info(f"\n[ACE] [PROCESSING] Applying perturbations to {num_samples} existing ACE files")
-        _logger.info(f"  Root directory: {os.path.abspath(root_dir)}")
+        # FULL processing (ACE perturbation in-place)
+        _logger.info(f"  [INFO] [ACE] Applying perturbations to {num_samples} existing ACE files")
+        _logger.info(f"  [INFO] [ACE] Root directory: {os.path.abspath(root_dir)}")
         if nprocs > 1:
-            _logger.info(f"  Using {nprocs} parallel processes")
+            _logger.info(f"  [INFO] [ACE] Using {nprocs} parallel processes")
             
         # Create progress tracking variables
         report_interval = max(1, min(100, num_samples // 10))  # Report at most 10 times
@@ -739,58 +739,56 @@ def perturb_seprate_ACE_files(
                 skipped_samples.append(j+1)
         
         if skipped_samples:
-            _logger.warning(f"  Skipped {len(skipped_samples)} samples - ACE files not found: {skipped_samples[:10]}{'...' if len(skipped_samples) > 10 else ''}")
-        
+            _logger.warning(f"  [WARN] [ACE] Skipped {len(skipped_samples)} samples - ACE files not found: {skipped_samples[:10]}{'...' if len(skipped_samples) > 10 else ''}")
+            _warning_counts[f"ZAID {zaid}: skipped samples"] = len(skipped_samples)
+
         if not tasks:
-            _logger.error(f"  No ACE files found for any samples of ZAID {zaid}")
-            _logger.info(f"\n{separator}\n")
-            print(f"[ERROR] No ACE files found for ZAID {zaid}")
+            _logger.error(f"  [ERROR] [ACE] No ACE files found for any samples of ZAID {zaid}")
+            _step_elapsed = time.time() - _step_t0
+            _logger.info(f"#-- END STEP {_step_num} (elapsed: {_step_elapsed:.1f}s) -------------------------------------")
+            _logger.info(f"  [ERROR] [ACE] No ACE files found for ZAID {zaid}", console=True)
             continue
-        
-        _logger.info(f"  Found {len(tasks)} ACE files to process out of {num_samples} requested samples")
+
+        _logger.info(f"  [INFO] [ACE] Found {len(tasks)} ACE files to process out of {num_samples} requested samples")
 
         if nprocs > 1:
             # For parallel processing, just show start and end messages
-            _logger.info(f"  Starting parallel sample processing... (progress updates disabled in parallel mode)")
-            
+            _logger.info(f"  [INFO] [ACE] Starting parallel sample processing... (progress updates disabled in parallel mode)")
+
             with Pool(processes=nprocs) as pool:
                 for args in tasks:
                     pool.apply_async(_process_sample_inplace, args=args)
                 pool.close()
                 pool.join()
-                
-            _logger.info(f"  Completed processing {len(tasks)} samples")
-            print(f"[INFO] Completed ACE perturbation for ZAID {zaid}")
+
+            _logger.info(f"  [INFO] [ACE] Completed processing {len(tasks)} samples")
+            _logger.info(f"  [INFO] [ACE] Completed ACE perturbation for ZAID {zaid}", console=True)
         else:
             # For sequential processing, show periodic progress updates
-            _logger.info(f"  Processing samples (progress updates every {report_interval} samples)")
-            
-            for i, args in enumerate(tasks):
+            _logger.info(f"  [INFO] [ACE] Processing samples (progress updates every {report_interval} samples)")
+
+            for task_i, args in enumerate(tasks):
                 _process_sample_inplace(*args)
-                
-                # Report progress periodically TO LOG FILE
-                if (i + 1) % report_interval == 0 or i + 1 == len(tasks):
-                    progress = (i + 1) / len(tasks) * 100
-                    _logger.info(f"  Progress: {i + 1}/{len(tasks)} samples ({progress:.1f}%)")
-            
-            print(f"[INFO] Completed ACE perturbation for ZAID {zaid}")
+
+                # Report progress periodically TO LOG FILE (verbose-gated)
+                if verbose and ((task_i + 1) % report_interval == 0 or task_i + 1 == len(tasks)):
+                    progress = (task_i + 1) / len(tasks) * 100
+                    _logger.info(f"  [INFO] [ACE] Progress: {task_i + 1}/{len(tasks)} samples ({progress:.1f}%)")
+
+            _logger.info(f"  [INFO] [ACE] Completed ACE perturbation for ZAID {zaid}", console=True)
 
         # ====== End of ZAID processing ======
-        _logger.info(f"\n{separator}")
-        _logger.info(f"[ACE] [COMPLETED] ZAID {zaid} ({len(tasks)} samples processed)")
-        _logger.info(f"{separator}\n")
+        _step_elapsed = time.time() - _step_t0
+        _logger.info(f">> success_count = {len(tasks)}")
+        _logger.info(f">> fail_count = {len(skipped_samples) if skipped_samples else 0}")
+        _logger.info(f"#-- END STEP {_step_num} (elapsed: {_step_elapsed:.1f}s) -------------------------------------")
 
         # Copy parquet data to each temperature directory (summary files generation removed)
         # Note: Summary text files are no longer generated - parquet file contains all data
 
-    # =====================================================================
-    #  Print final summary for all isotopes TO LOG FILE
-    # =====================================================================
-    separator = "=" * 80
-    _logger.info(f"\n{separator}")
-    _logger.info(f"[ACE] [SUMMARY] Processing Results")
-    _logger.info(f"{separator}")
-    
+    # SUMMARY section
+    _logger.info(f"#== SUMMARY ============================================================")
+
     if not summary_data:
         _logger.info("  No isotopes were processed.")
     else:
@@ -813,9 +811,8 @@ def perturb_seprate_ACE_files(
                                    if zaid not in skipped_isotopes and not data['mt_perturbed']}
         
         if successfully_processed:
-            _logger.info("\n  SUCCESSFULLY PROCESSED ISOTOPES:")
-            _logger.info(f"  {'-' * 50}")
-            
+            _logger.info("  SUCCESSFULLY PROCESSED ISOTOPES:")
+
             for zaid, data in successfully_processed.items():
                 # Only show filename in parentheses if ZAID is not numeric (i.e., it's a filename)
                 try:
@@ -823,13 +820,12 @@ def perturb_seprate_ACE_files(
                     isotope_display = f"{zaid}"
                 except (ValueError, TypeError):
                     isotope_display = f"{zaid} ({data['ace_file']})"
-                
-                _logger.info(f"\n  Isotope: {isotope_display}")
-                _logger.info(f"  {'-' * 50}")
-                
+
+                _logger.info(f"    Isotope: {isotope_display}")
+
                 # MT numbers that were perturbed
-                _logger.info(f"  ► Perturbed MT numbers: {', '.join(map(str, data['mt_perturbed']))}")
-                
+                _logger.info(f"      Perturbed MT numbers: {', '.join(map(str, data['mt_perturbed']))}")
+
                 # Autofix information (for medium/hard levels)
                 autofix_info = data.get('autofix_info', {})
                 if autofix_info.get('level') in ['medium', 'hard']:
@@ -843,29 +839,28 @@ def perturb_seprate_ACE_files(
                         else:
                             corr_str = f"({corr_pairs[0][0]},{corr_pairs[0][1]}), ({corr_pairs[1][0]},{corr_pairs[1][1]}), ... (+{len(corr_pairs)-2} more)"
                         autofix_lines.append(f"removed correlations {corr_str}")
-                    
+
                     if autofix_lines:
-                        _logger.info(f"  ► Autofix (level='{autofix_info['level']}'): {'; '.join(autofix_lines)}")
+                        _logger.info(f"      Autofix (level='{autofix_info['level']}'): {'; '.join(autofix_lines)}")
 
                 # MT numbers that were removed and why (excluding autofix info already shown above)
-                other_removed = {mt: reason for mt, reason in data['removed_mts'].items() 
+                other_removed = {mt: reason for mt, reason in data['removed_mts'].items()
                                if not reason.startswith("Removed during covariance autofix")}
                 if other_removed:
-                    _logger.info(f"  ► Other removed MT numbers:")
+                    _logger.info(f"      Other removed MT numbers:")
                     for mt, reason in sorted(other_removed.items()):
-                        _logger.info(f"    • MT={mt}: {reason}")
-                
+                        _logger.info(f"        MT={mt}: {reason}")
+
                 # Warnings if any
                 if data['warnings']:
-                    _logger.info(f"  ► Warnings:")
+                    _logger.info(f"      Warnings:")
                     for warning in data['warnings']:
-                        _logger.info(f"    • {warning}")
+                        _logger.info(f"        {warning}")
 
         # Report isotopes that were processed but had no perturbation
         if processed_no_perturbation or skipped_isotopes:
-            _logger.info("\n  ISOTOPES WITH NO PERTURBATION:")
-            _logger.info(f"  {'-' * 50}")
-            
+            _logger.info("  ISOTOPES WITH NO PERTURBATION:")
+
             # First report explicitly skipped isotopes - use same sorting and display logic
             for zaid, reason in sorted(skipped_isotopes.items(), key=lambda x: sort_key((x[0], None))):
                 if zaid in summary_data:
@@ -874,10 +869,10 @@ def perturb_seprate_ACE_files(
                         isotope_display = f"{zaid}"
                     except (ValueError, TypeError):
                         isotope_display = f"{zaid} ({summary_data[zaid]['ace_file']})"
-                    
-                    _logger.info(f"  Isotope: {isotope_display}")
-                    _logger.info(f"    • Reason: {reason}")
-            
+
+                    _logger.info(f"    Isotope: {isotope_display}")
+                    _logger.info(f"      Reason: {reason}")
+
             # Then report isotopes that were processed but had no MTs perturbed
             for zaid, data in processed_no_perturbation.items():
                 try:
@@ -885,47 +880,59 @@ def perturb_seprate_ACE_files(
                     isotope_display = f"{zaid}"
                 except (ValueError, TypeError):
                     isotope_display = f"{zaid} ({data['ace_file']})"
-                
-                _logger.info(f"  Isotope: {isotope_display}")
+
+                _logger.info(f"    Isotope: {isotope_display}")
                 if data['warnings']:
                     for warning in data['warnings']:
-                        _logger.info(f"    • Reason: {warning}")
+                        _logger.info(f"      Reason: {warning}")
                 else:
-                    _logger.info(f"    • Reason: No eligible MT numbers to perturb")
+                    _logger.info(f"      Reason: No eligible MT numbers to perturb")
 
-    _logger.info(f"\n{separator}")
+    # Emit summary metrics
+    processed_count = len([zaid for zaid in summary_data.keys() if zaid not in skipped_isotopes])
+    skipped_count = len(skipped_isotopes)
+    _logger.info(f">> processed_isotopes = {processed_count}")
+    _logger.info(f">> skipped_isotopes = {skipped_count}")
+    _job_elapsed = time.time() - _job_t0
+    _logger.info(f">> total_elapsed_s = {_job_elapsed:.1f}")
+    _logger.info(f"#== END SUMMARY ========================================================")
     
     # Convert individual files to master parquet and clean up
     final_parquet_path = _finalize_master_perturbation_matrix(matrix_dir, verbose)
     if final_parquet_path is not None:
-        _logger.info(f"[MATRIX] [COMPLETE] Master perturbation matrix finalized")
-        _logger.info(f"  Final matrix file: {os.path.basename(final_parquet_path)}")
-        
+        _logger.info(f"  [INFO] [ACE] Master perturbation matrix finalized")
+        _logger.info(f"  [INFO] [ACE] Final matrix file: {os.path.basename(final_parquet_path)}")
+
         # Copy the master parquet file to each temperature directory
         _copy_master_files_to_temperature_directories(root_dir, temperatures, final_parquet_path, log_file, verbose)
-        
+
         # Clean up master files from root directory after copying
         if final_parquet_path and os.path.exists(final_parquet_path):
             os.remove(final_parquet_path)
-            _logger.info(f"[CLEANUP] Removed master parquet from root directory")
-        
+            _logger.info(f"  [INFO] [ACE] Removed master parquet from root directory")
+
         matrix_file_msg = f"Master matrix file copied to temperature directories"
     else:
-        _logger.info(f"[MATRIX] [COMPLETE] No master perturbation matrix created (no valid data)")
+        _logger.info(f"  [INFO] [ACE] No master perturbation matrix created (no valid data)")
         matrix_file_msg = "No master matrix file created (no valid perturbation data)"
-    
-    # Clean up root log file after copying (will be copied to temperature directories)
-    # We'll remove it at the very end after all console output is done
-    
+
+    # WARNINGS section
+    _logger.info(f"#== WARNINGS ===========================================================")
+    if _warning_counts:
+        for wkey, wcount in _warning_counts.items():
+            _logger.info(f"  {wkey}: {wcount}")
+        _logger.info(f">> total_warnings = {sum(_warning_counts.values())}")
+    else:
+        _logger.info(f"  No warnings.")
+        _logger.info(f">> total_warnings = 0")
+    _logger.info(f"#== END WARNINGS =======================================================")
+
     # Console: Final summary
-    processed_count = len([zaid for zaid in summary_data.keys() if zaid not in skipped_isotopes])
-    skipped_count = len(skipped_isotopes)
-    
-    print(f"\n[INFO] Job completed!")
-    print(f"[INFO] Processed: {processed_count} isotope(s)")
-    print(f"[INFO] Skipped: {skipped_count} isotope(s)")
-    print(f"[INFO] Detailed log saved to: {log_file}")
-    print(f"[INFO] {matrix_file_msg}")
+    _logger.info(f"[INFO] [ACE] Job completed", console=True)
+    _logger.info(f"[INFO] [ACE] Processed: {processed_count} isotope(s)", console=True)
+    _logger.info(f"[INFO] [ACE] Skipped: {skipped_count} isotope(s)", console=True)
+    _logger.info(f"[INFO] [ACE] Detailed log saved to: {log_file}", console=True)
+    _logger.info(f"[INFO] [ACE] {matrix_file_msg}", console=True)
     
     # Clean up root log file after all console output is complete
     # The log file has been copied to temperature directories
@@ -976,7 +983,7 @@ def _copy_master_files_to_temperature_directories(
     logger = _get_logger()
     
     if verbose and logger:
-        logger.info(f"[COPY] Copying master files to temperature directories")
+        logger.info(f"  [INFO] [ACE] Copying master files to temperature directories")
     
     import shutil
     
@@ -993,12 +1000,12 @@ def _copy_master_files_to_temperature_directories(
             if os.path.abspath(master_parquet_path) != os.path.abspath(dest_parquet):
                 shutil.copy2(master_parquet_path, dest_parquet)
                 if verbose and logger:
-                    logger.info(f"  Copied parquet to {temp_str}/")
+                    logger.info(f"  [INFO] [ACE] Copied parquet to {temp_str}/")
             elif verbose and logger:
-                logger.info(f"  Parquet already exists in {temp_str}/")
+                logger.info(f"  [INFO] [ACE] Parquet already exists in {temp_str}/")
         elif verbose and logger:
-            logger.info(f"  No parquet file to copy to {temp_str}/")
-        
+            logger.info(f"  [INFO] [ACE] No parquet file to copy to {temp_str}/")
+
         # Copy log file (only if it's not already in this location)
         if os.path.exists(log_file):
             dest_log = os.path.join(temp_ace_dir, os.path.basename(log_file))
@@ -1006,9 +1013,9 @@ def _copy_master_files_to_temperature_directories(
             if os.path.abspath(log_file) != os.path.abspath(dest_log):
                 shutil.copy2(log_file, dest_log)
                 if verbose and logger:
-                    logger.info(f"  Copied log to {temp_str}/")
+                    logger.info(f"  [INFO] [ACE] Copied log to {temp_str}/")
             elif verbose and logger:
-                logger.info(f"  Log already exists in {temp_str}/")
+                logger.info(f"  [INFO] [ACE] Log already exists in {temp_str}/")
 
 
 def _mask_factors_by_energy_range_ace(
@@ -1123,8 +1130,8 @@ def apply_perturbation_factor_to_ace(ace, sample, sample_index, energy_grid, mt_
     perturbed_mts = sorted(set(perturbed_mts))
 
     if verbose and logger:
-        logger.info(f"[ACE] [PERTURB] Applying factors for sample #{sample_index+1:04d}")
-        logger.info(f"  Perturbed MT numbers: {perturbed_mts}")
+        logger.info(f"  [INFO] [ACE] Applying factors for sample #{sample_index+1:04d}")
+        logger.info(f"  [INFO] [ACE]   Perturbed MT numbers: {perturbed_mts}")
 
 
 def _apply_factors_to_mt(ace, mt, factors, boundaries, verbose=True):
@@ -1140,7 +1147,7 @@ def _apply_factors_to_mt(ace, mt, factors, boundaries, verbose=True):
     if (factors <= 0).any():
         bad = ", ".join(f"{f:+.3e}" for f in factors if f <= 0)
         if verbose and logger:
-            logger.warning(f"[ACE] [WARNING] MT={mt}: negative or zero factors detected ({bad}). Reaction not perturbed.")
+            logger.warning(f"  [WARN] [ACE] MT={mt}: negative or zero factors detected ({bad}). Reaction not perturbed.")
         return  # leave this reaction unperturbed
 
     reac       = ace.cross_section.reaction[mt]

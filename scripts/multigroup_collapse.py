@@ -111,7 +111,6 @@ def find_adaptive_group_boundaries(
     fine_bin_widths_mev: np.ndarray,
     max_order: int,
     rho_min: float = 0.90,
-    sigma_ratio_max: float = 2.0,
     logger=None,
     diagnostics_file: Optional[Path] = None,
 ) -> Tuple[List[List[int]], List[GroupInfo]]:
@@ -120,8 +119,13 @@ def find_adaptive_group_boundaries(
 
     Algorithm (greedy merging):
     1. Start at i=0
-    2. Extend group [i0, i1]: merge if rho >= rho_min and ratio <= sigma_ratio_max
+    2. Extend group [i0, i1]: merge if rho >= rho_min
     3. Finalize group, start next at i1+1
+
+    Variance heterogeneity within groups is not used as a merge criterion.
+    Instead, the percentile-based variance compensation applied after
+    collapsing adapts to the intra-group variance ratio (see
+    ``apply_percentile_variance_scaling``).
 
     Parameters
     ----------
@@ -139,8 +143,6 @@ def find_adaptive_group_boundaries(
         Maximum Legendre order (L)
     rho_min : float
         Minimum l=1 adjacent correlation to allow merging (default 0.90)
-    sigma_ratio_max : float
-        Maximum l=1 sigma ratio within group (default 2.0)
     logger : optional
         Logger for diagnostics
     diagnostics_file : Path, optional
@@ -160,7 +162,6 @@ def find_adaptive_group_boundaries(
     if logger:
         logger.info(f"  Grouping parameters:")
         logger.info(f"    rho_min = {rho_min}")
-        logger.info(f"    sigma_ratio_max = {sigma_ratio_max}")
 
     # Pre-compute per-bin l=1 sigma for diagnostics
     sigma_l1_per_bin = np.array([
@@ -197,15 +198,10 @@ def find_adaptive_group_boundaries(
         while i1 + 1 < n_fine:
             rho = adj_rho[i1]
 
-            # Check l=1 sigma ratio in [i0, i1+1]
+            # Sigma ratio diagnostics (not used for merge decision)
             sigmas_l1 = [s for s in sigma_l1_per_bin[i0:i1 + 2] if s > 0]
+            ratio = max(sigmas_l1) / min(sigmas_l1) if len(sigmas_l1) >= 2 else 1.0
 
-            if len(sigmas_l1) >= 2:
-                ratio = max(sigmas_l1) / min(sigmas_l1)
-            else:
-                ratio = 1.0
-
-            # Pairwise sigma ratio for diagnostics
             s_i = sigma_l1_per_bin[i1]
             s_j = sigma_l1_per_bin[i1 + 1]
             if s_i > 0 and s_j > 0:
@@ -213,8 +209,8 @@ def find_adaptive_group_boundaries(
             else:
                 pair_ratio = 1.0
 
-            # Merge if both criteria met
-            merged = rho >= rho_min and ratio <= sigma_ratio_max
+            # Merge if correlation criterion met
+            merged = rho >= rho_min
 
             if diag_fh is not None:
                 diag_fh.write(
@@ -440,7 +436,9 @@ def try_merge_adjacent_multigroups(
         cov_fine=cov_fine,
         groups=merged_groups,
         max_order=max_order,
-        variance_percentile=variance_percentile,
+        variance_percentile_min=67.0,
+        variance_percentile_max=85.0,
+        variance_ratio_ref=5.0,
         fine_bin_widths_mev=fine_bin_widths_mev,
         valid_mask=valid_mask,
         logger=logger,
@@ -720,7 +718,9 @@ def apply_percentile_variance_scaling(
     cov_fine: np.ndarray,
     groups: List[List[int]],
     max_order: int,
-    variance_percentile: float = 50.0,
+    variance_percentile_min: float = 67.0,
+    variance_percentile_max: float = 85.0,
+    variance_ratio_ref: float = 5.0,
     fine_bin_widths_mev: Optional[np.ndarray] = None,
     valid_mask: Optional[np.ndarray] = None,
     logger=None,
@@ -732,30 +732,18 @@ def apply_percentile_variance_scaling(
     averaging. This function rescales the diagonal to match a target percentile
     of the fine variances within each group, while preserving correlation structure.
 
-    When ``fine_bin_widths_mev`` is provided, the percentile is computed
-    adaptively per group using a retention-based quality score:
+    The percentile is adaptive per group, driven by the intra-group variance
+    heterogeneity (l=1 sigma ratio):
 
-        q = rho_w + (1 - rho_w) / n_eff
+        sigma_ratio = max(sigma_l1) / min(sigma_l1)   within the group
+        t = min((sigma_ratio - 1) / (variance_ratio_ref - 1), 1)
+        group_pct = variance_percentile_min + t * (variance_percentile_max - variance_percentile_min)
 
-    Groups with high internal correlation or few effective bins (high q) get a
-    lower percentile (closer to 50, i.e. less inflation), while groups that lose
-    more variance from averaging get a higher percentile.  The mapping is:
+    Homogeneous groups (ratio ~ 1) receive ``variance_percentile_min``.
+    Heterogeneous groups (ratio >= ``variance_ratio_ref``) receive
+    ``variance_percentile_max``.
 
-        group_pct = variance_percentile - q * (variance_percentile - 50)
-
-    So ``variance_percentile`` is the maximum percentile applied to groups with
-    the worst quality score (q -> 0).  Well-behaved groups (q -> 1) always get
-    percentile 50 (the median, i.e. no inflation).
-
-    - 50 = no compensation (every group gets the median)
-    - 67 = moderate: worst groups get 67th percentile, good groups ~50th
-    - 80 = aggressive: worst groups get 80th percentile
-
-    A no-deflation guard ensures scale factors are always >= 1.0 — this step
-    compensates for averaging-induced variance shrinkage, never introduces it.
-
-    When ``fine_bin_widths_mev`` is None, falls back to uniform
-    ``variance_percentile`` for all groups (backward compatible).
+    A no-deflation guard ensures scale factors are always >= 1.0.
 
     Parameters
     ----------
@@ -767,12 +755,18 @@ def apply_percentile_variance_scaling(
         Fine bin indices per group
     max_order : int
         Maximum Legendre order
-    variance_percentile : float
-        Maximum percentile of fine-bin variances used as target (50-95).
-        50 = median only (no compensation), 67 = moderate, 80 = aggressive.
-        When fine_bin_widths_mev is None, applied uniformly to all groups.
+    variance_percentile_min : float
+        Base percentile for groups with homogeneous variance (default 67).
+    variance_percentile_max : float
+        Maximum percentile for groups with highly heterogeneous variance
+        (default 85).
+    variance_ratio_ref : float
+        Intra-group sigma ratio at which the percentile saturates at
+        ``variance_percentile_max`` (default 5.0).
     fine_bin_widths_mev : np.ndarray, optional
-        Width of each fine bin in MeV.  Enables adaptive per-group percentile.
+        Width of each fine bin in MeV (unused, kept for API compatibility).
+    valid_mask : np.ndarray, optional
+        Boolean mask for fitted parameters (n_fine * max_order).
     logger : optional
         Logger for diagnostics
 
@@ -784,26 +778,34 @@ def apply_percentile_variance_scaling(
     n_groups = len(groups)
     n_params = n_groups * max_order
 
-    adaptive = fine_bin_widths_mev is not None
-    p_max = np.clip(variance_percentile, 50.0, 95.0)
+    p_min = np.clip(variance_percentile_min, 50.0, 95.0)
+    p_max = np.clip(variance_percentile_max, p_min, 95.0)
 
     # Build scaling factors
     scale_factors = np.ones(n_params)
-    group_percentiles = np.full(n_groups, p_max)
-    group_quality_scores = np.full(n_groups, np.nan)
+    group_percentiles = np.full(n_groups, p_min)
+    group_sigma_ratios = np.ones(n_groups)
 
     for g_idx, fine_indices in enumerate(groups):
-        # Compute adaptive percentile for this group
-        if adaptive:
-            q = _compute_group_quality_score(
-                fine_indices, cov_fine, fine_bin_widths_mev, max_order,
-            )
-            group_quality_scores[g_idx] = q
-            group_pct = p_max - q * (p_max - 50.0)
-            group_pct = np.clip(group_pct, 50.0, p_max)
-            group_percentiles[g_idx] = group_pct
+        # Compute intra-group l=1 sigma ratio
+        l1_sigmas = np.array([
+            np.sqrt(max(cov_fine[idx(i, 1, max_order), idx(i, 1, max_order)], 0.0))
+            for i in fine_indices
+        ])
+        pos_sigmas = l1_sigmas[l1_sigmas > 0]
+        if len(pos_sigmas) >= 2:
+            sigma_ratio = float(pos_sigmas.max() / pos_sigmas.min())
         else:
-            group_pct = p_max
+            sigma_ratio = 1.0
+        group_sigma_ratios[g_idx] = sigma_ratio
+
+        # Adaptive percentile: linear ramp from p_min to p_max
+        if variance_ratio_ref > 1.0:
+            t = min((sigma_ratio - 1.0) / (variance_ratio_ref - 1.0), 1.0)
+        else:
+            t = 0.0
+        group_pct = p_min + t * (p_max - p_min)
+        group_percentiles[g_idx] = group_pct
 
         for order in range(1, max_order + 1):
             g_param = idx(g_idx, order, max_order)
@@ -862,16 +864,12 @@ def apply_percentile_variance_scaling(
         avg_scale = np.mean(scale_factors)
         min_scale = np.min(scale_factors)
         max_scale = np.max(scale_factors)
-        if adaptive:
-            valid_q = group_quality_scores[~np.isnan(group_quality_scores)]
-            logger.info(f"  Adaptive variance compensation (variance_percentile={p_max:.1f}%):")
-            if len(valid_q) > 0:
-                logger.info(f"    Quality scores: mean={np.mean(valid_q):.3f}, "
-                            f"min={np.min(valid_q):.3f}, max={np.max(valid_q):.3f}")
-            logger.info(f"    Per-group percentiles: mean={np.mean(group_percentiles):.1f}, "
-                        f"min={np.min(group_percentiles):.1f}, max={np.max(group_percentiles):.1f}")
-        else:
-            logger.info(f"  Variance compensation (variance_percentile={p_max:.1f}%):")
+        logger.info(f"  Adaptive variance compensation (p_min={p_min:.0f}%, "
+                     f"p_max={p_max:.0f}%, ratio_ref={variance_ratio_ref:.1f}):")
+        logger.info(f"    Sigma ratios: mean={np.mean(group_sigma_ratios):.2f}, "
+                    f"min={np.min(group_sigma_ratios):.2f}, max={np.max(group_sigma_ratios):.2f}")
+        logger.info(f"    Per-group percentiles: mean={np.mean(group_percentiles):.1f}, "
+                    f"min={np.min(group_percentiles):.1f}, max={np.max(group_percentiles):.1f}")
         logger.info(f"    Scale factors: mean={avg_scale:.2f}, min={min_scale:.2f}, max={max_scale:.2f}")
         if len(retention_before) > 0:
             logger.info(f"    Variance retention before: {np.mean(retention_before):.0f}% (mean), "
@@ -1103,8 +1101,9 @@ def perform_adaptive_multigroup_collapse(
     energy_bins: List,      # List[EnergyBinInfo]
     max_order: int,
     rho_min: float = 0.90,
-    sigma_ratio_max: float = 2.0,
-    variance_percentile: float = 50.0,
+    variance_percentile_min: float = 67.0,
+    variance_percentile_max: float = 85.0,
+    variance_ratio_ref: float = 5.0,
     logger=None,
     apply_covariance_cap: bool = False,
     max_relative_std_cap: float = 1.0,
@@ -1136,15 +1135,14 @@ def perform_adaptive_multigroup_collapse(
         Maximum Legendre order
     rho_min : float
         Minimum l=1 adjacent correlation to merge (default 0.90)
-    sigma_ratio_max : float
-        Maximum l=1 sigma ratio within group (default 2.0)
-    variance_percentile : float
-        Maximum percentile of fine-bin variances used as target (50-95).
-        - 50 = median only, no compensation (default)
-        - 67 = moderate: worst groups get 67th percentile, good groups ~50th
-        - 80 = aggressive: worst groups get 80th percentile
-        This rescales the grouped covariance diagonal to preserve uncertainty
-        magnitudes while maintaining the correlation structure from averaging.
+    variance_percentile_min : float
+        Base percentile for groups with homogeneous variance (default 67).
+    variance_percentile_max : float
+        Maximum percentile for groups with highly heterogeneous variance
+        (default 85).
+    variance_ratio_ref : float
+        Intra-group sigma ratio at which the percentile saturates at
+        ``variance_percentile_max`` (default 5.0).
     logger : optional
         Logger for diagnostics
 
@@ -1271,7 +1269,6 @@ def perform_adaptive_multigroup_collapse(
                 fine_bin_widths_mev=fine_bin_widths_mev,
                 max_order=max_order,
                 rho_min=rho_min,
-                sigma_ratio_max=sigma_ratio_max,
                 logger=logger,
                 diagnostics_file=_diag_below,
             )
@@ -1310,7 +1307,6 @@ def perform_adaptive_multigroup_collapse(
                 fine_bin_widths_mev=fine_bin_widths_mev,
                 max_order=max_order,
                 rho_min=rho_min,
-                sigma_ratio_max=sigma_ratio_max,
                 logger=logger,
                 diagnostics_file=_diag_above,
             )
@@ -1338,7 +1334,6 @@ def perform_adaptive_multigroup_collapse(
             fine_bin_widths_mev=fine_bin_widths_mev,
             max_order=max_order,
             rho_min=rho_min,
-            sigma_ratio_max=sigma_ratio_max,
             logger=logger,
             diagnostics_file=diagnostics_file,
         )
@@ -1368,7 +1363,9 @@ def perform_adaptive_multigroup_collapse(
         cov_fine=cov_matrix,
         groups=groups,
         max_order=max_order,
-        variance_percentile=variance_percentile,
+        variance_percentile_min=variance_percentile_min,
+        variance_percentile_max=variance_percentile_max,
+        variance_ratio_ref=variance_ratio_ref,
         fine_bin_widths_mev=fine_bin_widths_mev,
         valid_mask=valid_mask_mg,
         logger=logger,

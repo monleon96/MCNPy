@@ -80,6 +80,7 @@ from scripts.exfor_utils import (
     build_gaussian_correlation_covariance,
     build_gaussian_relevance_matrix,
     _extract_correlation_matrix,
+    inject_within_bin_correlations,
     compute_bin_reliability_alpha,
     generate_cholesky_samples,
     cap_covariance_relative_uncertainty,
@@ -140,254 +141,157 @@ import time
 
 
 # =============================================================================
-# CONFIGURATION PARAMETERS - MODIFY THESE BEFORE RUNNING
+# CONFIGURATION
 # =============================================================================
 
-# -----------------------------------------------------------------------------
-# 1. INPUT/OUTPUT PATHS
-# -----------------------------------------------------------------------------
-# Reference ENDF file (source of energy grid and original Legendre coefficients)
+# --- PATHS & I/O ----------------------------------------------------------- #
 ENDF_FILE = "/share_snc/snc/JuanMonleon/jeff40_with_MF4_from_jeff33/26-Fe-56g.txt"
-
-# Optional: separate ENDF file for MF34 covariance data to merge with pipeline MF34.
-# Set to None to use ENDF_FILE. Useful when ENDF_FILE lacks MF34 or has a
-# parser-incompatible MF34 (e.g. mixed LB types).
-MF34_SOURCE_FILE = None
-
-# EXFOR JSON directory (for source="json" or "auto")
+MF34_SOURCE_FILE = None                          # Separate MF34 source (None = use ENDF_FILE)
 EXFOR_DIRECTORY = "/share_snc/snc/JuanMonleon/EXFOR/data_v1/"
-
-# X4Pro SQLite database path (for source="database" or "auto")
-# Set to None to use KIKA_X4PRO_DB_PATH env variable or builtin default
 EXFOR_DB_PATH = '/share_snc/snc/JuanMonleon/EXFOR/x4_iron_angular.db'
+OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_34/"
+TOF_PARAMETERS_FILE = "/share_snc/snc/JuanMonleon/EXFOR/exfor_tof_parameters.json"
 
-# Output directory (all generated files go here)
-OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_32/"
-
-# -----------------------------------------------------------------------------
-# 2. DATA SOURCE CONFIGURATION
-# -----------------------------------------------------------------------------
-# Data source: "json", "database", "auto" (database + JSON fallback), or "both"
-EXFOR_SOURCE = "database"
-
-# Filter options for database queries
-# Use list of ZAIDs to include both Fe-56 and natural iron (Fe-0) experiments
-# Natural iron is ~92% Fe-56 and has much more experimental coverage in 1-3 MeV range
-TARGET_ZAIDS = [26056, 26000]                    # Target ZAIDs: Fe-56 + natural iron
+# --- DATA SOURCE ----------------------------------------------------------- #
+EXFOR_SOURCE = "database"                        # "json", "database", "auto", or "both"
+TARGET_ZAIDS = [26056, 26000]                    # Fe-56 + natural iron
 TARGET_PROJECTILE = "N"                          # Projectile (N for neutrons)
-
-# Supplementary JSON files (for experiments not in database)
-# These files will be loaded in addition to the main data source
-SUPPLEMENTARY_JSON_FILES = [
+SUPPLEMENTARY_JSON_FILES = [                     # Extra JSON files loaded alongside main source
     '/share_snc/snc/JuanMonleon/EXFOR/data_v1/27673002.json',
-    # "C:/Users/Usuario/BaradDur/EXFOR/data_v1/data_v1/27673002.json",  # Gkatis (2025)
 ]
 
-# -----------------------------------------------------------------------------
-# 3. FITTING ENDF OUTPUT (Pipeline A)
-# -----------------------------------------------------------------------------
-GENERATE_NOMINAL_ENDF = True                     # Best-fit coefficients ENDF
-GENERATE_MC_MEAN_ENDF = False                     # MC mean coefficients ENDF
-GENERATE_FITTING_SAMPLES = False                 # Individual MC fitting sample ENDFs → endf_direct/
-GENERATE_FITTING_ACE = False                     # Generate ACE files for fitting samples
-SAVE_COVARIANCE_FILES = False                     # Save covariance/correlation .npy files
-N_SAMPLES = 100                                   # Number of MC samples
-
-# -----------------------------------------------------------------------------
-# 3b. MULTIGROUP COVARIANCE OPTIONS
-# -----------------------------------------------------------------------------
-GENERATE_MULTIGROUP_COVARIANCE = True           # Enable adaptive multigroup collapse
-MULTIGROUP_RHO_MIN = 0.90                        # Min l=1 adjacent correlation to merge
-MULTIGROUP_SIGMA_RATIO_MAX = 2.0                 # Max l=1 sigma ratio within group
-MF34_COVARIANCE_TYPE = "multigroup"              # "fine", "multigroup", or "both"
-USE_ORIGINAL_MF34_GRID = False                   # Force multigroup grid from original MF34
-MERGE_ORIGINAL_MF34 = True                      # Merge pipeline MF34 with original (full range) or pipeline-only
-
-# Variance conservatism for multigroup collapse
-# Controls how aggressively averaging-induced variance loss is compensated:
-# - 50 = no compensation (collapsed variance as-is)
-# Maximum percentile of fine-bin variances used as target after grouping (50-95).
-# 50 = median only (no compensation), 67 = moderate, 80 = aggressive.
-MULTIGROUP_VARIANCE_PERCENTILE = 67
-
-# Second-pass regrouping after smoothing
-MULTIGROUP_REGROUP_AFTER_SMOOTH = True
-MULTIGROUP_REGROUP_SIGMA_RATIO_MAX = 2.5   # relaxed vs first-pass 2.0
-
-# --- Pre-processing: covariance diagonal cap (before abs→rel conversion) ---
-APPLY_COVARIANCE_CAP = False          # global rel_std cap (True to enable)
-MAX_RELATIVE_STD_CAP = 1.0            # max relative std when cap is enabled
-
-# --- Pre-processing: near-zero regularization (during covariance construction) ---
-# Replaces explosive relative stds caused by near-zero means with
-# neighbor-interpolated values via congruence transform.
-REGULARIZE_NEAR_ZERO_REL_UNC = True
-NEAR_ZERO_SNR_THRESHOLD = 1.0        # flag if |mean|/sigma_abs < this
-NEAR_ZERO_N_NEIGHBORS = 3             # valid neighbors to seek on each side
-
-# =============================================================================
-# MF34 POST-PROCESSING PIPELINE
-# Steps 1-5 below run sequentially after abs→rel conversion.
-# Set APPLY_COV_POSTPROCESSING = False to skip ALL steps.
-# =============================================================================
-APPLY_COV_POSTPROCESSING = False
-
-# --- Step 1: Between-experiment scatter floor (FG level only, no config) ---
-
-# --- Step 2: Dip/spike smoothing & absent-order interpolation ---
-# Fills absent entries (rel_std < floor) and detects dips/spikes vs neighbors.
-# Set SMOOTH_DIP_FRACTION to None to disable dip detection.
-# Set SMOOTH_SPIKE_FACTOR to None to disable spike detection.
-SMOOTH_MIN_REL_STD = 0.005            # entries below this treated as absent
-SMOOTH_DIP_FRACTION = 0.50            # flag if < fraction * neighbor median (None = disabled)
-SMOOTH_SPIKE_FACTOR = 3.0             # flag if > factor * neighbor median (None = disabled)
-SMOOTH_DIP_N_NEIGHBORS = 3            # neighbors each side (FG level)
-SMOOTH_MEDIAN_FILL_THRESHOLD = 0.50   # if > this fraction absent, use flat median fill
-MG_SMOOTH_SPIKE_FACTOR = 2.0          # tighter spike threshold at MG/RG level
-MG_SMOOTH_DIP_N_NEIGHBORS = 5         # wider neighborhood at MG/RG level
-
-# --- Step 3: Spatial Gaussian smoothing of diagonal ---
-SMOOTH_DIAGONAL_WINDOW = 0            # Gaussian kernel window (0 = disabled, >=3 to enable)
-
-# --- Step 4: Hard cap per Legendre order ---
-# Final safety net: scales down entries exceeding cap via congruence transform.
-# Set to None to disable.
-ORDER_REL_STD_CAPS = {1: 0.50, 2: 0.50, 3: 0.40, 4: 0.35, 5: 0.25, 6: 0.20}
-
-# --- Step 5: Forward-fill absent orders ---
-FORWARD_FILL_REL_STD_ENABLED = False   # propagate last valid rel_std into absent bins
-
-# --- Diagnostic & file output ---
-VERBOSE_DIAGNOSTICS = True             # per-order percentile stats at every pipeline stage
-SAVE_CORRELATION_MATRICES = False      # save correlation alongside covariance
-
-# --- Post-processing: positivity-constrained projection ---
-# Projects MC samples to ensure non-negative angular distributions.
-APPLY_POSITIVITY_PROJECTION = True
-POSITIVITY_CHECK_POINTS = 101          # number of mu points in [-1, 1]
-
-# -----------------------------------------------------------------------------
-# 3c. ACE COMMON OPTIONS (shared NJOY config, used by either pipeline)
-# -----------------------------------------------------------------------------
-ACE_TEMPERATURES = [293.6]                         # Temperature(s) in Kelvin
-ACE_NJOY_EXE = "/soft_snc/NJOY/2016.78/bin/njoy"
-ACE_LIBRARY_NAME = "jeff40"                        # Library name (e.g., 'endfb81', 'jeff40')
-ACE_NJOY_VERSION = "NJOY 2016.78"                 # NJOY version string
-ACE_XSDIR_FILE = "/share_snc/snc/JuanMonleon/xsdir_MCNPy/xsdir40-irdff2"      # Master xsdir to update (None = per-sample only)
-ACE_SKIP_EXISTING = False                          # Skip samples with existing ACE files
-
-# -----------------------------------------------------------------------------
-# 3d. MF34 SAMPLING (Pipeline B)
-# -----------------------------------------------------------------------------
-GENERATE_MF34_SAMPLES = False                       # Generate perturbed ENDF samples from MF34 covariance → endf/
-GENERATE_MF34_ACE = False                           # Generate ACE files for MF34 samples
-SAMPLING_RESOLUTION = "multigroup"                 # "fine" | "multigroup" (grid controlled by USE_ORIGINAL_MF34_GRID)
-SAMPLING_SPACE = "linear"                          # "linear" or "log"
-SAMPLING_DECOMPOSITION = "svd"                     # "svd", "cholesky", "eigen", "pca"
-SAMPLING_METHOD = "random"                          # "sobol", "lhs", "random"
-
-# -----------------------------------------------------------------------------
-# 4. GENERAL PARAMETERS (Apply to ALL methods)
-# -----------------------------------------------------------------------------
-# Energy range to process (in MeV)
+# --- ENERGY RANGE & PHYSICS ------------------------------------------------ #
 ENERGY_MIN_MEV = 0.847
 ENERGY_MAX_MEV = 4
-
-# MT reaction number (2 = elastic scattering)
-MT_NUMBER = 2
-
-# Target isotope masses (for LAB->CM frame conversion)
+MT_NUMBER = 2                                    # MT reaction (2 = elastic scattering)
 M_PROJ_U = 1.008665                              # Projectile mass in u (neutron)
 M_TARG_U = 55.93494                              # Target mass in u (Fe-56)
 
-# Legendre fitting parameters
+# --- LEGENDRE FITTING ------------------------------------------------------ #
 MAX_LEGENDRE_DEGREE = 6                          # Maximum Legendre order (capped at 8)
 SELECT_DEGREE = "aicc"                           # "aicc", "bic", or None (use max)
 RIDGE_LAMBDA = 1e-4                              # Ridge regularization parameter
 RIDGE_POWER = 4                                  # Power for ridge penalty (l^ridge_power)
-DF_METHOD = "hat"                                # Degrees of freedom method: "hat" or "naive"
+DF_METHOD = "hat"                                # Degrees of freedom: "hat" or "naive"
 
-# Processing options
-N_PROCS = 40                                      # Parallel processes (1 = sequential)
-BASE_SEED = 42                                   # Random seed for reproducibility
-N_EFF_WARNING_THRESHOLD = 5.0                    # Warning if effective sample size < threshold
-
-# --- Experiment Exclusion and Uncertainty Floor ---
-# Experiments to exclude from fitting (e.g., experiments with known issues)
-# Accepts formats: "20743" (all subentries), "20743002", or "20743/002"
-EXCLUDE_EXPERIMENTS = ["32246002"]  
-# - "20743002" - Cierjacks (1978)
-# - "32246002" - Tostkii (1957)
-
-
-# Minimum relative uncertainty floor (prevents unrealistically small errors from dominating)
-# Set to 0.0 to disable. e.g., 0.05 for 5% minimum uncertainty
-MIN_RELATIVE_UNCERTAINTY = 0.05
-# Uncertainty floor strategy: 'fixed' (simple floor) or 'bin_median' (replace with bin median)
-UNCERTAINTY_FLOOR_STRATEGY = 'bin_median'
-
-# -----------------------------------------------------------------------------
-# 6. METHOD-SPECIFIC PARAMETERS
-# -----------------------------------------------------------------------------
-
-# --- 6a. TOF Energy Resolution ---
-DELTA_T_NS = 5.0                                 # Time resolution in nanoseconds
-FLIGHT_PATH_M = 27.037                           # Flight path in meters
-N_SIGMA_CUTOFF = 3.0                             # Gaussian kernel cutoff (±n_sigma * σE)
-
-# --- 6d. Angular-Band Discrepancy ---
+# --- UNCERTAINTY & DISCREPANCY --------------------------------------------- #
+# Band-based discrepancy
 USE_BAND_DISCREPANCY = True                      # Use band-based uncertainty (vs global Birge)
-MIN_POINTS_PER_BAND = 5                          # Minimum points to estimate s_b per band
-MAX_BAND_SCALE_FACTOR = 3.0                      # Max multiplicative scale per band (safety cap)
-TAU_SMOOTHING_WINDOW = 1                         # Moving median window for s_b(E) smoothing (1 = disabled)
-TAU_PRIOR_FLOOR = False                           # Apply tau prior floor from well-supported bins
+MIN_POINTS_PER_BAND = 5                          # Min points to estimate s_b per band
+MAX_BAND_SCALE_FACTOR = 3.0                      # Max multiplicative scale per band
+TAU_SMOOTHING_WINDOW = 1                         # Moving median window for s_b(E) (1 = disabled)
+TAU_PRIOR_FLOOR = False                          # Apply tau prior floor from well-supported bins
 TAU_PRIOR_NEFF_THRESHOLD = 5.0                   # Min N_eff to count as "well-supported"
 TAU_PRIOR_PERCENTILE = 50                        # Percentile of well-supported tau for baseline
 RESCALE_UNC_BY_CHI2 = True                       # Apply Birge scaling when band discrepancy disabled
 ALLOW_SHRINK_UNC = True                          # Allow uncertainties to shrink (chi2_red < 1)
-
-# --- 6e. Per-Experiment Normalization ---
+# Per-experiment normalization
 NORMALIZATION_SIGMA = 0.05                       # Per-experiment normalization uncertainty (5%)
-NORM_DIST = "lognormal"                          # Distribution: "lognormal" (always positive) or "normal"
+NORM_DIST = "lognormal"                          # "lognormal" (always positive) or "normal"
+# Experiment exclusion & uncertainty floor
+EXCLUDE_EXPERIMENTS = ["32246002"]                # Experiments to exclude (e.g. "32246002" = Tostkii)
+MIN_RELATIVE_UNCERTAINTY = 0.05                  # Minimum relative uncertainty floor (0 = disabled)
+UNCERTAINTY_FLOOR_STRATEGY = 'bin_median'        # 'fixed' or 'bin_median'
 
-# --- 6f. Model Averaging ---
+# --- MODEL AVERAGING ------------------------------------------------------- #
 USE_MODEL_AVERAGING = True                       # Enable model averaging over Legendre orders
-MIN_DEGREE_FOR_AVERAGING = 1                     # Minimum degree to consider (1 = include all)
-USE_DEGREE_SAMPLING_IN_MC = True                 # Sample degree from degree_weights distribution
+MIN_DEGREE_FOR_AVERAGING = 1                     # Min degree to consider (1 = include all)
+USE_DEGREE_SAMPLING_IN_MC = True                 # Sample degree from degree_weights in MC
 
-# --- 6g. Energy Bin Method Specific  ---
+# --- ENERGY BINNING & CORRELATION ------------------------------------------ #
+# Weighting and constraints
 NORMALIZE_BY_N_POINTS = True                     # Enable study-level GLS-ESS weighting
-MAX_EXP_WEIGHT_FRAC_BIN = 0.80                  # Safety cap per experiment
-FREEZE_C0 = True                                # Fix c0 for shape-only refits
-MAX_SAMPLE_ORDER = 3                               # Publish covariance for l=1..3 only (higher orders cap-dominated)
-
-# --- Angular Quality Gate ---
+MAX_EXP_WEIGHT_FRAC_BIN = 0.80                  # Safety cap per experiment weight fraction
+FREEZE_C0 = True                                 # Fix c0 for shape-only refits
+MAX_SAMPLE_ORDER = 3                             # Publish covariance for l=1..MAX_SAMPLE_ORDER only
+# Angular quality gate
 ANGULAR_QUALITY_GATE = True
-MIN_ANGULAR_POINTS = 4                              # Minimum total angular data points
-MIN_BANDS_COVERED = 3                               # Must have data in all 3 bands (F/M/B)
-MAX_BIN_EXPANSION = 3                               # Max expansion steps (1=±1 bins, 2=±2 bins)
-
-# --- Energy Grid Source ---
-# "endf"  — use ENDF MF4 Legendre energy grid (original behavior)
-# "union" — build grid from union of energies of selected EXFOR subentries
-ENERGY_GRID_SOURCE = "union"
-# Subentries + per-subentry energy range (min_MeV, max_MeV); None = use global bound
-UNION_GRID_SUBENTRIES = [
-    ("10571002", 0.847, 2.5),   # Kinney: up to 2.5 MeV
-    ("23365005", 2.5, 4),       # Pirovano: from 2.5 MeV onwards
+MIN_ANGULAR_POINTS = 4                           # Min total angular data points
+MIN_BANDS_COVERED = 3                            # Must have data in all 3 bands (F/M/B)
+MAX_BIN_EXPANSION = 3                            # Max expansion steps (1=+-1 bins, 2=+-2, etc.)
+# Energy grid source
+ENERGY_GRID_SOURCE = "union"                     # "endf" (MF4 grid) or "union" (from EXFOR subentries)
+UNION_GRID_SUBENTRIES = [                        # (subentry, min_MeV, max_MeV)
+    ("10571002", 0.847, 2.5),                    # Kinney: up to 2.5 MeV
+    ("23365005", 2.5, 4),                        # Pirovano: from 2.5 MeV onwards
 ]
-
-# --- 6h. Correlation Method ---
-# "gaussian"        — Per-bin stochastic MC → Gaussian parametric energy correlations → Cholesky samples
-# "kernel_weight_mc" — Kernel-weighted multi-bin MC → correlations from shared perturbed datasets
-# "hybrid"          — KW two-pass + Gaussian blend weighted by per-bin reliability (alpha from n_eff)
+# Correlation method
+# "gaussian"         - Per-bin stochastic MC -> Gaussian parametric correlations -> Cholesky
+# "kernel_weight_mc" - Kernel-weighted multi-bin MC -> correlations from shared perturbations
+# "hybrid"           - KW two-pass + Gaussian blend weighted by per-bin reliability
 CORRELATION_METHOD = "kernel_weight_mc"
-KW_MC_TWO_PASS = True                            # True: per-bin variance + KW correlations. False: single-pass.
-KW_MC_MIN_WEIGHT = 1e-3                          # Overlap weight threshold for kernel-weight MC
-KW_MIN_POINTS_REF = None                         # Quality penalty threshold: set to max_order+1 at runtime
+KW_MC_TWO_PASS = True                            # True: per-bin variance + KW correlations
+KW_MC_MIN_WEIGHT = 1e-3                          # Overlap weight threshold
+KW_MIN_POINTS_REF = None                         # Quality penalty threshold (set to max_order+1 at runtime)
+# TOF energy resolution
+DELTA_T_NS = 5.0                                 # Time resolution in nanoseconds
+FLIGHT_PATH_M = 27.037                           # Flight path in meters
+N_SIGMA_CUTOFF = 3.0                             # Gaussian kernel cutoff (+-n_sigma * sigma_E)
 
-# --- 6i. TOF Parameters (for energy resolution) ---
-TOF_PARAMETERS_FILE = "/share_snc/snc/JuanMonleon/EXFOR/exfor_tof_parameters.json"
+# --- COVARIANCE PIPELINE --------------------------------------------------- #
+# Pre-processing: cap & near-zero regularization
+APPLY_COVARIANCE_CAP = False                     # Global rel_std cap (True to enable)
+MAX_RELATIVE_STD_CAP = 1.0                       # Max relative std when cap is enabled
+REGULARIZE_NEAR_ZERO_REL_UNC = True              # Regularize explosive rel_std near zero means
+NEAR_ZERO_SNR_THRESHOLD = 1.0                    # Flag if |mean|/sigma_abs < threshold
+NEAR_ZERO_N_NEIGHBORS = 3                        # Valid neighbors to seek on each side
+# Post-processing pipeline (set APPLY_COV_POSTPROCESSING=False to skip all)
+APPLY_COV_POSTPROCESSING = False
+SMOOTH_MIN_REL_STD = 0.005                       # Entries below this treated as absent (0.5%)
+SMOOTH_DIP_FRACTION = 0.50                       # Flag dips < fraction*median (None = disabled)
+SMOOTH_SPIKE_FACTOR = 3.0                        # Flag spikes > factor*median (None = disabled)
+SMOOTH_DIP_N_NEIGHBORS = 3                       # Neighbors each side (fine-grid level)
+SMOOTH_MEDIAN_FILL_THRESHOLD = 0.50              # If > fraction absent, use flat median fill
+MG_SMOOTH_SPIKE_FACTOR = 2.0                     # Tighter spike threshold at MG level
+MG_SMOOTH_DIP_N_NEIGHBORS = 5                    # Wider neighborhood at MG level
+SMOOTH_DIAGONAL_WINDOW = 0                       # Gaussian kernel window (0=disabled, >=3 to enable)
+ORDER_REL_STD_CAPS = {1: 0.50, 2: 0.50, 3: 0.40, 4: 0.35, 5: 0.25, 6: 0.20}  # Hard cap per order (None=disabled)
+FORWARD_FILL_REL_STD_ENABLED = False             # Propagate last valid rel_std into absent bins
+# Positivity projection
+APPLY_POSITIVITY_PROJECTION = True               # Project MC samples for non-negative distributions
+POSITIVITY_CHECK_POINTS = 101                    # Number of mu points in [-1, 1]
+
+# --- MULTIGROUP COVARIANCE ------------------------------------------------- #
+GENERATE_MULTIGROUP_COVARIANCE = True            # Enable adaptive multigroup collapse
+MULTIGROUP_RHO_MIN = 0.90                        # Min l=1 adjacent correlation to merge groups
+MF34_COVARIANCE_TYPE = "multigroup"              # "fine", "multigroup", or "both"
+USE_ORIGINAL_MF34_GRID = False                   # Force grid from original MF34
+MERGE_ORIGINAL_MF34 = True                       # Merge pipeline MF34 with original (full range)
+MULTIGROUP_VARIANCE_PCT_MIN = 67                 # Base percentile for homogeneous groups
+MULTIGROUP_VARIANCE_PCT_MAX = 85                 # Max percentile for heterogeneous groups
+MULTIGROUP_VARIANCE_RATIO_REF = 5.0              # Sigma ratio at which percentile saturates
+MULTIGROUP_REGROUP_AFTER_SMOOTH = False          # Second-pass regrouping after smoothing
+
+# --- OUTPUT: Pipeline A (fitting) ------------------------------------------ #
+N_SAMPLES = 100                                  # Number of MC samples
+BASE_SEED = 42                                   # Random seed for reproducibility
+GENERATE_NOMINAL_ENDF = True                     # Best-fit coefficients ENDF
+GENERATE_MC_MEAN_ENDF = False                    # MC mean coefficients ENDF
+GENERATE_FITTING_SAMPLES = False                 # Individual MC sample ENDFs -> endf_direct/
+GENERATE_FITTING_ACE = False                     # Generate ACE files for fitting samples
+SAVE_COVARIANCE_FILES = False                    # Save covariance/correlation .npy files
+SAVE_CORRELATION_MATRICES = False                # Save correlation alongside covariance
+
+# --- OUTPUT: Pipeline B (MF34 sampling) ------------------------------------ #
+GENERATE_MF34_SAMPLES = False                    # Perturbed ENDF samples from MF34 -> endf/
+GENERATE_MF34_ACE = False                        # Generate ACE files for MF34 samples
+SAMPLING_RESOLUTION = "multigroup"               # "fine" or "multigroup"
+SAMPLING_SPACE = "linear"                        # "linear" or "log"
+SAMPLING_DECOMPOSITION = "svd"                   # "svd", "cholesky", "eigen", "pca"
+SAMPLING_METHOD = "random"                       # "sobol", "lhs", "random"
+
+# --- ACE / NJOY ----------------------------------------------------------- #
+ACE_TEMPERATURES = [293.6]                       # Temperature(s) in Kelvin
+ACE_NJOY_EXE = "/soft_snc/NJOY/2016.78/bin/njoy"
+ACE_LIBRARY_NAME = "jeff40"                      # Library name (e.g., 'endfb81', 'jeff40')
+ACE_NJOY_VERSION = "NJOY 2016.78"               # NJOY version string
+ACE_XSDIR_FILE = "/share_snc/snc/JuanMonleon/xsdir_MCNPy/xsdir40-irdff2"
+ACE_SKIP_EXISTING = False                        # Skip samples with existing ACE files
+
+# --- RUNTIME --------------------------------------------------------------- #
+N_PROCS = 40                                     # Parallel processes (1 = sequential)
+N_EFF_WARNING_THRESHOLD = 5.0                    # Warning if effective sample size < threshold
+VERBOSE_DIAGNOSTICS = True                       # Per-order percentile stats at every pipeline stage
 
 # =============================================================================
 # END OF CONFIGURATION
@@ -1655,10 +1559,10 @@ def run_exfor_to_endf_sampling_v2(
     # Multigroup covariance options
     generate_multigroup_covariance: bool = False,
     multigroup_rho_min: float = 0.90,
-    multigroup_sigma_ratio_max: float = 2.0,
-    multigroup_variance_percentile: float = 50.0,
-    multigroup_regroup_after_smooth: bool = True,
-    multigroup_regroup_sigma_ratio_max: float = 2.5,
+    multigroup_variance_pct_min: float = 67.0,
+    multigroup_variance_pct_max: float = 85.0,
+    multigroup_variance_ratio_ref: float = 5.0,
+    multigroup_regroup_after_smooth: bool = False,
     mf34_covariance_type: str = "fine",
     use_original_mf34_grid: bool = False,
     # Database configuration (new parameters)
@@ -1744,102 +1648,178 @@ def run_exfor_to_endf_sampling_v2(
     _logger = DualLogger(str(log_file))
     _set_logger(_logger)
 
-    separator = "=" * 80
-    _logger.info(separator)
-    _logger.info("EXFOR-to-ENDF Angular Distribution Sampling (v2 - using kika.exfor)")
-    _logger.info(separator)
+    _logger.info("EXFOR-to-ENDF Angular Distribution Sampling (v2)")
     _logger.info(f"Timestamp: {datetime.now().isoformat()}")
     _logger.info("")
 
     print(f"[INFO] Starting EXFOR-to-ENDF sampling (v2)")
     print(f"[INFO] Log file: {log_file}")
 
-    # ── [RUN PARAMETERS] ─────────────────────────────────────────────────────
-    _logger.info("[RUN PARAMETERS]")
+    # Track warnings for dynamic summary at end
+    _warning_counts = {}
+
+    # ── CONFIG section ───────────────────────────────────────────────────────
+    _logger.info("#== CONFIG ================================================================")
     _logger.info("")
 
-    # -- General: Paths --
-    _logger.info("  Paths:")
-    _logger.info(f"    ENDF_FILE              = {endf_file}")
-    _logger.info(f"    MF34_SOURCE_FILE       = {mf34_source_file or '(same as ENDF_FILE)'}")
-    _logger.info(f"    EXFOR_DIRECTORY         = {exfor_directory}")
-    _logger.info(f"    EXFOR_DB_PATH           = {exfor_db_path}")
-    _logger.info(f"    OUTPUT_DIR              = {output_dir}")
+    # -- Paths & I/O --
+    _logger.info("  # Paths & I/O")
+    _logger.info(f"  ENDF_FILE = {endf_file}")
+    _logger.info(f"  MF34_SOURCE_FILE = {mf34_source_file or '(same as ENDF_FILE)'}")
+    _logger.info(f"  EXFOR_DIRECTORY = {exfor_directory}")
+    _logger.info(f"  EXFOR_DB_PATH = {exfor_db_path}")
+    _logger.info(f"  OUTPUT_DIR = {output_dir}")
+    _logger.info(f"  TOF_PARAMETERS_FILE = {TOF_PARAMETERS_FILE}")
     _logger.info("")
 
-    # -- General: Data source --
-    _logger.info("  Data Source:")
-    _logger.info(f"    EXFOR_SOURCE            = {exfor_source}")
-    _logger.info(f"    TARGET_ZAIDS            = {target_zaid}")
-    _logger.info(f"    TARGET_PROJECTILE       = {target_projectile}")
-    _logger.info(f"    SUPPLEMENTARY_JSON_FILES = {supplementary_json_files}")
+    # -- Data Source --
+    _logger.info("  # Data Source")
+    _logger.info(f"  EXFOR_SOURCE = {exfor_source}")
+    _logger.info(f"  TARGET_ZAIDS = {target_zaid}")
+    _logger.info(f"  TARGET_PROJECTILE = {target_projectile}")
+    _logger.info(f"  SUPPLEMENTARY_JSON_FILES = {supplementary_json_files}")
     _logger.info("")
 
-    # -- General: Physics --
-    _logger.info("  Energy Range & Physics:")
-    _logger.info(f"    ENERGY_MIN_MEV          = {energy_min_mev}")
-    _logger.info(f"    ENERGY_MAX_MEV          = {energy_max_mev}")
-    _logger.info(f"    MT_NUMBER               = {mt_number}")
-    _logger.info(f"    M_PROJ_U                = {m_proj_u}")
-    _logger.info(f"    M_TARG_U                = {m_targ_u}")
+    # -- Energy Range & Physics --
+    _logger.info("  # Energy Range & Physics")
+    _logger.info(f"  ENERGY_MIN_MEV = {energy_min_mev}")
+    _logger.info(f"  ENERGY_MAX_MEV = {energy_max_mev}")
+    _logger.info(f"  MT_NUMBER = {mt_number}")
+    _logger.info(f"  M_PROJ_U = {m_proj_u}")
+    _logger.info(f"  M_TARG_U = {m_targ_u}")
     _logger.info("")
 
-    # -- General: Legendre fitting --
-    _logger.info("  Legendre Fitting:")
-    _logger.info(f"    MAX_LEGENDRE_DEGREE     = {max_degree}")
-    _logger.info(f"    SELECT_DEGREE           = {select_degree if select_degree else 'None (use max)'}")
-    _logger.info(f"    RIDGE_LAMBDA            = {ridge_lambda}")
-    _logger.info(f"    RIDGE_POWER             = {RIDGE_POWER}")
-    _logger.info(f"    DF_METHOD               = {DF_METHOD}")
+    # -- Legendre Fitting --
+    _logger.info("  # Legendre Fitting")
+    _logger.info(f"  MAX_LEGENDRE_DEGREE = {max_degree}")
+    _logger.info(f"  SELECT_DEGREE = {select_degree if select_degree else 'None (use max)'}")
+    _logger.info(f"  RIDGE_LAMBDA = {ridge_lambda}")
+    _logger.info(f"  RIDGE_POWER = {RIDGE_POWER}")
+    _logger.info(f"  DF_METHOD = {DF_METHOD}")
     _logger.info("")
 
-    # -- Fitting ENDF Output (Pipeline A) --
-    _logger.info("  Fitting ENDF Output (Pipeline A):")
-    _logger.info(f"    GENERATE_NOMINAL_ENDF   = {generate_nominal_endf}")
-    _logger.info(f"    GENERATE_MC_MEAN_ENDF   = {generate_mc_mean_endf}")
-    _logger.info(f"    GENERATE_FITTING_SAMPLES = {generate_fitting_samples}")
-    _logger.info(f"    GENERATE_FITTING_ACE    = {generate_fitting_ace}")
-    _logger.info(f"    SAVE_COVARIANCE_FILES   = {save_covariance_files}")
-    _logger.info(f"    N_SAMPLES               = {n_samples}")
-    _logger.info(f"    SAVE_CORRELATION_MATRICES = {save_correlation_matrices}")
+    # -- Uncertainty & Discrepancy --
+    _logger.info("  # Uncertainty & Discrepancy")
+    _logger.info(f"  USE_BAND_DISCREPANCY = {use_band_discrepancy}")
+    _logger.info(f"  MIN_POINTS_PER_BAND = {min_points_per_band}")
+    _logger.info(f"  MAX_BAND_SCALE_FACTOR = {max_band_scale}")
+    _logger.info(f"  TAU_SMOOTHING_WINDOW = {tau_smoothing_window}")
+    _logger.info(f"  TAU_PRIOR_FLOOR = {tau_prior_floor}")
+    if tau_prior_floor:
+        _logger.info(f"  TAU_PRIOR_NEFF_THRESHOLD = {tau_prior_neff_threshold}")
+        _logger.info(f"  TAU_PRIOR_PERCENTILE = {tau_prior_percentile}")
+    _logger.info(f"  RESCALE_UNC_BY_CHI2 = {RESCALE_UNC_BY_CHI2}")
+    _logger.info(f"  ALLOW_SHRINK_UNC = {ALLOW_SHRINK_UNC}")
+    _logger.info(f"  NORMALIZATION_SIGMA = {sigma_norm}")
+    _logger.info(f"  NORM_DIST = {NORM_DIST}")
+    _logger.info(f"  EXCLUDE_EXPERIMENTS = {exclude_experiments if exclude_experiments else 'None'}")
+    _logger.info(f"  MIN_RELATIVE_UNCERTAINTY = {min_relative_uncertainty} ({min_relative_uncertainty*100:.1f}%)")
+    _logger.info(f"  UNCERTAINTY_FLOOR_STRATEGY = {UNCERTAINTY_FLOOR_STRATEGY}")
     _logger.info("")
 
-    # -- General: Processing --
-    _logger.info("  Processing:")
-    _logger.info(f"    N_PROCS                 = {n_procs}")
-    _logger.info(f"    BASE_SEED               = {base_seed}")
+    # -- Model Averaging --
+    _logger.info("  # Model Averaging")
+    _logger.info(f"  USE_MODEL_AVERAGING = {use_model_averaging}")
+    _logger.info(f"  MIN_DEGREE_FOR_AVERAGING = {min_degree_for_averaging}")
+    _logger.info(f"  USE_DEGREE_SAMPLING_IN_MC = {USE_DEGREE_SAMPLING_IN_MC}")
     _logger.info("")
 
-    # -- General: Exclusions --
-    _logger.info("  Exclusions & Uncertainty:")
-    _logger.info(f"    EXCLUDE_EXPERIMENTS     = {exclude_experiments if exclude_experiments else 'None'}")
-    _logger.info(f"    MIN_RELATIVE_UNCERTAINTY = {min_relative_uncertainty} ({min_relative_uncertainty*100:.1f}%)")
-    _logger.info(f"    UNCERTAINTY_FLOOR_STRATEGY = {UNCERTAINTY_FLOOR_STRATEGY}")
-    _logger.info("")
-
-    # -- Energy Grid Source --
+    # -- Energy Binning & Correlation --
     if union_grid_subentries is None:
         union_grid_subentries = UNION_GRID_SUBENTRIES
-    _logger.info("  Energy Grid:")
-    _logger.info(f"    ENERGY_GRID_SOURCE      = {energy_grid_source}")
+    _logger.info("  # Energy Binning & Correlation")
+    _logger.info(f"  NORMALIZE_BY_N_POINTS = {NORMALIZE_BY_N_POINTS}")
+    _logger.info(f"  MAX_EXP_WEIGHT_FRAC_BIN = {MAX_EXP_WEIGHT_FRAC_BIN}")
+    _logger.info(f"  FREEZE_C0 = {FREEZE_C0}")
+    _logger.info(f"  MAX_SAMPLE_ORDER = {MAX_SAMPLE_ORDER}")
+    _logger.info(f"  ANGULAR_QUALITY_GATE = {ANGULAR_QUALITY_GATE}")
+    if ANGULAR_QUALITY_GATE:
+        _logger.info(f"  MIN_ANGULAR_POINTS = {MIN_ANGULAR_POINTS}")
+        _logger.info(f"  MIN_BANDS_COVERED = {MIN_BANDS_COVERED}")
+        _logger.info(f"  MAX_BIN_EXPANSION = {MAX_BIN_EXPANSION}")
+    _logger.info(f"  ENERGY_GRID_SOURCE = {energy_grid_source}")
     if energy_grid_source == "union":
-        _logger.info(f"    UNION_GRID_SUBENTRIES   = {union_grid_subentries}")
+        _logger.info(f"  UNION_GRID_SUBENTRIES = {union_grid_subentries}")
+    _logger.info(f"  CORRELATION_METHOD = {CORRELATION_METHOD}")
+    if CORRELATION_METHOD in ("kernel_weight_mc", "hybrid"):
+        _logger.info(f"  KW_MC_TWO_PASS = {KW_MC_TWO_PASS}")
+        _logger.info(f"  KW_MC_MIN_WEIGHT = {KW_MC_MIN_WEIGHT}")
+        _logger.info(f"  KW_MIN_POINTS_REF = {KW_MIN_POINTS_REF}")
+    _logger.info(f"  DELTA_T_NS = {DELTA_T_NS}")
+    _logger.info(f"  FLIGHT_PATH_M = {FLIGHT_PATH_M}")
+    _logger.info(f"  N_SIGMA_CUTOFF = {N_SIGMA_CUTOFF}")
     _logger.info("")
 
-    # -- Multigroup Covariance (only if enabled) --
+    # -- Covariance Pipeline --
+    _logger.info("  # Covariance Pipeline")
+    _logger.info(f"  APPLY_COVARIANCE_CAP = {apply_covariance_cap}")
+    if apply_covariance_cap:
+        _logger.info(f"  MAX_RELATIVE_STD_CAP = {max_relative_std_cap} ({max_relative_std_cap*100:.0f}%)")
+    _logger.info(f"  REGULARIZE_NEAR_ZERO = {regularize_near_zero}")
+    if regularize_near_zero:
+        _logger.info(f"  NEAR_ZERO_SNR_THRESHOLD = {near_zero_snr_threshold}")
+        _logger.info(f"  NEAR_ZERO_N_NEIGHBORS = {near_zero_n_neighbors}")
+    _logger.info(f"  APPLY_COV_POSTPROCESSING = {apply_cov_postprocessing}")
+    if apply_cov_postprocessing:
+        _dip_str = "None (disabled)" if SMOOTH_DIP_FRACTION is None else f"{SMOOTH_DIP_FRACTION} ({SMOOTH_DIP_FRACTION*100:.0f}%)"
+        _spike_str = "None (disabled)" if SMOOTH_SPIKE_FACTOR is None else f"{SMOOTH_SPIKE_FACTOR} ({SMOOTH_SPIKE_FACTOR:.1f}x)"
+        _caps_str = "None (disabled)" if ORDER_REL_STD_CAPS is None else str(ORDER_REL_STD_CAPS)
+        _smooth_w = SMOOTH_DIAGONAL_WINDOW or 0
+        _logger.info(f"  SMOOTH_MIN_REL_STD = {SMOOTH_MIN_REL_STD} ({SMOOTH_MIN_REL_STD*100:.1f}%)")
+        _logger.info(f"  SMOOTH_DIP_FRACTION = {_dip_str}")
+        _logger.info(f"  SMOOTH_SPIKE_FACTOR = {_spike_str}")
+        _logger.info(f"  SMOOTH_DIP_N_NEIGHBORS = {SMOOTH_DIP_N_NEIGHBORS}")
+        _logger.info(f"  SMOOTH_MEDIAN_FILL_THRESHOLD = {SMOOTH_MEDIAN_FILL_THRESHOLD}")
+        _logger.info(f"  MG_SMOOTH_SPIKE_FACTOR = {MG_SMOOTH_SPIKE_FACTOR}")
+        _logger.info(f"  MG_SMOOTH_DIP_N_NEIGHBORS = {MG_SMOOTH_DIP_N_NEIGHBORS}")
+        _logger.info(f"  SMOOTH_DIAGONAL_WINDOW = {_smooth_w}")
+        _logger.info(f"  ORDER_REL_STD_CAPS = {_caps_str}")
+        _logger.info(f"  FORWARD_FILL_REL_STD = {FORWARD_FILL_REL_STD_ENABLED}")
+    _logger.info(f"  APPLY_POSITIVITY_PROJECTION = {apply_positivity_projection}")
+    if apply_positivity_projection:
+        _logger.info(f"  POSITIVITY_CHECK_POINTS = {positivity_check_points}")
+    _logger.info("")
+
+    # -- Multigroup Covariance --
     if generate_multigroup_covariance:
-        _logger.info("  Multigroup Covariance:")
-        _logger.info(f"    GENERATE_MULTIGROUP_COVARIANCE = {generate_multigroup_covariance}")
-        _logger.info(f"    MULTIGROUP_RHO_MIN             = {multigroup_rho_min}")
-        _logger.info(f"    MULTIGROUP_SIGMA_RATIO_MAX     = {multigroup_sigma_ratio_max}")
-        _logger.info(f"    MF34_COVARIANCE_TYPE           = {mf34_covariance_type}")
-        _logger.info(f"    MULTIGROUP_VARIANCE_PERCENTILE = {multigroup_variance_percentile}")
+        _logger.info("  # Multigroup Covariance")
+        _logger.info(f"  GENERATE_MULTIGROUP_COVARIANCE = {generate_multigroup_covariance}")
+        _logger.info(f"  MULTIGROUP_RHO_MIN = {multigroup_rho_min}")
+        _logger.info(f"  MF34_COVARIANCE_TYPE = {mf34_covariance_type}")
+        _logger.info(f"  MULTIGROUP_VARIANCE_PCT_MIN = {multigroup_variance_pct_min}")
+        _logger.info(f"  MULTIGROUP_VARIANCE_PCT_MAX = {multigroup_variance_pct_max}")
+        _logger.info(f"  MULTIGROUP_VARIANCE_RATIO_REF = {multigroup_variance_ratio_ref}")
+        _logger.info(f"  MULTIGROUP_REGROUP_AFTER_SMOOTH = {multigroup_regroup_after_smooth}")
         _logger.info("")
 
-    # -- ACE Common Options --
+    # -- Output: Pipeline A (fitting) --
+    _logger.info("  # Output: Pipeline A (fitting)")
+    _logger.info(f"  N_SAMPLES = {n_samples}")
+    _logger.info(f"  BASE_SEED = {base_seed}")
+    _logger.info(f"  GENERATE_NOMINAL_ENDF = {generate_nominal_endf}")
+    _logger.info(f"  GENERATE_MC_MEAN_ENDF = {generate_mc_mean_endf}")
+    _logger.info(f"  GENERATE_FITTING_SAMPLES = {generate_fitting_samples}")
+    _logger.info(f"  GENERATE_FITTING_ACE = {generate_fitting_ace}")
+    _logger.info(f"  SAVE_COVARIANCE_FILES = {save_covariance_files}")
+    _logger.info(f"  SAVE_CORRELATION_MATRICES = {save_correlation_matrices}")
+    _logger.info("")
+
+    # -- Output: Pipeline B (MF34 sampling) --
+    _logger.info("  # Output: Pipeline B (MF34 sampling)")
+    _logger.info(f"  GENERATE_MF34_SAMPLES = {generate_mf34_samples}")
+    _logger.info(f"  GENERATE_MF34_ACE = {generate_mf34_ace}")
+    if generate_mf34_samples:
+        _logger.info(f"  SAMPLING_RESOLUTION = {sampling_resolution}")
+        _logger.info(f"  MERGE_ORIGINAL_MF34 = {merge_original_mf34}")
+        _logger.info(f"  SAMPLING_SPACE = {sampling_space}")
+        _logger.info(f"  SAMPLING_DECOMPOSITION = {sampling_decomposition}")
+        _logger.info(f"  SAMPLING_METHOD = {sampling_method}")
+    _logger.info("")
+
+    # -- ACE / NJOY --
     _any_ace = generate_fitting_ace or generate_mf34_ace
     if _any_ace:
-        # Normalize temperatures: single float → list
+        # Normalize temperatures: single float -> list
         if ace_temperatures is None:
             ace_temperatures = [293.6]
         elif isinstance(ace_temperatures, (int, float)):
@@ -1861,148 +1841,46 @@ def run_exfor_to_endf_sampling_v2(
                 "ACE_TEMPERATURES must be a non-empty list when ACE generation is enabled."
             )
 
-        _logger.info("  ACE Common Options:")
-        _logger.info(f"    ACE_TEMPERATURES        = {ace_temperatures}")
-        _logger.info(f"    ACE_NJOY_EXE            = {ace_njoy_exe}")
-        _logger.info(f"    ACE_LIBRARY_NAME        = {ace_library_name}")
-        _logger.info(f"    ACE_NJOY_VERSION        = {ace_njoy_version}")
-        _logger.info(f"    ACE_XSDIR_FILE          = {ace_xsdir_file}")
-        _logger.info(f"    ACE_SKIP_EXISTING       = {ace_skip_existing}")
+        _logger.info("  # ACE / NJOY")
+        _logger.info(f"  ACE_TEMPERATURES = {ace_temperatures}")
+        _logger.info(f"  ACE_NJOY_EXE = {ace_njoy_exe}")
+        _logger.info(f"  ACE_LIBRARY_NAME = {ace_library_name}")
+        _logger.info(f"  ACE_NJOY_VERSION = {ace_njoy_version}")
+        _logger.info(f"  ACE_XSDIR_FILE = {ace_xsdir_file}")
+        _logger.info(f"  ACE_SKIP_EXISTING = {ace_skip_existing}")
         _logger.info("")
 
-    # -- MF34 Sampling (Pipeline B) --
-    _logger.info("  MF34 Sampling (Pipeline B):")
-    _logger.info(f"    GENERATE_MF34_SAMPLES         = {generate_mf34_samples}")
-    _logger.info(f"    GENERATE_MF34_ACE             = {generate_mf34_ace}")
-    if generate_mf34_samples:
-        _logger.info(f"    SAMPLING_RESOLUTION           = {sampling_resolution}")
-        _logger.info(f"    MERGE_ORIGINAL_MF34           = {merge_original_mf34}")
-        _logger.info(f"    SAMPLING_SPACE                = {sampling_space}")
-        _logger.info(f"    SAMPLING_DECOMPOSITION        = {sampling_decomposition}")
-        _logger.info(f"    SAMPLING_METHOD               = {sampling_method}")
+    # -- Runtime --
+    _logger.info("  # Runtime")
+    _logger.info(f"  N_PROCS = {n_procs}")
+    _logger.info(f"  N_EFF_WARNING_THRESHOLD = {n_eff_warning_threshold}")
+    _logger.info(f"  VERBOSE_DIAGNOSTICS = {verbose_diagnostics}")
     _logger.info("")
 
-    # -- Post-Processing Layers --
-    _logger.info("  Post-Processing Layers:")
-    _logger.info(f"    APPLY_COVARIANCE_CAP       = {apply_covariance_cap}")
-    if apply_covariance_cap:
-        _logger.info(f"    MAX_RELATIVE_STD_CAP       = {max_relative_std_cap} ({max_relative_std_cap*100:.0f}%)")
-    _logger.info(f"    REGULARIZE_NEAR_ZERO       = {regularize_near_zero}")
-    if regularize_near_zero:
-        _logger.info(f"    NEAR_ZERO_SNR_THRESHOLD    = {near_zero_snr_threshold}")
-        _logger.info(f"    NEAR_ZERO_N_NEIGHBORS      = {near_zero_n_neighbors}")
-    _logger.info(f"    APPLY_COV_POSTPROCESSING    = {apply_cov_postprocessing}")
-    _dip_str = "None (disabled)" if SMOOTH_DIP_FRACTION is None else f"{SMOOTH_DIP_FRACTION} ({SMOOTH_DIP_FRACTION*100:.0f}%)"
-    _spike_str = "None (disabled)" if SMOOTH_SPIKE_FACTOR is None else f"{SMOOTH_SPIKE_FACTOR} ({SMOOTH_SPIKE_FACTOR:.1f}x)"
-    _caps_str = "None (disabled)" if ORDER_REL_STD_CAPS is None else str(ORDER_REL_STD_CAPS)
-    _smooth_w = SMOOTH_DIAGONAL_WINDOW or 0
-    _logger.info(f"    SMOOTH_MIN_REL_STD          = {SMOOTH_MIN_REL_STD} ({SMOOTH_MIN_REL_STD*100:.1f}%)")
-    _logger.info(f"    SMOOTH_DIP_FRACTION         = {_dip_str}")
-    _logger.info(f"    SMOOTH_SPIKE_FACTOR         = {_spike_str} [FG level]")
-    _logger.info(f"    SMOOTH_DIP_N_NEIGHBORS      = {SMOOTH_DIP_N_NEIGHBORS} [FG level]")
-    _logger.info(f"    SMOOTH_MEDIAN_FILL_THRESHOLD = {SMOOTH_MEDIAN_FILL_THRESHOLD} ({SMOOTH_MEDIAN_FILL_THRESHOLD*100:.0f}%)")
-    _mg_spike_str = "None (disabled)" if MG_SMOOTH_SPIKE_FACTOR is None else f"{MG_SMOOTH_SPIKE_FACTOR} ({MG_SMOOTH_SPIKE_FACTOR:.1f}x)"
-    _logger.info(f"    MG_SMOOTH_SPIKE_FACTOR      = {_mg_spike_str} [MG level]")
-    _logger.info(f"    MG_SMOOTH_DIP_N_NEIGHBORS   = {MG_SMOOTH_DIP_N_NEIGHBORS} [MG level]")
-    _logger.info(f"    SMOOTH_DIAGONAL_WINDOW      = {_smooth_w} [Gaussian σ={_smooth_w/4:.1f}]")
-    _logger.info(f"    ORDER_REL_STD_CAPS          = {_caps_str}")
-    _logger.info(f"    FORWARD_FILL_REL_STD        = {FORWARD_FILL_REL_STD_ENABLED}")
-    _logger.info(f"    VERBOSE_DIAGNOSTICS         = {verbose_diagnostics}")
-    _logger.info(f"    APPLY_POSITIVITY_PROJECTION = {apply_positivity_projection}")
-    if apply_positivity_projection:
-        _logger.info(f"    POSITIVITY_CHECK_POINTS    = {positivity_check_points}")
+    _logger.info("#== END CONFIG ============================================================")
     _logger.info("")
-
-    # -- Angular-Band Discrepancy (6d) --
-    _logger.info("  Angular-Band Discrepancy (6d):")
-    _logger.info(f"    USE_BAND_DISCREPANCY           = {use_band_discrepancy}")
-    _logger.info(f"    MIN_POINTS_PER_BAND            = {min_points_per_band}")
-    _logger.info(f"    MAX_BAND_SCALE_FACTOR      = {max_band_scale}")
-    _logger.info(f"    TAU_SMOOTHING_WINDOW           = {tau_smoothing_window}")
-    _logger.info(f"    TAU_PRIOR_FLOOR                = {tau_prior_floor}")
-    if tau_prior_floor:
-        _logger.info(f"    TAU_PRIOR_NEFF_THRESHOLD       = {tau_prior_neff_threshold}")
-        _logger.info(f"    TAU_PRIOR_PERCENTILE           = {tau_prior_percentile}")
-    _logger.info(f"    RESCALE_UNC_BY_CHI2            = {RESCALE_UNC_BY_CHI2}")
-    _logger.info(f"    ALLOW_SHRINK_UNC               = {ALLOW_SHRINK_UNC}")
-    _logger.info("")
-
-    # -- Per-Experiment Normalization (6e) --
-    _logger.info("  Per-Experiment Normalization (6e):")
-    _logger.info(f"    NORMALIZATION_SIGMA             = {sigma_norm}")
-    _logger.info(f"    NORM_DIST                      = {NORM_DIST}")
-    _logger.info("")
-
-    # -- Model Averaging (6f) --
-    _logger.info("  Model Averaging (6f):")
-    _logger.info(f"    USE_MODEL_AVERAGING            = {use_model_averaging}")
-    _logger.info(f"    MIN_DEGREE_FOR_AVERAGING       = {min_degree_for_averaging}")
-    _logger.info(f"    USE_DEGREE_SAMPLING_IN_MC      = {USE_DEGREE_SAMPLING_IN_MC}")
-    _logger.info("")
-
-    # -- Energy Bin Method (6g) --
-    _logger.info("  Energy Bin Method (6g):")
-    _logger.info(f"    NORMALIZE_BY_N_POINTS          = {NORMALIZE_BY_N_POINTS}")
-    _logger.info(f"    GLS-ESS weighting (sigma_norm  = {NORMALIZATION_SIGMA})")
-    _logger.info(f"    MAX_EXP_WEIGHT_FRAC_BIN        = {MAX_EXP_WEIGHT_FRAC_BIN}")
-    _logger.info(f"    FREEZE_C0                      = {FREEZE_C0}")
-    _logger.info(f"    MAX_SAMPLE_ORDER               = {MAX_SAMPLE_ORDER}")
-    _logger.info(f"    ANGULAR_QUALITY_GATE           = {ANGULAR_QUALITY_GATE}")
-    if ANGULAR_QUALITY_GATE:
-        _logger.info(f"    MIN_ANGULAR_POINTS             = {MIN_ANGULAR_POINTS}")
-        _logger.info(f"    MIN_BANDS_COVERED              = {MIN_BANDS_COVERED}")
-        _logger.info(f"    MAX_BIN_EXPANSION              = {MAX_BIN_EXPANSION}")
-    _logger.info("")
-
-    # -- Correlation Method (6h) --
-    _logger.info("  Correlation Method (6h):")
-    _logger.info(f"    CORRELATION_METHOD              = {CORRELATION_METHOD}")
-    if CORRELATION_METHOD in ("kernel_weight_mc", "hybrid"):
-        _logger.info(f"    KW_MC_TWO_PASS                 = {KW_MC_TWO_PASS}")
-        _logger.info(f"    KW_MC_MIN_WEIGHT               = {KW_MC_MIN_WEIGHT}")
-        _logger.info(f"    KW_MIN_POINTS_REF              = {KW_MIN_POINTS_REF}")
-    _logger.info(f"    TOF_PARAMETERS_FILE            = {TOF_PARAMETERS_FILE}")
-    _logger.info("")
-
-    _logger.info(separator)
-    _logger.info("")
-
-    # Warning legend
-    _logger.info("[WARNING LEGEND]")
-    _logger.info("  - 'No EXFOR data': Coefficients will be INTERPOLATED from neighboring bins")
-    _logger.info("  - 'Low N_eff': Few independent data points contributing to fit")
-    _logger.info("  - 'INTERPOLATED from neighboring bins': No EXFOR data at this energy")
-    _logger.info("      -> Cause: No experimental data available within energy tolerance")
-    _logger.info("      -> Effect: Coefficients linearly interpolated from neighboring bins with data")
-    _logger.info("      -> Note: Original ENDF coefficients are NEVER used (ensures independence)")
-    _logger.info("")
-    _logger.info("  - 'Below/Above EXFOR data range - extrapolating': Energy outside data coverage")
-    _logger.info("      -> Cause: Energy bin is below/above the range of available EXFOR data")
-    _logger.info("      -> Effect: Uses nearest neighbor's coefficients (no interpolation possible)")
-    _logger.info("      -> Action: Expand energy range coverage or accept extrapolation uncertainty")
-    _logger.info("")
-    _logger.info(separator)
 
     # Validate inputs
     if not os.path.exists(endf_file):
-        _logger.error(f"ENDF file not found: {endf_file}", console=True)
+        _logger.error(f"[ERROR] [ENDF] File not found: {endf_file}", console=True)
         return
 
     if not os.path.isdir(exfor_directory):
-        _logger.error(f"EXFOR directory not found: {exfor_directory}", console=True)
+        _logger.error(f"[ERROR] [EXFOR] Directory not found: {exfor_directory}", console=True)
         return
 
-    # Step 1: Pre-load EXFOR data (using NEW API with database support)
-    _logger.info("")
-    _logger.info("[STEP 1] Pre-loading EXFOR data using NEW kika.exfor module")
-    _logger.info(f"  Source: {exfor_source}")
-    if exfor_source in ("database", "auto", "both"):
-        _logger.info(f"  Database: {exfor_db_path or 'default'}")
-    if exfor_directory:
-        _logger.info(f"  JSON directory: {exfor_directory}")
-
-    print(f"[INFO] Pre-loading EXFOR data (source={exfor_source})")
+    # Step 1: Pre-load EXFOR data
     t_exfor_start = time.time()
+    t_step = time.time()
+    _logger.info("")
+    _logger.info("#-- STEP 1: Load EXFOR data ------------------------------------------------")
+    _logger.info(f"  [INFO] [EXFOR] Source: {exfor_source}")
+    if exfor_source in ("database", "auto", "both"):
+        _logger.info(f"  [INFO] [EXFOR] Database: {exfor_db_path or 'default'}")
+    if exfor_directory:
+        _logger.info(f"  [INFO] [EXFOR] JSON directory: {exfor_directory}")
+
+    _logger.info(f"  [INFO] [EXFOR] Pre-loading EXFOR data (source={exfor_source})", console=True)
 
     try:
         exfor_cache, sorted_exfor_energies = load_exfor_with_new_api(
@@ -2017,50 +1895,56 @@ def run_exfor_to_endf_sampling_v2(
             exclude_experiments=exclude_experiments,
             logger=_logger,
         )
-        t_exfor_elapsed = time.time() - t_exfor_start
+        t_exfor_elapsed = time.time() - t_step
 
         n_exfor_files = sum(len(entries) for entries in exfor_cache.values())
-        _logger.info(f"  Loaded {n_exfor_files} EXFOR experiments at {len(sorted_exfor_energies)} unique energies")
-        _logger.info(f"  EXFOR energy range: [{min(sorted_exfor_energies):.4f}, {max(sorted_exfor_energies):.4f}] MeV")
-        _logger.info(f"  Pre-loading completed in {t_exfor_elapsed:.2f} seconds")
-        print(f"[INFO] Loaded {n_exfor_files} EXFOR experiments in {t_exfor_elapsed:.1f}s")
+        _logger.info(f"  [INFO] [EXFOR] Loaded {n_exfor_files} experiments at {len(sorted_exfor_energies)} unique energies")
+        _logger.info(f"  [INFO] [EXFOR] Energy range: [{min(sorted_exfor_energies):.4f}, {max(sorted_exfor_energies):.4f}] MeV")
+        _logger.info(f">> exfor_experiments = {n_exfor_files}")
+        _logger.info(f">> exfor_energies = {len(sorted_exfor_energies)}")
+        _logger.info(f"#-- END STEP 1 (elapsed: {t_exfor_elapsed:.2f}s) -------------------------------------")
+        _logger.info(f"  [INFO] [EXFOR] Loaded {n_exfor_files} experiments in {t_exfor_elapsed:.1f}s", console=True)
     except Exception as e:
-        _logger.error(f"Failed to load EXFOR data: {str(e)}", console=True)
+        _logger.error(f"[ERROR] [EXFOR] Failed to load data: {str(e)}", console=True)
         return
 
     # Step 2: Read ENDF and extract energy grid
+    t_step = time.time()
     _logger.info("")
-    _logger.info("[STEP 2] Reading ENDF file and extracting energy grid")
+    _logger.info("#-- STEP 2: Read ENDF file -------------------------------------------------")
 
     try:
         endf = read_endf(endf_file)
         mf4 = endf.get_file(4)
 
         if mf4 is None:
-            _logger.error("MF4 section not found in ENDF file", console=True)
+            _logger.error("[ERROR] [ENDF] MF4 section not found in ENDF file", console=True)
             return
 
         mt_data = mf4.sections.get(mt_number)
         if mt_data is None:
-            _logger.error(f"MT{mt_number} not found in MF4", console=True)
+            _logger.error(f"[ERROR] [ENDF] MT{mt_number} not found in MF4", console=True)
             return
 
         if not isinstance(mt_data, (MF4MTLegendre, MF4MTMixed)):
-            _logger.error(f"MT{mt_number} is not Legendre or Mixed type (LTT={mt_data._ltt})", console=True)
+            _logger.error(f"[ERROR] [ENDF] MT{mt_number} is not Legendre or Mixed type (LTT={mt_data._ltt})", console=True)
             return
 
         energies_ev = np.array(mt_data.legendre_energies)
         original_coeffs = mt_data.legendre_coefficients
 
-        _logger.info(f"  Found {len(energies_ev)} energy points in MF4/MT{mt_number}")
+        _logger.info(f"  [INFO] [ENDF] Found {len(energies_ev)} energy points in MF4/MT{mt_number}")
+        _logger.info(f">> endf_energy_points = {len(energies_ev)}")
+        _logger.info(f"#-- END STEP 2 (elapsed: {time.time() - t_step:.2f}s) -------------------------------------")
 
     except Exception as e:
-        _logger.error(f"Failed to read ENDF file: {str(e)}", console=True)
+        _logger.error(f"[ERROR] [ENDF] Failed to read file: {str(e)}", console=True)
         return
 
     # Step 3: Compute energy bins
+    t_step = time.time()
     _logger.info("")
-    _logger.info("[STEP 3] Computing energy bins with TOF-based resolution")
+    _logger.info("#-- STEP 3: Compute energy bins --------------------------------------------")
 
     if energy_grid_source == "union":
         grid_energies_ev = build_union_energy_grid(
@@ -2094,14 +1978,14 @@ def run_exfor_to_endf_sampling_v2(
         if idx < len(original_coeffs):
             bin_info.original_coeffs = list(original_coeffs[idx])
 
-    _logger.info(f"  Processing {len(energy_bins)} energy bins")
-    print(f"[INFO] Processing {len(energy_bins)} energy bins")
+    _logger.info(f">> energy_bins = {len(energy_bins)}")
+    _logger.info(f"#-- END STEP 3 (elapsed: {time.time() - t_step:.2f}s) -------------------------------------")
+    _logger.info(f"  [INFO] [ENDF] Processing {len(energy_bins)} energy bins", console=True)
 
     # Step 4: Nominal fits
+    t_step = time.time()
     _logger.info("")
-    _logger.info("[STEP 4] Phase 1: Nominal fits")
-
-    t_fit_start = time.time()
+    _logger.info("#-- STEP 4: Nominal fits ---------------------------------------------------")
 
     nominal_results = perform_nominal_fits(
         energy_bins=energy_bins,
@@ -2130,41 +2014,41 @@ def run_exfor_to_endf_sampling_v2(
         logger=_logger,
     )
 
-    t_nominal_elapsed = time.time() - t_fit_start
     n_with_data = sum(1 for nr in nominal_results if nr.has_data)
-    _logger.info(f"  Nominal fits completed in {t_nominal_elapsed:.2f}s")
-    _logger.info(f"  Bins with EXFOR data: {n_with_data}/{len(nominal_results)}")
-    print(f"[INFO] Nominal fits completed ({n_with_data}/{len(nominal_results)} with data)")
+    _logger.info(f"  [INFO] [FIT] Bins with EXFOR data: {n_with_data}/{len(nominal_results)}")
+    _logger.info(f">> bins_with_data = {n_with_data}")
+    _logger.info(f">> bins_total = {len(nominal_results)}")
 
     # Step 4b: Interpolate missing bins (NEVER use original ENDF coefficients)
     n_missing = len(nominal_results) - n_with_data
     if n_missing > 0:
-        _logger.info("")
-        _logger.info("[STEP 4b] Interpolating missing energy bins")
-        _logger.info(f"  Bins needing interpolation: {n_missing}")
+        _logger.info(f"  [INFO] [FIT] Interpolating {n_missing} missing energy bins")
 
         nominal_results = interpolate_missing_nominal_fits(
             nominal_results=nominal_results,
             logger=_logger,
         )
 
-        # Count results after interpolation
         n_with_data_after = sum(1 for nr in nominal_results if nr.has_data)
         n_interpolated = sum(1 for nr in nominal_results if nr.interpolated)
-        _logger.info(f"  After interpolation: {n_with_data_after}/{len(nominal_results)} bins have coefficients")
-        _logger.info(f"  ({n_interpolated} interpolated, {n_with_data_after - n_interpolated} from EXFOR)")
-        _logger.info(f"  IMPORTANT: Original ENDF coefficients are NEVER used as fallback")
-        _logger.info(f"  (This ensures an independent evaluation based solely on EXFOR data)")
-        print(f"[INFO] Interpolated {n_interpolated} bins without EXFOR data")
+        _logger.info(f"  [INFO] [FIT] After interpolation: {n_with_data_after}/{len(nominal_results)} bins have coefficients")
+        _logger.info(f"  [INFO] [FIT] ({n_interpolated} interpolated, {n_with_data_after - n_interpolated} from EXFOR)")
+        _logger.info(f">> interpolated_bins = {n_interpolated}")
+        _warning_counts['interpolated_bins'] = n_interpolated
+    else:
+        n_interpolated = 0
 
-    # Log experiment summary (quick overview of all data sources used)
+    # Log experiment summary
     log_experiments_summary(nominal_results, logger=_logger)
 
+    _logger.info(f"#-- END STEP 4 (elapsed: {time.time() - t_step:.2f}s) -------------------------------------")
+    _logger.info(f"  [INFO] [FIT] Nominal fits: {n_with_data}/{len(nominal_results)} with data, {n_interpolated} interpolated", console=True)
+
     # Step 5: MC sampling
+    t_step = time.time()
     _logger.info("")
-    _logger.info("[STEP 5] Phase 2: MC sampling")
-    _logger.info(f"  Generating {n_samples} MC samples")
-    _logger.info(f"  Correlation method: {CORRELATION_METHOD}")
+    _logger.info("#-- STEP 5: MC sampling ----------------------------------------------------")
+    _logger.info(f"  [INFO] [MC] Generating {n_samples} samples, method={CORRELATION_METHOD}")
 
     _prebuilt_gaussian_cov = None
     _prebuilt_mc_mean = None
@@ -2296,7 +2180,7 @@ def run_exfor_to_endf_sampling_v2(
                 tof_params_cache = load_tof_parameters_file(TOF_PARAMETERS_FILE)
                 _logger.info(f"  Loaded TOF parameters for {len(tof_params_cache)} experiments")
             except FileNotFoundError:
-                _logger.warning(f"  TOF parameters file not found: {TOF_PARAMETERS_FILE}")
+                _logger.warning(f"[WARN] [MC] TOF parameters file not found: {TOF_PARAMETERS_FILE}")
 
         # Precompute overlap weights for all datasets across all bins
         overlap_weights = precompute_overlap_weights(
@@ -2495,11 +2379,16 @@ def run_exfor_to_endf_sampling_v2(
                 )
                 w_gauss_ij = (1.0 - alpha_ij) * g_ij
 
-                # Hybrid blend
+                # Hybrid blend (cross-bin correlations)
                 corr_hyb = (1.0 - w_gauss_ij) * corr_kw + w_gauss_ij * corr_gauss
                 corr_hyb = (corr_hyb + corr_hyb.T) / 2.0
                 np.fill_diagonal(corr_hyb, 1.0)
                 corr_hyb = np.clip(corr_hyb, -1.0, 1.0)
+
+                # Within-bin cross-order correlations from Pass 1
+                corr_hyb = inject_within_bin_correlations(
+                    corr_hyb, cov_perbin, len(energy_indices_kw), max_degree,
+                )
 
                 cov_combined = corr_hyb * np.outer(std_perbin, std_perbin)
 
@@ -2532,6 +2421,10 @@ def run_exfor_to_endf_sampling_v2(
                 else:
                     _logger.info(f"  Hybrid blend: all {n_interp} bins interpolated (pure Gaussian)")
             else:  # pure kernel_weight_mc
+                # Within-bin cross-order correlations from Pass 1
+                corr_kw = inject_within_bin_correlations(
+                    corr_kw, cov_perbin, len(energy_indices_kw), max_degree,
+                )
                 cov_combined = corr_kw * np.outer(std_perbin, std_perbin)
 
             # Generate Cholesky samples from combined covariance
@@ -2552,14 +2445,18 @@ def run_exfor_to_endf_sampling_v2(
 
         n_sampled = sum(1 for nr in nominal_results if nr.has_data and not nr.interpolated)
         n_interpolated_used = sum(1 for nr in nominal_results if nr.has_data and nr.interpolated)
-        _logger.info(f"  MC complete: {n_sampled} bins with data, {n_interpolated_used} interpolated")
+        _logger.info(f"  [INFO] [MC] Complete: {n_sampled} bins with data, {n_interpolated_used} interpolated")
 
     else:
         raise ValueError(f"Unknown CORRELATION_METHOD: {CORRELATION_METHOD!r}. Use 'gaussian', 'kernel_weight_mc', or 'hybrid'.")
 
+    _logger.info(f">> samples_generated = {n_samples}")
+    _logger.info(f"#-- END STEP 5 (elapsed: {time.time() - t_step:.2f}s) -------------------------------------")
+
     # Step 6: Save coefficients
+    t_step = time.time()
     _logger.info("")
-    _logger.info("[STEP 6] Saving Legendre coefficients")
+    _logger.info("#-- STEP 6: Save Legendre coefficients -------------------------------------")
 
     try:
         parquet_file = save_all_legendre_coefficients(
@@ -2568,10 +2465,12 @@ def run_exfor_to_endf_sampling_v2(
             output_dir=str(output_path),
             max_degree=max_degree,
         )
-        _logger.info(f"  Saved to: {parquet_file}")
+        _logger.info(f"  [INFO] [ENDF] Saved to: {parquet_file}")
     except Exception as e:
-        _logger.error(f"Failed to save coefficients: {str(e)}", console=True)
+        _logger.error(f"[ERROR] [ENDF] Failed to save coefficients: {str(e)}", console=True)
         parquet_file = None
+
+    _logger.info(f"#-- END STEP 6 (elapsed: {time.time() - t_step:.2f}s) -------------------------------------")
 
     # Step 7: Covariance
     cov_matrix = None
@@ -2589,8 +2488,9 @@ def run_exfor_to_endf_sampling_v2(
             valid_mask_s7[ie * max_degree + l] = True
 
     if True:  # Covariance always computed (needed for MF34)
+        t_step = time.time()
         _logger.info("")
-        _logger.info("[STEP 7] Computing covariance matrix")
+        _logger.info("#-- STEP 7: Compute covariance matrix --------------------------------------")
 
         if _prebuilt_gaussian_cov is not None:
             # Gaussian correlation mode: use pre-built covariance from Step 5
@@ -2627,7 +2527,7 @@ def run_exfor_to_endf_sampling_v2(
         # Safety net: sanitize non-finite entries before multigroup collapse
         n_nonfinite = int(np.sum(~np.isfinite(cov_matrix)))
         if n_nonfinite > 0:
-            _logger.warning(f"  Covariance matrix has {n_nonfinite} non-finite entries — replacing with 0")
+            _logger.warning(f"[WARN] [COV] Covariance matrix has {n_nonfinite} non-finite entries -- replacing with 0")
             cov_matrix = np.where(np.isfinite(cov_matrix), cov_matrix, 0.0)
             cov_matrix = (cov_matrix + cov_matrix.T) / 2.0  # re-symmetrize
             # Also fix cov_abs and corr_matrix
@@ -2659,7 +2559,7 @@ def run_exfor_to_endf_sampling_v2(
                     console=True
                 )
         else:
-            _logger.warning("  WARNING: No positive diagonal elements in covariance matrix!")
+            _logger.warning("[WARN] [COV] No positive diagonal elements in covariance matrix!")
 
         _logger.info(f"  Covariance matrix shape: {cov_matrix.shape}")
 
@@ -2700,10 +2600,14 @@ def run_exfor_to_endf_sampling_v2(
                 valid_mask=valid_mask_s7,
             )
 
+        _logger.info(f">> covariance_shape = {cov_matrix.shape}")
+        _logger.info(f"#-- END STEP 7 (elapsed: {time.time() - t_step:.2f}s) -------------------------------------")
+
         # Step 7a: Apply covariance cap (Layer 1) if enabled
         if apply_covariance_cap:
+            t_step = time.time()
             _logger.info("")
-            _logger.info("[STEP 7a] Applying covariance diagonal cap (Layer 1)")
+            _logger.info("#-- STEP 7a: Covariance diagonal cap (Layer 1) ----------------------------")
 
             # Build energy MeV lookup for logging
             energy_mev_lookup = {
@@ -2722,12 +2626,13 @@ def run_exfor_to_endf_sampling_v2(
             n_capped = cap_diagnostics['n_capped']
             if n_capped > 0:
                 _logger.warning(
-                    f"  Covariance capping was applied to {n_capped} entries. "
-                    f"Set APPLY_COVARIANCE_CAP=False and re-run to obtain the uncapped covariance matrix.",
+                    f"[WARN] [COV] Capping applied to {n_capped} entries. "
+                    f"Set APPLY_COVARIANCE_CAP=False for uncapped covariance.",
                     console=True,
                 )
+                _warning_counts['covariance_capped'] = n_capped
             else:
-                _logger.info("  No entries exceeded the cap — no capping applied, output is unchanged.")
+                _logger.info("  [INFO] [COV] No entries exceeded the cap -- no capping applied.")
 
             # Keep cov_abs consistent with capped MC-relative covariance
             cov_abs = cov_matrix * np.outer(mc_mean_params, mc_mean_params)
@@ -2768,9 +2673,10 @@ def run_exfor_to_endf_sampling_v2(
         if cov_matrix is None:
             multigroup_failure_reason = "covariance matrix is None (computation may have failed)"
         else:
+            t_step = time.time()
             _logger.info("")
-            _logger.info("[STEP 7b] Computing adaptive multigroup covariance")
-            _logger.info(f"  Using l=1 correlation for grouping (same grid for all orders)")
+            _logger.info("#-- STEP 7b: Adaptive multigroup covariance --------------------------------")
+            _logger.info(f"  [INFO] [MG] Using l=1 correlation for grouping (same grid for all orders)")
 
             # Extract forced MF34 grid if requested
             forced_grid = None
@@ -2783,7 +2689,7 @@ def run_exfor_to_endf_sampling_v2(
                     logger=_logger,
                 )
                 if forced_grid is None:
-                    _logger.warning("  MF34 grid extraction failed — falling back to adaptive grouping")
+                    _logger.warning("[WARN] [MG] MF34 grid extraction failed -- falling back to adaptive grouping")
 
             try:
                 multigroup_result = perform_adaptive_multigroup_collapse(
@@ -2793,8 +2699,9 @@ def run_exfor_to_endf_sampling_v2(
                     energy_bins=energy_bins,
                     max_order=max_degree,
                     rho_min=multigroup_rho_min,
-                    sigma_ratio_max=multigroup_sigma_ratio_max,
-                    variance_percentile=multigroup_variance_percentile,
+                    variance_percentile_min=multigroup_variance_pct_min,
+                    variance_percentile_max=multigroup_variance_pct_max,
+                    variance_ratio_ref=multigroup_variance_ratio_ref,
                     logger=_logger,
                     apply_covariance_cap=apply_covariance_cap,
                     max_relative_std_cap=max_relative_std_cap,
@@ -2821,9 +2728,10 @@ def run_exfor_to_endf_sampling_v2(
 
             except Exception as e:
                 multigroup_failure_reason = f"{str(e)}\n{traceback.format_exc()}"
-                _logger.error(f"Failed to compute multigroup covariance: {str(e)}", console=True)
-                _logger.error(f"  Traceback:\n{traceback.format_exc()}")
+                _logger.error(f"[ERROR] [MG] Failed to compute multigroup covariance: {str(e)}", console=True)
+                _logger.error(f"  Traceback:\n{traceback.format_exc()}", console=False)
                 multigroup_result = None
+                _warning_counts['multigroup_failed'] = 1
 
     # Prepare samples for ENDF writing:
     # With splice mode, samples use pipeline energy_index directly (no remapping needed).
@@ -2844,10 +2752,11 @@ def run_exfor_to_endf_sampling_v2(
             all_samples_endf = all_samples
 
     # Step 8: Write ENDF files
+    t_step = time.time()
     average_file = None
     if generate_mc_mean_endf:
         _logger.info("")
-        _logger.info("[STEP 8] Writing average ENDF file (MC mean)")
+        _logger.info("#-- STEP 8: Write ENDF files -----------------------------------------------")
 
         try:
             average_file = write_average_endf(
@@ -2859,14 +2768,13 @@ def run_exfor_to_endf_sampling_v2(
                 energy_bins=energy_bins if use_splice else None,
                 energy_range_mev=splice_range,
             )
-            _logger.info(f"  Average ENDF: {average_file}")
+            _logger.info(f"  [INFO] [ENDF] Average ENDF: {average_file}")
         except Exception as e:
-            _logger.error(f"Failed to write average ENDF: {str(e)}", console=True)
+            _logger.error(f"[ERROR] [ENDF] Failed to write average ENDF: {str(e)}", console=True)
 
     nominal_file = None
     if generate_nominal_endf:
-        _logger.info("")
-        _logger.info("[STEP 8b] Writing nominal ENDF file")
+        _logger.info(f"  [INFO] [ENDF] Writing nominal ENDF file")
 
         try:
             nominal_file = write_nominal_endf(
@@ -2877,15 +2785,18 @@ def run_exfor_to_endf_sampling_v2(
                 energy_bins=energy_bins if use_splice else None,
                 energy_range_mev=splice_range,
             )
-            _logger.info(f"  Nominal ENDF: {nominal_file}")
+            _logger.info(f"  [INFO] [ENDF] Nominal ENDF: {nominal_file}")
         except Exception as e:
-            _logger.error(f"Failed to write nominal ENDF: {str(e)}", console=True)
+            _logger.error(f"[ERROR] [ENDF] Failed to write nominal ENDF: {str(e)}", console=True)
+
+    _logger.info(f"#-- END STEP 8 (elapsed: {time.time() - t_step:.2f}s) -------------------------------------")
 
     # Step 9: Write fitting sample files (Pipeline A)
     output_files = []
     if generate_fitting_samples:
+        t_step = time.time()
         _logger.info("")
-        _logger.info("[STEP 9] Writing fitting ENDF sample files")
+        _logger.info("#-- STEP 9: Write fitting ENDF samples (Pipeline A) -------------------------")
 
         output_files = write_endf_samples_batch(
             original_endf_file=endf_file,
@@ -2896,12 +2807,15 @@ def run_exfor_to_endf_sampling_v2(
             energy_bins=energy_bins if use_splice else None,
             energy_range_mev=splice_range,
         )
-        _logger.info(f"  Written {len(output_files)} sample files")
+        _logger.info(f"  [INFO] [ENDF] Written {len(output_files)} sample files")
+        _logger.info(f">> fitting_samples_written = {len(output_files)}")
+        _logger.info(f"#-- END STEP 9 (elapsed: {time.time() - t_step:.2f}s) -------------------------------------")
 
     # Step 9b: ACE generation for fitting samples (Pipeline A)
     if generate_fitting_ace:
+        t_step = time.time()
         _logger.info("")
-        _logger.info("[STEP 9b] Generating ACE files via NJOY")
+        _logger.info("#-- STEP 9b: ACE generation (Pipeline A) ------------------------------------")
 
         # Bridge logger: let kika sampling functions log to our pipeline log
         _set_kika_logger(_logger)
@@ -2923,7 +2837,7 @@ def run_exfor_to_endf_sampling_v2(
         valid_files = [(f, i) for i, f in enumerate(endf_sample_files) if f]
 
         if not valid_files:
-            _logger.warning("[ACE] No ENDF sample files found — skipping ACE generation", console=True)
+            _logger.warning("[WARN] [ACE] No ENDF sample files found -- skipping ACE generation", console=True)
         else:
             _logger.info(f"  Processing {len(valid_files)} ENDF samples at {len(ace_temperatures)} temperature(s)")
             _logger.info(f"  Temperatures: {ace_temperatures} K")
@@ -2936,7 +2850,7 @@ def run_exfor_to_endf_sampling_v2(
                     ace_zaid = _endf_for_zaid.zaid
                     _logger.info(f"  ZAID for skip-existing check: {ace_zaid}")
                 except Exception:
-                    _logger.warning("  Could not read ZAID from ENDF file — skip-existing disabled")
+                    _logger.warning("[WARN] [ACE] Could not read ZAID -- skip-existing disabled", console=False)
 
             # Build worker args
             ace_args_list = [
@@ -2985,20 +2899,25 @@ def run_exfor_to_endf_sampling_v2(
                 _logger.info(f"    {temp} K: {temp_processed} processed, {temp_skipped} skipped")
 
             if all_errors:
-                _logger.warning(f"  {len(all_errors)} error(s) during ACE generation:", console=True)
+                _logger.warning(f"[WARN] [ACE] {len(all_errors)} error(s) during ACE generation:", console=True)
                 for err in all_errors[:10]:
-                    _logger.warning(f"    {err}")
+                    _logger.warning(f"    {err}", console=False)
                 if len(all_errors) > 10:
-                    _logger.warning(f"    ... and {len(all_errors) - 10} more")
+                    _logger.warning(f"    ... and {len(all_errors) - 10} more", console=False)
+                _warning_counts['ace_errors'] = len(all_errors)
 
-            print(f"[INFO] ACE generation: {n_success}/{len(valid_files)} samples processed in {t_ace_elapsed:.1f}s")
+            _logger.info(f">> ace_success = {n_success}")
+            _logger.info(f">> ace_failed = {n_failed}")
+            _logger.info(f"#-- END STEP 9b (elapsed: {time.time() - t_step:.2f}s) ------------------------------------")
+            _logger.info(f"  [INFO] [ACE] {n_success}/{len(valid_files)} samples processed in {t_ace_elapsed:.1f}s", console=True)
 
     # Step 10: MF34 (using library functions)
     mg_nom_file = None
     if cov_matrix is not None:
+        t_step = time.time()
         _logger.info("")
-        _logger.info("[STEP 10] Writing MF34 using kika.endf.writers")
-        _logger.info(f"  Covariance type: {mf34_covariance_type}")
+        _logger.info("#-- STEP 10: Write MF34 covariance -----------------------------------------")
+        _logger.info(f"  [INFO] [MF34] Covariance type: {mf34_covariance_type}")
 
         try:
             endf_orig = read_endf(endf_file)
@@ -3412,8 +3331,6 @@ def run_exfor_to_endf_sampling_v2(
                     n_fine=_rg_n_fine,
                     max_order=max_degree,
                     rho_min=multigroup_rho_min,
-                    sigma_ratio_max=multigroup_regroup_sigma_ratio_max,
-                    variance_percentile=multigroup_variance_percentile,
                     valid_mask=_rg_valid_mask,
                     logger=_logger,
                 )
@@ -3658,9 +3575,12 @@ def run_exfor_to_endf_sampling_v2(
                     )
 
         except Exception as e:
-            _logger.error(f"Failed to write MF34: {str(e)}", console=True)
-            _logger.error(f"  Traceback:\n{traceback.format_exc()}")
+            _logger.error(f"[ERROR] [MF34] Failed to write MF34: {str(e)}", console=True)
+            _logger.error(f"  Traceback:\n{traceback.format_exc()}", console=False)
             mf34_sample_source = None
+            _warning_counts['mf34_write_failed'] = 1
+
+        _logger.info(f"#-- END STEP 10 (elapsed: {time.time() - t_step:.2f}s) ------------------------------------")
 
     else:
         mf34_sample_source = None
@@ -3668,7 +3588,7 @@ def run_exfor_to_endf_sampling_v2(
     # Step 11: Generate perturbed ENDF samples from MF34 covariance (Pipeline B)
     if generate_mf34_samples:
         _logger.info("")
-        _logger.info("[STEP 11] Generating perturbed ENDF samples from MF34 (Pipeline B)")
+        _logger.info("#-- STEP 11: MF34 sampling (Pipeline B) ------------------------------------")
         _logger.info(f"  Resolution: {sampling_resolution}, Merge original: {merge_original_mf34}")
         _logger.info(f"  Space: {sampling_space}, Decomposition: {sampling_decomposition}")
         _logger.info(f"  Sampling method: {sampling_method}, N={n_samples}")
@@ -3695,28 +3615,46 @@ def run_exfor_to_endf_sampling_v2(
                     njoy_version=ace_njoy_version,
                     xsdir_file=ace_xsdir_file if generate_mf34_ace else None,
                 )
-                _logger.info(f"  Pipeline B samples written to: {output_path / 'endf'}")
+                _logger.info(f"  [INFO] [MF34] Pipeline B samples written to: {output_path / 'endf'}")
             except Exception as e:
-                _logger.error(f"  Pipeline B sampling failed: {str(e)}", console=True)
-                _logger.error(f"  Traceback:\n{traceback.format_exc()}")
+                _logger.error(f"[ERROR] [MF34] Pipeline B sampling failed: {str(e)}", console=True)
+                _logger.error(f"  Traceback:\n{traceback.format_exc()}", console=False)
         else:
             _logger.warning(
-                f"  MF34 source for ({sampling_resolution}, merge={merge_original_mf34}) "
-                f"not available — skipping Step 11",
+                f"[WARN] [MF34] Source for ({sampling_resolution}, merge={merge_original_mf34}) "
+                f"not available -- skipping Step 11",
                 console=True,
             )
 
-    # Summary
+    # ── SUMMARY ──────────────────────────────────────────────────────────────
     total_time = time.time() - t_exfor_start
     _logger.info("")
-    _logger.info(separator)
-    _logger.info("[SUMMARY]")
-    _logger.info(f"  Total execution time: {total_time:.2f}s")
-    _logger.info(f"  API Version: kika.exfor (v2)")
-    _logger.info(separator)
+    _logger.info("#== SUMMARY ================================================================")
+    _logger.info(f">> total_elapsed = {total_time:.2f}s")
+    _logger.info(f">> api_version = kika.exfor (v2)")
+    _logger.info(f">> bins_total = {len(nominal_results)}")
+    _logger.info(f">> bins_with_data = {n_with_data}")
+    _logger.info(f">> bins_interpolated = {n_interpolated}")
+    _logger.info(f">> samples_generated = {n_samples}")
+    if cov_matrix is not None:
+        _logger.info(f">> covariance_shape = {cov_matrix.shape}")
+    if multigroup_result is not None:
+        _logger.info(f">> multigroup_bins = {multigroup_result.n_groups}")
+    _logger.info(f"  Pipeline A: nominal={'written' if nominal_file else 'skipped'}, "
+                 f"samples={len(output_files) if output_files else 'skipped'}")
+    _logger.info(f"  Pipeline B: {'enabled' if generate_mf34_samples else 'disabled'}")
+    _logger.info("#== END SUMMARY ============================================================")
 
-    print(f"\n[INFO] Completed! Output directory: {output_path}")
-    print(f"[INFO] Total time: {total_time:.1f}s")
+    # ── WARNINGS ─────────────────────────────────────────────────────────────
+    if _warning_counts:
+        _logger.info("")
+        _logger.info("#== WARNINGS ===============================================================")
+        for wkey, wcount in _warning_counts.items():
+            _logger.info(f"  {wkey} -- {wcount}")
+        _logger.info("#== END WARNINGS ===========================================================")
+
+    _logger.info(f"  [INFO] Completed! Output: {output_path}", console=True)
+    _logger.info(f"  [INFO] Total time: {total_time:.1f}s", console=True)
 
     return nominal_results, all_samples, output_files
 
@@ -3757,10 +3695,10 @@ if __name__ == "__main__":
         # Multigroup covariance options
         generate_multigroup_covariance=GENERATE_MULTIGROUP_COVARIANCE,
         multigroup_rho_min=MULTIGROUP_RHO_MIN,
-        multigroup_sigma_ratio_max=MULTIGROUP_SIGMA_RATIO_MAX,
-        multigroup_variance_percentile=MULTIGROUP_VARIANCE_PERCENTILE,
+        multigroup_variance_pct_min=MULTIGROUP_VARIANCE_PCT_MIN,
+        multigroup_variance_pct_max=MULTIGROUP_VARIANCE_PCT_MAX,
+        multigroup_variance_ratio_ref=MULTIGROUP_VARIANCE_RATIO_REF,
         multigroup_regroup_after_smooth=MULTIGROUP_REGROUP_AFTER_SMOOTH,
-        multigroup_regroup_sigma_ratio_max=MULTIGROUP_REGROUP_SIGMA_RATIO_MAX,
         mf34_covariance_type=MF34_COVARIANCE_TYPE,
         use_original_mf34_grid=USE_ORIGINAL_MF34_GRID,
         # Database configuration

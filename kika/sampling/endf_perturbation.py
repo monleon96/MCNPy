@@ -9,6 +9,7 @@ from typing import List, Union, Optional, Dict, Tuple, Any
 from multiprocessing import Pool
 from datetime import datetime
 import os
+import time
 import numpy as np
 import pandas as pd
 import shutil
@@ -126,7 +127,7 @@ def _process_sample(
         success = writer.replace_mf_section(endf.files[4], out_endf)
         if not success:
             if _get_logger():
-                _get_logger().error(f"Failed to write perturbed ENDF file: {out_endf}")
+                _get_logger().error(f"  [ERROR] [ENDF] Failed to write perturbed ENDF file: {out_endf}")
             return
     
     # Write sample summary
@@ -201,7 +202,7 @@ def _process_njoy_for_sample(
         zaid = endf_data.zaid or "unknown"
     except Exception as e:
         if logger:
-            logger.error(f"[NJOY] Sample {sample_str}: Failed to parse ENDF for ZAID - {e}")
+            logger.error(f"  [ERROR] [NJOY] Sample {sample_str}: Failed to parse ENDF for ZAID - {e}")
         return {"success": False, "error": f"Failed to parse ENDF for ZAID: {e}"}
     
     results = {"success": True, "temperatures_processed": [], "errors": [], "warnings": []}
@@ -240,7 +241,7 @@ def _process_njoy_for_sample(
                             warning_msg = f"Could not move {aux_file} at {temp}K: {move_err}"
                             results["warnings"].append(warning_msg)
                             if logger:
-                                logger.warning(f"[NJOY] Sample {sample_str}: {warning_msg}")
+                                logger.warning(f"  [WARN] [NJOY] Sample {sample_str}: {warning_msg}")
 
                 if result["returncode"] == 0:
                     results["temperatures_processed"].append(temp)
@@ -291,14 +292,14 @@ def _process_njoy_for_sample(
                     results["errors"].append(error_msg)
                     results["success"] = False
                     if logger:
-                        logger.error(f"[NJOY] Sample {sample_str}: {error_msg}")
+                        logger.error(f"  [ERROR] [NJOY] Sample {sample_str}: {error_msg}")
                         
         except Exception as e:
             error_msg = f"Exception at {temp}K: {e}"
             results["errors"].append(error_msg)
             results["success"] = False
             if logger:
-                logger.error(f"[NJOY] Sample {sample_str}: {error_msg}")
+                logger.error(f"  [ERROR] [NJOY] Sample {sample_str}: {error_msg}")
     
     return results
 
@@ -349,14 +350,14 @@ def _log_njoy_batch_results(njoy_results, file_key, file_index, temperatures, su
         summary_data[file_key]['ace_generation']['failed_samples'] = failed_samples
     
     # Log batch summary
-    logger.info(f"[NJOY] File {file_index}: Batch processing complete - {successful_samples}/{total_samples} samples successful", console=True)
-    
+    logger.info(f"  [INFO] [NJOY] File {file_index}: Batch processing complete - {successful_samples}/{total_samples} samples successful", console=True)
+
     # Log temperature-specific results
     for temp in temperatures:
         success_count = temp_success_count[temp]
         temp_str = str(temp).rstrip('0').rstrip('.') if '.' in str(temp) else str(temp)
-        logger.info(f"[NJOY] File {file_index}: Temperature {temp_str} - {success_count}/{total_samples} samples successful", console=True)
-    
+        logger.info(f"  [INFO] [NJOY] File {file_index}: Temperature {temp_str} - {success_count}/{total_samples} samples successful", console=True)
+
     # Log warnings (if any) - aggregate similar warnings
     if all_warnings:
         warning_counts = {}
@@ -364,14 +365,14 @@ def _log_njoy_batch_results(njoy_results, file_key, file_index, temperatures, su
             # Extract the core warning message (remove temperature-specific parts)
             core_warning = warning.split(" at ")[0] if " at " in warning else warning
             warning_counts[core_warning] = warning_counts.get(core_warning, 0) + 1
-        
-        logger.warning(f"[NJOY] File {file_index}: {len(all_warnings)} warnings occurred:")
+
+        logger.warning(f"  [WARN] [NJOY] File {file_index}: {len(all_warnings)} warnings occurred:")
         for warning, count in warning_counts.items():
             if count > 1:
-                logger.warning(f"[NJOY] File {file_index}:   {warning} (occurred {count} times)")
+                logger.warning(f"  [WARN] [NJOY] File {file_index}:   {warning} (occurred {count} times)")
             else:
-                logger.warning(f"[NJOY] File {file_index}:   {warning}")
-    
+                logger.warning(f"  [WARN] [NJOY] File {file_index}:   {warning}")
+
     # Log errors (if any) - aggregate similar errors
     if all_errors:
         error_counts = {}
@@ -379,13 +380,13 @@ def _log_njoy_batch_results(njoy_results, file_key, file_index, temperatures, su
             # Extract the core error message (remove temperature-specific parts)
             core_error = error.split(" at ")[0] if " at " in error else error
             error_counts[core_error] = error_counts.get(core_error, 0) + 1
-        
-        logger.error(f"[NJOY] File {file_index}: {len(all_errors)} errors occurred:")
+
+        logger.error(f"  [ERROR] [NJOY] File {file_index}: {len(all_errors)} errors occurred:")
         for error, count in error_counts.items():
             if count > 1:
-                logger.error(f"[NJOY] File {file_index}:   {error} (occurred {count} times)")
+                logger.error(f"  [ERROR] [NJOY] File {file_index}:   {error} (occurred {count} times)")
             else:
-                logger.error(f"[NJOY] File {file_index}:   {error}")
+                logger.error(f"  [ERROR] [NJOY] File {file_index}:   {error}")
 
 
 def load_mf34_covariance(path: str) -> Optional[LegendreCovariance]:
@@ -404,13 +405,13 @@ def load_mf34_covariance(path: str) -> Optional[LegendreCovariance]:
     """
     if not os.path.exists(path):
         if _get_logger():
-            _get_logger().error(f"ENDF file not found: {path}")
+            _get_logger().error(f"  [ERROR] [ENDF] ENDF file not found: {path}")
         return None
     
     try:
         logger = _get_logger()
         if logger:
-            logger.info(f"[ENDF] [MF34] Loading covariance from file: {path}")
+            logger.info(f"  [INFO] [ENDF] Loading MF34 covariance from file: {path}")
         
         # Parse the ENDF file
         endf = parse_endf_file(path)
@@ -419,7 +420,7 @@ def load_mf34_covariance(path: str) -> Optional[LegendreCovariance]:
         mf34 = endf.get_file(34)
         if mf34 is None:
             if logger:
-                logger.error(f"[ENDF] [MF34] No MF34 section found in file: {path}")
+                logger.error(f"  [ERROR] [ENDF] No MF34 section found in file: {path}")
             return None
         
         # Convert all MT sections to LegendreCovariance and combine them
@@ -428,7 +429,7 @@ def load_mf34_covariance(path: str) -> Optional[LegendreCovariance]:
         for mt_number, mt_data in mf34.sections.items():
             if hasattr(mt_data, 'to_ang_covmat'):
                 if logger:
-                    logger.info(f"[ENDF] [MF34] Converting MT{mt_number} to angular covariance matrix")
+                    logger.info(f"  [INFO] [ENDF] Converting MT{mt_number} to angular covariance matrix")
                 
                 mt_covmat = mt_data.to_ang_covmat()
                 
@@ -437,8 +438,8 @@ def load_mf34_covariance(path: str) -> Optional[LegendreCovariance]:
                     # Check if matrix is relative (required for sampling)
                     if not mt_covmat.is_relative[i]:
                         if logger:
-                            logger.warning(f"[ENDF] [MF34] Skipping absolute covariance matrix for isotope {mt_covmat.isotope_rows[i]} "
-                                         f"MT{mt_covmat.reaction_rows[i]} L={mt_covmat.l_rows[i]} ↔ "
+                            logger.warning(f"  [WARN] [ENDF] Skipping absolute covariance matrix for isotope {mt_covmat.isotope_rows[i]} "
+                                         f"MT{mt_covmat.reaction_rows[i]} L={mt_covmat.l_rows[i]} <-> "
                                          f"isotope {mt_covmat.isotope_cols[i]} MT{mt_covmat.reaction_cols[i]} L={mt_covmat.l_cols[i]}. "
                                          f"Only relative covariance matrices are supported for sampling.")
                         continue
@@ -446,8 +447,8 @@ def load_mf34_covariance(path: str) -> Optional[LegendreCovariance]:
                     # Check if frame is compatible (should be "same-as-MF4")
                     if mt_covmat.frame[i] != "same-as-MF4":
                         if logger:
-                            logger.warning(f"[ENDF] [MF34] Covariance matrix for isotope {mt_covmat.isotope_rows[i]} "
-                                         f"MT{mt_covmat.reaction_rows[i]} L={mt_covmat.l_rows[i]} ↔ "
+                            logger.warning(f"  [WARN] [ENDF] Covariance matrix for isotope {mt_covmat.isotope_rows[i]} "
+                                         f"MT{mt_covmat.reaction_rows[i]} L={mt_covmat.l_rows[i]} <-> "
                                          f"isotope {mt_covmat.isotope_cols[i]} MT{mt_covmat.reaction_cols[i]} L={mt_covmat.l_cols[i]} "
                                          f"has reference frame '{mt_covmat.frame[i]}' instead of 'same-as-MF4'. "
                                          f"This may cause inconsistencies in perturbation.")
@@ -466,16 +467,16 @@ def load_mf34_covariance(path: str) -> Optional[LegendreCovariance]:
                     )
         
         if logger:
-            logger.info(f"[ENDF] [MF34] Successfully loaded covariance with {combined_mf34_cov.num_matrices} matrices")
-            logger.info(f"Available isotopes: {sorted(combined_mf34_cov.isotopes)}")
-            logger.info(f"Available reactions: {sorted(combined_mf34_cov.reactions)}")
-            logger.info(f"Available Legendre indices: {sorted(combined_mf34_cov.legendre_indices)}")
+            logger.info(f"  [INFO] [ENDF] Successfully loaded covariance with {combined_mf34_cov.num_matrices} matrices")
+            logger.info(f"  [INFO] [ENDF] Available isotopes: {sorted(combined_mf34_cov.isotopes)}")
+            logger.info(f"  [INFO] [ENDF] Available reactions: {sorted(combined_mf34_cov.reactions)}")
+            logger.info(f"  [INFO] [ENDF] Available Legendre indices: {sorted(combined_mf34_cov.legendre_indices)}")
         
         return combined_mf34_cov
         
     except Exception as e:
         if _get_logger():
-            _get_logger().error(f"Failed to load MF34 covariance: {e}")
+            _get_logger().error(f"  [ERROR] [ENDF] Failed to load MF34 covariance: {e}")
         return None
 
 
@@ -587,11 +588,11 @@ def perturb_ENDF_files(
     _set_logger(_logger)
     
     # Console: Basic start message
-    print(f"[INFO] Starting ENDF perturbation job")
-    print(f"[INFO] Log file: {log_file}")
-    print(f"[INFO] Output directory: {os.path.abspath(output_dir)}")
+    _logger.info("[INFO] [ENDF] Starting ENDF perturbation job", console=True)
+    _logger.info(f"[INFO] [ENDF] Log file: {log_file}", console=True)
+    _logger.info(f"[INFO] [ENDF] Output directory: {os.path.abspath(output_dir)}", console=True)
     if generate_ace:
-        print(f"[INFO] ACE generation enabled")
+        _logger.info("[INFO] [ENDF] ACE generation enabled", console=True)
     
     # Validate NJOY parameters if ACE generation is requested
     if generate_ace:
@@ -616,55 +617,52 @@ def perturb_ENDF_files(
             raise FileNotFoundError(f"NJOY executable not found: {njoy_exe}")
     
     # Print run parameters as metadata TO LOG FILE
-    separator = "=" * 80
-    _logger.info(f"\n{separator}")
-    _logger.info(f"[ENDF] [PARAMETERS] Run Configuration")
-    _logger.info(f"{separator}")
-    
+    _logger.info("#== CONFIG ============================================================")
+
     # Format and print input files
     if isinstance(endf_files, str):
         endf_files = [endf_files]
-        _logger.info(f"ENDF files: {endf_files[0]}")
+        _logger.info(f"  ENDF_FILES = {endf_files[0]}")
     else:
-        _logger.info(f"ENDF files ({len(endf_files)}):")
+        _logger.info(f"  ENDF_FILES = ({len(endf_files)} files)")
         for i, f in enumerate(endf_files):
-            _logger.info(f"  [{i+1}] {f}")
-    
+            _logger.info(f"    [{i+1}] {f}")
+
     # Handle MF34 covariance files parameter
     if mf34_cov_files is None:
-        _logger.info(f"MF34 covariance files: None (will read from ENDF files)")
+        _logger.info("  MF34_COV_FILES = None (will read from ENDF files)")
         # Use ENDF files themselves as covariance sources
         mf34_cov_files = endf_files[:]
     elif isinstance(mf34_cov_files, str):
         mf34_cov_files = [mf34_cov_files]
-        _logger.info(f"MF34 covariance files: {mf34_cov_files[0]}")
+        _logger.info(f"  MF34_COV_FILES = {mf34_cov_files[0]}")
     else:
-        _logger.info(f"MF34 covariance files ({len(mf34_cov_files)}):")
+        _logger.info(f"  MF34_COV_FILES = ({len(mf34_cov_files)} files)")
         for i, f in enumerate(mf34_cov_files):
-            _logger.info(f"  [{i+1}] {f}")
-    
-    _logger.info(f"MT reactions: {mt_list}")
-    _logger.info(f"Legendre coefficients: {legendre_coeffs}")
-    _logger.info(f"Number of samples: {num_samples}")
-    _logger.info(f"Sampling space: {space}")
-    _logger.info(f"Decomposition method: {decomposition_method}")
-    _logger.info(f"Sampling method: {sampling_method}")
-    _logger.info(f"Random seed: {seed}")
-    _logger.info(f"Parallel processes: {nprocs}")
-    _logger.info(f"Dry run: {dry_run}")
-    _logger.info(f"Generate ACE: {generate_ace}")
+            _logger.info(f"    [{i+1}] {f}")
+
+    _logger.info(f"  MT_REACTIONS = {mt_list}")
+    _logger.info(f"  LEGENDRE_COEFFS = {legendre_coeffs}")
+    _logger.info(f"  NUM_SAMPLES = {num_samples}")
+    _logger.info(f"  SAMPLING_SPACE = {space}")
+    _logger.info(f"  DECOMPOSITION_METHOD = {decomposition_method}")
+    _logger.info(f"  SAMPLING_METHOD = {sampling_method}")
+    _logger.info(f"  RANDOM_SEED = {seed}")
+    _logger.info(f"  NPROCS = {nprocs}")
+    _logger.info(f"  DRY_RUN = {dry_run}")
+    _logger.info(f"  GENERATE_ACE = {generate_ace}")
     if energy_ranges is not None:
         ranges_mev = [(e1/1e6, e2/1e6) for e1, e2 in energy_ranges]
-        _logger.info(f"Energy ranges (MeV): {ranges_mev}")
+        _logger.info(f"  ENERGY_RANGES_MEV = {ranges_mev}")
     else:
-        _logger.info(f"Energy ranges: all")
+        _logger.info("  ENERGY_RANGES = all")
     if generate_ace:
-        _logger.info(f"NJOY executable: {njoy_exe}")
-        _logger.info(f"Temperatures: {temperatures}")
-        _logger.info(f"Library name: {library_name}")
-        _logger.info(f"NJOY version: {njoy_version}")
-        _logger.info(f"XSDIR file: {xsdir_file if xsdir_file else 'None'}")
-    _logger.info(f"{separator}")
+        _logger.info(f"  NJOY_EXE = {njoy_exe}")
+        _logger.info(f"  TEMPERATURES = {temperatures}")
+        _logger.info(f"  LIBRARY_NAME = {library_name}")
+        _logger.info(f"  NJOY_VERSION = {njoy_version}")
+        _logger.info(f"  XSDIR_FILE = {xsdir_file if xsdir_file else 'None'}")
+    _logger.info("#== END CONFIG ========================================================")
     
     # Validate inputs
     if mf34_cov_files is not None and len(mf34_cov_files) != 1 and len(mf34_cov_files) != len(endf_files):
@@ -681,9 +679,13 @@ def perturb_ENDF_files(
     processed_files = 0
     failed_files = 0
     
+    total_warnings_count = 0
+
     for i, endf_file in enumerate(endf_files):
+        step_num = i + 1
+        step_t0 = time.time()
+        _logger.info(f"#-- STEP {step_num}: Process {os.path.basename(endf_file)} ({step_num}/{len(endf_files)}) ------------------------------------------------")
         try:
-            _logger.info(f"\n[ENDF] Processing file {i+1}/{len(endf_files)}: {os.path.basename(endf_file)}")
             
             # Initialize summary data for this file
             file_key = os.path.basename(endf_file)
@@ -710,18 +712,22 @@ def perturb_ENDF_files(
             # Load covariance matrix
             mf34_cov = load_mf34_covariance(cov_file)
             if mf34_cov is None:
-                _logger.error(f"[ENDF] File {i+1}: Failed to load covariance matrix from {cov_file}")
+                _logger.error(f"  [ERROR] [ENDF] File {step_num}: Failed to load covariance matrix from {cov_file}")
                 failed_files_details[file_key] = "Failed to load MF34 covariance matrix"
                 failed_files += 1
+                step_elapsed = time.time() - step_t0
+                _logger.info(f"#-- END STEP {step_num} (elapsed: {step_elapsed:.1f}s) -------------------------------------")
                 continue
             
             # Filter covariance data by requested MTs and Legendre coefficients
             filtered_cov = _filter_mf34_covariance(mf34_cov, mt_list, legendre_coeffs)
             
             if filtered_cov.num_matrices == 0:
-                _logger.warning(f"[ENDF] File {i+1}: No covariance data found for requested MTs {mt_list} and L coefficients {legendre_coeffs}")
+                _logger.warning(f"  [WARN] [ENDF] File {step_num}: No covariance data found for requested MTs {mt_list} and L coefficients {legendre_coeffs}")
                 failed_files_details[file_key] = f"No covariance data for requested MTs {mt_list} and L coefficients {legendre_coeffs}"
                 failed_files += 1
+                step_elapsed = time.time() - step_t0
+                _logger.info(f"#-- END STEP {step_num} (elapsed: {step_elapsed:.1f}s) -------------------------------------")
                 continue
             
             # Store which MTs and L coefficients will be perturbed
@@ -732,7 +738,8 @@ def perturb_ENDF_files(
             param_mapping, energy_grids = _create_parameter_mapping(filtered_cov)
             
             # Generate perturbation factors
-            _logger.info(f"[ENDF] File {i+1}: Generating {num_samples} perturbation samples...")
+            if verbose:
+                _logger.info(f"  [INFO] [ENDF] File {step_num}: Generating {num_samples} perturbation samples...")
             
             try:
                 factors, _, diagnostic_results = generate_endf_samples(
@@ -746,7 +753,8 @@ def perturb_ENDF_files(
                     verbose=verbose,
                 )
                 
-                _logger.info(f"[ENDF] File {i+1}: Successfully generated perturbation factors: shape {factors.shape}")
+                _logger.info(f"  [INFO] [ENDF] File {step_num}: Successfully generated perturbation factors: shape {factors.shape}")
+                _logger.info(f">> factors_shape = {factors.shape}")
 
                 # Apply energy range masking if specified
                 if energy_ranges is not None:
@@ -754,16 +762,18 @@ def perturb_ENDF_files(
                         factors, param_mapping, energy_grids, energy_ranges, space
                     )
                     n_masked = np.sum(factors[0] == (1.0 if space == "linear" else 0.0))
-                    _logger.info(f"[ENDF] File {i+1}: Energy range filter applied — {factors.shape[1] - n_masked}/{factors.shape[1]} parameters perturbed")
+                    _logger.info(f"  [INFO] [ENDF] File {step_num}: Energy range filter applied -- {factors.shape[1] - n_masked}/{factors.shape[1]} parameters perturbed")
 
                 # Store diagnostic results in summary data for later reporting
                 if diagnostic_results:
                     summary_data[file_key]['sampling_diagnostics'] = diagnostic_results
                 
             except Exception as e:
-                _logger.error(f"[ENDF] File {i+1}: Failed to generate perturbation factors: {e}")
+                _logger.error(f"  [ERROR] [ENDF] File {step_num}: Failed to generate perturbation factors: {e}")
                 failed_files_details[file_key] = f"Perturbation generation failed: {str(e)}"
                 failed_files += 1
+                step_elapsed = time.time() - step_t0
+                _logger.info(f"#-- END STEP {step_num} (elapsed: {step_elapsed:.1f}s) -------------------------------------")
                 continue
             
             # Store factors and mapping for master file
@@ -773,15 +783,18 @@ def perturb_ENDF_files(
             
             # Process samples
             if not dry_run:
-                _logger.info(f"[ENDF] File {i+1}: Applying perturbations to {num_samples} samples...")
+                if verbose:
+                    _logger.info(f"  [INFO] [ENDF] File {step_num}: Applying perturbations to {num_samples} samples...")
             else:
-                _logger.info(f"[ENDF] File {i+1}: Dry run: generating factor summaries for {num_samples} samples...")
+                if verbose:
+                    _logger.info(f"  [INFO] [ENDF] File {step_num}: Dry run: generating factor summaries for {num_samples} samples...")
             
             # Process samples with optional parallelization
             njoy_results = []  # Track NJOY results for batch logging
             
             if nprocs > 1 and num_samples > 1:
-                _logger.info(f"[ENDF] File {i+1}: Using {nprocs} processes for parallel processing")
+                if verbose:
+                    _logger.info(f"  [INFO] [ENDF] File {step_num}: Using {nprocs} processes for parallel processing")
                 
                 try:
                     with Pool(processes=nprocs) as pool:
@@ -806,10 +819,10 @@ def perturb_ENDF_files(
                                 if result and generate_ace and not dry_run:
                                     njoy_results.append((j, result))
                             except Exception as e:
-                                _logger.error(f"[ENDF] File {i+1}: Sample {j+1:04d} processing failed: {e}")
+                                _logger.error(f"  [ERROR] [ENDF] File {step_num}: Sample {j+1:04d} processing failed: {e}")
                                 
                 except Exception as e:
-                    _logger.error(f"[ENDF] File {i+1}: Parallel processing failed, falling back to serial: {e}")
+                    _logger.error(f"  [ERROR] [ENDF] File {step_num}: Parallel processing failed, falling back to serial: {e}")
                     # Fall back to serial processing
                     njoy_results = []
                     for sample_idx in range(num_samples):
@@ -832,7 +845,7 @@ def perturb_ENDF_files(
                             if result and generate_ace and not dry_run:
                                 njoy_results.append((sample_idx, result))
                         except Exception as sample_e:
-                            _logger.error(f"[ENDF] File {i+1}: Sample {sample_idx+1:04d} processing failed: {sample_e}")
+                            _logger.error(f"  [ERROR] [ENDF] File {step_num}: Sample {sample_idx+1:04d} processing failed: {sample_e}")
                             continue
             else:
                 # Serial processing
@@ -856,7 +869,7 @@ def perturb_ENDF_files(
                         if result and generate_ace and not dry_run:
                             njoy_results.append((sample_idx, result))
                     except Exception as e:
-                        _logger.error(f"[ENDF] File {i+1}: Sample {sample_idx+1:04d} processing failed: {e}")
+                        _logger.error(f"  [ERROR] [ENDF] File {step_num}: Sample {sample_idx+1:04d} processing failed: {e}")
                         continue
             
             # Batch logging for NJOY results
@@ -864,12 +877,17 @@ def perturb_ENDF_files(
                 _log_njoy_batch_results(njoy_results, file_key, i+1, temperatures, summary_data)
             
             processed_files += 1
-            _logger.info(f"[ENDF] File {i+1}: Successfully processed all samples")
-            
+            _logger.info(f"  [INFO] [ENDF] File {step_num}: Successfully processed all samples")
+            _logger.info(f">> samples_generated = {num_samples}")
+            step_elapsed = time.time() - step_t0
+            _logger.info(f"#-- END STEP {step_num} (elapsed: {step_elapsed:.1f}s) -------------------------------------")
+
         except Exception as file_error:
-            _logger.error(f"[ENDF] File {i+1}: Critical error during processing: {file_error}")
+            _logger.error(f"  [ERROR] [ENDF] File {step_num}: Critical error during processing: {file_error}")
             failed_files_details[file_key] = f"Critical processing error: {str(file_error)}"
             failed_files += 1
+            step_elapsed = time.time() - step_t0
+            _logger.info(f"#-- END STEP {step_num} (elapsed: {step_elapsed:.1f}s) -------------------------------------")
             continue
     
     # Write master perturbation factors file
@@ -877,104 +895,112 @@ def perturb_ENDF_files(
         all_factors, all_param_mappings, all_energy_grids, output_dir, timestamp, verbose
     )
     
-    # =====================================================================
-    #  Print final comprehensive summary for all files TO LOG FILE
-    # =====================================================================
-    separator = "=" * 80
-    _logger.info(f"\n{separator}")
-    _logger.info(f"[ENDF] [SUMMARY] Processing Results")
-    _logger.info(f"{separator}")
-    
+    # Final comprehensive summary
+    _logger.info("#== SUMMARY ============================================================")
+
     if not summary_data and not failed_files_details:
         _logger.info("  No ENDF files were processed.")
     else:
         # Report files that were successfully processed
         successfully_processed = {k: v for k, v in summary_data.items() if k not in failed_files_details}
-        
+
         if successfully_processed:
-            _logger.info("\n  SUCCESSFULLY PROCESSED ENDF FILES:")
-            _logger.info(f"  {'-' * 60}")
-            
+            _logger.info("  SUCCESSFULLY PROCESSED ENDF FILES:")
+
             for file_key, data in successfully_processed.items():
-                _logger.info(f"\n  File: {file_key}")
-                _logger.info(f"  {'-' * 60}")
-                
+                _logger.info(f"  File: {file_key}")
+
                 # MTs and Legendre coefficients that were perturbed
                 if data['perturbed_mts']:
-                    _logger.info(f"  ► Perturbed MT numbers: {', '.join(map(str, sorted(data['perturbed_mts'])))}")
+                    _logger.info(f"    Perturbed MT numbers: {', '.join(map(str, sorted(data['perturbed_mts'])))}")
                 if data['perturbed_l_coeffs']:
-                    _logger.info(f"  ► Perturbed Legendre coefficients: {', '.join(map(str, sorted(data['perturbed_l_coeffs'])))}")
-                
-                _logger.info(f"  ► Number of samples generated: {data['num_samples']}")
-                
+                    _logger.info(f"    Perturbed Legendre coefficients: {', '.join(map(str, sorted(data['perturbed_l_coeffs'])))}")
+
+                _logger.info(f"    Number of samples generated: {data['num_samples']}")
+
                 # Sampling quality assessment
                 diagnostics = data.get('sampling_diagnostics')
                 if diagnostics and 'overall_status' in diagnostics:
                     status = diagnostics['overall_status']
                     if status in ['CRITICAL', 'POOR']:
-                        status_emoji = "🛑" if status == 'CRITICAL' else "❌"
-                        _logger.info(f"  ► Sampling Quality: {status_emoji} {status} (check detailed log for more information)")
+                        _logger.info(f"    Sampling Quality: [FAIL] {status} (check detailed log for more information)")
                     elif status == 'ACCEPTABLE':
-                        _logger.info(f"  ► Sampling Quality: ⚠️  {status}")
+                        _logger.info(f"    Sampling Quality: [WARN] {status}")
                     elif status in ['GOOD', 'PASS']:
-                        _logger.info(f"  ► Sampling Quality: ✅ {status}")
+                        _logger.info(f"    Sampling Quality: [PASS] {status}")
                     elif status in ['EXCELLENT']:
-                        _logger.info(f"  ► Sampling Quality: 🌟 {status}")
+                        _logger.info(f"    Sampling Quality: [PASS] {status}")
                     elif status in ['WARN', 'FAIL']:
-                        status_emoji = "⚠️" if status == 'WARN' else "❌"
-                        _logger.info(f"  ► Sampling Quality: {status_emoji} {status} (check detailed log for more information)")
+                        tag = "[WARN]" if status == 'WARN' else "[FAIL]"
+                        _logger.info(f"    Sampling Quality: {tag} {status} (check detailed log for more information)")
                 else:
-                    _logger.info(f"  ► Sampling Quality: ℹ️  Not available (diagnostics disabled)")
-                
+                    _logger.info("    Sampling Quality: [INFO] Not available (diagnostics disabled)")
+
                 # ACE generation information
                 ace_info = data['ace_generation']
                 if ace_info['enabled']:
-                    _logger.info(f"  ► ACE generation: ENABLED")
+                    _logger.info("    ACE generation: ENABLED")
                     if ace_info['temperatures']:
                         temps_str = ', '.join(str(t).rstrip('0').rstrip('.') if '.' in str(t) else str(t) for t in ace_info['temperatures'])
-                        _logger.info(f"    • Temperatures: {temps_str}")
-                    
-                    # Note: We would need to update the NJOY processing to track successful/failed ACE generations
-                    # For now, just report if it was enabled
+                        _logger.info(f"      Temperatures: {temps_str}")
+
                     if xsdir_file:
-                        _logger.info(f"    • XSDIR files: Generated from master file {os.path.basename(xsdir_file)}")
+                        _logger.info(f"      XSDIR files: Generated from master file {os.path.basename(xsdir_file)}")
                 else:
-                    _logger.info(f"  ► ACE generation: DISABLED")
-                
+                    _logger.info("    ACE generation: DISABLED")
+
                 # Warnings if any
                 if data['warnings']:
-                    _logger.info(f"  ► Warnings:")
+                    total_warnings_count += len(data['warnings'])
+                    _logger.info("    Warnings:")
                     for warning in data['warnings']:
-                        _logger.info(f"    • {warning}")
+                        _logger.info(f"      {warning}")
 
         # Report files that failed processing
         if failed_files_details:
-            _logger.info("\n  FAILED ENDF FILES:")
-            _logger.info(f"  {'-' * 60}")
-            
+            _logger.info("  FAILED ENDF FILES:")
+
             for file_key, reason in failed_files_details.items():
                 _logger.info(f"  File: {file_key}")
-                _logger.info(f"    • Reason: {reason}")
+                _logger.info(f"    Reason: {reason}")
 
-    _logger.info(f"\n{separator}")
-    
-    # Console: Final summary
+    # Metric lines
     processed_count = len(successfully_processed) if 'successfully_processed' in locals() else processed_files
     failed_count = len(failed_files_details)
-    
-    print(f"\n[INFO] ENDF perturbation job completed!")
-    print(f"[INFO] Processed: {processed_count} file(s)")
-    if failed_count > 0:
-        print(f"[WARNING] Failed: {failed_count} file(s)")
-    print(f"[INFO] Detailed log saved to: {log_file}")
-    
+    _logger.info(f">> success_count = {processed_count}")
+    _logger.info(f">> fail_count = {failed_count}")
     if master_file:
-        print(f"[INFO] Master matrix file: {os.path.basename(master_file)}")
-    
+        _logger.info(f">> master_file = {os.path.basename(master_file)}")
     if generate_ace:
-        print(f"[INFO] ACE generation: {'ENABLED' if generate_ace else 'DISABLED'}")
-        if generate_ace and xsdir_file:
-            print(f"[INFO] XSDIR files generated in: xsdir/ subdirectory")
+        ace_total = sum(
+            sd['ace_generation'].get('successful_samples', 0)
+            for sd in summary_data.values()
+        )
+        _logger.info(f">> ace_generated = {ace_total}")
+
+    _logger.info("#== END SUMMARY ========================================================")
+
+    # Aggregated warnings section
+    _logger.info(f"#== WARNINGS ============================================================")
+    _logger.info(f">> total_warnings = {total_warnings_count}")
+    if total_warnings_count == 0:
+        _logger.info("  No warnings.")
+    _logger.info(f"#== END WARNINGS ========================================================")
+
+    # Console: Final summary
+    _logger.info(f"[INFO] [ENDF] ENDF perturbation job completed", console=True)
+    _logger.info(f"[INFO] [ENDF] Processed: {processed_count} file(s)", console=True)
+    if failed_count > 0:
+        _logger.info(f"[WARN] [ENDF] Failed: {failed_count} file(s)", console=True)
+    _logger.info(f"[INFO] [ENDF] Detailed log saved to: {log_file}", console=True)
+
+    if master_file:
+        _logger.info(f"[INFO] [ENDF] Master matrix file: {os.path.basename(master_file)}", console=True)
+
+    if generate_ace:
+        _logger.info(f"[INFO] [ENDF] ACE generation: ENABLED", console=True)
+        if xsdir_file:
+            _logger.info(f"[INFO] [ENDF] XSDIR files generated in: xsdir/ subdirectory", console=True)
 
 
 def apply_perturbation_factors_to_endf(
@@ -1009,7 +1035,7 @@ def apply_perturbation_factors_to_endf(
         List of perturbed parameter combinations
     """
     if verbose and _get_logger():
-        _get_logger().info(f"[ENDF] [SAMPLE] Applying perturbations to sample {sample_index + 1}")
+        _get_logger().info(f"  [INFO] [ENDF] Applying perturbations to sample {sample_index + 1}")
     
     perturbed_params = []
     
@@ -1017,7 +1043,7 @@ def apply_perturbation_factors_to_endf(
     mf4 = endf.get_file(4)
     if mf4 is None:
         if _get_logger():
-            _get_logger().warning("No MF4 data found in ENDF file")
+            _get_logger().warning("  [WARN] [ENDF] No MF4 data found in ENDF file")
         return perturbed_params
     
     # Apply perturbations to each MT section
@@ -1081,7 +1107,7 @@ def _apply_factors_to_mf4_legendre(
     
     if not current_coeffs or not energies:
         if verbose and _get_logger():
-            _get_logger().warning(f"[ENDF] [MT{mt_data.number}] No Legendre coefficients found")
+            _get_logger().warning(f"  [WARN] [ENDF] MT{mt_data.number}: No Legendre coefficients found")
         return
     
     # Step 0: Make baseline copies before any scaling
@@ -1089,7 +1115,7 @@ def _apply_factors_to_mf4_legendre(
     A0 = [c[:] for c in mt_data._legendre_coeffs]  # Original coefficients (deep copy)
     
     if verbose and _get_logger():
-        _get_logger().debug(f"[ENDF] [MT{mt_data.number}] Baseline: {len(E0)} energy points, max coeffs per point: {max(len(c) for c in A0) if A0 else 0}")
+        _get_logger().debug(f"  [INFO] [ENDF] MT{mt_data.number}: Baseline: {len(E0)} energy points, max coeffs per point: {max(len(c) for c in A0) if A0 else 0}")
     
     # Step 1: Gather boundaries from all energy grids for this MT
     boundaries = set()
@@ -1118,7 +1144,7 @@ def _apply_factors_to_mf4_legendre(
         return np.any(np.isclose(boundaries, x, rtol=0.0, atol=atol))
     
     if verbose and _get_logger():
-        _get_logger().debug(f"[ENDF] [MT{mt_data.number}] Found {len(boundaries)} bin boundaries: {boundaries}")
+        _get_logger().debug(f"  [INFO] [ENDF] MT{mt_data.number}: Found {len(boundaries)} bin boundaries: {boundaries}")
     
     # Step 2: Scale interior points (not at boundaries)
     applied_count = 0
@@ -1160,7 +1186,7 @@ def _apply_factors_to_mf4_legendre(
                     
                     if verbose and _get_logger():
                         _get_logger().debug(
-                            f"[ENDF] [INTERIOR] MT{mt} L{l_coeff} at {energy:.3e} MeV: "
+                            f"  [INFO] [ENDF] INTERIOR MT{mt} L{l_coeff} at {energy:.3e} MeV: "
                             f"factor {factor:.6f}, {old_value:.3e} -> {mt_data._legendre_coeffs[energy_idx][coeff_index]:.3e}"
                         )
     
@@ -1169,14 +1195,14 @@ def _apply_factors_to_mf4_legendre(
     
     for boundary_energy in boundaries:
         if verbose and _get_logger():
-            _get_logger().debug(f"[ENDF] [BOUNDARY] Processing boundary at {boundary_energy:.3e} MeV")
+            _get_logger().debug(f"  [INFO] [ENDF] BOUNDARY: Processing boundary at {boundary_energy:.3e} MeV")
         
         # Interpolate baseline coefficients at this boundary
         baseline_coeffs = _interpolate_legendre_coefficients(boundary_energy, E0, A0)
         
         if baseline_coeffs is None:
             if verbose and _get_logger():
-                _get_logger().warning(f"[ENDF] [BOUNDARY] Could not interpolate at {boundary_energy:.3e} MeV")
+                _get_logger().warning(f"  [WARN] [ENDF] BOUNDARY: Could not interpolate at {boundary_energy:.3e} MeV")
             continue
         
         # Find the factors for lower and upper bins at this boundary
@@ -1240,7 +1266,7 @@ def _apply_factors_to_mf4_legendre(
     
     if verbose and _get_logger():
         _get_logger().info(
-            f"[ENDF] [MT{mt_data.number}] Applied {applied_count} interior factors and "
+            f"  [INFO] [ENDF] MT{mt_data.number}: Applied {applied_count} interior factors and "
             f"{insertions_made} boundary discontinuities. Final: {mt_data._ne} energy points"
         )
 
@@ -1335,7 +1361,7 @@ def _insert_boundary_discontinuity(
         idx = existing_indices[0]
         
         if verbose and _get_logger():
-            _get_logger().debug(f"[ENDF] [BOUNDARY] Replacing existing point at {boundary_energy:.3e} MeV")
+            _get_logger().debug(f"  [INFO] [ENDF] BOUNDARY: Replacing existing point at {boundary_energy:.3e} MeV")
         
         # Replace the existing point with minus side
         mt_data._energies[idx] = boundary_energy
@@ -1355,7 +1381,7 @@ def _insert_boundary_discontinuity(
                 break
         
         if verbose and _get_logger():
-            _get_logger().debug(f"[ENDF] [BOUNDARY] Inserting new points at {boundary_energy:.3e} MeV at index {insert_idx}")
+            _get_logger().debug(f"  [INFO] [ENDF] BOUNDARY: Inserting new points at {boundary_energy:.3e} MeV at index {insert_idx}")
         
         # Insert minus side first
         mt_data._energies.insert(insert_idx, boundary_energy)
@@ -1390,9 +1416,9 @@ def _filter_mf34_covariance(
         Filtered covariance data
     """
     if _get_logger():
-        _get_logger().info(f"Filtering MF34 covariance data: MT={mt_list}, L={legendre_coeffs}")
+        _get_logger().info(f"  [INFO] [ENDF] Filtering MF34 covariance data: MT={mt_list}, L={legendre_coeffs}")
         if not legendre_coeffs or legendre_coeffs == [-1]:
-            _get_logger().info(f"Using all available Legendre coefficients: {sorted(mf34_cov.legendre_indices)}")
+            _get_logger().info(f"  [INFO] [ENDF] Using all available Legendre coefficients: {sorted(mf34_cov.legendre_indices)}")
     
     filtered_cov = LegendreCovariance()
     
@@ -1403,7 +1429,7 @@ def _filter_mf34_covariance(
     if not legendre_coeffs or legendre_coeffs == [-1]:
         available_ls = list(mf34_cov.legendre_indices)
         if _get_logger():
-            _get_logger().info(f"Available L coefficients: {available_ls}")
+            _get_logger().info(f"  [INFO] [ENDF] Available L coefficients: {available_ls}")
     else:
         available_ls = legendre_coeffs
     
@@ -1432,7 +1458,7 @@ def _filter_mf34_covariance(
             )
     
     if _get_logger():
-        _get_logger().info(f"Filtered to {filtered_cov.num_matrices} matrices")
+        _get_logger().info(f"  [INFO] [ENDF] Filtered to {filtered_cov.num_matrices} matrices")
     
     return filtered_cov
 
@@ -1609,7 +1635,7 @@ def _write_master_perturbation_file(
     """
     if not all_factors:
         if verbose and _get_logger():
-            _get_logger().info("[ENDF] [OUTPUT] No factors to write to master file")
+            _get_logger().info("  [INFO] [ENDF] No factors to write to master file")
         return
     
     # Determine the maximum number of samples across all files
@@ -1657,9 +1683,9 @@ def _write_master_perturbation_file(
     df.to_parquet(master_file, index=False, compression='zstd', compression_level=3)
     
     if verbose and _get_logger():
-        _get_logger().info(f"[ENDF] [OUTPUT] Master perturbation factors saved to: {master_file}")
-        _get_logger().info(f"[ENDF] [OUTPUT] DataFrame shape: {df.shape}")
-        _get_logger().info(f"[ENDF] [OUTPUT] Columns: {len(df.columns)} (including Sample_ID)")
-        _get_logger().info(f"[ENDF] [OUTPUT] Samples: {max_samples}")
+        _get_logger().info(f"  [INFO] [ENDF] Master perturbation factors saved to: {master_file}")
+        _get_logger().info(f"  [INFO] [ENDF] DataFrame shape: {df.shape}")
+        _get_logger().info(f"  [INFO] [ENDF] Columns: {len(df.columns)} (including Sample_ID)")
+        _get_logger().info(f"  [INFO] [ENDF] Samples: {max_samples}")
     
     return master_file
