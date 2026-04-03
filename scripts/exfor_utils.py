@@ -2322,23 +2322,34 @@ def compute_covariance_from_samples(
 def absolute_to_nominal_relative(
     cov_abs: np.ndarray,
     nominal_params: np.ndarray,
-    zero_threshold: float = 1e-12,
+    zero_threshold: float = 1e-6,
 ) -> np.ndarray:
     """Convert absolute covariance to relative-to-nominal.
 
     Cov_rel(i,j) = Cov_abs(i,j) / (nom_i * nom_j)
-    Where |nom_i * nom_j| < zero_threshold, set to 0.
 
-    The default threshold (1e-12) corresponds to the square of the ENDF
-    11-character field precision (~6 significant digits).  Coefficients
-    below ~1e-6 are indistinguishable from zero at ENDF precision, so
-    their pairwise product is below 1e-12 and the relative covariance
-    is treated as undefined.
+    Parameters with ``|nom_i| < zero_threshold`` are treated as
+    undefined: their entire row **and** column are set to zero.  This
+    preserves positive semi-definiteness (equivalent to removing those
+    parameters from the matrix).
+
+    The default threshold (1e-6) corresponds to the ENDF 11-character
+    field precision (~6 significant digits).  Coefficients below this
+    are indistinguishable from zero at ENDF precision.
+
+    .. versionchanged:: 0.x
+       Previous versions tested the *pairwise product*
+       ``|nom_i * nom_j| < threshold²``, which could zero the diagonal
+       (variance) while keeping cross-terms, breaking PSD.  The new
+       per-parameter test avoids this.
     """
+    param_safe = np.abs(nominal_params) > zero_threshold
+    # Both row AND column parameter must be safe
+    pair_safe = np.outer(param_safe, param_safe)
     denom = np.outer(nominal_params, nominal_params)
-    safe = np.abs(denom) > zero_threshold
+
     cov_rel = np.zeros_like(cov_abs)
-    cov_rel[safe] = cov_abs[safe] / denom[safe]
+    cov_rel[pair_safe] = cov_abs[pair_safe] / denom[pair_safe]
     return cov_rel
 
 

@@ -570,7 +570,8 @@ def enforce_matrix_quality(matrix: np.ndarray,
                           clip_small_negatives: bool = False,
                           symmetrize: bool = True,
                           project_to_psd: bool = False,
-                          psd_floor: float = 0.0) -> np.ndarray:
+                          psd_floor: float = 0.0,
+                          psd_method: str = "higham") -> np.ndarray:
     """
     Apply quality checks and corrections to covariance matrices.
 
@@ -586,9 +587,11 @@ def enforce_matrix_quality(matrix: np.ndarray,
         Whether to enforce symmetry
     project_to_psd : bool, optional
         Whether to project matrix to nearest positive semi-definite matrix
-        using Higham-style eigenvalue clipping
     psd_floor : float, optional
         Minimum eigenvalue for PSD projection (default 0.0)
+    psd_method : str, optional
+        PSD projection method: "higham" (diagonal-preserving, default) or
+        "clip" (naive eigenvalue clipping)
 
     Returns
     -------
@@ -609,12 +612,19 @@ def enforce_matrix_quality(matrix: np.ndarray,
             warnings.warn(f"Clipped {np.sum(small_negatives)} small negative diagonal elements to zero")
             np.fill_diagonal(result, np.where(small_negatives, 0.0, diagonal))
 
-    # Optional PSD projection by clipping negative eigenvalues (Higham-style)
+    # Optional PSD projection
     if project_to_psd:
-        w, v = np.linalg.eigh(result)
-        w_clipped = np.maximum(w, psd_floor)
-        result = (v @ np.diag(w_clipped) @ v.T)
-        result = (result + result.T) / 2.0  # Re-symmetrize after reconstruction
+        if psd_method == "higham":
+            from kika.cov.decomposition import nearest_psd_higham
+            result, _info = nearest_psd_higham(
+                result, preserve_diagonal=True, eigval_floor=psd_floor,
+                verbose=False,
+            )
+        else:
+            w, v = np.linalg.eigh(result)
+            w_clipped = np.maximum(w, psd_floor)
+            result = (v @ np.diag(w_clipped) @ v.T)
+            result = (result + result.T) / 2.0
 
     return result
 

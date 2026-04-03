@@ -49,10 +49,15 @@ def _make_lb5_record(
 ) -> SubSubsectionRecord:
     """Create an LB=5 symmetric upper-triangle SubSubsectionRecord.
 
+    Only appropriate for symmetric matrices (diagonal L=L' blocks).
+    For asymmetric cross-correlation matrices (L≠L'), use
+    :func:`_make_lb6_record` instead.
+
     Parameters
     ----------
     matrix : np.ndarray
-        Square covariance matrix of shape (m, m) where m = len(energy_grid) - 1.
+        Square **symmetric** covariance matrix of shape (m, m)
+        where m = len(energy_grid) - 1.
     energy_grid : List[float]
         Energy boundary points (m + 1 values).
 
@@ -74,6 +79,50 @@ def _make_lb5_record(
     triu_rows, triu_cols = np.triu_indices(m)
     record.matrix = matrix[triu_rows, triu_cols].tolist()
     record.nt = len(energy_grid) + len(record.matrix)
+    return record
+
+
+def _make_lb6_record(
+    matrix: np.ndarray,
+    row_energy_grid: List[float],
+    col_energy_grid: List[float],
+) -> SubSubsectionRecord:
+    """Create an LB=6 rectangular-matrix SubSubsectionRecord.
+
+    Use this for asymmetric cross-correlation matrices such as
+    off-diagonal (L≠L') Legendre covariance blocks where
+    ``Cov(a_L(E_i), a_L'(E_j)) ≠ Cov(a_L(E_j), a_L'(E_i))``.
+
+    Parameters
+    ----------
+    matrix : np.ndarray
+        Matrix of shape (r, c) where r = len(row_energy_grid) - 1
+        and c = len(col_energy_grid) - 1.
+    row_energy_grid : List[float]
+        Row energy boundary points (r + 1 values).
+    col_energy_grid : List[float]
+        Column energy boundary points (c + 1 values).
+
+    Returns
+    -------
+    SubSubsectionRecord
+    """
+    r = len(row_energy_grid) - 1
+    c = len(col_energy_grid) - 1
+    if matrix.shape != (r, c):
+        raise ValueError(
+            f"Matrix shape {matrix.shape} doesn't match energy grids "
+            f"with {r} row intervals and {c} column intervals"
+        )
+    record = SubSubsectionRecord()
+    record.ls = 0
+    record.lb = 6
+    record.row_energies = list(row_energy_grid)
+    record.col_energies = list(col_energy_grid)
+    record.rect_matrix = matrix.ravel().tolist()
+    # NT = NER + NEC + NER_intervals * NEC_intervals
+    record.nt = len(row_energy_grid) + len(col_energy_grid) + r * c
+    record.ne = len(row_energy_grid)  # NE field stores NER for LB=6
     return record
 
 
@@ -320,7 +369,14 @@ def create_mf34_from_covariance(
 
             sub_matrix = cov_matrix[np.ix_(row_indices, col_indices)]
 
-            sub_subsec.records = [_make_lb5_record(sub_matrix, list(energy_grid_ev))]
+            if l == l1:
+                # Diagonal block: symmetric → LB=5 LS=1
+                sub_subsec.records = [_make_lb5_record(sub_matrix, list(energy_grid_ev))]
+            else:
+                # Off-diagonal block: asymmetric → LB=6
+                sub_subsec.records = [_make_lb6_record(
+                    sub_matrix, list(energy_grid_ev), list(energy_grid_ev)
+                )]
             subsection.sub_subsections.append(sub_subsec)
 
     mf34._nmt1 = 1  # One subsection
@@ -553,11 +609,16 @@ def merge_mf34(
     for l, l1 in all_ll_pairs:
         orig_data = orig_map.get((l, l1))
         pipe_data = pipe_map.get((l, l1))
+        is_offdiag = (l != l1)
 
         if orig_data is None and pipe_data is not None:
             # Pipeline-only pair: single record
             mat, egrid = pipe_data
-            records = [_make_lb5_record(mat, [float(e) for e in egrid])]
+            egrid_f = [float(e) for e in egrid]
+            if is_offdiag:
+                records = [_make_lb6_record(mat, egrid_f, egrid_f)]
+            else:
+                records = [_make_lb5_record(mat, egrid_f)]
 
         elif pipe_data is None and orig_data is not None:
             # Original-only pair: exclude the pipeline energy range.
@@ -569,8 +630,13 @@ def merge_mf34(
             )
             if not splits:
                 continue  # pipeline covers entire original range → skip pair
-            records = [_make_lb5_record(s_mat, [float(e) for e in s_grid])
-                       for s_mat, s_grid in splits]
+            if is_offdiag:
+                records = [_make_lb6_record(s_mat, [float(e) for e in s_grid],
+                                            [float(e) for e in s_grid])
+                           for s_mat, s_grid in splits]
+            else:
+                records = [_make_lb5_record(s_mat, [float(e) for e in s_grid])
+                           for s_mat, s_grid in splits]
 
         else:
             # Both sources have data – merge on union grid
@@ -609,7 +675,11 @@ def merge_mf34(
                 merged_matrix[np.ix_(orig_idx, orig_idx)] = orig_mat[np.ix_(ob, ob)]
 
             # Cross-source cells remain zero (already initialized)
-            records = [_make_lb5_record(merged_matrix, [float(e) for e in union_grid])]
+            union_grid_f = [float(e) for e in union_grid]
+            if is_offdiag:
+                records = [_make_lb6_record(merged_matrix, union_grid_f, union_grid_f)]
+            else:
+                records = [_make_lb5_record(merged_matrix, union_grid_f)]
 
         sub_subsec = SubSubsection()
         sub_subsec.l = l

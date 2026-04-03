@@ -40,12 +40,14 @@ class CrossSectionCovariance:
         Energy unit for energy_grid: 'eV' (default) or 'MeV'
     """
     num_groups: int = 0
-    energy_grid: Optional[List[float]] = None 
+    energy_grid: Optional[List[float]] = None
+    energy_grids: List[List[float]] = field(default_factory=list)  # Per-matrix energy grids (pointwise ENDF)
     isotope_rows: List[int] = field(default_factory=list)
     reaction_rows: List[int] = field(default_factory=list)
     isotope_cols: List[int] = field(default_factory=list)
     reaction_cols: List[int] = field(default_factory=list)
     matrices: List[np.ndarray] = field(default_factory=list)
+    is_relative: List[bool] = field(default_factory=list)  # Per-matrix: True=relative, False=absolute
     cross_sections: Dict[Tuple[int, int], np.ndarray] = field(default_factory=dict)
     energy_unit: str = 'eV'  # Energy unit: 'eV' or 'MeV'
 
@@ -66,16 +68,18 @@ class CrossSectionCovariance:
         return copy.deepcopy(self)
 
     def add_matrix(
-        self, 
-        isotope_row: int, 
-        reaction_row: int, 
-        isotope_col: int, 
-        reaction_col: int, 
-        matrix: np.ndarray
+        self,
+        isotope_row: int,
+        reaction_row: int,
+        isotope_col: int,
+        reaction_col: int,
+        matrix: np.ndarray,
+        energy_grid: Optional[List[float]] = None,
+        is_relative: Optional[bool] = None,
     ) -> None:
         """
         Add a covariance matrix to the collection.
-        
+
         Parameters
         ----------
         isotope_row : int
@@ -87,17 +91,37 @@ class CrossSectionCovariance:
         reaction_col : int
             Column reaction MT number
         matrix : np.ndarray
-            Covariance matrix of shape (num_groups, num_groups)
+            Covariance matrix
+        energy_grid : list of float, optional
+            Energy grid for this matrix. If not provided, validates against
+            ``self.num_groups`` (multigroup mode).
+        is_relative : bool, optional
+            Whether the matrix is relative (True) or absolute (False).
         """
-        # Validate matrix shape
-        if matrix.shape != (self.num_groups, self.num_groups):
-            raise ValueError(f"Matrix shape {matrix.shape} does not match expected shape ({self.num_groups}, {self.num_groups})")
-        
+        if energy_grid is not None:
+            # Per-matrix grid mode (ENDF MF33 or explicit grid)
+            expected_size = len(energy_grid) - 1
+            if matrix.shape != (expected_size, expected_size) and matrix.shape[0] != expected_size:
+                raise ValueError(
+                    f"Matrix shape {matrix.shape} incompatible with energy_grid "
+                    f"of {len(energy_grid)} points ({expected_size} intervals)"
+                )
+            self.energy_grids.append(list(energy_grid))
+        else:
+            # Multigroup mode: validate against num_groups
+            if self.num_groups > 0 and matrix.shape != (self.num_groups, self.num_groups):
+                raise ValueError(f"Matrix shape {matrix.shape} does not match expected shape ({self.num_groups}, {self.num_groups})")
+            # Populate energy_grids from the shared energy_grid for consistency
+            if self.energy_grid is not None:
+                self.energy_grids.append(list(self.energy_grid))
+
         self.isotope_rows.append(isotope_row)
         self.reaction_rows.append(reaction_row)
         self.isotope_cols.append(isotope_col)
         self.reaction_cols.append(reaction_col)
         self.matrices.append(matrix)
+        if is_relative is not None:
+            self.is_relative.append(is_relative)
 
         # Invalidate cached adjacency graph (if any)
         self._invalidate_cov_graph_cache()
@@ -315,13 +339,13 @@ class CrossSectionCovariance:
             energy_grid=list(self.energy_grid) if self.energy_grid is not None else None,
         )
         # copy retained covariance matrices
-        for ir, rr, ic, rc, M in zip(
+        for idx, (ir, rr, ic, rc, M) in enumerate(zip(
             self.isotope_rows,
             self.reaction_rows,
             self.isotope_cols,
             self.reaction_cols,
             self.matrices
-        ):
+        )):
             remove = False
             if ir == isotope and ic == isotope:
                 for r1, r2 in reaction_pairs:
@@ -345,6 +369,10 @@ class CrossSectionCovariance:
                 new.isotope_cols.append(ic)
                 new.reaction_cols.append(rc)
                 new.matrices.append(M.copy())
+                if idx < len(self.energy_grids):
+                    new.energy_grids.append(list(self.energy_grids[idx]))
+                if idx < len(self.is_relative):
+                    new.is_relative.append(self.is_relative[idx])
         # copy retained cross sections
         for key, xs in self.cross_sections.items():
             zaid, mt = key
@@ -378,7 +406,12 @@ class CrossSectionCovariance:
         """
         Return the full covariance matrix of shape (N·G) × (N·G),
         where N = number of unique (iso,rxn) blocks and G = num_groups.
+
+        If :meth:`ensure_psd` has been called, the cached PSD matrix is
+        returned directly.
         """
+        if getattr(self, "_psd_covariance_cache", None) is not None:
+            return self._psd_covariance_cache
         param_pairs = self._get_param_pairs()
         idx_map = {p: i for i, p in enumerate(param_pairs)}
 
@@ -592,6 +625,10 @@ class CrossSectionCovariance:
             nuevo.isotope_cols.append(isotope)
             nuevo.reaction_cols.append(c)
             nuevo.matrices.append(self.matrices[i])
+            if i < len(self.energy_grids):
+                nuevo.energy_grids.append(list(self.energy_grids[i]))
+            if i < len(self.is_relative):
+                nuevo.is_relative.append(self.is_relative[i])
 
         # copy XS vectors that survive the same filters
         for (iso, mt), xs in self.cross_sections.items():
@@ -630,6 +667,10 @@ class CrossSectionCovariance:
             new_cov.isotope_cols.append(isotope)
             new_cov.reaction_cols.append(self.reaction_cols[i])
             new_cov.matrices.append(self.matrices[i])
+            if i < len(self.energy_grids):
+                new_cov.energy_grids.append(list(self.energy_grids[i]))
+            if i < len(self.is_relative):
+                new_cov.is_relative.append(self.is_relative[i])
 
         for (iso, mt), xs in self.cross_sections.items():
             if iso == isotope:
@@ -670,10 +711,81 @@ class CrossSectionCovariance:
             new_cov.isotope_cols.append(self.isotope_cols[i])
             new_cov.reaction_cols.append(self.reaction_cols[i])
             new_cov.matrices.append(self.matrices[i])
+            if i < len(self.energy_grids):
+                new_cov.energy_grids.append(list(self.energy_grids[i]))
+            if i < len(self.is_relative):
+                new_cov.is_relative.append(self.is_relative[i])
 
         # Copy cross sections for selected isotopes
         for (iso, mt), xs in self.cross_sections.items():
             if iso in isotope_set:
+                new_cov.cross_sections[(iso, mt)] = xs.copy()
+
+        return new_cov
+
+    def filter_by_reactions(
+        self,
+        mts: Sequence[int],
+        isotope: Optional[int] = None,
+    ) -> "CrossSectionCovariance":
+        """
+        Return a new CrossSectionCovariance containing only matrices whose
+        row and column reactions are both in *mts*. When per-matrix
+        ``energy_grids`` are available (e.g. ENDF MF33), the returned object
+        has ``num_groups`` and ``energy_grid`` set from the diagonal block of
+        the first requested MT so that all plotting methods work directly.
+
+        Parameters
+        ----------
+        mts : sequence of int
+            Reaction MT numbers to keep.
+        isotope : int, optional
+            If given, also filter by this isotope.
+        """
+        mt_set = set(mts)
+        idxs = [
+            i for i, (rr, rc) in enumerate(
+                zip(self.reaction_rows, self.reaction_cols)
+            )
+            if rr in mt_set and rc in mt_set
+            and (isotope is None or (self.isotope_rows[i] == isotope and self.isotope_cols[i] == isotope))
+        ]
+
+        # Determine num_groups / energy_grid from the first diagonal block
+        ng = 0
+        eg = None
+        for i in idxs:
+            if self.reaction_rows[i] == self.reaction_cols[i]:
+                ng = self.matrices[i].shape[0]
+                if i < len(self.energy_grids):
+                    eg = list(self.energy_grids[i])
+                elif self.energy_grid is not None:
+                    eg = list(self.energy_grid)
+                break
+        if ng == 0:
+            ng = self.num_groups
+        if eg is None and self.energy_grid is not None:
+            eg = list(self.energy_grid)
+
+        new_cov = CrossSectionCovariance(
+            num_groups=ng,
+            energy_grid=eg,
+            energy_unit=self.energy_unit,
+        )
+
+        for i in idxs:
+            new_cov.isotope_rows.append(self.isotope_rows[i])
+            new_cov.reaction_rows.append(self.reaction_rows[i])
+            new_cov.isotope_cols.append(self.isotope_cols[i])
+            new_cov.reaction_cols.append(self.reaction_cols[i])
+            new_cov.matrices.append(self.matrices[i])
+            if i < len(self.energy_grids):
+                new_cov.energy_grids.append(list(self.energy_grids[i]))
+            if i < len(self.is_relative):
+                new_cov.is_relative.append(self.is_relative[i])
+
+        for (iso, mt), xs in self.cross_sections.items():
+            if mt in mt_set and (isotope is None or iso == isotope):
                 new_cov.cross_sections[(iso, mt)] = xs.copy()
 
         return new_cov
@@ -810,6 +922,61 @@ class CrossSectionCovariance:
             "min_eigenvalue": rem_log.get("min_eigenvalue", log.get("min_eigenvalue")),  # Use final eigenvalue
         }
         return cm_final, out_log
+
+    def ensure_psd(
+        self,
+        *,
+        preserve_diagonal: bool = True,
+        max_iter: int = 1000,
+        tol: float = 1e-10,
+        eigval_floor: float = 0.0,
+        verbose: bool = True,
+        logger=None,
+    ) -> Tuple["CrossSectionCovariance", Dict[str, Any]]:
+        """
+        Return a copy whose :attr:`covariance_matrix` is the nearest PSD matrix.
+
+        Uses Higham's alternating-projection algorithm.  The original
+        sub-matrices are **not** modified; instead, the assembled PSD matrix
+        is cached and returned by the ``covariance_matrix`` /
+        ``log_covariance_matrix`` properties.
+
+        Parameters
+        ----------
+        preserve_diagonal : bool
+            If True, preserve the original variances (diagonal elements).
+        max_iter : int
+            Maximum number of Higham iterations.
+        tol : float
+            Convergence tolerance on relative Frobenius change.
+        eigval_floor : float
+            Floor for eigenvalues in the PSD projection step.
+        verbose : bool
+            Whether to print diagnostic information.
+        logger : optional
+            Logger instance for file output.
+
+        Returns
+        -------
+        Tuple[CrossSectionCovariance, dict]
+            (psd_copy, info) where *psd_copy* has the PSD cache set and
+            *info* is the diagnostic dict from ``nearest_psd_higham``.
+        """
+        from kika.cov.decomposition import nearest_psd_higham
+
+        full = self.covariance_matrix
+        psd_full, info = nearest_psd_higham(
+            full,
+            preserve_diagonal=preserve_diagonal,
+            max_iter=max_iter,
+            tol=tol,
+            eigval_floor=eigval_floor,
+            verbose=verbose,
+            logger=logger,
+        )
+        out = self.copy()
+        out._psd_covariance_cache = psd_full
+        return out, info
 
     def eigen_block_contributions(
         self,
@@ -1922,23 +2089,23 @@ class CrossSectionCovariance:
     def cholesky_decomposition(
         self,
         *,
-        space: str = "log",        # "log" (default) or "linear"
+        space: str = "log",
+        psd_method: str = "higham",
         jitter_scale: float = 1e-10,
         max_jitter_ratio: float = 1e-3,
         verbose: bool = True,
-        logger = None,  # Add logger parameter
+        logger=None,
     ) -> np.ndarray:
-        """
-        Robust Cholesky factor L such that  M ≈ L Lᵀ.
-        """
+        """Robust Cholesky factor L such that M ≈ L Lᵀ."""
         from kika.cov.decomposition import cholesky_decomposition
         return cholesky_decomposition(
             self,
             space=space,
+            psd_method=psd_method,
             jitter_scale=jitter_scale,
             max_jitter_ratio=max_jitter_ratio,
             verbose=verbose,
-            logger=logger
+            logger=logger,
         )
 
     def eigen_decomposition(
@@ -1946,22 +2113,19 @@ class CrossSectionCovariance:
         *,
         space: str = "log",
         clip_negatives: bool = True,
+        psd_method: Optional[str] = None,
         verbose: bool = True,
-        logger = None,  # Add logger parameter
+        logger=None,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Eigendecomposition with optional *clipping* instead of jitter.
-
-        If ``clip_negatives`` is *True*, negative eigenvalues are set to
-        zero and the user is informed of the number of clips and the minimum
-        original value.
-        """
+        """Eigendecomposition with PSD correction."""
         from kika.cov.decomposition import eigen_decomposition
         return eigen_decomposition(
             self,
             space=space,
             clip_negatives=clip_negatives,
+            psd_method=psd_method,
             verbose=verbose,
-            logger=logger
+            logger=logger,
         )
 
     def svd_decomposition(
@@ -1969,25 +2133,21 @@ class CrossSectionCovariance:
         *,
         space: str = "log",
         clip_negatives: bool = True,
+        psd_method: Optional[str] = None,
         verbose: bool = True,
         full_matrices: bool = False,
-        logger = None,  # Add logger parameter
+        logger=None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """SVD with pre-clipping using eigendecomposition.
-
-        For symmetric matrices, SVD and eigen are equivalent. If
-        ``clip_negatives`` is activated, a preliminary eigendecomposition,
-        clipping, and reconstruction step is performed before applying SVD,
-        ensuring singular values consistent with a PSD matrix.
-        """
+        """SVD with PSD pre-processing."""
         from kika.cov.decomposition import svd_decomposition
         return svd_decomposition(
             self,
             space=space,
             clip_negatives=clip_negatives,
+            psd_method=psd_method,
             verbose=verbose,
             full_matrices=full_matrices,
-            logger=logger
+            logger=logger,
         )
 
     
@@ -3024,6 +3184,7 @@ class CrossSectionCovariance:
         report_tol: float = 1e-6,
         eigen_floor: float = 1e-12,
         project_psd: bool = True,
+        psd_method: str = "higham",
         verbose: bool = True,
     ):
         """
@@ -3123,13 +3284,22 @@ class CrossSectionCovariance:
         # --- optional PSD projection ---
         if project_psd:
             neg_count = int((w1 < 0).sum())
-            if neg_count and verbose:
-                print(f"[COV] [CORRELATION] PSD-proj: {neg_count} eigenvalues < 0, floored to {eigen_floor:.1e}")
-            w2 = np.maximum(w1, eigen_floor)
-            C2 = V1 @ np.diag(w2) @ V1.T
-            C2 = (C2 + C2.T) * 0.5
-            if verbose:
-                print("[COV] [CORRELATION] Smallest 5 eigenvalues AFTER PSD:", " ".join(f"{x:+.3e}" for x in w2[:5]))
+            if psd_method == "higham" and neg_count > 0:
+                from kika.cov.decomposition import nearest_psd_higham
+                if verbose:
+                    print(f"[COV] [CORRELATION] PSD-proj (Higham): {neg_count} eigenvalues < 0")
+                C2, _psd_info = nearest_psd_higham(
+                    C1, preserve_diagonal=True, eigval_floor=eigen_floor,
+                    verbose=verbose,
+                )
+            else:
+                if neg_count and verbose:
+                    print(f"[COV] [CORRELATION] PSD-proj: {neg_count} eigenvalues < 0, floored to {eigen_floor:.1e}")
+                w2 = np.maximum(w1, eigen_floor)
+                C2 = V1 @ np.diag(w2) @ V1.T
+                C2 = (C2 + C2.T) * 0.5
+                if verbose:
+                    print("[COV] [CORRELATION] Smallest 5 eigenvalues AFTER PSD:", " ".join(f"{x:+.3e}" for x in w2[:5]))
         else:
             C2 = C1
 

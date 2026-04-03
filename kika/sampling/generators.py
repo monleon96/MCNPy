@@ -8,8 +8,12 @@ from typing import List, Sequence, Optional, Tuple, Dict, Any
 
 from kika.cov.cross_section_covariance import CrossSectionCovariance
 from kika.cov.decomposition import (
+    cap_variance_congruence,
+    cholesky_decomposition as _cholesky_decomposition,
+    eigen_decomposition as _eigen_decomposition,
+    svd_decomposition as _svd_decomposition,
     verify_cholesky_decomposition,
-    verify_eigen_decomposition, 
+    verify_eigen_decomposition,
     verify_svd_decomposition,
     verify_pca_decomposition
 )
@@ -34,6 +38,7 @@ def _verify_sample_covariance(
     space: str,
     verbose: bool = True,
     logger = None,
+    label: str = "",
 ) -> Dict[str, float]:
     """
     Verify that the empirical covariance from samples matches the original covariance matrix.
@@ -65,23 +70,29 @@ def _verify_sample_covariance(
         empirical_cov = np.cov(centered_samples.T, ddof=1)
     else:  # log space
         # For log space: samples = factors = exp(Y), we need to check Cov(log(factors))
-        log_samples = np.log(samples)
+        log_samples = np.log(np.maximum(samples, np.finfo(samples.dtype).tiny))
         # Remove the mean shift to get the underlying Y ~ N(m, Σ_log)
         # Since samples = exp(Y + m), we have log(samples) = Y + m
         # The original covariance is Cov(Y), so we need Cov(log(samples) - mean(log(samples)))
         log_samples_centered = log_samples - np.mean(log_samples, axis=0)
         empirical_cov = np.cov(log_samples_centered.T, ddof=1)
     
-    # Calculate verification metrics
-    frobenius_original = np.linalg.norm(original_cov, 'fro')
-    frobenius_diff = np.linalg.norm(original_cov - empirical_cov, 'fro')
+    # Mask non-finite entries for NaN-safe computation
+    finite_mask = np.isfinite(original_cov) & np.isfinite(empirical_cov)
+    n_nonfinite = int(np.count_nonzero(~finite_mask))
+
+    # Compute Frobenius on finite entries only
+    orig_clean = np.where(finite_mask, original_cov, 0.0)
+    emp_clean = np.where(finite_mask, empirical_cov, 0.0)
+    frobenius_original = np.linalg.norm(orig_clean, 'fro')
+    frobenius_diff = np.linalg.norm(orig_clean - emp_clean, 'fro')
     relative_frobenius_error = frobenius_diff / frobenius_original if frobenius_original > 0 else 0.0
-    
-    # Calculate element-wise errors
-    abs_errors = np.abs(original_cov - empirical_cov)
+
+    # Calculate element-wise errors (finite only)
+    abs_errors = np.abs(orig_clean - emp_clean)
     max_diagonal_error = np.max(abs_errors[np.eye(n_params, dtype=bool)])
     max_offdiag_error = np.max(abs_errors[~np.eye(n_params, dtype=bool)]) if n_params > 1 else 0.0
-    
+
     # Calculate relative diagonal errors
     diagonal_original = np.diag(original_cov)
     diagonal_empirical = np.diag(empirical_cov)
@@ -99,38 +110,40 @@ def _verify_sample_covariance(
         'n_parameters': n_params
     }
     
-    # Log results in the same style as decomposition verification
+    # Quality assessment: combine Frobenius and diagonal error
+    frob_pct = relative_frobenius_error * 100.0
+    diag_pct = max_relative_diagonal_error * 100.0
+    if frob_pct < 1.0 and diag_pct < 20.0:
+        quality = "EXCELLENT"
+    elif frob_pct < 5.0 and diag_pct < 50.0:
+        quality = "GOOD"
+    elif frob_pct < 15.0 and diag_pct < 100.0:
+        quality = "FAIR"
+    else:
+        quality = "POOR"
+
+    # Log results
     if verbose:
-        if logger:
-            logger.info(f"[SAMPLING] [QUALITY] Sample-based covariance verification:")
-            logger.info(f"  Samples used: {n_samples}")
-            logger.info(f"  Parameters: {n_params}")
-            logger.info(f"  Relative Frobenius error: {relative_frobenius_error*100:.6f}%")
-            logger.info(f"  Max diagonal error: {max_relative_diagonal_error*100:.6f}%")
-            logger.info(f"  Max off-diagonal error: {max_offdiag_error:.6e}")
-            
-            # Provide quality assessment
-            if relative_frobenius_error < 0.01:  # < 1%
-                quality = "EXCELLENT"
-            elif relative_frobenius_error < 0.05:  # < 5%
-                quality = "GOOD"
-            elif relative_frobenius_error < 0.15:  # < 15%
-                quality = "FAIR"
+        ctx = f" [{label}]" if label else ""
+        separator = "-" * 60
+        def _out(msg):
+            if logger:
+                logger.info(msg)
             else:
-                quality = "POOR"
-            
-            logger.info(f"  Sample quality assessment: {quality}")
-            
-            # Add note about sample count dependency
-            if n_samples < 1000:
-                logger.info(f"  Note: Quality improves with more samples (current: {n_samples})")
-        else:
-            # When logger is not available but verbose is True, still print to stdout
-            # This maintains backward compatibility for direct function calls
-            print(f"[SAMPLING] [QUALITY] Sample-based covariance verification:")
-            print(f"  Relative Frobenius error: {relative_frobenius_error*100:.6f}%")
-            print(f"  Max relative diagonal error: {max_relative_diagonal_error*100:.6f}%")
-            print(f"  Sample quality: {'GOOD' if relative_frobenius_error < 0.05 else 'FAIR' if relative_frobenius_error < 0.15 else 'POOR'}")
+                print(msg)
+
+        _out(f"\n[SAMPLING] [QUALITY] Sample covariance verification{ctx}\n{separator}")
+        _out(f"  Samples used: {n_samples}")
+        _out(f"  Parameters: {n_params}")
+        if n_nonfinite > 0:
+            _out(f"  Non-finite entries masked: {n_nonfinite}")
+        _out(f"  Relative Frobenius error: {frob_pct:.4f}%")
+        _out(f"  Max relative diagonal error: {diag_pct:.4f}%")
+        _out(f"  Max absolute off-diagonal error: {max_offdiag_error:.6e}")
+        _out(f"  Sample quality assessment: {quality}")
+        if n_samples < 1000:
+            _out(f"  Note: Quality improves with more samples (current: {n_samples})")
+        _out(separator)
     
     return metrics
 
@@ -262,9 +275,12 @@ def generate_samples(
     energy_grid: Optional[Sequence[float]] = None,
     autofix: Optional[str] = None,    # can be None/"soft"/"medium"/"hard"
     high_val_thresh: float = 5.0,
-    accept_tol: float = -1.0e-4,  
+    accept_tol: float = -1.0e-4,
+    psd_method: str = "higham",
+    max_relative_std: Optional[float] = 3.0,
     verbose: bool = True,
-) -> Tuple[np.ndarray, Optional[List[int]], Optional[Dict[str, Any]]]: 
+    label: str = "",
+) -> Tuple[np.ndarray, Optional[List[int]], Optional[Dict[str, Any]]]:
     """
     Draw multiplicative perturbation factors.
 
@@ -410,6 +426,24 @@ def generate_samples(
         raise ValueError("space must be 'linear' or 'log'")
 
     # ------------------------------------------------------------------
+    # 2b. Cap extreme variances (threshold-reaction spikes, etc.)
+    if max_relative_std is not None and max_relative_std > 0:
+        if space == "log":
+            max_log_var = np.log(1.0 + max_relative_std ** 2)
+        else:
+            max_log_var = max_relative_std ** 2
+
+        cov_mat, cap_info = cap_variance_congruence(
+            cov_mat, max_log_var,
+            param_pairs=param_pairs,
+            num_groups=num_groups,
+            bins=bins,
+            verbose=verbose,
+            logger=logger,
+            label=label,
+        )
+
+    # ------------------------------------------------------------------
     # 3. Draw uncorrelated N(0,1)
     Z = _uncorrelated(dim=p, n=n_samples,
                       method=sampling_method, seed=seed)
@@ -424,50 +458,21 @@ def generate_samples(
             )
         else:
             if method == "cholesky":
-                try:
-                    L = cov_fixed.cholesky_decomposition(space=space, verbose=verbose, logger=logger)
-                    # Verify Cholesky decomposition quality
-                    if verbose:
-                        verify_cholesky_decomposition(
-                            original_matrix=cov_mat,
-                            L=L,
-                            space=space,
-                            verbose=verbose,
-                            logger=logger
-                        )
-                except Exception as chol_err:
-                    if verbose:
-                        if logger:
-                            logger.warning(f"[DECOMPOSITION] [QUALITY] Cholesky verification skipped: decomposition failed ({str(chol_err)})")
-                        else:
-                            print(f"[DECOMPOSITION] [QUALITY] Cholesky verification skipped: decomposition failed ({str(chol_err)})")
-                    raise  # Re-raise the original exception
+                L = _cholesky_decomposition(
+                    space=space, psd_method=psd_method,
+                    verbose=verbose, logger=logger, matrix=cov_mat,
+                )
             elif method == "eigen":
-                eigvals, eigvecs = cov_fixed.eigen_decomposition(space=space, clip_negatives=True, verbose=verbose, logger=logger)
-                # Verify eigendecomposition quality
-                if verbose:
-                    verify_eigen_decomposition(
-                        original_matrix=cov_mat,
-                        eigvals=eigvals,
-                        eigvecs=eigvecs,
-                        space=space,
-                        verbose=verbose,
-                        logger=logger
-                    )
+                eigvals, eigvecs = _eigen_decomposition(
+                    space=space, psd_method=psd_method,
+                    verbose=verbose, logger=logger, matrix=cov_mat,
+                )
                 L = eigvecs @ np.diag(np.sqrt(eigvals))
             elif method == "svd":
-                U, S, Vt = cov_fixed.svd_decomposition(space=space, clip_negatives=True, verbose=verbose, logger=logger)
-                # Verify SVD quality
-                if verbose:
-                    verify_svd_decomposition(
-                        original_matrix=cov_mat,
-                        U=U,
-                        S=S,
-                        Vt=Vt,
-                        space=space,
-                        verbose=verbose,
-                        logger=logger
-                    )
+                U, S, Vt = _svd_decomposition(
+                    space=space, psd_method=psd_method,
+                    verbose=verbose, logger=logger, matrix=cov_mat,
+                )
                 L = U @ np.diag(np.sqrt(S))
             else:
                 raise ValueError(
@@ -493,11 +498,9 @@ def generate_samples(
         m = -0.5 * np.diag(cov_mat)        # shift so mean → 1
         factors = np.exp(Y + m)            # strictly positive
     
-    # Convert perturbation factors to float32 for memory efficiency
-    factors = factors.astype(np.float32)
-
     # ------------------------------------------------------------------
-    # 6. Diagnostics of the *samples* (same code you had, now renamed)
+    # 6. Diagnostics of the *samples* (run before float32 cast to avoid
+    #    underflow-to-zero that poisons log-space metrics with NaN)
 
     if space == "linear":
         sampling_diagnostic_results = _diagnostics_samples_linear(
@@ -513,7 +516,7 @@ def generate_samples(
             bins,
             Z_LIMIT, verbose
         )
-    
+
     # ------------------------------------------------------------------
     # 7. Verify sample-based covariance matches original covariance
     if verbose:
@@ -522,8 +525,12 @@ def generate_samples(
             original_cov=cov_mat,
             space=space,
             verbose=verbose,
-            logger=logger
+            logger=logger,
+            label=label,
         )
+
+    # Convert perturbation factors to float32 for memory efficiency
+    factors = factors.astype(np.float32)
     
     # Update fix_info to include soft autofix status
     if soft_autofix_failed and fix_info:
@@ -547,6 +554,7 @@ def generate_endf_samples(
     seed: Optional[int] = None,
     mt_numbers: Optional[Sequence[int]] = None,
     energy_grid: Optional[Sequence[float]] = None,
+    psd_method: str = "higham",
     verbose: bool = True,
 ) -> Tuple[np.ndarray, Optional[List[int]]]: 
     """
@@ -656,7 +664,7 @@ def generate_endf_samples(
     else:
         if method == "cholesky":
             try:
-                L = mf34_cov.cholesky_decomposition(space=space, verbose=verbose, logger=logger)
+                L = mf34_cov.cholesky_decomposition(space=space, psd_method=psd_method, verbose=verbose, logger=logger)
                 # Verify Cholesky decomposition quality
                 if verbose:
                     verify_cholesky_decomposition(
@@ -674,7 +682,7 @@ def generate_endf_samples(
                         print(f"[DECOMPOSITION] [QUALITY] Cholesky verification skipped: decomposition failed ({str(chol_err)})")
                 raise  # Re-raise the original exception
         elif method == "eigen":
-            eigvals, eigvecs = mf34_cov.eigen_decomposition(space=space, clip_negatives=True, verbose=verbose, logger=logger)
+            eigvals, eigvecs = mf34_cov.eigen_decomposition(space=space, psd_method=psd_method, verbose=verbose, logger=logger)
             # Verify eigendecomposition quality
             if verbose:
                 verify_eigen_decomposition(
@@ -687,7 +695,7 @@ def generate_endf_samples(
                 )
             L = eigvecs @ np.diag(np.sqrt(eigvals))
         elif method == "svd":
-            U, S, Vt = mf34_cov.svd_decomposition(space=space, clip_negatives=True, verbose=verbose, logger=logger)
+            U, S, Vt = mf34_cov.svd_decomposition(space=space, psd_method=psd_method, verbose=verbose, logger=logger)
             # Verify SVD quality
             if verbose:
                 verify_svd_decomposition(

@@ -488,6 +488,7 @@ def perturb_ENDF_files(
     mf34_cov_files: Optional[Union[str, List[str]]] = None,
     space: str = "linear",
     decomposition_method: str = "svd",
+    psd_method: str = "higham",
     sampling_method: str = "sobol",
     output_dir: str = '.',
     seed: Optional[int] = None,
@@ -647,6 +648,7 @@ def perturb_ENDF_files(
     _logger.info(f"  SAMPLING_SPACE = {space}")
     _logger.info(f"  DECOMPOSITION_METHOD = {decomposition_method}")
     _logger.info(f"  SAMPLING_METHOD = {sampling_method}")
+    _logger.info(f"  PSD_METHOD = {psd_method}")
     _logger.info(f"  RANDOM_SEED = {seed}")
     _logger.info(f"  NPROCS = {nprocs}")
     _logger.info(f"  DRY_RUN = {dry_run}")
@@ -750,6 +752,7 @@ def perturb_ENDF_files(
                     sampling_method=sampling_method,
                     seed=seed,
                     mt_numbers=mt_list,
+                    psd_method=psd_method,
                     verbose=verbose,
                 )
                 

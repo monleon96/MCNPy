@@ -134,6 +134,10 @@ def _compute_sensitivity_impl(input_data, mctal, tally: int,
     tally_obj = mctal.tally[tally]
     energy = tally_obj.energies
     n_energies = len(energy)
+    # For tallies with no energy bins (e.g. DPA with FM multiplier), results
+    # are stored as one value per cell.  Use n_energies_stride = max(1, ...)
+    # so cell_offset computation is correct.
+    n_energies_stride = max(n_energies, 1)
 
     # Handle multi-cell tallies: select requested cell
     n_cells = tally_obj.n_cells_surfaces if tally_obj.n_cells_surfaces > 0 else 1
@@ -147,12 +151,12 @@ def _compute_sensitivity_impl(input_data, mctal, tally: int,
                 f"Cell {cell} not found in tally {tally}. "
                 f"Available cells: {tally_obj.cell_surface_ids}"
             )
-        cell_offset = cell_idx * n_energies
+        cell_offset = cell_idx * n_energies_stride
 
     all_r0 = np.array(tally_obj.results)
     all_e0 = np.array(tally_obj.errors)
-    r0 = all_r0[cell_offset:cell_offset + n_energies]
-    e0 = all_e0[cell_offset:cell_offset + n_energies]
+    r0 = all_r0[cell_offset:cell_offset + n_energies_stride]
+    e0 = all_e0[cell_offset:cell_offset + n_energies_stride]
 
     # Prepare all the data first before creating the SensitivityData object
     full_data = {}
@@ -241,7 +245,12 @@ def _compute_sensitivity_impl(input_data, mctal, tally: int,
     integral_r0 = None
     integral_e0 = None
 
-    if n_cells <= 1 and tally_obj.integral_result is not None:
+    if n_energies == 0:
+        # No energy bins — the single per-cell value IS the integral
+        has_integral = True
+        integral_r0 = float(r0[0])
+        integral_e0 = float(e0[0])
+    elif n_cells <= 1 and tally_obj.integral_result is not None:
         has_integral = True
         integral_r0 = tally_obj.integral_result
         integral_e0 = tally_obj.integral_error
@@ -261,7 +270,11 @@ def _compute_sensitivity_impl(input_data, mctal, tally: int,
             # Process first-order coefficients for integral results
             for j, pert in enumerate(group_dict_first[rxn]):
                 pert_obj = tally_obj.perturbation[pert]
-                if n_cells > 1 and hasattr(pert_obj, 'total_energy_values') and pert_obj.total_energy_values:
+                if n_energies == 0:
+                    # No energy bins — result is directly per-cell
+                    c1_int = pert_obj.results[cell_idx]
+                    e1_int = pert_obj.errors[cell_idx]
+                elif n_cells > 1 and hasattr(pert_obj, 'total_energy_values') and pert_obj.total_energy_values:
                     c1_int = pert_obj.total_energy_values['results'][cell_idx]
                     e1_int = pert_obj.total_energy_values['errors'][cell_idx]
                 else:
@@ -290,7 +303,10 @@ def _compute_sensitivity_impl(input_data, mctal, tally: int,
                 for j, pert in enumerate(group_dict_second[rxn]):
                     # Get first-order Taylor coefficient directly
                     pert1_obj = tally_obj.perturbation[group_dict_first[rxn][j]]
-                    if n_cells > 1 and hasattr(pert1_obj, 'total_energy_values') and pert1_obj.total_energy_values:
+                    if n_energies == 0:
+                        c1_int_val = pert1_obj.results[cell_idx]
+                        c1_int_err = pert1_obj.errors[cell_idx]
+                    elif n_cells > 1 and hasattr(pert1_obj, 'total_energy_values') and pert1_obj.total_energy_values:
                         c1_int_val = pert1_obj.total_energy_values['results'][cell_idx]
                         c1_int_err = pert1_obj.total_energy_values['errors'][cell_idx]
                     else:
@@ -301,7 +317,10 @@ def _compute_sensitivity_impl(input_data, mctal, tally: int,
 
                     # Get second-order Taylor coefficient directly
                     pert2_obj = tally_obj.perturbation[pert]
-                    if n_cells > 1 and hasattr(pert2_obj, 'total_energy_values') and pert2_obj.total_energy_values:
+                    if n_energies == 0:
+                        c2_int_val = pert2_obj.results[cell_idx]
+                        c2_int_err = pert2_obj.errors[cell_idx]
+                    elif n_cells > 1 and hasattr(pert2_obj, 'total_energy_values') and pert2_obj.total_energy_values:
                         c2_int_val = pert2_obj.total_energy_values['results'][cell_idx]
                         c2_int_err = pert2_obj.total_energy_values['errors'][cell_idx]
                     else:

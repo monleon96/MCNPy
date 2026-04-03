@@ -201,7 +201,7 @@ def parse_mf34_mt(lines: List[str], mt: int) -> MF34MT:
                 elif lb == 6:
                     # C3 should be 0 for LB=6
                     ner = c6  # Number of row energies
-                    logger.debug(f"Parsing LIST record {list_idx+1}/{ni} with LB={lb}, NT={nt}, NER={ner} (NEC={nec})")
+                    logger.debug(f"Parsing LIST record {list_idx+1}/{ni} with LB={lb}, NT={nt}, NER={ner}")
                 else:
                     logger.debug(f"Parsing LIST record {list_idx+1}/{ni} with LB={lb}, NT={nt}")
 

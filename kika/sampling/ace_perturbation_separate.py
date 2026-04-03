@@ -112,9 +112,11 @@ def perturb_seprate_ACE_files(
     autofix: Optional[str] = None, 
     high_val_thresh: float = 1.0,
     accept_tol: float = -1.0e-4,
-    remove_blocks: Optional[Dict[int, Union[Tuple[int, int], List[Tuple[int, int]]]]] = None,  # Add remove_blocks parameter
+    remove_blocks: Optional[Dict[int, Union[Tuple[int, int], List[Tuple[int, int]]]]] = None,
     verbose: bool = True,
     energy_ranges: Optional[List[Tuple[float, float]]] = None,
+    psd_method: str = "higham",
+    max_relative_std: Optional[float] = 3.0,
 ):
     """
     Perturb existing ACE nuclear data files using covariance matrices.
@@ -169,6 +171,10 @@ def perturb_seprate_ACE_files(
         List of (emin, emax) energy ranges in eV. Only energy bins overlapping
         these ranges will be perturbed; bins outside are set to neutral (1.0 for
         linear space, 0.0 for log space). None means perturb all energies.
+    max_relative_std : float or None, default 3.0
+        Maximum relative standard deviation (e.g. 3.0 = 300%). Variances
+        exceeding this cap are reduced via a correlation-preserving congruence
+        transform. Common near threshold reactions. Set to None to disable.
 
     Notes
     -----
@@ -594,10 +600,13 @@ def perturb_seprate_ACE_files(
                 seed                 = None if seed is None else seed + zaid,
                 mt_numbers           = mt_perturb,
                 energy_grid          = energy_grid,
-                autofix              = autofix, 
+                autofix              = autofix,
                 high_val_thresh      = high_val_thresh,
                 accept_tol           = accept_tol,
+                psd_method           = psd_method,
+                max_relative_std     = max_relative_std,
                 verbose              = verbose,
+                label                = str(zaid),
             )
         except Exception as e:
             # Import the exception classes to check for them

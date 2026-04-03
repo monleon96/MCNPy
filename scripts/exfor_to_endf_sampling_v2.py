@@ -253,7 +253,7 @@ POSITIVITY_CHECK_POINTS = 101                    # Number of mu points in [-1, 1
 
 # --- MULTIGROUP COVARIANCE ------------------------------------------------- #
 GENERATE_MULTIGROUP_COVARIANCE = True            # Enable adaptive multigroup collapse
-MULTIGROUP_RHO_MIN = 0.90                        # Min l=1 adjacent correlation to merge groups
+MULTIGROUP_RHO_MIN = 0.85                        # Min l=1 adjacent correlation to merge groups
 MF34_COVARIANCE_TYPE = "multigroup"              # "fine", "multigroup", or "both"
 USE_ORIGINAL_MF34_GRID = False                   # Force grid from original MF34
 MERGE_ORIGINAL_MF34 = True                       # Merge pipeline MF34 with original (full range)
@@ -3086,6 +3086,30 @@ def run_exfor_to_endf_sampling_v2(
                 )
 
             # Helper to merge pipeline MF34 with original if available
+            def _check_cov_psd(cov_matrix, label, max_order, logger):
+                """Log PSD status of a covariance matrix before MF34 write."""
+                eigvals = np.linalg.eigvalsh(cov_matrix)
+                min_eig = float(eigvals[0])
+                n_neg = int(np.sum(eigvals < -1e-10))
+                n_params = cov_matrix.shape[0]
+                n_energies = n_params // max_order
+
+                if n_neg == 0:
+                    logger.info(
+                        f"  [PSD CHECK] {label}: OK "
+                        f"(min_eig={min_eig:.3e}, {n_params} params = "
+                        f"{n_energies} bins × {max_order} orders)"
+                    )
+                else:
+                    logger.warning(
+                        f"  [PSD CHECK] {label}: NOT PSD — "
+                        f"{n_neg} negative eigenvalues "
+                        f"(min_eig={min_eig:.3e}, {n_params} params = "
+                        f"{n_energies} bins × {max_order} orders). "
+                        f"Sampling from this matrix will be unreliable.",
+                        console=True,
+                    )
+
             def _maybe_merge(pipeline_mf34_obj, pipe_grid_ev):
                 if original_mf34_mt is not None:
                     pipe_emin = float(pipe_grid_ev[0])
@@ -3133,6 +3157,7 @@ def run_exfor_to_endf_sampling_v2(
                     _logger.info(f"  Fine MF34 added to average: {average_file}")
 
                 if nominal_file:
+                    _check_cov_psd(cov_matrix_nominal, "Fine-grid nominal covariance (Step 10)", max_degree, _logger)
                     _logger.info(f"  Pre-MF34 check (fine nom): cov shape={cov_matrix_nominal.shape}, "
                                  f"inf={np.sum(np.isinf(cov_matrix_nominal))}, "
                                  f"nan={np.sum(np.isnan(cov_matrix_nominal))}, "
@@ -3471,6 +3496,7 @@ def run_exfor_to_endf_sampling_v2(
                     _logger.info(f"  Multigroup MF34 written to: {mg_avg_file}")
 
                 if nominal_file:
+                    _check_cov_psd(cov_grouped_nominal, "MG nominal covariance (Step 10)", max_degree, _logger)
                     _logger.info(f"  Pre-MF34 check (MG nom): cov shape={cov_grouped_nominal.shape}, "
                                  f"inf={np.sum(np.isinf(cov_grouped_nominal))}, "
                                  f"nan={np.sum(np.isnan(cov_grouped_nominal))}, "
@@ -3519,6 +3545,7 @@ def run_exfor_to_endf_sampling_v2(
                         base_dir = Path(nominal_file).parent
                         sampling_file = str(base_dir / f"{base_stem}{suffix}.endf")
                         shutil.copy(nominal_file, sampling_file)
+                        _check_cov_psd(cov_matrix_nominal, "Fine-grid nominal covariance", max_degree, _logger)
                         _logger.info(f"  Pre-MF34 check (fine nom): cov shape={cov_matrix_nominal.shape}, "
                                      f"inf={np.sum(np.isinf(cov_matrix_nominal))}, "
                                      f"nan={np.sum(np.isnan(cov_matrix_nominal))}, "
@@ -3548,6 +3575,7 @@ def run_exfor_to_endf_sampling_v2(
                         base_dir = Path(nominal_file).parent
                         sampling_file = str(base_dir / f"{base_stem}{suffix}.endf")
                         shutil.copy(nominal_file, sampling_file)
+                        _check_cov_psd(cov_grouped_nominal, "Multigroup nominal covariance", max_degree, _logger)
                         _logger.info(f"  Pre-MF34 check (MG sampling): cov shape={cov_grouped_nominal.shape}, "
                                      f"inf={np.sum(np.isinf(cov_grouped_nominal))}, "
                                      f"nan={np.sum(np.isnan(cov_grouped_nominal))}, "
@@ -3639,7 +3667,7 @@ def run_exfor_to_endf_sampling_v2(
     if cov_matrix is not None:
         _logger.info(f">> covariance_shape = {cov_matrix.shape}")
     if multigroup_result is not None:
-        _logger.info(f">> multigroup_bins = {multigroup_result.n_groups}")
+        _logger.info(f">> multigroup_bins = {len(multigroup_result.groups)}")
     _logger.info(f"  Pipeline A: nominal={'written' if nominal_file else 'skipped'}, "
                  f"samples={len(output_files) if output_files else 'skipped'}")
     _logger.info(f"  Pipeline B: {'enabled' if generate_mf34_samples else 'disabled'}")

@@ -13,6 +13,7 @@ from .parse_mf1 import parse_mf1
 from .parse_mf2 import parse_mf2
 from .parse_mf3 import parse_mf3
 from .parse_mf4 import parse_mf4
+from .parse_mf33 import parse_mf33
 from .parse_mf34 import parse_mf34
 from ...utils import get_endf_logger
 
@@ -26,6 +27,7 @@ MF_PARSERS = {
     2: parse_mf2,
     3: parse_mf3,
     4: parse_mf4,
+    33: parse_mf33,
     34: parse_mf34,
     # Additional parsers will be registered here
 }

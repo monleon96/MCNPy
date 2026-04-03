@@ -13,11 +13,14 @@ def _empirical_cov(X: np.ndarray) -> np.ndarray:
     return (Xc.T @ Xc) / (X.shape[0] - 1)
 
 def _relative_frobenius(A: np.ndarray, B: np.ndarray) -> float:
-    """Return 100 * ||A-B||_F / ||B||_F as percent."""
-    denom = np.linalg.norm(B, ord='fro')
+    """Return 100 * ||A-B||_F / ||B||_F as percent (NaN-safe)."""
+    finite_mask = np.isfinite(A) & np.isfinite(B)
+    A_clean = np.where(finite_mask, A, 0.0)
+    B_clean = np.where(finite_mask, B, 0.0)
+    denom = np.linalg.norm(B_clean, ord='fro')
     if denom == 0.0:
         return np.inf
-    return (np.linalg.norm(A - B, ord='fro') / denom) * 100.0
+    return (np.linalg.norm(A_clean - B_clean, ord='fro') / denom) * 100.0
 
 # ----------------------------------------------------------------------
 #  Linear-space sample diagnostics
@@ -252,8 +255,9 @@ def _diagnostics_samples_log(
         warning_msg = f"Mean deviation in {param_desc}: |z|={abs(z):.2f}>{z_limit} (mean={means_f[dim]:+.3e})"
         results['mean_deviation_warnings'].append(warning_msg)
 
-    # Log space covariance reproduction
-    emp_cov = _empirical_cov(np.log(samples))
+    # Log space covariance reproduction (clip to avoid -inf from float32 zeros)
+    log_samples = np.log(np.maximum(samples, np.finfo(samples.dtype).tiny))
+    emp_cov = _empirical_cov(log_samples)
     frob_rel = _relative_frobenius(emp_cov, cov_log)
     results['frobenius_error_pct'] = frob_rel
 

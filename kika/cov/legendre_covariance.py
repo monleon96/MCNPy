@@ -346,21 +346,26 @@ class LegendreCovariance:
         """
         return sorted(set(self.l_rows + self.l_cols))
     
+    def copy(self) -> "LegendreCovariance":
+        """Return a deep copy of this object."""
+        import copy as _copy
+        return _copy.deepcopy(self)
+
     @property
     def covariance_matrix(self) -> np.ndarray:
         """
         Return the full covariance matrix.
-        
-        Constructs the complete covariance matrix by assembling all sub-matrices
-        with proper energy grid alignment using union grids.
-        
+
+        If :meth:`ensure_psd` has been called, the cached PSD matrix is
+        returned directly instead of re-assembling from sub-matrices.
+
         Returns
         -------
         np.ndarray
-            Full covariance matrix of shape (N*G_max, N*G_max) where N is the
-            number of unique (isotope, reaction, L) triplets and G_max is the
-            maximum number of energy bins across all triplets
+            Full covariance matrix of shape (N*G_max, N*G_max)
         """
+        if getattr(self, "_psd_covariance_cache", None) is not None:
+            return self._psd_covariance_cache
         param_triplets = self._get_param_triplets()
         idx_map = {p: i for i, p in enumerate(param_triplets)}
         unions = getattr(self, "_union_grids", None) or self.compute_union_energy_grids()
@@ -415,9 +420,64 @@ class LegendreCovariance:
         Return the log-space covariance matrix.
         Converts relative covariance to log-space using log1p transformation.
         """
-        cov_rel = self.covariance_matrix
+        cov_rel = self.covariance_matrix  # uses PSD cache if available
         Sigma_log = np.log1p(cov_rel)
         return Sigma_log
+
+    def ensure_psd(
+        self,
+        *,
+        preserve_diagonal: bool = True,
+        max_iter: int = 1000,
+        tol: float = 1e-10,
+        eigval_floor: float = 0.0,
+        verbose: bool = True,
+        logger=None,
+    ) -> Tuple["LegendreCovariance", dict]:
+        """
+        Return a copy whose :attr:`covariance_matrix` is the nearest PSD matrix.
+
+        Uses Higham's alternating-projection algorithm.  The original
+        sub-matrices are **not** modified; instead, the assembled PSD matrix
+        is cached and returned by the ``covariance_matrix`` /
+        ``log_covariance_matrix`` properties.
+
+        Parameters
+        ----------
+        preserve_diagonal : bool
+            If True, preserve the original variances (diagonal elements).
+        max_iter : int
+            Maximum number of Higham iterations.
+        tol : float
+            Convergence tolerance on relative Frobenius change.
+        eigval_floor : float
+            Floor for eigenvalues in the PSD projection step.
+        verbose : bool
+            Whether to print diagnostic information.
+        logger : optional
+            Logger instance for file output.
+
+        Returns
+        -------
+        Tuple[LegendreCovariance, dict]
+            (psd_copy, info) where *psd_copy* has the PSD cache set and
+            *info* is the diagnostic dict from ``nearest_psd_higham``.
+        """
+        from kika.cov.decomposition import nearest_psd_higham
+
+        full = self.covariance_matrix  # assembled from sub-matrices
+        psd_full, info = nearest_psd_higham(
+            full,
+            preserve_diagonal=preserve_diagonal,
+            max_iter=max_iter,
+            tol=tol,
+            eigval_floor=eigval_floor,
+            verbose=verbose,
+            logger=logger,
+        )
+        out = self.copy()
+        out._psd_covariance_cache = psd_full
+        return out, info
 
     def has_uniform_energy_grid(self) -> bool:
         """
@@ -1546,28 +1606,31 @@ class LegendreCovariance:
     def cholesky_decomposition(
         self,
         *,
-        space: str = "log",        # "log" (default) or "linear"
+        space: str = "log",
+        psd_method: str = "higham",
         jitter_scale: float = 1e-10,
         max_jitter_ratio: float = 1e-3,
         verbose: bool = True,
-        logger = None,
+        logger=None,
     ) -> np.ndarray:
         """
         Robust Cholesky factor L such that M ≈ L L^T.
-        
+
         Parameters
         ----------
         space : str
             "linear" or "log" space for decomposition
+        psd_method : str
+            PSD correction: "higham" (default) or "jitter".
         jitter_scale : float
-            Base jitter scale for PSD correction
+            Base jitter scale (only used when *psd_method="jitter"*).
         max_jitter_ratio : float
-            Maximum jitter relative to matrix norm
+            Maximum jitter relative to matrix norm.
         verbose : bool
             Whether to log progress
         logger : optional
             Logger instance for output
-            
+
         Returns
         -------
         np.ndarray
@@ -1575,12 +1638,13 @@ class LegendreCovariance:
         """
         from kika.cov.decomposition import cholesky_decomposition
         return cholesky_decomposition(
-            self, 
-            space=space, 
+            self,
+            space=space,
+            psd_method=psd_method,
             jitter_scale=jitter_scale,
             max_jitter_ratio=max_jitter_ratio,
-            verbose=verbose, 
-            logger=logger
+            verbose=verbose,
+            logger=logger,
         )
 
     def eigen_decomposition(
@@ -1588,27 +1652,26 @@ class LegendreCovariance:
         *,
         space: str = "log",
         clip_negatives: bool = True,
+        psd_method: Optional[str] = None,
         verbose: bool = True,
-        logger = None,
+        logger=None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Eigendecomposition with optional clipping instead of jitter.
+        Eigendecomposition with PSD correction.
 
-        If ``clip_negatives`` is *True*, negative eigenvalues are set to
-        zero and the user is informed of the number of clips and the minimum
-        original value.
-        
         Parameters
         ----------
         space : str
             "linear" or "log" space for decomposition
         clip_negatives : bool
-            Whether to clip negative eigenvalues to zero
+            Deprecated. Use *psd_method* instead.
+        psd_method : str or None
+            "higham" (default), "clip", or "none".
         verbose : bool
             Whether to log progress
         logger : optional
             Logger instance for output
-            
+
         Returns
         -------
         Tuple[np.ndarray, np.ndarray]
@@ -1619,8 +1682,9 @@ class LegendreCovariance:
             self,
             space=space,
             clip_negatives=clip_negatives,
+            psd_method=psd_method,
             verbose=verbose,
-            logger=logger
+            logger=logger,
         )
 
     def svd_decomposition(
@@ -1628,31 +1692,29 @@ class LegendreCovariance:
         *,
         space: str = "log",
         clip_negatives: bool = True,
+        psd_method: Optional[str] = None,
         verbose: bool = True,
         full_matrices: bool = False,
-        logger = None,
+        logger=None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        SVD with pre-clipping using eigendecomposition.
+        SVD with PSD pre-processing.
 
-        For symmetric matrices, SVD and eigen are equivalent. If
-        ``clip_negatives`` is activated, a preliminary eigendecomposition,
-        clipping, and reconstruction step is performed before applying SVD,
-        ensuring singular values consistent with a PSD matrix.
-        
         Parameters
         ----------
         space : str
             "linear" or "log" space for decomposition
         clip_negatives : bool
-            Whether to clip negative eigenvalues before SVD
+            Deprecated. Use *psd_method* instead.
+        psd_method : str or None
+            "higham" (default), "clip", or "none".
         verbose : bool
             Whether to log progress
         full_matrices : bool
             Whether to return full-sized U and V matrices
         logger : optional
             Logger instance for output
-            
+
         Returns
         -------
         Tuple[np.ndarray, np.ndarray, np.ndarray]
@@ -1663,9 +1725,10 @@ class LegendreCovariance:
             self,
             space=space,
             clip_negatives=clip_negatives,
+            psd_method=psd_method,
             verbose=verbose,
             full_matrices=full_matrices,
-            logger=logger
+            logger=logger,
         )
 
     # ------------------------------------------------------------------
@@ -1784,18 +1847,18 @@ class LegendreCovariance:
     def _lift_matrix(self, src_grid, dst_grid):
         """
         Create a lifting matrix to map covariance from source to destination energy grid.
-        
+
         Constructs a mapping matrix A such that when applied, it transforms covariance
         matrices from the source energy grid to the destination (union) energy grid.
         Assumes destination grid is a subset or refinement of source grid.
-        
+
         Parameters
         ----------
         src_grid : array-like
             Source energy grid boundaries (NE points)
         dst_grid : array-like
             Destination energy grid boundaries (NE points)
-        
+
         Returns
         -------
         np.ndarray

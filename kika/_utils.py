@@ -158,7 +158,7 @@ def MeV_to_kelvin(temp: float) -> float:
     float
         Temperature in Kelvin
     """
-    return temp / BOLTZMANN_CONSTANT 
+    return round(temp / BOLTZMANN_CONSTANT, 2)
 
 
 def temperature_to_suffix(temp_K: float) -> str:
