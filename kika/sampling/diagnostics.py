@@ -132,7 +132,7 @@ def _diagnostics_samples_linear(
         results['overall_status'] = 'WARN'
 
     # Consolidated technical summary
-    tech_msg = f"  📊 Technical Summary:"
+    tech_msg = f"  Technical Summary:"
     if logger:
         logger.info(tech_msg)
     else:
@@ -149,8 +149,8 @@ def _diagnostics_samples_linear(
             print(msg)
 
     # User-friendly status
-    status_emoji = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌"}
-    status_msg = f"  {status_emoji.get(results['overall_status'], '?')} Overall Status: {results['overall_status']}"
+    status_tag = {"PASS": "[GOOD]", "WARN": "[WARN]", "FAIL": "[POOR]"}
+    status_msg = f"  {status_tag.get(results['overall_status'], '?')} Overall Status: {results['overall_status']}"
     if logger:
         logger.info(status_msg)
     else:
@@ -159,7 +159,7 @@ def _diagnostics_samples_linear(
     # Detailed warnings if any
     all_warnings = results['negative_warnings'] + results['mean_deviation_warnings']
     if all_warnings:
-        detail_msg = f"  ⚠ Detailed warnings ({len(all_warnings)} total):"
+        detail_msg = f"  [WARN] Detailed warnings ({len(all_warnings)} total):"
         if logger:
             logger.info(detail_msg)
         else:
@@ -269,7 +269,7 @@ def _diagnostics_samples_log(
         results['overall_status'] = 'WARN'
 
     # Consolidated technical summary
-    tech_msg = f"  📊 Technical Summary:"
+    tech_msg = f"  Technical Summary:"
     if logger:
         logger.info(tech_msg)
     else:
@@ -285,8 +285,8 @@ def _diagnostics_samples_log(
             print(msg)
 
     # User-friendly status
-    status_emoji = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌"}
-    status_msg = f"  {status_emoji.get(results['overall_status'], '?')} Overall Status: {results['overall_status']}"
+    status_tag = {"PASS": "[GOOD]", "WARN": "[WARN]", "FAIL": "[POOR]"}
+    status_msg = f"  {status_tag.get(results['overall_status'], '?')} Overall Status: {results['overall_status']}"
     if logger:
         logger.info(status_msg)
     else:
@@ -294,7 +294,7 @@ def _diagnostics_samples_log(
 
     # Detailed warnings if any
     if results['mean_deviation_warnings']:
-        detail_msg = f"  ⚠ Detailed mean deviation warnings:"
+        detail_msg = f"  [WARN] Detailed mean deviation warnings:"
         if logger:
             logger.info(detail_msg)
         else:
@@ -1146,29 +1146,29 @@ def _log_fast_qc_summary(
     
     if critical_count > 0 or avg_score < 2.5:
         overall_status = "CRITICAL"
-        status_emoji = "🛑"
+        status_tag = "[CRITICAL]"
         recommendation = "DO NOT USE - Sampling is fundamentally flawed. Check covariance matrix and sampling parameters. Increase sample size."
     elif poor_count >= 3 or avg_score < 3.0:
         overall_status = "POOR"
-        status_emoji = "❌"
+        status_tag = "[POOR]"
         recommendation = "NOT RECOMMENDED - Significant issues detected. Results may be unreliable. Try increasing sample size."
     elif avg_score < 3.5:
         overall_status = "ACCEPTABLE"
-        status_emoji = "⚠️"
+        status_tag = "[WARN]"
         recommendation = "PROCEED WITH CAUTION - Some issues present, but may be acceptable for certain applications. Increase sample size if possible."
     elif avg_score < 4.5:
         overall_status = "GOOD"
-        status_emoji = "✅"
+        status_tag = "[GOOD]"
         recommendation = "GOOD QUALITY - Minor issues present, suitable for most applications."
     else:
         overall_status = "EXCELLENT"
-        status_emoji = "🌟"
+        status_tag = "[EXCELLENT]"
         recommendation = "EXCELLENT QUALITY - High-quality sampling, suitable for all applications."
 
     # Log the summary
     separator = "=" * 60
     
-    header = f"\n{separator}\n{status_emoji} SAMPLING QUALITY ASSESSMENT ({space.upper()} SPACE)\n{separator}"
+    header = f"\n{separator}\n{status_tag} SAMPLING QUALITY ASSESSMENT ({space.upper()} SPACE)\n{separator}"
     
     if logger:
         logger.info(header)
@@ -1176,36 +1176,36 @@ def _log_fast_qc_summary(
         print(header)
 
     # Main verdict
-    verdict_msg = f"  🎯 OVERALL: {overall_status}"
+    verdict_msg = f"  OVERALL: {overall_status}"
     if logger:
         logger.info(verdict_msg)
     else:
         print(verdict_msg)
 
-    recommendation_msg = f"  💡 RECOMMENDATION: {recommendation}"
+    recommendation_msg = f"  RECOMMENDATION: {recommendation}"
     if logger:
         logger.info(recommendation_msg)
     else:
         print(recommendation_msg)
 
     # Detailed breakdown
-    detail_header = f"\n  📋 DETAILED BREAKDOWN:"
+    detail_header = f"\n  DETAILED BREAKDOWN:"
     if logger:
         logger.info(detail_header)
     else:
         print(detail_header)
 
-    quality_emojis = {
-        "EXCELLENT": "🌟", "GOOD": "✅", "ACCEPTABLE": "⚠️", "POOR": "❌", "CRITICAL": "🛑"
+    quality_tags = {
+        "EXCELLENT": "[EXCELLENT]", "GOOD": "[GOOD]", "ACCEPTABLE": "[WARN]", "POOR": "[POOR]", "CRITICAL": "[CRITICAL]"
     }
 
     details = [
-        f"    • Covariance Reproduction: {quality_emojis[cov_quality]} {cov_quality} ({frob_cov_pct:.1f}%)",
-        f"    • Statistical Whitening: {quality_emojis[wht_quality]} {wht_quality} ({wht:.1f}%)",
-        f"    • Correlation Structure: {quality_emojis[off_quality]} {off_quality} (max |r|={off:.3f})",
-        f"    • χ² Distribution: {quality_emojis[cover_quality]} {cover_quality} ({covered_pct:.1f}% coverage)",
-        f"    • Mean Consistency: {quality_emojis[z_quality]} {z_quality} (max |z|={wz:.1f})",
-        f"    • Parameter Deviations: {quality_emojis[mean_quality]} {mean_quality} ({mean_dev_warns}/{total_dims})"
+        f"    • Covariance Reproduction: {quality_tags[cov_quality]} {cov_quality} ({frob_cov_pct:.1f}%)",
+        f"    • Statistical Whitening: {quality_tags[wht_quality]} {wht_quality} ({wht:.1f}%)",
+        f"    • Correlation Structure: {quality_tags[off_quality]} {off_quality} (max |r|={off:.3f})",
+        f"    • χ² Distribution: {quality_tags[cover_quality]} {cover_quality} ({covered_pct:.1f}% coverage)",
+        f"    • Mean Consistency: {quality_tags[z_quality]} {z_quality} (max |z|={wz:.1f})",
+        f"    • Parameter Deviations: {quality_tags[mean_quality]} {mean_quality} ({mean_dev_warns}/{total_dims})"
     ]
 
     for detail in details:
@@ -1215,7 +1215,7 @@ def _log_fast_qc_summary(
             print(detail)
 
     # Context for interpretation
-    context_header = f"\n  🔍 INTERPRETATION GUIDE:"
+    context_header = f"\n  INTERPRETATION GUIDE:"
     if logger:
         logger.info(context_header)
     else:

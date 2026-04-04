@@ -129,7 +129,7 @@ class MF:
             A string containing all MT sections in ENDF format, sorted by MT number
         """
         # Import inside the method to avoid circular imports
-        from ..utils import format_endf_data_line, ENDF_FORMAT_INT
+        from ..utils import format_endf_data_line, ENDF_FORMAT_FLOAT, ENDF_FORMAT_INT, ENDF_FORMAT_INT_ZERO
         
         # Get all MT sections and sort them by MT number
         sorted_mts = sorted(self.sections.items(), key=lambda x: x[0])
@@ -147,11 +147,11 @@ class MF:
             _, last_mt = sorted_mts[-1]
             mat = getattr(last_mt, "_mat", 0) or 0
         
-        # Format end-of-file marker
+        # FEND record: C1=0.0, C2=0.0, L1=0, L2=0, N1=0, N2=0, MF=0, MT=0
         end_line = format_endf_data_line(
-            [0, 0, 0, 0, 0, 0],
-            mat, 0, 0, 0,  # MF=0, MT=0 for end of file marker
-            formats=[ENDF_FORMAT_INT, ENDF_FORMAT_INT, ENDF_FORMAT_INT, ENDF_FORMAT_INT, ENDF_FORMAT_INT, ENDF_FORMAT_INT]
+            [0.0, 0.0, 0, 0, 0, 0],
+            mat, 0, 0, 0,
+            formats=[ENDF_FORMAT_FLOAT, ENDF_FORMAT_FLOAT, ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT_ZERO]
         )
         
         # Add end-of-file marker to the result

@@ -174,9 +174,9 @@ def perturb_ACE_files(
     _set_logger(_logger)
     
     # Console: Basic start message
-    _logger.info(f"[ACE] Starting ACE perturbation job", console=True)
-    _logger.info(f"[ACE] Log file: {log_file}", console=True)
-    _logger.info(f"[ACE] Output directory: {os.path.abspath(output_dir)}", console=True)
+    _logger.info(f"[INFO] [ACE] Starting ACE perturbation job", console=True)
+    _logger.info(f"[INFO] [ACE] Log file: {log_file}", console=True)
+    _logger.info(f"[INFO] [ACE] Output directory: {os.path.abspath(output_dir)}", console=True)
 
     # Print run parameters as metadata TO LOG FILE
     _logger.info(f"\n#== CONFIG ============================================================")
@@ -789,7 +789,7 @@ def perturb_ACE_files(
     skipped_count = len(skipped_isotopes)
     _logger.info(f"\n>> success_count = {processed_count}")
     _logger.info(f">> fail_count = {skipped_count}")
-    _logger.info(f">> total_elapsed = {time.time() - job_t0:.1f}s")
+    _logger.info(f">> total_elapsed_s = {time.time() - job_t0:.1f}s")
 
     _logger.info(f"#== END SUMMARY ========================================================")
 
@@ -811,11 +811,11 @@ def perturb_ACE_files(
     _logger.info(f"#== END WARNINGS ======================================================")
 
     # Console: Final summary
-    _logger.info(f"[ACE] Job completed", console=True)
-    _logger.info(f"[ACE] Processed: {processed_count} isotope(s)", console=True)
-    _logger.info(f"[ACE] Skipped: {skipped_count} isotope(s)", console=True)
-    _logger.info(f"[ACE] Detailed log saved to: {log_file}", console=True)
-    _logger.info(f"[ACE] Master matrix file: {os.path.basename(final_parquet_path)}", console=True)
+    _logger.info(f"[INFO] [ACE] Job completed", console=True)
+    _logger.info(f"[INFO] [ACE] Processed: {processed_count} isotope(s)", console=True)
+    _logger.info(f"[INFO] [ACE] Skipped: {skipped_count} isotope(s)", console=True)
+    _logger.info(f"[INFO] [ACE] Detailed log saved to: {log_file}", console=True)
+    _logger.info(f"[INFO] [ACE] Master matrix file: {os.path.basename(final_parquet_path)}", console=True)
 
 
 def _mask_factors_by_energy_range_ace(

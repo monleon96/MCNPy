@@ -6,7 +6,7 @@ the MF1/MT451 directory must be updated to reflect the new line counts.
 This module provides a standalone function to scan an ENDF file and
 rebuild the directory from scratch.
 """
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from collections import OrderedDict
 
 from ..parsers.parse_mf1 import parse_mt451
@@ -16,7 +16,7 @@ from ...utils import get_endf_logger
 logger = get_endf_logger(__name__)
 
 
-def update_mf1_directory(filepath: str) -> bool:
+def update_mf1_directory(filepath: str, added_sections: Optional[Set[Tuple[int, int]]] = None) -> bool:
     """
     Scan an ENDF file and rebuild the MF1/MT451 directory to match actual content.
 
@@ -24,10 +24,18 @@ def update_mf1_directory(filepath: str) -> bool:
     rebuilds the directory entries with correct NC (line count) values,
     and rewrites the MF1/MT451 section in place.
 
+    Only sections that were already in the original directory (or are
+    explicitly listed in *added_sections*) are included.  This prevents
+    orphan data that happens to exist in the file from being promoted
+    into the directory.
+
     Parameters
     ----------
     filepath : str
         Path to the ENDF file to update.
+    added_sections : set of (MF, MT) tuples, optional
+        Sections that were intentionally added and should appear in the
+        directory even if they were not present before.
 
     Returns
     -------
@@ -44,7 +52,7 @@ def update_mf1_directory(filepath: str) -> bool:
 
     # --- Step 1: Find MF1/MT451 boundaries ---
     mt451_start = None
-    mt451_end = None  # exclusive (first line AFTER MT451 data)
+    mt451_end = None  # exclusive (first line AFTER MT451 + its SEND record)
 
     for i, line in enumerate(lines):
         mat, mf, mt = parse_endf_id(line)
@@ -52,8 +60,20 @@ def update_mf1_directory(filepath: str) -> bool:
             if mt451_start is None:
                 mt451_start = i
         elif mt451_start is not None and mt451_end is None:
-            # First line that is no longer MF1/MT451
-            mt451_end = i
+            if mf == 1 and mt == 0:
+                # SEND record(s) for MT451 — consume all consecutive
+                # MF=1/MT=0 lines so the serialized MT451 (which
+                # includes its own SEND) replaces them cleanly.
+                j = i
+                while j < len(lines):
+                    _, mf_j, mt_j = parse_endf_id(lines[j])
+                    if mf_j == 1 and mt_j == 0:
+                        j += 1
+                    else:
+                        break
+                mt451_end = j
+            else:
+                mt451_end = i
             break
 
     if mt451_start is None:
@@ -68,24 +88,34 @@ def update_mf1_directory(filepath: str) -> bool:
 
     nwd = mt451._nwd if mt451._nwd is not None else 0
 
-    # --- Step 3: Scan all lines to count data lines per (MF, MT) ---
+    # --- Step 3: Build the set of (MF, MT) pairs allowed in the directory ---
+    # Start from what was already in the old directory, plus any sections
+    # the caller explicitly added.  This prevents orphan data from being
+    # promoted into the directory.
+    old_keys: Set[Tuple[int, int]] = set()
+    for mf_val, mt_val, nc_val, mod_val in mt451._directory:
+        old_keys.add((int(mf_val), int(mt_val)))
+    allowed_keys = old_keys | (added_sections or set())
+
+    # --- Step 4: Count data lines only for allowed (MF, MT) pairs ---
     line_counts: Dict[Tuple[int, int], int] = OrderedDict()
 
     for line in lines:
         mat, mf, mt = parse_endf_id(line)
         if mf is not None and mt is not None and mf > 0 and mt > 0:
             key = (mf, mt)
-            line_counts[key] = line_counts.get(key, 0) + 1
+            if key in allowed_keys:
+                line_counts[key] = line_counts.get(key, 0) + 1
 
-    # Sort by (MF, MT)
-    sorted_keys = sorted(line_counts.keys())
+    # Remove entries that no longer have data in the file
+    sorted_keys = sorted(k for k in line_counts.keys() if line_counts[k] > 0)
 
-    # --- Step 4: Build old MOD lookup ---
+    # --- Step 5: Build old MOD lookup ---
     old_mod: Dict[Tuple[int, int], int] = {}
     for mf_val, mt_val, nc_val, mod_val in mt451._directory:
         old_mod[(int(mf_val), int(mt_val))] = int(mod_val)
 
-    # --- Step 5: Build new directory ---
+    # --- Step 6: Build new directory ---
     nxc_new = len(sorted_keys)
 
     new_directory: List[Tuple[int, int, int, int]] = []
@@ -98,11 +128,11 @@ def update_mf1_directory(filepath: str) -> bool:
         mod = old_mod.get((mf_val, mt_val), 0)
         new_directory.append((mf_val, mt_val, nc, mod))
 
-    # --- Step 6: Update MT451 fields ---
+    # --- Step 7: Update MT451 fields ---
     mt451._nxc = nxc_new
     mt451._directory = new_directory
 
-    # --- Step 7: Serialize and replace in file ---
+    # --- Step 8: Serialize and replace in file ---
     new_mt451_str = str(mt451)
     new_mt451_lines = [line + '\n' for line in new_mt451_str.split('\n') if line]
 

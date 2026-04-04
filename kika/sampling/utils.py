@@ -85,19 +85,19 @@ class DualLogger:
         """Log info message. If console=True, also show in console."""
         self.logger.info(message)
         if console:
-            print(f"[INFO] {message}")
-    
+            print(message)
+
     def warning(self, message: str, console: bool = True):
         """Log warning message. If console=True, also show in console."""
         self.logger.warning(message)
         if console:
-            print(f"[WARNING] {message}")
-    
+            print(message)
+
     def error(self, message: str, console: bool = True):
         """Log error message. If console=True, also show in console."""
         self.logger.error(message)
         if console:
-            print(f"[ERROR] {message}")
+            print(message)
 
 
 # Global logger instance

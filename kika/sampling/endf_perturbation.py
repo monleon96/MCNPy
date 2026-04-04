@@ -237,6 +237,8 @@ def _process_njoy_for_sample(
                         dest_aux = os.path.join(njoy_sample_dir, aux_filename)
                         try:
                             shutil.move(result[aux_file], dest_aux)
+                            if aux_file == "njoy_output":
+                                results["njoy_output_path"] = dest_aux
                         except Exception as move_err:
                             warning_msg = f"Could not move {aux_file} at {temp}K: {move_err}"
                             results["warnings"].append(warning_msg)
@@ -292,8 +294,12 @@ def _process_njoy_for_sample(
                     results["errors"].append(error_msg)
                     results["success"] = False
                     if logger:
-                        logger.error(f"  [ERROR] [NJOY] Sample {sample_str}: {error_msg}")
-                        
+                        error_count = len(results["errors"])
+                        if error_count <= 3:
+                            logger.error(f"  [ERROR] [NJOY] Sample {sample_str}: {error_msg}")
+                        elif error_count == 4:
+                            logger.error(f"  [ERROR] [NJOY] Sample {sample_str}: Suppressing further identical errors (see batch summary)")
+
         except Exception as e:
             error_msg = f"Exception at {temp}K: {e}"
             results["errors"].append(error_msg)
@@ -387,6 +393,28 @@ def _log_njoy_batch_results(njoy_results, file_key, file_index, temperatures, su
                 logger.error(f"  [ERROR] [NJOY] File {file_index}:   {error} (occurred {count} times)")
             else:
                 logger.error(f"  [ERROR] [NJOY] File {file_index}:   {error}")
+
+        # Log NJOY output excerpt from first failure
+        for sample_idx, result in njoy_results:
+            if result.get("njoy_output_path") and result.get("errors"):
+                try:
+                    output_path = result["njoy_output_path"]
+                    if os.path.exists(output_path):
+                        with open(output_path, 'r') as f:
+                            njoy_lines = f.readlines()
+                        # Show last 10 non-empty lines
+                        tail = [l.rstrip() for l in njoy_lines if l.strip()][-10:]
+                        if tail:
+                            logger.error(f"  [ERROR] [NJOY] File {file_index}: NJOY output excerpt (sample {sample_idx+1:04d}):")
+                            for line in tail:
+                                logger.error(f"  [ERROR] [NJOY] File {file_index}:   {line}")
+                except Exception:
+                    pass
+                break  # Only show first failure
+
+    if failed_samples == total_samples:
+        logger.error(f"  [ERROR] [NJOY] File {file_index}: ALL {total_samples} samples failed -- systemic issue", console=True)
+        logger.error(f"  [ERROR] [NJOY] File {file_index}: Check NJOY output excerpt above and sampling quality", console=True)
 
 
 def load_mf34_covariance(path: str) -> Optional[LegendreCovariance]:
@@ -880,7 +908,17 @@ def perturb_ENDF_files(
                 _log_njoy_batch_results(njoy_results, file_key, i+1, temperatures, summary_data)
             
             processed_files += 1
-            _logger.info(f"  [INFO] [ENDF] File {step_num}: Successfully processed all samples")
+            if generate_ace and not dry_run:
+                ace_info = summary_data.get(file_key, {}).get('ace_generation', {})
+                ace_success = ace_info.get('successful_samples', 0)
+                if ace_success == 0:
+                    _logger.warning(f"  [WARN] [ENDF] File {step_num}: ENDF perturbation completed but ALL ACE generations failed (0/{num_samples})")
+                elif ace_success < num_samples:
+                    _logger.info(f"  [INFO] [ENDF] File {step_num}: ENDF perturbation completed, ACE: {ace_success}/{num_samples} succeeded")
+                else:
+                    _logger.info(f"  [INFO] [ENDF] File {step_num}: Successfully processed all {num_samples} samples")
+            else:
+                _logger.info(f"  [INFO] [ENDF] File {step_num}: Successfully generated {num_samples} perturbed ENDF files")
             _logger.info(f">> samples_generated = {num_samples}")
             step_elapsed = time.time() - step_t0
             _logger.info(f"#-- END STEP {step_num} (elapsed: {step_elapsed:.1f}s) -------------------------------------")
@@ -970,8 +1008,8 @@ def perturb_ENDF_files(
     # Metric lines
     processed_count = len(successfully_processed) if 'successfully_processed' in locals() else processed_files
     failed_count = len(failed_files_details)
-    _logger.info(f">> success_count = {processed_count}")
-    _logger.info(f">> fail_count = {failed_count}")
+    _logger.info(f">> endf_success_count = {processed_count}")
+    _logger.info(f">> endf_fail_count = {failed_count}")
     if master_file:
         _logger.info(f">> master_file = {os.path.basename(master_file)}")
     if generate_ace:
@@ -980,6 +1018,12 @@ def perturb_ENDF_files(
             for sd in summary_data.values()
         )
         _logger.info(f">> ace_generated = {ace_total}")
+        ace_failed = sum(
+            sd['ace_generation'].get('failed_samples', 0)
+            for sd in summary_data.values()
+        )
+        if ace_failed > 0:
+            _logger.info(f">> ace_failed = {ace_failed}")
 
     _logger.info("#== END SUMMARY ========================================================")
 

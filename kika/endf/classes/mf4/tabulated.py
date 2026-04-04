@@ -517,11 +517,11 @@ class MF4MTTabulated(MF4MT):
                 lines.append(pair_line)
                 line_num += 1
         
-        # End of section marker - all integers
+        # SEND record: C1=0.0, C2=0.0, L1=0, L2=0, N1=0, N2=0, MT=0
         end_line = format_endf_data_line(
-            [0, 0, 0, 0, 0, 0],
-            mat, mf, 0, 99999,  # Note MT=0 for end of section
-            formats=[ENDF_FORMAT_INT, ENDF_FORMAT_INT, ENDF_FORMAT_INT, ENDF_FORMAT_INT, ENDF_FORMAT_INT, ENDF_FORMAT_INT]
+            [0.0, 0.0, 0, 0, 0, 0],
+            mat, mf, 0, 99999,
+            formats=[ENDF_FORMAT_FLOAT, ENDF_FORMAT_FLOAT, ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT_ZERO]
         )
         lines.append(end_line)
         

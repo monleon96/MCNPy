@@ -900,8 +900,8 @@ def perturb_seprate_ACE_files(
     # Emit summary metrics
     processed_count = len([zaid for zaid in summary_data.keys() if zaid not in skipped_isotopes])
     skipped_count = len(skipped_isotopes)
-    _logger.info(f">> processed_isotopes = {processed_count}")
-    _logger.info(f">> skipped_isotopes = {skipped_count}")
+    _logger.info(f">> success_count = {processed_count}")
+    _logger.info(f">> fail_count = {skipped_count}")
     _job_elapsed = time.time() - _job_t0
     _logger.info(f">> total_elapsed_s = {_job_elapsed:.1f}")
     _logger.info(f"#== END SUMMARY ========================================================")

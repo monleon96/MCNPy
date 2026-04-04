@@ -485,7 +485,7 @@ def write_mf34_to_file(
 
     if update_directory:
         from .update_directory import update_mf1_directory
-        update_mf1_directory(output_path)
+        update_mf1_directory(output_path, added_sections={(34, mf34.number)})
 
     return output_path
 
