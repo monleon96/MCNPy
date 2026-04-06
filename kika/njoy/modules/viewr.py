@@ -177,7 +177,12 @@ def parse(card_lines: list[str]) -> dict:
 
     result: dict = {"infile": infile, "nps": nps}
 
+    lm: dict[str, list[int]] = {
+        "infile": [0], "nps": [0],
+    }
+
     if infile != 5 or len(card_lines) <= 1:
+        result["_line_map"] = lm
         return result
 
     # Inline plot cards — parse page setup and plot data
@@ -345,4 +350,5 @@ def parse(card_lines: list[str]) -> dict:
         current_plot["curves"].append(curve)
 
     result["plots"] = plots
+    result["_line_map"] = lm
     return result

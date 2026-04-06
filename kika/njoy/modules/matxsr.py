@@ -107,6 +107,12 @@ def parse(card_lines: list[str]) -> dict:
         if len(c1) > 3 + i:
             result[key] = int(c1[3 + i])
 
+    lm: dict[str, list[int]] = {
+        "ngen1": [0], "ngen2": [0], "nmatx": [0],
+        "ngen3": [0], "ngen4": [0], "ngen5": [0],
+        "ngen6": [0], "ngen7": [0], "ngen8": [0],
+    }
+
     idx = 1
 
     # Card 2: ivers 'huse'/
@@ -115,6 +121,7 @@ def parse(card_lines: list[str]) -> dict:
     ivers_str = card2_line[:quote_pos].strip()
     result["ivers"] = int(ivers_str) if ivers_str else 0
     result["huse"] = parse_quoted_string(card2_line)
+    lm["ivers"] = [idx]; lm["huse"] = [idx]
     idx += 1
 
     # Card 3: npart ntype nholl nmat
@@ -123,20 +130,25 @@ def parse(card_lines: list[str]) -> dict:
     ntype = int(c3[1])
     nholl = int(c3[2])
     nmat = int(c3[3])
+    lm["npart"] = [idx]; lm["ntype"] = [idx]; lm["nholl"] = [idx]; lm["nmat"] = [idx]
     idx += 1
 
     # Card 4: 'hsetid'/ — repeated nholl times
+    hsetid_start = idx
     hsetid = []
     for _ in range(nholl):
         hsetid.append(parse_quoted_string(card_lines[idx]))
         idx += 1
     result["hsetid"] = hsetid
+    lm["hsetid"] = list(range(hsetid_start, idx))
 
     # Card 5: particle names (unquoted)
+    pnames_idx = idx
     pnames = _parse_word_list(card_lines[idx])
     idx += 1
 
     # Card 6: ngrp per particle
+    ngrp_idx = idx
     ngrp_vals = parse_card_values(card_lines[idx])
     idx += 1
 
@@ -144,16 +156,20 @@ def parse(card_lines: list[str]) -> dict:
     for i in range(npart):
         particles.append({"name": pnames[i], "ngrp": int(ngrp_vals[i])})
     result["particles"] = particles
+    lm["particles"] = [pnames_idx, ngrp_idx]
 
     # Card 7: data type names (unquoted)
+    tnames_idx = idx
     tnames = _parse_word_list(card_lines[idx])
     idx += 1
 
     # Card 8: jinp per data type
+    jinp_idx = idx
     jinp_vals = parse_card_values(card_lines[idx])
     idx += 1
 
     # Card 9: joutp per data type
+    joutp_idx = idx
     joutp_vals = parse_card_values(card_lines[idx])
     idx += 1
 
@@ -165,8 +181,10 @@ def parse(card_lines: list[str]) -> dict:
             "joutp": int(joutp_vals[j]),
         })
     result["data_types"] = data_types
+    lm["data_types"] = [tnames_idx, jinp_idx, joutp_idx]
 
     # Card 10: hmat matno [matgg] / — repeated nmat times
+    mat_start = idx
     materials = []
     for _ in range(nmat):
         vals = parse_card_values(card_lines[idx])
@@ -176,5 +194,7 @@ def parse(card_lines: list[str]) -> dict:
         materials.append(mat_entry)
         idx += 1
     result["materials"] = materials
+    lm["materials"] = list(range(mat_start, idx))
 
+    result["_line_map"] = lm
     return result

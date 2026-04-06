@@ -107,4 +107,13 @@ def parse(card_lines: list[str]) -> dict:
     if len(c4) > 1:
         result["emax"] = float(c4[1])
 
+    # Build line map
+    lm: dict[str, list[int]] = {
+        "nendf": [0], "nin": [0], "nout": [0],
+        "matde": [1], "matdp": [1], "nbin": [1], "ntemp": [1],
+        "iin": [1], "icoh": [1], "iform": [1], "natom": [1], "mtref": [1], "iprint": [1],
+        "temperatures": [2], "tol": [3], "emax": [3],
+    }
+    result["_line_map"] = lm
+
     return result

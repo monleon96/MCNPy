@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._base import Lines, parse_iprint, parse_card_values, parse_quoted_string
+from ._base import Lines, parse_iprint, parse_card_values, parse_quoted_string, parse_multiline_card
 
 
 def generate(p: dict) -> Lines:
@@ -199,21 +199,32 @@ def parse(card_lines: list[str]) -> dict:
     """Parse LEAPR card lines into a parameter dict."""
     idx = 0
 
+    lm: dict[str, list[int]] = {}
+
     # Card 1: nout
-    c1 = parse_card_values(card_lines[idx]); idx += 1
+    c1 = parse_card_values(card_lines[idx])
+    lm["nout"] = [idx]
+    idx += 1
     nout = int(c1[0])
 
     # Card 2: 'title'/
-    title = parse_quoted_string(card_lines[idx]); idx += 1
+    title = parse_quoted_string(card_lines[idx])
+    lm["title"] = [idx]
+    idx += 1
 
     # Card 3: ntempr [iprint] [nphon]
-    c3 = parse_card_values(card_lines[idx]); idx += 1
+    c3 = parse_card_values(card_lines[idx])
+    lm["ntempr"] = [idx]; lm["iprint"] = [idx]; lm["nphon"] = [idx]
+    idx += 1
     ntempr = int(c3[0])
     iprint = int(c3[1]) if len(c3) > 1 else 0
     nphon = int(c3[2]) if len(c3) > 2 else 100
 
     # Card 4: mat za [isabt] [ilog] [smin]
-    c4 = parse_card_values(card_lines[idx]); idx += 1
+    c4 = parse_card_values(card_lines[idx])
+    lm["mat"] = [idx]; lm["za"] = [idx]; lm["isabt"] = [idx]
+    lm["ilog"] = [idx]; lm["smin"] = [idx]
+    idx += 1
     mat = int(c4[0])
     za = int(c4[1])
     isabt = int(c4[2]) if len(c4) > 2 else 0
@@ -221,7 +232,10 @@ def parse(card_lines: list[str]) -> dict:
     smin = float(c4[4]) if len(c4) > 4 else None
 
     # Card 5: awr spr [npr] [iel] [ncold] [nsk]
-    c5 = parse_card_values(card_lines[idx]); idx += 1
+    c5 = parse_card_values(card_lines[idx])
+    lm["awr"] = [idx]; lm["spr"] = [idx]; lm["npr"] = [idx]
+    lm["iel"] = [idx]; lm["ncold"] = [idx]; lm["nsk"] = [idx]
+    idx += 1
     awr = float(c5[0])
     spr = float(c5[1])
     npr = int(c5[2]) if len(c5) > 2 else 1
@@ -230,7 +244,10 @@ def parse(card_lines: list[str]) -> dict:
     nsk = int(c5[5]) if len(c5) > 5 else 0
 
     # Card 6: nss [b7] [aws] [sps] [mss]
-    c6 = parse_card_values(card_lines[idx]); idx += 1
+    c6 = parse_card_values(card_lines[idx])
+    lm["nss"] = [idx]; lm["b7"] = [idx]; lm["aws"] = [idx]
+    lm["sps"] = [idx]; lm["mss"] = [idx]
+    idx += 1
     nss = int(c6[0])
     b7 = int(c6[1]) if len(c6) > 1 else 0
     aws = float(c6[2]) if len(c6) > 2 else 0.0
@@ -238,15 +255,24 @@ def parse(card_lines: list[str]) -> dict:
     mss = int(c6[4]) if len(c6) > 4 else 0
 
     # Card 7: nalpha nbeta [lat]
-    c7 = parse_card_values(card_lines[idx]); idx += 1
+    c7 = parse_card_values(card_lines[idx])
+    lm["nalpha"] = [idx]; lm["nbeta"] = [idx]; lm["lat"] = [idx]
+    idx += 1
     nalpha = int(c7[0])
     nbeta = int(c7[1])
     lat = int(c7[2]) if len(c7) > 2 else 1
 
-    # Card 8: alphas
-    alphas = [float(v) for v in parse_card_values(card_lines[idx])]; idx += 1
-    # Card 9: betas
-    betas = [float(v) for v in parse_card_values(card_lines[idx])]; idx += 1
+    # Card 8: alphas (may span multiple lines)
+    alpha_vals, alpha_lines = parse_multiline_card(card_lines, idx)
+    alphas = [float(v) for v in alpha_vals]
+    lm["alphas"] = list(range(idx, idx + alpha_lines))
+    idx += alpha_lines
+
+    # Card 9: betas (may span multiple lines)
+    beta_vals, beta_lines = parse_multiline_card(card_lines, idx)
+    betas = [float(v) for v in beta_vals]
+    lm["betas"] = list(range(idx, idx + beta_lines))
+    idx += beta_lines
 
     # Temperature blocks for principal scatterer
     temperatures = []
@@ -294,6 +320,7 @@ def parse(card_lines: list[str]) -> dict:
         if sec_temps:
             result["secondary_temperatures"] = sec_temps
 
+    result["_line_map"] = lm
     return result
 
 

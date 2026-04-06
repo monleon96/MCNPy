@@ -13,13 +13,19 @@ from .sandwich import (
     filter_reactions_by_nuclide,
     filter_reactions_by_type
 )
+from .convergence import convergence_analysis
+from .normality import normality_tests, histogram_data, qq_plot_data
 
 __all__ = [
-    'fastTMC', 
+    'fastTMC',
     'create_summary_table',
     'sandwich_uncertainty_propagation',
     'UncertaintyResult',
-    'UncertaintyContribution', 
+    'UncertaintyContribution',
     'filter_reactions_by_nuclide',
-    'filter_reactions_by_type'
+    'filter_reactions_by_type',
+    'convergence_analysis',
+    'normality_tests',
+    'histogram_data',
+    'qq_plot_data',
 ]

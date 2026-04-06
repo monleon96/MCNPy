@@ -4,13 +4,13 @@ Nuclear data processing — kika's "homemade NJOY".
 Format-independent processing that operates on canonical types from
 ``kika.nuclear_data``.  Each submodule implements one processing step:
 
-- ``reconr``          — resonance reconstruction (MF2 → pointwise σ)
+- ``reconstruct``     — resonance reconstruction (MF2 → pointwise σ)
 - ``linearization``   — adaptive energy grid generation
 - ``resonance_formulas`` — SLBW / MLBW / Reich-Moore cross-section formulas
 - ``penetration``     — penetrability and shift factors
 """
 
-from .reconr import reconr
+from .reconstruct import reconstruct
 from .multigroup import (
     WeightingFunction,
     compute_rebin_operator,
@@ -20,7 +20,7 @@ from .multigroup import (
 )
 
 __all__ = [
-    "reconr",
+    "reconstruct",
     "WeightingFunction",
     "compute_rebin_operator",
     "collapse_covariance",

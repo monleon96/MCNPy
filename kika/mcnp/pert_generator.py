@@ -735,7 +735,7 @@ def _format_mcnp_line(line, max_length=80):
 
     :param line: The full line to format
     :type line: str
-    :param max_length: Maximum line length (default: 120 for MCNP6)
+    :param max_length: Maximum line length (default: 80)
     :type max_length: int
 
     :return: Formatted string with proper line breaks

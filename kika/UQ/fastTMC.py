@@ -35,6 +35,7 @@ def fastTMC(
         N sample results for single tally analysis. Cannot be used with DataFrames.
     y_sigma : array-like, optional
         N relative 1-σ uncertainties for single tally analysis (as fractions).
+        If None, only total observed uncertainty is computed (no decomposition).
     results_df : pd.DataFrame, optional
         DataFrame with results for each tally (columns) and sample (rows).
     uncertainties_df : pd.DataFrame, optional
@@ -108,13 +109,18 @@ def fastTMC(
         )
     
     if single_mode:
-        # Single tally analysis
-        if y_val is None or y_sigma is None:
-            raise ValueError("Both y_val and y_sigma must be provided for single-tally analysis.")
-        
-        return _single_tally_analysis(
-            y_val, y_sigma, n_bootstrap, ci_level, random_seed, verbose, reliability_threshold
-        )
+        if y_val is None:
+            raise ValueError("y_val must be provided for single-tally analysis.")
+
+        if y_sigma is not None:
+            return _single_tally_analysis(
+                y_val, y_sigma, n_bootstrap, ci_level, random_seed, verbose, reliability_threshold
+            )
+        else:
+            # Values-only analysis (deterministic results, no uncertainty decomposition)
+            return _values_only_analysis(
+                y_val, n_bootstrap, ci_level, random_seed, verbose
+            )
     
     else:
         # DataFrame analysis
@@ -240,6 +246,72 @@ def _single_tally_analysis(
         'stat_to_obs_ratio': stat_to_obs_ratio,
         'bootstrap': bootstrap_results,
         'ci': ci
+    }
+
+
+def _values_only_analysis(
+    y_val: Union[np.ndarray, list],
+    n_bootstrap: int,
+    ci_level: float,
+    random_seed: Optional[int],
+    verbose: bool,
+) -> Dict:
+    """Analysis for values-only data (no per-sample uncertainties).
+
+    Computes total observed uncertainty with bootstrap CIs but cannot
+    decompose into statistical vs nuclear-data components.
+    """
+    y = np.asarray(y_val, dtype=float)
+    N = y.size
+
+    mean_tally = y.mean()
+    var_observed = np.var(y, ddof=1)
+    std_obs = np.sqrt(var_observed)
+    pct_obs = std_obs / mean_tally * 100.0 if mean_tally != 0 else 0.0
+
+    # Bootstrap for CIs on mean and observed uncertainty
+    rng = np.random.default_rng(random_seed)
+    bs_mean = np.empty(n_bootstrap)
+    bs_obs = np.empty(n_bootstrap)
+
+    for i in range(n_bootstrap):
+        idx = rng.integers(0, N, N)
+        y_bs = y[idx]
+        bs_mean[i] = y_bs.mean()
+        std_obs_bs = np.std(y_bs, ddof=1)
+        bs_obs[i] = std_obs_bs / y_bs.mean() * 100.0 if y_bs.mean() != 0 else 0.0
+
+    alpha = 1 - ci_level
+    lo, hi = 100 * (alpha / 2), 100 * (1 - alpha / 2)
+
+    ci = {
+        'mean_tally': tuple(np.percentile(bs_mean, [lo, hi])),
+        'percent_unc_observed': tuple(np.percentile(bs_obs, [lo, hi])),
+        'percent_unc_nuclear_data': (0.0, 0.0),
+    }
+
+    if verbose:
+        print(f"Values-only analysis (no uncertainty decomposition)")
+        print(f"  Mean tally value      : {mean_tally:.5e}")
+        print(f"  Observed uncertainty  : {pct_obs:.2f}%")
+        print(f"\nBootstrap {int(ci_level*100)}% CIs:")
+        print(f"  • Mean tally          : {ci['mean_tally'][0]:.5e} – {ci['mean_tally'][1]:.5e}")
+        print(f"  • Observed unc.       : {ci['percent_unc_observed'][0]:.2f}% – "
+              f"{ci['percent_unc_observed'][1]:.2f}%")
+
+    return {
+        'mean_tally': mean_tally,
+        'percent_unc_observed': pct_obs,
+        'percent_unc_statistical': 0.0,
+        'percent_unc_nuclear_data': 0.0,
+        'is_reliable': True,  # Not applicable — no decomposition to judge
+        'stat_to_obs_ratio': 0.0,
+        'bootstrap': {
+            'mean_tally': bs_mean,
+            'percent_unc_nuclear_data': np.zeros(n_bootstrap),
+            'percent_unc_observed': bs_obs,
+        },
+        'ci': ci,
     }
 
 

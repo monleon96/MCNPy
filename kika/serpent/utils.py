@@ -6,6 +6,7 @@ import re
 from typing import Iterable, List, Tuple
 
 from kika.serpent.sens import Perturbation, PertCategory
+from kika._constants import MT_TO_REACTION
 
 
 _NUM_RE = re.compile(r"[+-]?(?:\d+\.\d*|\d*\.\d+|\d+)(?:[Ee][+-]?\d+)?")
@@ -27,6 +28,14 @@ def extract_string_list(block: str) -> List[str]:
     return items
 
 
+def _mt_label(mt: int) -> str:
+    """Build a human-readable label for an MT number, e.g. 'MT 102 (n,γ)'."""
+    name = MT_TO_REACTION.get(mt)
+    if name:
+        return f"MT {mt} {name}"
+    return f"MT {mt}"
+
+
 def parse_perturbation_label(raw: str, index: int) -> Perturbation:
     s = raw.strip().lower()
     # total xs
@@ -36,7 +45,7 @@ def parse_perturbation_label(raw: str, index: int) -> Perturbation:
             raw_label=raw,
             category=PertCategory.MT_XS,
             mt=1,
-            short_label="MT=1",
+            short_label=_mt_label(1),
         )
     # mt N xs
     m = re.fullmatch(r"mt\s+(\d+)\s+xs", s)
@@ -61,7 +70,7 @@ def parse_perturbation_label(raw: str, index: int) -> Perturbation:
                 raw_label=raw,
                 category=PertCategory.MT_XS,
                 mt=mt,
-                short_label=f"MT={mt}",
+                short_label=_mt_label(mt),
             )
     # inelastic scattering (SERPENT sometimes uses labels like 'inl scatt xs')
     # map these to MT=4 so downstream code treats them correctly
@@ -71,7 +80,7 @@ def parse_perturbation_label(raw: str, index: int) -> Perturbation:
             raw_label=raw,
             category=PertCategory.MT_XS,
             mt=4,
-            short_label="MT=4 (inelastic)",
+            short_label=_mt_label(4),
         )
     # <channel> leg mom N (current format for Legendre moments)
     m = re.fullmatch(r"(\w+)\s+leg\s+mom\s+(\d+)", s)

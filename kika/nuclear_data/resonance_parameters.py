@@ -2,7 +2,7 @@
 Format-agnostic resonance parameters.
 
 Stores resolved resonance data in a structure that can be consumed
-by processing functions (e.g. ``kika.processing.reconr``) without
+by processing functions (e.g. ``kika.processing.reconstruct``) without
 knowledge of the original file format.
 
 The ``ResonanceRecord`` dataclass mirrors the physics of a single

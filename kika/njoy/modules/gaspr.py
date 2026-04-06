@@ -19,4 +19,5 @@ def generate(p: dict) -> Lines:
 def parse(card_lines: list[str]) -> dict:
     """Parse GASPR card lines into a parameter dict."""
     vals = parse_card_values(card_lines[0])
-    return {"nendf": int(vals[0]), "nin": int(vals[1]), "nout": int(vals[2])}
+    return {"nendf": int(vals[0]), "nin": int(vals[1]), "nout": int(vals[2]),
+            "_line_map": {"nendf": [0], "nin": [0], "nout": [0]}}

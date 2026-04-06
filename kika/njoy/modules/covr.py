@@ -117,6 +117,10 @@ def _parse_library(card_lines: list[str], nin: int, nout: int) -> dict:
         "hlibid": hlibid,
         "hdescr": hdescr,
         "cases": cases,
+        "_line_map": {
+            "nin": [0], "nout": [0],
+            "matype": [1], "hlibid": [2], "hdescr": [3],
+        },
     }
 
 
@@ -160,4 +164,9 @@ def _parse_plot(card_lines: list[str], nin: int, nplot: int) -> dict:
     for i in range(ncase):
         cases.append([int(v) for v in parse_card_values(card_lines[idx + i])])
     result["cases"] = cases
+
+    lm: dict[str, list[int]] = {
+        "nin": [0], "nout": [0], "nplot": [0], "icolor": [1],
+    }
+    result["_line_map"] = lm
     return result

@@ -1,5 +1,5 @@
 """
-RECONR — Resonance reconstruction on canonical types.
+Resonance reconstruction on canonical types.
 
 Reconstructs pointwise cross sections from resonance parameters,
 returning ``CrossSection`` objects.  Operates entirely on
@@ -39,7 +39,7 @@ _DISPATCH = {
 }
 
 
-def reconr(
+def reconstruct(
     resonance_params: List[ResonanceParameters],
     background: Optional[Dict[int, CrossSection]] = None,
     tolerance: float = 1e-3,

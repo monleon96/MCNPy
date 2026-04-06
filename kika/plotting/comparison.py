@@ -364,6 +364,8 @@ class ComparisonBuilder:
         self._reference: Optional[PlotData] = None
         self._reference_styling: dict = {}
         self._comparisons: List[Tuple[PlotData, dict]] = []
+        self._overlays: List[Tuple[PlotData, dict]] = []
+        self._scatter_overlays: List[Tuple[PlotData, dict]] = []
 
         # Difference-panel config
         self._show_diff_panel: bool = False
@@ -401,11 +403,29 @@ class ComparisonBuilder:
         self._comparisons.append((data, styling))
         return self
 
+    def add_overlay(self, data: PlotData, **styling) -> 'ComparisonBuilder':
+        """Add overlay data to the main panel only.
+
+        Overlays are rendered on the main panel but are NOT included in
+        difference computations.
+        """
+        self._overlays.append((data, styling))
+        return self
+
+    def add_scatter_overlay(self, data: PlotData, **styling) -> 'ComparisonBuilder':
+        """Add scatter overlay data (e.g., EXFOR) to both main and diff panels.
+
+        Scatter overlays are rendered on the main panel AND their difference
+        against the reference is shown as scatter points in the diff panel.
+        """
+        self._scatter_overlays.append((data, styling))
+        return self
+
     def set_difference_panel(
         self,
         mode: Literal['relative', 'absolute'] = _NOT_SET,
         y_label: Optional[str] = _NOT_SET,
-        y_lim: Optional[Tuple[float, float]] = _NOT_SET,
+        y_lim: Optional[Tuple[Optional[float], Optional[float]]] = _NOT_SET,
         height_ratios: Tuple[float, float] = _NOT_SET,
         relative_in_percent: bool = _NOT_SET,
         zero_line: bool = _NOT_SET,
@@ -481,8 +501,8 @@ class ComparisonBuilder:
 
     def set_limits(
         self,
-        x_lim: Optional[Tuple[float, float]] = None,
-        y_lim: Optional[Tuple[float, float]] = None,
+        x_lim: Optional[Tuple[Optional[float], Optional[float]]] = None,
+        y_lim: Optional[Tuple[Optional[float], Optional[float]]] = None,
     ) -> 'ComparisonBuilder':
         """Set axis limits for the main panel."""
         self._x_lim = x_lim
@@ -523,9 +543,10 @@ class ComparisonBuilder:
             raise ValueError(
                 "No reference data set. Call set_reference() first."
             )
-        if not self._comparisons:
+        if not self._comparisons and not self._scatter_overlays:
             raise ValueError(
-                "No comparison data. Call add_comparison() at least once."
+                "No comparison or scatter overlay data. "
+                "Call add_comparison() or add_scatter_overlay() at least once."
             )
 
         # Resolve interpolation: explicit value wins, otherwise infer
@@ -548,9 +569,9 @@ class ComparisonBuilder:
                 results.append(result)
 
         if self._show_diff_panel and self._diff_only:
-            return self._build_diff_only_panel(results, show)
+            return self._build_diff_only_panel(results, show, interpolation)
         elif self._show_diff_panel:
-            return self._build_dual_panel(results, show)
+            return self._build_dual_panel(results, show, interpolation)
         else:
             return self._build_single_panel(show)
 
@@ -570,6 +591,7 @@ class ComparisonBuilder:
 
     def _build_diff_only_panel(
         self, results: List[ComparisonResult], show: bool,
+        interpolation: str = 'log-log',
     ) -> plt.Figure:
         """Single-panel figure showing only difference curves."""
         builder = PlotBuilder(
@@ -586,10 +608,41 @@ class ComparisonBuilder:
             zip(results, self._comparisons)
         ):
             diff_data = result.difference
-            # Use the short comparison label, not the verbose auto-label
-            diff_data.label = cmp_data.label
+            # Use per-series diff_label from metadata if provided:
+            #   not present → use comparison label (default)
+            #   empty string → suppress label (None)
+            #   non-empty → use as-is
+            raw_diff_label = cmp_data.metadata.get('diff_label')
+            if raw_diff_label is None:
+                diff_data.label = cmp_data.label
+            else:
+                diff_data.label = raw_diff_label or None
             color_idx = (i + 1) % len(colors)
-            builder.add_data(diff_data, color=colors[color_idx])
+            diff_color = cmp_data.color if cmp_data.color else colors[color_idx]
+            builder.add_data(diff_data, color=diff_color)
+
+        # Add scatter overlays to diff-only panel
+        for ovl_data, ovl_styling in self._scatter_overlays:
+            try:
+                ovl_result = compute_difference(
+                    reference=self._reference,
+                    comparison=ovl_data,
+                    mode=self._diff_mode,
+                    interpolation=interpolation,
+                    grid='comparison',
+                    relative_in_percent=self._relative_in_percent,
+                )
+                ovl_diff = ovl_result.difference
+                ovl_diff.label = ovl_data.label
+                ovl_diff_styling = {
+                    'color': ovl_data.color or ovl_styling.get('color'),
+                    'marker': ovl_data.marker or ovl_styling.get('marker', 'o'),
+                    'markersize': ovl_data.markersize or ovl_styling.get('markersize', 5),
+                    'linestyle': 'none',
+                }
+                builder.add_data(ovl_diff, **ovl_diff_styling)
+            except Exception:
+                pass
 
         builder.set_labels(
             title=self._title,
@@ -638,6 +691,10 @@ class ComparisonBuilder:
         builder.add_data(self._reference, **self._reference_styling)
         for cmp_data, styling in self._comparisons:
             builder.add_data(cmp_data, **styling)
+        for ovl_data, ovl_styling in self._overlays:
+            builder.add_data(ovl_data, **ovl_styling)
+        for ovl_data, ovl_styling in self._scatter_overlays:
+            builder.add_data(ovl_data, **ovl_styling)
 
         builder.set_labels(
             title=self._title, x_label=self._x_label, y_label=self._y_label,
@@ -651,6 +708,7 @@ class ComparisonBuilder:
 
     def _build_dual_panel(
         self, results: List[ComparisonResult], show: bool,
+        interpolation: str = 'log-log',
     ) -> plt.Figure:
         """Dual-panel figure: main overlay + difference panel."""
         # Resolve notebook / interactive settings
@@ -694,6 +752,10 @@ class ComparisonBuilder:
         main_builder.add_data(self._reference, **self._reference_styling)
         for cmp_data, styling in self._comparisons:
             main_builder.add_data(cmp_data, **styling)
+        for ovl_data, ovl_styling in self._overlays:
+            main_builder.add_data(ovl_data, **ovl_styling)
+        for ovl_data, ovl_styling in self._scatter_overlays:
+            main_builder.add_data(ovl_data, **ovl_styling)
         main_builder.set_labels(title=self._title, y_label=self._y_label)
         main_builder.set_scales(log_x=self._use_log_x, log_y=self._use_log_y)
         main_builder.set_limits(x_lim=self._x_lim, y_lim=self._y_lim)
@@ -713,14 +775,46 @@ class ComparisonBuilder:
         )
 
         colors = _get_color_palette(self._style)
-        for i, result in enumerate(results):
-            # Comparison colors start at index 1 (index 0 is reference)
+        for i, (result, (cmp_data, _)) in enumerate(
+            zip(results, self._comparisons)
+        ):
+            # Use the comparison series' own color if specified; fall back to palette
             color_idx = (i + 1) % len(colors)
-            diff_styling = {'color': colors[color_idx]}
+            diff_color = cmp_data.color if cmp_data.color else colors[color_idx]
+            diff_styling = {'color': diff_color}
             diff_data = result.difference
-            # Suppress verbose diff labels — colors match the main panel
-            diff_data.label = None
+            # In dual-panel mode: labels are suppressed by default (colors match main panel)
+            # but a per-series diff_label in metadata overrides this
+            raw_diff_label = cmp_data.metadata.get('diff_label')
+            if raw_diff_label is None:
+                diff_data.label = None  # Default: suppress in dual-panel
+            else:
+                diff_data.label = raw_diff_label or None
             diff_builder.add_data(diff_data, **diff_styling)
+
+        # Add scatter overlays to diff panel (e.g., EXFOR experimental data)
+        for ovl_data, ovl_styling in self._scatter_overlays:
+            try:
+                ovl_result = compute_difference(
+                    reference=self._reference,
+                    comparison=ovl_data,
+                    mode=self._diff_mode,
+                    interpolation=interpolation,
+                    grid='comparison',  # Keep scatter x-points
+                    relative_in_percent=self._relative_in_percent,
+                )
+                ovl_diff = ovl_result.difference
+                ovl_diff.label = None  # Suppress legend in diff panel
+                # Preserve scatter marker style
+                ovl_diff_styling = {
+                    'color': ovl_data.color or ovl_styling.get('color'),
+                    'marker': ovl_data.marker or ovl_styling.get('marker', 'o'),
+                    'markersize': ovl_data.markersize or ovl_styling.get('markersize', 5),
+                    'linestyle': 'none',
+                }
+                diff_builder.add_data(ovl_diff, **ovl_diff_styling)
+            except Exception:
+                pass  # Skip if interpolation fails for this overlay
 
         diff_builder.set_labels(
             y_label=self._resolve_diff_y_label(), x_label=self._x_label,
@@ -729,6 +823,11 @@ class ComparisonBuilder:
         diff_builder.set_limits(x_lim=self._x_lim, y_lim=self._diff_y_lim)
         diff_builder.set_grid(grid=self._grid)
         diff_builder.build()
+
+        # Remove legend from diff panel — colors match the main panel
+        _diff_legend = ax_diff.get_legend()
+        if _diff_legend:
+            _diff_legend.remove()
 
         # Zero reference line
         if self._zero_line:

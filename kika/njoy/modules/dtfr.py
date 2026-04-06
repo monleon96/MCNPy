@@ -133,11 +133,18 @@ def parse(card_lines: list[str]) -> dict:
         "iedit": iedit,
     }
 
+    lm: dict[str, list[int]] = {
+        "nin": [0], "nout": [0], "npend": [0], "nplot": [0],
+        "iprint": [1], "ifilm": [1], "iedit": [1],
+    }
+
     idx = 2
 
     if iedit == 0:
         # Card 3: nlmax ng iptotl ipingp itabl ned ntherm
         c3 = parse_card_values(card_lines[idx])
+        lm["nlmax"] = [idx]; lm["ng"] = [idx]; lm["iptotl"] = [idx]
+        lm["ipingp"] = [idx]; lm["itabl"] = [idx]; lm["ntherm"] = [idx]
         idx += 1
         nlmax = int(c3[0])
         ng = int(c3[1])
@@ -159,6 +166,7 @@ def parse(card_lines: list[str]) -> dict:
         # Card 3a (if ntherm > 0): mti mtc nlc
         if ntherm > 0:
             c3a = parse_card_values(card_lines[idx])
+            lm["mti"] = [idx]; lm["mtc"] = [idx]; lm["nlc"] = [idx]
             idx += 1
             result["mti"] = int(c3a[0])
             result["mtc"] = int(c3a[1]) if len(c3a) > 1 else 0
@@ -168,9 +176,11 @@ def parse(card_lines: list[str]) -> dict:
         num_names = iptotl - 3
         if num_names > 0:
             result["edit_names"] = _extract_quoted_strings(card_lines[idx])
+            lm["edit_names"] = [idx]
             idx += 1
 
         # Card 5: ned triplets of jpos mt mult
+        edits_start = idx
         edits: list[list[int]] = []
         for _ in range(ned):
             c5 = parse_card_values(card_lines[idx])
@@ -178,20 +188,24 @@ def parse(card_lines: list[str]) -> dict:
             edits.append([int(c5[0]), int(c5[1]), int(c5[2])])
         if edits:
             result["edits"] = edits
+            lm["edits"] = list(range(edits_start, idx))
     else:
         # Card 6 (iedit=1, CLAW): nlmax ng
         c6 = parse_card_values(card_lines[idx])
+        lm["nlmax"] = [idx]; lm["ng"] = [idx]
         idx += 1
         result["nlmax"] = int(c6[0])
         result["ng"] = int(c6[1])
 
     # Card 7: nptabl ngp
     c7 = parse_card_values(card_lines[idx])
+    lm["nptabl"] = [idx]; lm["ngp"] = [idx]
     idx += 1
     result["nptabl"] = int(c7[0])
     result["ngp"] = int(c7[1]) if len(c7) > 1 else 0
 
     # Card 8: materials (terminated by bare /)
+    mat_start = idx
     materials: list[dict] = []
     while idx < len(card_lines):
         line = card_lines[idx].strip()
@@ -220,5 +234,7 @@ def parse(card_lines: list[str]) -> dict:
 
     if materials:
         result["materials"] = materials
+        lm["materials"] = list(range(mat_start, idx - 1))  # exclude bare /
 
+    result["_line_map"] = lm
     return result

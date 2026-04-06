@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._base import Lines, parse_iprint, parse_card_values, parse_quoted_string
+from ._base import Lines, parse_iprint, parse_card_values, parse_quoted_string, parse_multiline_card
 
 
 def generate(p: dict) -> Lines:
@@ -108,15 +108,24 @@ def parse(card_lines: list[str]) -> dict:
     if len(c2) > 4:
         result["iprint"] = int(c2[4])
 
+    lm: dict[str, list[int]] = {
+        "nendf": [0], "npend": [0], "ngam1": [0], "ngam2": [0],
+        "matb": [1], "igg": [1], "iwt": [1], "lord": [1], "iprint": [1],
+        "title": [2],
+    }
+
     idx = 3
 
-    # Card 4: custom gamma group boundaries (igg=1)
+    # Card 4: custom gamma group boundaries (igg=1, may span multiple lines)
     if igg == 1:
         ngg_vals = parse_card_values(card_lines[idx])
         result["ngg"] = int(ngg_vals[0])
+        lm["ngg"] = [idx]
         idx += 1
-        result["egg"] = [float(v) for v in parse_card_values(card_lines[idx])]
-        idx += 1
+        egg_vals, egg_lines = parse_multiline_card(card_lines, idx)
+        result["egg"] = [float(v) for v in egg_vals]
+        lm["egg"] = list(range(idx, idx + egg_lines))
+        idx += egg_lines
 
     # Card 6: reactions (terminated by 0 / or -1 / for auto)
     reactions: list[list] = []
@@ -143,4 +152,5 @@ def parse(card_lines: list[str]) -> dict:
     if reactions:
         result["reactions"] = reactions
     # Remaining 0 / is the material terminator — skipped
+    result["_line_map"] = lm
     return result

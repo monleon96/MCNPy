@@ -101,4 +101,11 @@ def parse(card_lines: list[str]) -> dict:
         result.update(materials[0])
     if len(materials) > 1:
         result["materials"] = materials
+
+    # Build line map (first material at card_lines[2] and [3])
+    lm: dict[str, list[int]] = {
+        "nendf": [0], "npend": [0], "label": [1],
+        "mat": [2], "err": [3], "tempr": [3], "errmax": [3], "errint": [3],
+    }
+    result["_line_map"] = lm
     return result

@@ -221,6 +221,12 @@ def parse(card_lines: list[str]) -> dict:
         "hk": hk,
     }
 
+    lm: dict[str, list[int]] = {
+        "nendf": [0], "npend": [0], "ngend": [0], "nace": [0], "ndir": [0],
+        "iopt": [1], "iprint": [1], "itype": [1], "suff": [1],
+        "hk": [2],
+    }
+
     # Card 4: iz,aw pairs when nxtra > 0
     offset = 3  # next card index after Card 3
     if nxtra > 0:
@@ -229,20 +235,33 @@ def parse(card_lines: list[str]) -> dict:
         for i in range(0, nxtra * 2, 2):
             pairs.append((int(c4[i]), float(c4[i + 1])))
         result["nxtra"] = pairs
+        lm["nxtra"] = [offset]
         offset += 1
 
     if abs_iopt == 1:
         _parse_fast(result, card_lines, offset)
+        lm["matd"] = [offset]; lm["tempd"] = [offset]
+        lm["newfor"] = [offset + 1]; lm["iopp"] = [offset + 1]; lm["ismooth"] = [offset + 1]
+        lm["thin1"] = [offset + 2]; lm["thin2"] = [offset + 2]; lm["thin3"] = [offset + 2]
     elif abs_iopt == 2:
         _parse_thermal(result, card_lines, offset)
+        lm["matd"] = [offset]; lm["tempd"] = [offset]; lm["tname"] = [offset]
+        lm["iza"] = [offset + 1]
+        lm["mti"] = [offset + 2]; lm["nbint"] = [offset + 2]; lm["mte"] = [offset + 2]
+        lm["ielas"] = [offset + 2]; lm["nmix"] = [offset + 2]
+        lm["emax"] = [offset + 2]; lm["iwt"] = [offset + 2]
     elif abs_iopt == 3:
         _parse_dosimetry(result, card_lines, offset)
+        lm["matd"] = [offset]; lm["tempd"] = [offset]
     elif abs_iopt == 4:
         _parse_photoatomic(result, card_lines, offset)
+        lm["matd"] = [offset]
     elif abs_iopt == 5:
         _parse_photonuclear(result, card_lines, offset)
+        lm["matd"] = [offset]
     # iopt 7/8: no additional cards to parse
 
+    result["_line_map"] = lm
     return result
 
 

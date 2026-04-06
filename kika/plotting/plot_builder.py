@@ -157,8 +157,8 @@ class PlotBuilder:
         self._legend_ncol: Optional[int] = None
         self._use_log_x: bool = False
         self._use_log_y: bool = False
-        self._x_lim: Optional[Tuple[float, float]] = None
-        self._y_lim: Optional[Tuple[float, float]] = None
+        self._x_lim: Optional[Tuple[Optional[float], Optional[float]]] = None
+        self._y_lim: Optional[Tuple[Optional[float], Optional[float]]] = None
         self._grid: bool = True
         self._grid_alpha: float = 0.3  # Alpha (transparency) for major grid
         self._show_minor_grid: bool = False  # Whether to show minor grid
@@ -363,8 +363,8 @@ class PlotBuilder:
     
     def set_limits(
         self,
-        x_lim: Optional[Tuple[float, float]] = None,
-        y_lim: Optional[Tuple[float, float]] = None
+        x_lim: Optional[Tuple[Optional[float], Optional[float]]] = None,
+        y_lim: Optional[Tuple[Optional[float], Optional[float]]] = None
     ) -> 'PlotBuilder':
         """
         Set axis limits.
@@ -1679,7 +1679,17 @@ class PlotBuilder:
                     
                     # Plot step line without marker
                     marker_backup = plot_kwargs.pop('marker')
-                    self.ax.step(data.x, data.y, where=step_where, **plot_kwargs)
+                    # Handle G+1 edges / G values
+                    if len(data.x) == len(data.y) + 1:
+                        self.ax.step(data.x[:-1], data.y, where=step_where, **plot_kwargs)
+                        self.ax.hlines(
+                            data.y[-1], data.x[-2], data.x[-1],
+                            color=plot_kwargs.get('color'),
+                            linestyle=plot_kwargs.get('linestyle', '-'),
+                            linewidth=plot_kwargs.get('linewidth'),
+                        )
+                    else:
+                        self.ax.step(data.x, data.y, where=step_where, **plot_kwargs)
                     
                     # Calculate midpoints for markers
                     # For 'post' step: each segment spans from x[i] to x[i+1] at height y[i]
@@ -1716,7 +1726,18 @@ class PlotBuilder:
                     self.ax.plot(x_mid, y_mid, **marker_kwargs)
                 else:
                     # No markers, just plot the step normally
-                    self.ax.step(data.x, data.y, where=step_where, **plot_kwargs)
+                    # Handle G+1 edges / G values (len(x) == len(y) + 1)
+                    if len(data.x) == len(data.y) + 1:
+                        self.ax.step(data.x[:-1], data.y, where=step_where, **plot_kwargs)
+                        # Close last bin with horizontal segment
+                        self.ax.hlines(
+                            data.y[-1], data.x[-2], data.x[-1],
+                            color=plot_kwargs.get('color'),
+                            linestyle=plot_kwargs.get('linestyle', '-'),
+                            linewidth=plot_kwargs.get('linewidth'),
+                        )
+                    else:
+                        self.ax.step(data.x, data.y, where=step_where, **plot_kwargs)
             
             elif data.plot_type == 'scatter':
                 # Convert markersize to s for scatter plots
@@ -1754,13 +1775,20 @@ class PlotBuilder:
             if np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
                 self.ax.set_xlim(x_min, x_max)
         else:
-            # Apply user-specified limits (validate for log scale)
+            # Apply user-specified limits (validate for log scale, support partial limits)
             if self._x_lim is not None:
-                x_lim = self._x_lim
+                x_lo, x_hi = self._x_lim
                 if self._use_log_x:
-                    # For log scale, ensure limits are positive
-                    x_lim = (max(x_lim[0], 1e-10), max(x_lim[1], 1e-10))
-                self.ax.set_xlim(x_lim)
+                    if x_lo is not None:
+                        x_lo = max(x_lo, 1e-10)
+                    if x_hi is not None:
+                        x_hi = max(x_hi, 1e-10)
+                if x_lo is not None and x_hi is not None:
+                    self.ax.set_xlim(x_lo, x_hi)
+                elif x_lo is not None:
+                    self.ax.set_xlim(left=x_lo)
+                elif x_hi is not None:
+                    self.ax.set_xlim(right=x_hi)
 
         if self._y_lim is None and self._data_list:
             # Find the data range across all datasets (including uncertainty bands)
@@ -1806,13 +1834,20 @@ class PlotBuilder:
                             y_max = y_max + padding
                         self.ax.set_ylim(y_min, y_max)
         else:
-            # Apply user-specified limits (validate for log scale)
+            # Apply user-specified limits (validate for log scale, support partial limits)
             if self._y_lim is not None:
-                y_lim = self._y_lim
+                y_lo, y_hi = self._y_lim
                 if self._use_log_y:
-                    # For log scale, ensure limits are positive
-                    y_lim = (max(y_lim[0], 1e-10), max(y_lim[1], 1e-10))
-                self.ax.set_ylim(y_lim)
+                    if y_lo is not None:
+                        y_lo = max(y_lo, 1e-10)
+                    if y_hi is not None:
+                        y_hi = max(y_hi, 1e-10)
+                if y_lo is not None and y_hi is not None:
+                    self.ax.set_ylim(y_lo, y_hi)
+                elif y_lo is not None:
+                    self.ax.set_ylim(bottom=y_lo)
+                elif y_hi is not None:
+                    self.ax.set_ylim(top=y_hi)
 
         # Apply axis labels
         x_fs = self._xlabel_fontsize or self._label_fontsize
@@ -1886,7 +1921,7 @@ class PlotBuilder:
                     'left':   {'bbox_to_anchor': (-0.02, 1),  'loc': 'upper right'},
                     'top':    {'bbox_to_anchor': (0.5, 0.99), 'loc': 'upper center',
                                'bbox_transform': self.fig.transFigure},
-                    'bottom': {'bbox_to_anchor': (0.5, 0.01), 'loc': 'lower center',
+                    'bottom': {'bbox_to_anchor': (0.5, 0.02), 'loc': 'lower center',
                                'bbox_transform': self.fig.transFigure},
                 }
                 legend_kwargs.update(_OUTSIDE_LEGEND[_outside_dir])
@@ -1907,10 +1942,10 @@ class PlotBuilder:
                         if _outside_dir == 'top':
                             self.fig.tight_layout(rect=[0, 0, 1, leg_bb.y0 - 0.01])
                         else:
-                            self.fig.tight_layout(rect=[0, leg_bb.y1 + 0.01, 1, 1])
+                            self.fig.tight_layout(rect=[0, leg_bb.y1 + 0.03, 1, 1])
                     except Exception:
                         rect = [0, 0, 1, 0.82] if _outside_dir == 'top' \
-                            else [0, 0.18, 1, 1]
+                            else [0, 0.20, 1, 1]
                         try:
                             self.fig.tight_layout(rect=rect)
                         except Exception:

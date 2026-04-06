@@ -2,7 +2,7 @@
 Classes for MT sections within MF33 (Cross-Section Covariances) in ENDF files.
 """
 from dataclasses import dataclass, field
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -276,23 +276,340 @@ class MF33MT(MT):
 
         return T_row @ component_matrix @ T_col.T
 
+    @staticmethod
+    def _project_diagonal_piecewise_constant(
+        values: np.ndarray,
+        native_grid: List[float],
+        target_grid: List[float],
+    ) -> np.ndarray:
+        """Project a 1D diagonal (per-interval values) onto a target energy grid.
+
+        Uses piecewise-constant assumption: each source interval has a constant
+        value, and target intervals get the overlap-weighted average.
+
+        Parameters
+        ----------
+        values : array of shape (M,)
+            Per-interval values on the native grid (M = len(native_grid) - 1).
+        native_grid : list of float
+            Energy boundaries of the source grid (M+1 points).
+        target_grid : list of float
+            Energy boundaries of the target grid (N+1 points).
+
+        Returns
+        -------
+        np.ndarray of shape (N,)
+        """
+        src = np.asarray(native_grid, dtype=float)
+        tgt = np.asarray(target_grid, dtype=float)
+        vals = np.asarray(values, dtype=float)
+
+        n = len(tgt) - 1
+        result = np.zeros(n)
+
+        # For each target interval, compute overlap-weighted average
+        tgt_lo = tgt[:-1]
+        tgt_hi = tgt[1:]
+        src_lo = src[:-1]
+        src_hi = src[1:]
+
+        # Vectorised: overlap[i, k] = overlap of target_i with source_k
+        overlap = np.maximum(
+            0.0,
+            np.minimum(tgt_hi[:, None], src_hi[None, :])
+            - np.maximum(tgt_lo[:, None], src_lo[None, :]),
+        )
+        tgt_widths = tgt_hi - tgt_lo
+        with np.errstate(divide='ignore', invalid='ignore'):
+            weights = np.where(tgt_widths[:, None] > 0, overlap / tgt_widths[:, None], 0.0)
+        result = weights @ vals
+        return result
+
+    def _process_ni_records_to_diagonal(
+        self,
+        ni_records: List['NISubSubsectionRecord'],
+        mt_label: str = '',
+    ) -> Optional[Tuple[np.ndarray, List[float], bool]]:
+        """Process a list of NI records into a diagonal variance array.
+
+        Returns (diagonal, energy_grid, is_relative) or None if no valid data.
+        """
+        all_energies: Set[float] = set()
+        components = []
+
+        for ni_rec in ni_records:
+            try:
+                if ni_rec.lb in (0, 1, 2, 8, 9):
+                    mat, grid = self._decode_lb012_matrix(ni_rec)
+                    all_energies.update(grid)
+                    components.append((mat, grid, None))
+                elif ni_rec.lb in (3, 4):
+                    mat, row_grid, col_grid = self._decode_lb34_matrix(ni_rec)
+                    all_energies.update(row_grid)
+                    all_energies.update(col_grid)
+                    components.append((mat, row_grid, col_grid))
+                elif ni_rec.lb == 5:
+                    mat, grid = self._decode_lb5_matrix(ni_rec)
+                    all_energies.update(grid)
+                    components.append((mat, grid, None))
+                elif ni_rec.lb == 6:
+                    mat, row_grid, col_grid = self._decode_lb6_matrix(ni_rec)
+                    all_energies.update(row_grid)
+                    all_energies.update(col_grid)
+                    components.append((mat, row_grid, col_grid))
+            except ValueError as e:
+                logger.error(f"Error decoding LB={ni_rec.lb} in {mt_label}: {e}")
+
+        if not components:
+            return None
+
+        union_grid = sorted(all_energies)
+        if len(union_grid) < 2:
+            return None
+        union_m = len(union_grid) - 1
+        total = np.zeros((union_m, union_m))
+
+        for comp_mat, row_grid, col_grid in components:
+            if col_grid is None and row_grid == union_grid:
+                projected = comp_mat
+            elif col_grid is not None and row_grid == union_grid and col_grid == union_grid:
+                projected = comp_mat
+            else:
+                projected = self._project_matrix_piecewise_constant(
+                    comp_mat, row_grid, union_grid, native_col_grid=col_grid
+                )
+            total += projected
+
+        lb_set = {r.lb for r in ni_records}
+        is_relative = not lb_set.issubset({0, 8, 9})
+        diagonal = np.diag(total)
+        return diagonal, union_grid, is_relative
+
+    def _get_cross_mt_diagonal(
+        self,
+        mt_i: int,
+        mt_j: int,
+        sibling_sections: Dict[int, 'MF33MT'],
+    ) -> Optional[Tuple[np.ndarray, List[float]]]:
+        """Get the diagonal of the cross-MT covariance Cov(MT_i, MT_j).
+
+        Searches subsections of MT_i for mt1=MT_j, then MT_j for mt1=MT_i.
+        Returns (diagonal, energy_grid) or None if not found.
+        """
+        # Search MT_i's section for a subsection referencing MT_j
+        for src_mt, tgt_mt in [(mt_i, mt_j), (mt_j, mt_i)]:
+            section = sibling_sections.get(src_mt)
+            if section is None:
+                continue
+            subsection = section.get_subsection(tgt_mt)
+            if subsection is None or not subsection.ni_records:
+                continue
+            result = self._process_ni_records_to_diagonal(
+                subsection.ni_records,
+                mt_label=f"MT{src_mt}→MT{tgt_mt}",
+            )
+            if result is not None:
+                diag, grid, _is_rel = result
+                return diag, grid
+
+        return None
+
+    def resolve_nc_lty0(
+        self,
+        sibling_sections: Dict[int, 'MF33MT'],
+        energy_unit: str = 'eV',
+        _resolving: Optional[Set[int]] = None,
+    ) -> Optional['CrossSectionCovariance']:
+        """Resolve NC LTY=0 (derived redundant) covariance via the sum rule.
+
+        For a derived cross section σ_MT = Σ c_i × σ_{MTi}, the covariance is:
+            Cov(MT, MT) = Σ_i Σ_j c_i × c_j × Cov(MTi, MTj)
+
+        This method computes the full propagation including cross-MT terms.
+
+        Parameters
+        ----------
+        sibling_sections : dict
+            Map of MT number → MF33MT section for all other MTs in this MF33 file.
+        energy_unit : str
+            Energy unit ('eV' or 'MeV').
+        _resolving : set of int, optional
+            Set of MT numbers currently being resolved (recursion guard).
+
+        Returns
+        -------
+        CrossSectionCovariance or None
+            The derived covariance, or None if resolution fails.
+        """
+        from ....cov.cross_section_covariance import CrossSectionCovariance
+
+        # Find the LTY=0 NC record (only in self-subsection where mt1=MT)
+        nc_rec = None
+        for subsection in self._subsections:
+            if int(subsection.mt1) != self.number:
+                continue
+            for nc in subsection.nc_records:
+                if nc.lty == 0:
+                    nc_rec = nc
+                    break
+            if nc_rec is not None:
+                break
+
+        if nc_rec is None:
+            return None
+
+        # Parse contributing reactions and coefficients
+        mti_list = [int(round(x)) for x in nc_rec.xmti]
+        ci_list = list(nc_rec.ci)
+        nci = len(mti_list)
+
+        if nci == 0 or len(ci_list) < nci:
+            logger.warning(f"MT{self.number}: NC LTY=0 has no contributing reactions")
+            return None
+
+        ci_list = ci_list[:nci]  # Trim to NCI pairs
+
+        logger.info(
+            f"MT{self.number}: resolving NC LTY=0 from {nci} reactions: "
+            f"{list(zip(ci_list, mti_list))}"
+        )
+
+        resolving = (_resolving or set()) | {self.number}
+
+        # Step 1: Get self-covariance diagonals for each contributing MT
+        # diag_by_mt: {mt: (diagonal_variance, energy_grid)}
+        diag_by_mt: Dict[int, Tuple[np.ndarray, List[float]]] = {}
+
+        for mt_i in mti_list:
+            if mt_i in resolving:
+                logger.warning(
+                    f"MT{self.number}: skipping MT{mt_i} (circular NC reference)"
+                )
+                continue
+            section_i = sibling_sections.get(mt_i)
+            if section_i is None:
+                logger.debug(f"MT{self.number}: MT{mt_i} not in MF33, treating as zero")
+                continue
+
+            try:
+                xs_cov_i = section_i.to_xs_covmat(
+                    energy_unit=energy_unit,
+                    sibling_sections=sibling_sections,
+                    _resolving=resolving,
+                )
+            except Exception as e:
+                logger.warning(f"MT{self.number}: failed to resolve MT{mt_i}: {e}")
+                continue
+
+            # Extract the self-covariance diagonal (MT_i vs MT_i)
+            for idx in range(len(xs_cov_i.matrices)):
+                if (xs_cov_i.reaction_rows[idx] == mt_i
+                        and xs_cov_i.reaction_cols[idx] == mt_i):
+                    mat = xs_cov_i.matrices[idx]
+                    grid = xs_cov_i.energy_grids[idx] if xs_cov_i.energy_grids else None
+                    if grid is not None:
+                        diag_by_mt[mt_i] = (np.diag(mat), grid)
+                    break
+
+        if not diag_by_mt:
+            logger.warning(f"MT{self.number}: no contributing MT covariances found")
+            return None
+
+        # Step 2: Build union energy grid from all contributing grids
+        all_energies: Set[float] = set()
+        for diag, grid in diag_by_mt.values():
+            all_energies.update(grid)
+        union_grid = sorted(all_energies)
+
+        if len(union_grid) < 2:
+            return None
+
+        union_m = len(union_grid) - 1
+
+        # Step 3: Project all self-covariance diagonals onto union grid
+        proj_diag: Dict[int, np.ndarray] = {}
+        for mt_i, (diag, grid) in diag_by_mt.items():
+            if grid == union_grid:
+                proj_diag[mt_i] = diag
+            else:
+                proj_diag[mt_i] = self._project_diagonal_piecewise_constant(
+                    diag, grid, union_grid
+                )
+
+        # Step 4: Compute derived variance using full propagation formula
+        # Var(MT_k)_g = Σ_i Σ_j c_i * c_j * Cov(MTi, MTj)_g
+        derived_var = np.zeros(union_m)
+
+        for ii, mt_i in enumerate(mti_list):
+            c_i = ci_list[ii]
+
+            # Diagonal term: c_i^2 * Var(MT_i)
+            if mt_i in proj_diag:
+                derived_var += c_i * c_i * proj_diag[mt_i]
+
+            # Cross-MT terms: 2 * c_i * c_j * Cov(MTi, MTj) for j > i
+            for jj in range(ii + 1, nci):
+                mt_j = mti_list[jj]
+                c_j = ci_list[jj]
+
+                cross = self._get_cross_mt_diagonal(mt_i, mt_j, sibling_sections)
+                if cross is not None:
+                    cross_diag, cross_grid = cross
+                    if cross_grid == union_grid:
+                        proj_cross = cross_diag
+                    else:
+                        proj_cross = self._project_diagonal_piecewise_constant(
+                            cross_diag, cross_grid, union_grid
+                        )
+                    derived_var += 2.0 * c_i * c_j * proj_cross
+
+        # Clamp any negative variance to zero (numerical noise)
+        derived_var = np.maximum(derived_var, 0.0)
+
+        # Build result as a diagonal matrix (only diagonal is meaningful)
+        derived_matrix = np.diag(derived_var)
+        isotope = int(self._za)
+        result = CrossSectionCovariance(energy_unit=energy_unit)
+        result.add_matrix(
+            isotope, self.number, isotope, self.number,
+            derived_matrix,
+            energy_grid=union_grid,
+            is_relative=True,  # NC LTY=0 derived covariance is always relative
+        )
+
+        logger.info(
+            f"MT{self.number}: NC LTY=0 resolved — {union_m} groups, "
+            f"sqrt(diag) range [{np.sqrt(derived_var.min()):.4g}, {np.sqrt(derived_var.max()):.4g}]"
+        )
+        return result
+
     # ------------------------------------------------------------------
     # Conversion to CrossSectionCovariance
     # ------------------------------------------------------------------
 
-    def to_xs_covmat(self, energy_unit: str = 'eV') -> 'CrossSectionCovariance':
+    def to_xs_covmat(
+        self,
+        energy_unit: str = 'eV',
+        sibling_sections: Optional[Dict[int, 'MF33MT']] = None,
+        _resolving: Optional[Set[int]] = None,
+    ) -> 'CrossSectionCovariance':
         """
         Convert MF33 data to a CrossSectionCovariance object.
 
         Each subsection (reaction pair) produces one matrix entry with its own
         energy grid. Multiple NI components within a subsection are summed on
-        their union grid. NC-type sub-subsections are stored but not resolved
-        (they reference other evaluations).
+        their union grid. NC-type LTY=0 sub-subsections are resolved via the
+        sum rule when ``sibling_sections`` is provided.
 
         Parameters
         ----------
         energy_unit : str
             Energy unit: 'eV' (default) or 'MeV'.
+        sibling_sections : dict, optional
+            Map of MT number → MF33MT for other MTs in this MF33 file.
+            Required for NC LTY=0 resolution. If None, NC records are skipped.
+        _resolving : set of int, optional
+            MT numbers currently being resolved (recursion guard, internal use).
 
         Returns
         -------
@@ -308,14 +625,48 @@ class MF33MT(MT):
             mat1 = int(subsection.mat1 or 0)
             iso_col = isotope if mat1 == 0 else mat1
 
+            # Handle NC-type sub-subsections
+            nc_resolved = False
             if subsection.nc_records:
-                logger.info(
-                    f"MT{self.number}→MT{mt1}: {len(subsection.nc_records)} NC-type "
-                    f"sub-subsections present (LTY={[r.lty for r in subsection.nc_records]}). "
-                    f"These reference other evaluations and are not resolved here."
-                )
+                for nc in subsection.nc_records:
+                    if nc.lty == 0 and sibling_sections is not None:
+                        resolving = (_resolving or set()) | {self.number}
+                        nc_result = self.resolve_nc_lty0(
+                            sibling_sections, energy_unit, resolving
+                        )
+                        if nc_result is not None:
+                            for idx in range(len(nc_result.matrices)):
+                                result.add_matrix(
+                                    nc_result.isotope_rows[idx],
+                                    nc_result.reaction_rows[idx],
+                                    nc_result.isotope_cols[idx],
+                                    nc_result.reaction_cols[idx],
+                                    nc_result.matrices[idx],
+                                    energy_grid=(
+                                        nc_result.energy_grids[idx]
+                                        if nc_result.energy_grids else None
+                                    ),
+                                    is_relative=(
+                                        nc_result.is_relative[idx]
+                                        if nc_result.is_relative else None
+                                    ),
+                                )
+                            nc_resolved = True
+                    elif nc.lty == 0:
+                        logger.info(
+                            f"MT{self.number}→MT{mt1}: NC LTY=0 present but "
+                            f"sibling_sections not provided — skipping."
+                        )
+                    elif nc.lty in (1, 2, 3):
+                        logger.info(
+                            f"MT{self.number}→MT{mt1}: LTY={nc.lty} "
+                            f"(ratio to standard) not yet implemented."
+                        )
 
-            if not subsection.ni_records:
+            # Process NI-type sub-subsections
+            # Per ENDF manual 33.3.3 item 3: NI F-values must be zero within
+            # the NC LTY=0 energy range, so skip NI when NC was resolved.
+            if nc_resolved or not subsection.ni_records:
                 continue
 
             # Collect all energy points across NI components for union grid

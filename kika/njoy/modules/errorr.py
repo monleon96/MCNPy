@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._base import Lines, resolve_mat, parse_iprint, fmt_float, parse_card_values, format_multiline_card
+from ._base import Lines, resolve_mat, parse_iprint, fmt_float, parse_card_values, format_multiline_card, parse_multiline_card
 
 
 def generate(p: dict) -> Lines:
@@ -137,13 +137,26 @@ def parse(card_lines: list[str]) -> dict:
     if len(c7) > 6:
         result["dap"] = float(c7[6])
 
-    # Cards 12a/12b: custom energy boundaries (ign=1 or 19)
+    # Build line map
+    lm: dict[str, list[int]] = {
+        "nendf": [0], "npend": [0], "ngout": [0], "nout": [0],
+        "matd": [1], "ign": [1], "iwt": [1], "iprint": [1], "irelco": [1],
+        "mprint": [2], "tempin": [2],
+        "iread": [3], "mfcov": [3], "irespr": [3], "legord": [3],
+        "ifissp": [3], "efmean": [3], "dap": [3],
+    }
+
+    # Cards 12a/12b: custom energy boundaries (ign=1 or 19, may span multiple lines)
     idx = 4
     if ign in (1, 19) and idx < len(card_lines):
         ngn_vals = parse_card_values(card_lines[idx])
         result["ngn"] = int(ngn_vals[0])
+        lm["ngn"] = [idx]
         idx += 1
         if idx < len(card_lines):
-            result["egn"] = [float(v) for v in parse_card_values(card_lines[idx])]
+            egn_vals, egn_lines = parse_multiline_card(card_lines, idx)
+            result["egn"] = [float(v) for v in egn_vals]
+            lm["egn"] = list(range(idx, idx + egn_lines))
 
+    result["_line_map"] = lm
     return result

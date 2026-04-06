@@ -212,19 +212,26 @@ def parse(card_lines: list[str]) -> dict:
         "iclaps": int(c2[2]) if len(c2) > 2 else 0,
     }
 
-    if lib == 1:
-        _parse_fast(result, card_lines, 2)
-    elif lib == 2:
-        _parse_thermal(result, card_lines, 2)
-    elif lib == 3:
-        _parse_cpm(result, card_lines, 2)
+    lm: dict[str, list[int]] = {
+        "ngendf": [0], "nout": [0],
+        "lib": [1], "iprint": [1], "iclaps": [1],
+    }
 
+    if lib == 1:
+        _parse_fast(result, card_lines, 2, lm)
+    elif lib == 2:
+        _parse_thermal(result, card_lines, 2, lm)
+    elif lib == 3:
+        _parse_cpm(result, card_lines, 2, lm)
+
+    result["_line_map"] = lm
     return result
 
 
-def _parse_fast(result: dict, card_lines: list[str], offset: int) -> None:
+def _parse_fast(result: dict, card_lines: list[str], offset: int, lm: dict[str, list[int]]) -> None:
     """Parse lib=1 (fast) material cards."""
     materials: list[dict] = []
+    mat_start = offset
     idx = offset
     while idx < len(card_lines):
         c = parse_card_values(card_lines[idx])
@@ -253,11 +260,13 @@ def _parse_fast(result: dict, card_lines: list[str], offset: int) -> None:
         materials.append(mat)
 
     result["materials"] = materials
+    lm["materials"] = list(range(mat_start, idx))
 
 
-def _parse_thermal(result: dict, card_lines: list[str], offset: int) -> None:
+def _parse_thermal(result: dict, card_lines: list[str], offset: int, lm: dict[str, list[int]]) -> None:
     """Parse lib=2 (thermal) material cards."""
     materials: list[dict] = []
+    mat_start = offset
     idx = offset
     while idx < len(card_lines):
         line = card_lines[idx]
@@ -311,9 +320,10 @@ def _parse_thermal(result: dict, card_lines: list[str], offset: int) -> None:
         materials.append(mat)
 
     result["materials"] = materials
+    lm["materials"] = list(range(mat_start, idx))
 
 
-def _parse_cpm(result: dict, card_lines: list[str], offset: int) -> None:
+def _parse_cpm(result: dict, card_lines: list[str], offset: int, lm: dict[str, list[int]]) -> None:
     """Parse lib=3 (CPM) cards."""
     # Card 3: nlib idat newmat iopt mode if5 if4
     c3 = parse_card_values(card_lines[offset])
@@ -328,6 +338,8 @@ def _parse_cpm(result: dict, card_lines: list[str], offset: int) -> None:
     result["mode"] = int(c3[4]) if len(c3) > 4 else 0
     result["if5"] = if5
     result["if4"] = int(c3[6]) if len(c3) > 6 else 0
+    lm["nlib"] = [offset]; lm["idat"] = [offset]; lm["newmat"] = [offset]
+    lm["iopt"] = [offset]; lm["mode"] = [offset]; lm["if5"] = [offset]; lm["if4"] = [offset]
 
     idx = offset + 1
 
@@ -335,9 +347,11 @@ def _parse_cpm(result: dict, card_lines: list[str], offset: int) -> None:
     if iopt == 0 and idx < len(card_lines):
         c4 = parse_card_values(card_lines[idx])
         result["mat_list"] = [int(v) for v in c4] if c4 else []
+        lm["mat_list"] = [idx]
         idx += 1
 
     # Card 5: nuclide parameters (repeated)
+    nuclides_start = idx
     nuclides: list[dict] = []
     nmat = len(result.get("mat_list", []))
     for _ in range(nmat):
@@ -384,6 +398,7 @@ def _parse_cpm(result: dict, card_lines: list[str], offset: int) -> None:
 
     if nuclides:
         result["nuclides"] = nuclides
+        lm["nuclides"] = list(range(nuclides_start, idx))
 
 
 def _parse_star_string(line: str) -> str:

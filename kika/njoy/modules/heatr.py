@@ -84,7 +84,7 @@ def parse(card_lines: list[str]) -> dict:
         "nendf": int(c1[0]),
         "nin": int(c1[1]),
         "nout": int(c1[2]),
-        "nplot": int(c1[3]),
+        "nplot": int(c1[3]) if len(c1) > 3 else 0,
         "matd": int(c2[0]),
         "npk": npk,
     }
@@ -103,4 +103,13 @@ def parse(card_lines: list[str]) -> dict:
     if npk > 0 and len(card_lines) > 2:
         result["mtk"] = [int(v) for v in parse_card_values(card_lines[2])]
 
+    # Build line map
+    lm: dict[str, list[int]] = {
+        "nendf": [0], "nin": [0], "nout": [0], "nplot": [0],
+        "matd": [1], "npk": [1], "nqa": [1], "ntemp": [1],
+        "local": [1], "iprint": [1], "ed": [1],
+    }
+    if "mtk" in result:
+        lm["mtk"] = [2]
+    result["_line_map"] = lm
     return result

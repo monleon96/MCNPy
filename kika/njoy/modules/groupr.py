@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._base import Lines, resolve_mat, resolve_temps, parse_iprint, fmt_float, parse_card_values, parse_quoted_string, format_multiline_card
+from ._base import Lines, resolve_mat, resolve_temps, parse_iprint, fmt_float, parse_card_values, parse_quoted_string, format_multiline_card, parse_multiline_card
 
 
 def generate(p: dict) -> Lines:
@@ -174,29 +174,46 @@ def parse(card_lines: list[str]) -> dict:
     if len(c2) > 8:
         result["ismooth"] = int(c2[8])
 
-    idx = 3
-    # Card 4: temperatures
-    result["temperatures"] = [float(v) for v in parse_card_values(card_lines[idx])]
-    idx += 1
-    # Card 5: sigma-zero values
-    result["sigz"] = [float(v) for v in parse_card_values(card_lines[idx])]
-    idx += 1
+    lm: dict[str, list[int]] = {
+        "nendf": [0], "npend": [0], "ngout1": [0], "ngout2": [0],
+        "matb": [1], "ign": [1], "igg": [1], "iwt": [1], "lord": [1],
+        "ntemp": [1], "nsigz": [1], "iprint": [1], "ismooth": [1],
+        "title": [2],
+    }
 
-    # Card 6a/6b: custom neutron group boundaries (ign=1)
+    idx = 3
+    # Card 4: temperatures (may span multiple lines)
+    temp_vals, temp_lines = parse_multiline_card(card_lines, idx)
+    result["temperatures"] = [float(v) for v in temp_vals]
+    lm["temperatures"] = list(range(idx, idx + temp_lines))
+    idx += temp_lines
+    # Card 5: sigma-zero values (may span multiple lines)
+    sigz_vals, sigz_lines = parse_multiline_card(card_lines, idx)
+    result["sigz"] = [float(v) for v in sigz_vals]
+    lm["sigz"] = list(range(idx, idx + sigz_lines))
+    idx += sigz_lines
+
+    # Card 6a/6b: custom neutron group boundaries (ign=1, may span multiple lines)
     if ign == 1:
         ngn_vals = parse_card_values(card_lines[idx])
         result["ngn"] = int(ngn_vals[0])
+        lm["ngn"] = [idx]
         idx += 1
-        result["egn"] = [float(v) for v in parse_card_values(card_lines[idx])]
-        idx += 1
+        egn_vals, egn_lines = parse_multiline_card(card_lines, idx)
+        result["egn"] = [float(v) for v in egn_vals]
+        lm["egn"] = list(range(idx, idx + egn_lines))
+        idx += egn_lines
 
-    # Card 7a/7b: custom photon group boundaries (igg=1)
+    # Card 7a/7b: custom photon group boundaries (igg=1, may span multiple lines)
     if igg == 1:
         ngg_vals = parse_card_values(card_lines[idx])
         result["ngg"] = int(ngg_vals[0])
+        lm["ngg"] = [idx]
         idx += 1
-        result["egg"] = [float(v) for v in parse_card_values(card_lines[idx])]
-        idx += 1
+        egg_vals, egg_lines = parse_multiline_card(card_lines, idx)
+        result["egg"] = [float(v) for v in egg_vals]
+        lm["egg"] = list(range(idx, idx + egg_lines))
+        idx += egg_lines
 
     # Card 8c: analytic flux params (|iwt|=4)
     if abs(iwt) == 4:
@@ -205,6 +222,7 @@ def parse(card_lines: list[str]) -> dict:
         result["tb"] = float(c8[1])
         result["ec"] = float(c8[2])
         result["tc"] = float(c8[3])
+        lm["eb"] = [idx]; lm["tb"] = [idx]; lm["ec"] = [idx]; lm["tc"] = [idx]
         idx += 1
 
     # Card 9: reactions (terminated by 0 /)
@@ -217,7 +235,7 @@ def parse(card_lines: list[str]) -> dict:
             # First 0 / terminates reactions, second terminates materials
             break
         mfd = int(vals[0])
-        mtd = int(vals[1])
+        mtd = int(vals[1]) if len(vals) > 1 else 0
         rxn: list = [mfd, mtd]
         # Check for optional quoted name
         line_stripped = card_lines[idx - 1].strip()
@@ -229,4 +247,5 @@ def parse(card_lines: list[str]) -> dict:
     if reactions:
         result["reactions"] = reactions
     # Remaining 0 / is the material terminator — skipped
+    result["_line_map"] = lm
     return result

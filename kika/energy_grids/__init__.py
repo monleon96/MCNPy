@@ -1,6 +1,6 @@
 from .grids import (
     VITAMINJ174, VITAMINJ175, SCALE44, SCALE56, SCALE238, SCALE252,
-    WIMS69, ECCO33, ONEGROUP20
+    WIMS69, ECCO33, ONEGROUP20, CASMO12, CASMO40, CASMO70, LANL30, XMAS172
 )
 
 __all__ = [
@@ -12,5 +12,10 @@ __all__ = [
     'SCALE252',
     'WIMS69',
     'ECCO33',
-    'ONEGROUP20'
+    'ONEGROUP20',
+    'CASMO12',
+    'CASMO40',
+    'CASMO70',
+    'LANL30',
+    'XMAS172',
 ]

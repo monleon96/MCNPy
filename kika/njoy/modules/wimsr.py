@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._base import Lines, parse_iprint, parse_card_values
+from ._base import Lines, parse_iprint, parse_card_values, parse_multiline_card
 
 
 def generate(p: dict) -> Lines:
@@ -154,6 +154,11 @@ def parse(card_lines: list[str]) -> dict:
         "igroup": igroup,
     }
 
+    lm: dict[str, list[int]] = {
+        "ngendf": [0], "nout": [0],
+        "iprint": [1], "iverw": [1], "igroup": [1],
+    }
+
     idx = 2
 
     # Card 2a: ngnd nfg nrg [igref] (only when igroup=9)
@@ -164,6 +169,7 @@ def parse(card_lines: list[str]) -> dict:
         result["nrg"] = int(c2a[2])
         if len(c2a) > 3:
             result["igref"] = int(c2a[3])
+        lm["ngnd"] = [idx]; lm["nfg"] = [idx]; lm["nrg"] = [idx]; lm["igref"] = [idx]
         idx += 1
 
     # Card 3: mat nfid rdfid iburn
@@ -173,6 +179,7 @@ def parse(card_lines: list[str]) -> dict:
     result["mat"] = mat
     result["rdfid"] = float(c3[2])
     result["iburn"] = iburn
+    lm["mat"] = [idx]; lm["rdfid"] = [idx]; lm["iburn"] = [idx]
     idx += 1
 
     # Card 4: ntemp nsigz sgref ires sigp mti mtc ip1opt inorf isof ifprod jp1
@@ -190,6 +197,10 @@ def parse(card_lines: list[str]) -> dict:
     result["ifprod"] = int(c4[10])
     jp1 = int(c4[11])
     result["jp1"] = jp1
+    lm["ntemp"] = [idx]; lm["nsigz"] = [idx]; lm["sgref"] = [idx]
+    lm["ires"] = [idx]; lm["sigp"] = [idx]; lm["mti"] = [idx]
+    lm["mtc"] = [idx]; lm["ip1opt"] = [idx]; lm["inorf"] = [idx]
+    lm["isof"] = [idx]; lm["ifprod"] = [idx]; lm["jp1"] = [idx]
     idx += 1
 
     # Card 5: ntis efiss (only when iburn > 0)
@@ -200,18 +211,21 @@ def parse(card_lines: list[str]) -> dict:
             "efiss": float(c5[1]),
         }
         ntis = int(c5[0])
+        lm["burnup"] = [idx]
         idx += 1
 
         # Card 6a: capture product
         if idx < len(card_lines):
             c6a = parse_card_values(card_lines[idx])
             burnup["capture"] = (int(c6a[0]), float(c6a[1]))
+            lm["burnup"].append(idx)
             idx += 1
 
         # Card 6b: decay product
         if idx < len(card_lines):
             c6b = parse_card_values(card_lines[idx])
             burnup["decay"] = (int(c6b[0]), float(c6b[1]))
+            lm["burnup"].append(idx)
             idx += 1
 
         # Card 6c: fission products (ntis - 2 entries)
@@ -220,20 +234,26 @@ def parse(card_lines: list[str]) -> dict:
             if idx < len(card_lines):
                 c6c = parse_card_values(card_lines[idx])
                 fission_products.append((int(c6c[0]), float(c6c[1])))
+                lm["burnup"].append(idx)
                 idx += 1
         if fission_products:
             burnup["fission_products"] = fission_products
 
         result["burnup"] = burnup
 
-    # Card 7: lambdas
+    # Card 7: lambdas (may span multiple lines)
     if idx < len(card_lines):
-        result["lambdas"] = [float(v) for v in parse_card_values(card_lines[idx])]
-        idx += 1
+        lam_vals, lam_lines = parse_multiline_card(card_lines, idx)
+        result["lambdas"] = [float(v) for v in lam_vals]
+        lm["lambdas"] = list(range(idx, idx + lam_lines))
+        idx += lam_lines
 
-    # Card 8: current spectrum values (only when jp1 > 0)
+    # Card 8: current spectrum values (only when jp1 > 0, may span multiple lines)
     if jp1 > 0 and idx < len(card_lines):
-        result["p1flx"] = [float(v) for v in parse_card_values(card_lines[idx])]
-        idx += 1
+        p1_vals, p1_lines = parse_multiline_card(card_lines, idx)
+        result["p1flx"] = [float(v) for v in p1_vals]
+        lm["p1flx"] = list(range(idx, idx + p1_lines))
+        idx += p1_lines
 
+    result["_line_map"] = lm
     return result

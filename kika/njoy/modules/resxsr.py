@@ -88,6 +88,14 @@ def parse(card_lines: list[str]) -> dict:
         materials.append({"name": name, "mat": mat, "unit": unit})
         idx += 1
 
+    lm: dict[str, list[int]] = {
+        "nout": [0],
+        "nmat": [1], "maxt": [1], "nholl": [1], "efirst": [1], "elast": [1], "eps": [1],
+        "huse": [2], "ivers": [2],
+        "comments": list(range(3, 3 + nholl)),
+        "materials": list(range(3 + nholl, 3 + nholl + nmat)),
+    }
+
     return {
         "nout": nout,
         "nmat": nmat,
@@ -100,4 +108,5 @@ def parse(card_lines: list[str]) -> dict:
         "ivers": ivers,
         "comments": comments,
         "materials": materials,
+        "_line_map": lm,
     }

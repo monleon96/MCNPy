@@ -52,6 +52,37 @@ def parse_card_values(line: str) -> list[str]:
     return line.split()
 
 
+def parse_multiline_card(card_lines: list[str], start: int) -> tuple[list[str], int]:
+    """Parse a multi-line card (e.g., energy group boundaries).
+
+    Reads from ``card_lines[start]`` onward.  Lines without a ``/`` are
+    continuation lines; the first line containing ``/`` is the last line
+    of the card.
+
+    Returns ``(values, lines_consumed)`` where *values* is the combined
+    list of tokens from all lines and *lines_consumed* is how many card
+    lines were read.
+    """
+    values: list[str] = []
+    consumed = 0
+    for i in range(start, len(card_lines)):
+        raw = card_lines[i].strip()
+        has_slash = False
+        # Check for '/' outside quotes
+        in_quote = False
+        for ch in raw:
+            if ch == "'":
+                in_quote = not in_quote
+            elif ch == "/" and not in_quote:
+                has_slash = True
+                break
+        values.extend(parse_card_values(card_lines[i]))
+        consumed += 1
+        if has_slash:
+            break
+    return values, consumed
+
+
 def resolve_mat(p: dict, key: str = "mat") -> str | int:
     """Return MAT number or ``{MAT}`` placeholder when isotope is unset."""
     isotope = p.get(key, "")

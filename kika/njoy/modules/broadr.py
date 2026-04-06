@@ -106,7 +106,17 @@ def parse(card_lines: list[str]) -> dict:
     # Card 4: temperatures (if ntemp2 > 0)
     idx = 3
     if ntemp2 > 0:
-        result["temperatures"] = [float(v) for v in parse_card_values(card_lines[idx])]
+        result["temp2"] = [float(v) for v in parse_card_values(card_lines[idx])]
         idx += 1
     # Card 5: 0 / (terminator — skipped)
+
+    # Build line map: param name → card_lines indices
+    lm: dict[str, list[int]] = {
+        "nendf": [0], "nin": [0], "nout": [0],
+        "mat": [1], "ntemp2": [1], "istart": [1], "istrap": [1], "temp1": [1],
+        "errthn": [2], "thnmax": [2], "errmax": [2], "errint": [2],
+    }
+    if "temp2" in result:
+        lm["temp2"] = [3]
+    result["_line_map"] = lm
     return result

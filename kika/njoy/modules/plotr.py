@@ -164,7 +164,12 @@ def parse(card_lines: list[str]) -> dict:
 
     result: dict = {"nplt": nplt, "nplt0": nplt0}
 
+    lm: dict[str, list[int]] = {
+        "nplt": [0], "nplt0": [0],
+    }
+
     if len(card_lines) <= 1:
+        result["_line_map"] = lm
         return result
 
     idx = 1
@@ -319,4 +324,5 @@ def parse(card_lines: list[str]) -> dict:
         current_plot["curves"].append(curve)
 
     result["plots"] = plots
+    result["_line_map"] = lm
     return result

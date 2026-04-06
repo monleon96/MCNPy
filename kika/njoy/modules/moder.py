@@ -17,4 +17,5 @@ def generate(p: dict) -> Lines:
 def parse(card_lines: list[str]) -> dict:
     """Parse MODER card lines into a parameter dict."""
     vals = parse_card_values(card_lines[0])
-    return {"nin": int(vals[0]), "nout": int(vals[1])}
+    return {"nin": int(vals[0]), "nout": int(vals[1]),
+            "_line_map": {"nin": [0], "nout": [0]}}

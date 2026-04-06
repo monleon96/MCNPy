@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from ._base import Lines, parse_card_values
+from ._base import Lines, parse_card_values, parse_multiline_card
 
 
 def _parse_star_string(line: str) -> str:
@@ -126,38 +126,48 @@ def parse(card_lines: list[str]) -> dict:
     idx = 0
 
     # Card 1: nin nisot nbrks ndlay
-    c1 = parse_card_values(card_lines[idx]); idx += 1
-    nin = int(c1[0])
-    nisot = int(c1[1])
-    nbrks = int(c1[2])
-    ndlay = int(c1[3])
+    c1 = parse_card_values(card_lines[idx])
+    lm: dict[str, list[int]] = {
+        "nin": [idx], "nisot": [idx], "nbrks": [idx], "ndlay": [idx],
+    }
+    idx += 1
 
     # Card 2: lprint ivers *huse*/
-    line2 = card_lines[idx]; idx += 1
+    line2 = card_lines[idx]
     huse = ""
     if "*" in line2:
         huse = _parse_star_string(line2)
-        # Remove *huse*/ portion to parse numeric values
         cleaned = re.sub(r"\*[^*]*\*/?\s*$", "", line2).strip()
         c2 = cleaned.split()
     else:
         c2 = parse_card_values(line2)
     lprint = int(c2[0])
     ivers = int(c2[1]) if len(c2) > 1 else 0
+    lm["lprint"] = [idx]; lm["ivers"] = [idx]; lm["huse"] = [idx]
+    idx += 1
+
+    nin = int(c1[0])
+    nisot = int(c1[1])
+    nbrks = int(c1[2])
+    ndlay = int(c1[3])
 
     # Card 3: *hsetid*/
-    line3 = card_lines[idx]; idx += 1
+    line3 = card_lines[idx]
     hsetid = ""
     if "*" in line3:
         hsetid = _parse_star_string(line3)
+    lm["hsetid"] = [idx]
+    idx += 1
 
     # Card 4: ngroup nggrup niso maxord ifopt
-    c4 = parse_card_values(card_lines[idx]); idx += 1
+    c4 = parse_card_values(card_lines[idx])
     ngroup = int(c4[0])
     nggrup = int(c4[1])
     niso = int(c4[2])
     maxord = int(c4[3])
     ifopt = int(c4[4])
+    lm["ngroup"] = [idx]; lm["nggrup"] = [idx]; lm["maxord"] = [idx]; lm["ifopt"] = [idx]
+    idx += 1
 
     result: dict = {
         "nin": nin,
@@ -175,11 +185,11 @@ def parse(card_lines: list[str]) -> dict:
     }
 
     # Card 5 (niso times): *hisnm* *habsid* *hident* *hmat* imat xspo
+    iso_start = idx
     isotopes = []
     for _ in range(niso):
         line = card_lines[idx]; idx += 1
         stars = _parse_all_star_strings(line)
-        # Remove all *...* portions to get numeric tail
         cleaned = re.sub(r"\*[^*]*\*", "", line).strip()
         nums = cleaned.split()
         isotopes.append({
@@ -191,10 +201,12 @@ def parse(card_lines: list[str]) -> dict:
             "xspo": float(nums[1]),
         })
     result["isotopes"] = isotopes
+    if niso > 0:
+        lm["isotopes"] = list(range(iso_start, idx))
 
     # CISOTX cards (if nisot > 0)
     if nisot > 0:
-        c_iso1 = parse_card_values(card_lines[idx]); idx += 1
+        c_iso1 = parse_card_values(card_lines[idx])
         nsblok = int(c_iso1[0])
         maxup = int(c_iso1[1])
         maxdn = int(c_iso1[2])
@@ -203,11 +215,16 @@ def parse(card_lines: list[str]) -> dict:
         result["maxup"] = maxup
         result["maxdn"] = maxdn
         result["ichix"] = ichix
+        lm["nsblok"] = [idx]; lm["maxup"] = [idx]; lm["maxdn"] = [idx]; lm["ichix"] = [idx]
+        idx += 1
 
         if ichix >= 1:
-            spec_vals = parse_card_values(card_lines[idx]); idx += 1
+            spec_vals, spec_lines = parse_multiline_card(card_lines, idx)
             result["spec"] = [float(v) for v in spec_vals]
+            lm["spec"] = list(range(idx, idx + spec_lines))
+            idx += spec_lines
 
+        isotxs_start = idx
         isotxs_params = []
         for _ in range(niso):
             c_ip = parse_card_values(card_lines[idx]); idx += 1
@@ -221,23 +238,32 @@ def parse(card_lines: list[str]) -> dict:
                 "adens": float(c_ip[6]),
             })
         result["isotxs_params"] = isotxs_params
+        if niso > 0:
+            lm["isotxs_params"] = list(range(isotxs_start, idx))
 
     # CBRKOXS cards (if nbrks > 0)
     if nbrks > 0:
-        c_brk1 = parse_card_values(card_lines[idx]); idx += 1
+        c_brk1 = parse_card_values(card_lines[idx])
         nti = int(c_brk1[0])
         nzi = int(c_brk1[1])
         result["nti"] = nti
         result["nzi"] = nzi
+        lm["nti"] = [idx]; lm["nzi"] = [idx]
+        idx += 1
 
         if nti > 0:
-            atem_vals = parse_card_values(card_lines[idx]); idx += 1
+            atem_vals, atem_lines = parse_multiline_card(card_lines, idx)
             result["atem"] = [float(v) for v in atem_vals]
+            lm["atem"] = list(range(idx, idx + atem_lines))
+            idx += atem_lines
 
         if nzi > 0:
-            asig_vals = parse_card_values(card_lines[idx]); idx += 1
+            asig_vals, asig_lines = parse_multiline_card(card_lines, idx)
             result["asig"] = [float(v) for v in asig_vals]
+            lm["asig"] = list(range(idx, idx + asig_lines))
+            idx += asig_lines
 
     # CDLAYXS: no additional cards
 
+    result["_line_map"] = lm
     return result

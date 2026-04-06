@@ -62,12 +62,19 @@ def parse(card_lines: list[str]) -> dict:
     if len(c2) > 3:
         result["iprint"] = int(c2[3])
 
+    lm: dict[str, list[int]] = {
+        "nendf": [0], "nin": [0], "nout": [0],
+        "matd": [1], "ntemp": [1], "nsigz": [1], "iprint": [1],
+    }
     idx = 2
     if ntemp > 0:
-        result["temperatures"] = [float(v) for v in parse_card_values(card_lines[idx])]
+        result["temp"] = [float(v) for v in parse_card_values(card_lines[idx])]
+        lm["temp"] = [idx]
         idx += 1
     if nsigz > 0:
         result["sigz"] = [float(v) for v in parse_card_values(card_lines[idx])]
+        lm["sigz"] = [idx]
         idx += 1
     # 0 / terminator — skipped
+    result["_line_map"] = lm
     return result

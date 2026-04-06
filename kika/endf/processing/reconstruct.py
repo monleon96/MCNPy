@@ -1,9 +1,9 @@
 """
-RECONR — Resonance reconstruction (ENDF adapter).
+Resonance reconstruction (ENDF adapter).
 
-Thin wrapper around ``kika.processing.reconr`` that accepts and returns
+Thin wrapper around ``kika.processing.reconstruct`` that accepts and returns
 ENDF-specific types (``MF2MT151``, ``MF3MT``).  The actual physics
-lives in ``kika.processing.reconr``.
+lives in ``kika.processing.reconstruct``.
 
 Supported formalisms
 --------------------
@@ -20,7 +20,7 @@ from ..classes.mf2.mf2mt151 import MF2MT151
 from ..classes.mf3.mf3mt import MF3MT
 
 
-def reconr(mf2_mt151: MF2MT151,
+def reconstruct(mf2_mt151: MF2MT151,
            mf3_data=None,
            tolerance: float = 1e-3) -> Dict[int, MF3MT]:
     """Reconstruct pointwise cross sections from MF2 resonance parameters.
@@ -44,7 +44,7 @@ def reconr(mf2_mt151: MF2MT151,
     """
     # Lazy imports to avoid circular dependency at module load time
     from kika.nuclear_data import ResonanceParameters, CrossSection
-    from kika.processing.reconr import reconr as _reconr
+    from kika.processing.reconstruct import reconstruct as _reconstruct
 
     # Convert ENDF types → canonical types
     res_params = ResonanceParameters.from_endf(mf2_mt151)
@@ -57,7 +57,7 @@ def reconr(mf2_mt151: MF2MT151,
         }
 
     # Delegate to format-independent processing
-    canonical_result = _reconr(res_params, background, tolerance=tolerance)
+    canonical_result = _reconstruct(res_params, background, tolerance=tolerance)
 
     # Convert canonical types → ENDF types
     return {mt: xs.to_endf() for mt, xs in canonical_result.items()}
