@@ -963,17 +963,14 @@ def perturb_ENDF_files(
                 diagnostics = data.get('sampling_diagnostics')
                 if diagnostics and 'overall_status' in diagnostics:
                     status = diagnostics['overall_status']
-                    if status in ['CRITICAL', 'POOR']:
-                        _logger.info(f"    Sampling Quality: [FAIL] {status} (check detailed log for more information)")
-                    elif status == 'ACCEPTABLE':
-                        _logger.info(f"    Sampling Quality: [WARN] {status}")
-                    elif status in ['GOOD', 'PASS']:
-                        _logger.info(f"    Sampling Quality: [PASS] {status}")
-                    elif status in ['EXCELLENT']:
-                        _logger.info(f"    Sampling Quality: [PASS] {status}")
-                    elif status in ['WARN', 'FAIL']:
-                        tag = "[WARN]" if status == 'WARN' else "[FAIL]"
-                        _logger.info(f"    Sampling Quality: {tag} {status} (check detailed log for more information)")
+                    tag_map = {
+                        "EXCELLENT": "[PASS]", "GOOD": "[PASS]",
+                        "ACCEPTABLE": "[WARN]", "POOR": "[WARN]", "CRITICAL": "[FAIL]",
+                    }
+                    tag = tag_map.get(status, "[INFO]")
+                    _logger.info(f"    Sampling Quality: {tag} {status}")
+                    if status in ("CRITICAL", "POOR", "ACCEPTABLE"):
+                        _logger.info(f"      -> See 'SAMPLING QUALITY ASSESSMENT' section above for details")
                 else:
                     _logger.info("    Sampling Quality: [INFO] Not available (diagnostics disabled)")
 

@@ -84,7 +84,8 @@ def compute_angular_band_discrepancy(
     y_fit: np.ndarray,
     min_points_per_band: int = 3,
     max_band_scale: float = 3.0,
-) -> Tuple[np.ndarray, Dict[str, float]]:
+    experiment_ids: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, Dict]:
     """
     Estimate per-band multiplicative scale factor s_b and return effective
     uncertainties.
@@ -123,14 +124,20 @@ def compute_angular_band_discrepancy(
         If fewer, use the mid-band s value.
     max_band_scale : float
         Maximum allowed scale factor per band (safety cap).
+    experiment_ids : np.ndarray, optional
+        Per-point experiment identifiers (e.g. EXFOR entry numbers).
+        When provided and a band scale is capped, per-experiment
+        diagnostics are computed and returned in ``tau_info['exp_diag']``.
 
     Returns
     -------
     sigma_eff : np.ndarray
         Effective uncertainties scaled by band factors
-    tau_info : Dict[str, float]
+    tau_info : Dict
         Dictionary with per-band scale factors (s_F, s_M, s_B ≥ 1.0).
         Keys are 'tau_F', 'tau_M', 'tau_B' for backward compatibility.
+        When ``experiment_ids`` is given and a band is capped,
+        ``tau_info['exp_diag']`` contains per-experiment band diagnostics.
     """
     n = len(mu)
     sigma_eff = sigma.copy()
@@ -146,8 +153,18 @@ def compute_angular_band_discrepancy(
         'B': backward_mask,
     }
 
+    # Normalized residuals (full array, for per-experiment diagnostics)
+    r_all = (y - y_fit) / sigma
+
     # Values are multiplicative scale factors (1.0 = no inflation)
     tau_values = {'tau_F': 1.0, 'tau_M': 1.0, 'tau_B': 1.0}
+    # Raw (uncapped) MAD-based scale estimates for diagnostics
+    tau_values['raw_F'] = 1.0
+    tau_values['raw_M'] = 1.0
+    tau_values['raw_B'] = 1.0
+
+    # Per-experiment diagnostics for capped bands
+    exp_diag = {}
 
     # First pass: estimate scale factor for bands with enough points
     for band_name, mask in bands.items():
@@ -157,15 +174,39 @@ def compute_angular_band_discrepancy(
             continue
 
         # Normalized residuals in this band
-        r_band = (y[mask] - y_fit[mask]) / sigma[mask]
+        r_band = r_all[mask]
 
         # Robust scale estimate (MAD-based)
         s_band = robust_residual_scale(r_band)
 
+        # Store raw value before capping (floored at 1.0 but not capped)
+        raw_val = max(1.0, s_band)
+        tau_values[f'raw_{band_name}'] = raw_val
+
         # Apply: s_b = max(1, s_MAD), capped at max_band_scale
-        s_b = min(max(1.0, s_band), max_band_scale)
+        s_b = min(raw_val, max_band_scale)
 
         tau_values[f'tau_{band_name}'] = s_b
+
+        # Per-experiment diagnostics when band is capped
+        if experiment_ids is not None and raw_val > max_band_scale:
+            ids_band = experiment_ids[mask]
+            r_band_vals = r_band
+            band_entries = {}
+            for exp_id in np.unique(ids_band):
+                exp_mask = ids_band == exp_id
+                r_exp = r_band_vals[exp_mask]
+                n_exp = len(r_exp)
+                band_entries[exp_id] = {
+                    'n': n_exp,
+                    'mad_scale': robust_residual_scale(r_exp) if n_exp >= 2 else float('nan'),
+                    'mean_abs_r': float(np.mean(np.abs(r_exp))),
+                    'max_abs_r': float(np.max(np.abs(r_exp))),
+                }
+            exp_diag[band_name] = band_entries
+
+    if exp_diag:
+        tau_values['exp_diag'] = exp_diag
 
     # Second pass: for bands with too few points, use mid-band scale
     s_mid = tau_values['tau_M']

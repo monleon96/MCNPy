@@ -2592,6 +2592,7 @@ def apply_between_experiment_floor(
     energy_indices: List[int],
     max_order: int,
     logger=None,
+    apply: bool = True,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Apply between-experiment scatter as an uncertainty floor.
 
@@ -2599,6 +2600,11 @@ def apply_between_experiment_floor(
     the scatter-implied relative std to the current covariance diagonal.
     Where the scatter exceeds the MC-estimated uncertainty, inflate via
     a congruence scale (preserves correlations and PSD).
+
+    When ``apply=False`` the diagnostics are still computed and logged
+    (marked as *not applied*) so the user can assess their potential
+    impact.  A warning is emitted when the floor *would have* inflated
+    a significant number of entries.
 
     Parameters
     ----------
@@ -2612,11 +2618,15 @@ def apply_between_experiment_floor(
         Number of Legendre orders per energy bin.
     logger : optional
         Logger instance.
+    apply : bool
+        If True (default), return the floored covariance.  If False,
+        return the original covariance unchanged but still log
+        diagnostics.
 
     Returns
     -------
     cov_floored : np.ndarray
-        Covariance matrix with between-experiment floor applied.
+        Covariance matrix (floored if ``apply=True``, unchanged otherwise).
     diagnostics : dict
         Summary statistics.
     """
@@ -2677,17 +2687,35 @@ def apply_between_experiment_floor(
         'per_order': per_order_stats,
     }
 
+    status = "APPLIED" if apply else "NOT APPLIED (diagnostic only)"
     if logger:
-        logger.info(f"  [Between-exp floor] {n_bins_with_scatter}/{len(energy_indices)} bins had "
-                     f"scatter computed, {n_floored} (E,l) entries floored")
+        logger.info(f"  [Between-exp floor] {status} — "
+                     f"{n_bins_with_scatter}/{len(energy_indices)} bins had "
+                     f"scatter computed, {n_floored} (E,l) entries would be floored")
         for l in range(max_order):
             stats = per_order_stats[l]
             if stats['n_floored'] > 0:
                 mean_infl = float(np.mean(stats['inflation_factors']))
+                max_infl = float(np.max(stats['inflation_factors']))
                 logger.info(f"    l={l+1}: {stats['n_floored']} floored "
-                            f"(mean inflation {mean_infl:.1f}x)")
+                            f"(mean inflation {mean_infl:.1f}x, max {max_infl:.1f}x)")
 
-    return cov_floored, diagnostics
+        # Warning when disabled but would have significant impact
+        if not apply and n_floored > 0:
+            frac = n_floored / max(1, n_bins_with_scatter * max_order) * 100
+            all_factors = []
+            for l in range(max_order):
+                all_factors.extend(per_order_stats[l]['inflation_factors'])
+            median_infl = float(np.median(all_factors)) if all_factors else 1.0
+            logger.warning(
+                f"  [Between-exp floor WARNING] Floor is DISABLED but would inflate "
+                f"{n_floored} entries ({frac:.0f}% of eligible, median {median_infl:.1f}x). "
+                f"Consider setting APPLY_BETWEEN_EXP_FLOOR=True."
+            )
+
+    if apply:
+        return cov_floored, diagnostics
+    return cov_rel, diagnostics
 
 
 def log_rel_std_profile(
@@ -3646,7 +3674,7 @@ def generate_cholesky_samples(
     if logger:
         logger.info(f"  Ridge regularization: nugget={nugget:.2e}")
 
-    # Cholesky decomposition (use eigendecomposition fallback if not PSD)
+    # Cholesky decomposition (Higham PSD projection fallback if not PD)
     cholesky_succeeded = False
     try:
         L = np.linalg.cholesky(cov_abs)
@@ -3654,31 +3682,34 @@ def generate_cholesky_samples(
         if logger:
             logger.info(f"  Cholesky decomposition successful ({n_params}x{n_params})")
     except np.linalg.LinAlgError as e:
-        # Cholesky failure: the absolute covariance is not numerically PSD.
-        # This can happen when mean params near zero create a near-singular
-        # outer product, or from floating-point accumulation in the PSD
-        # projection. The eigendecomposition fallback produces L such that
-        # L @ L.T approximates cov_abs with all negative eigenvalues zeroed.
-        eigvals, eigvecs = np.linalg.eigh(cov_abs)
-        n_neg = int(np.sum(eigvals < 0))
-        min_eig = np.min(eigvals)
+        # Cholesky failure: apply Higham nearest-PSD projection with diagonal
+        # preservation (keeps variances exact, minimal off-diagonal distortion).
+        from kika.cov.decomposition import nearest_psd_higham
         if logger:
             logger.warning(f"  WARNING: Cholesky decomposition FAILED ({e})")
-            logger.warning(f"  Absolute covariance has {n_neg} negative eigenvalues "
-                           f"(min={min_eig:.2e})")
-            if abs(min_eig) < 1e-10:
-                logger.info(f"  -> Eigenvalues at machine-epsilon level; numerical noise, not a real PSD violation")
-            logger.info(f"  Using eigendecomposition fallback (zeroing negative eigenvalues)")
-        eigvals = np.maximum(eigvals, 0.0)
-        # L such that L @ L.T = cov_abs (approximately)
-        L = eigvecs @ np.diag(np.sqrt(eigvals))
-        if logger:
-            # Report how much variance was lost
-            total_var = np.trace(cov_abs)
-            kept_var = np.sum(eigvals)
-            if total_var > 0:
-                logger.info(f"  Variance retained after clipping: "
-                            f"{kept_var/total_var*100:.2f}%")
+            logger.info(f"  Applying Higham nearest-PSD projection (single-step eigenvalue clip)")
+        cov_psd, psd_info = nearest_psd_higham(
+            cov_abs, preserve_diagonal=False, eigval_floor=1e-14,
+            verbose=True, logger=logger,
+        )
+        max_diag_change = psd_info.get('max_diagonal_change', 0.0)
+        max_diag = np.max(np.diag(cov_abs))
+        if logger and max_diag > 0:
+            logger.info(f"  Max diagonal change: {max_diag_change:.2e} "
+                        f"({max_diag_change / max_diag * 100:.4f}% of max variance)")
+        try:
+            L = np.linalg.cholesky(cov_psd)
+            cholesky_succeeded = True
+            if logger:
+                logger.info(f"  Cholesky successful after PSD projection "
+                            f"(frob_err={psd_info.get('relative_frobenius_error', 0):.2e})")
+        except np.linalg.LinAlgError:
+            # Extremely rare: clip didn't suffice, add small jitter
+            jitter = np.max(np.diag(cov_psd)) * 1e-10
+            cov_psd[np.diag_indices_from(cov_psd)] += jitter
+            L = np.linalg.cholesky(cov_psd)
+            if logger:
+                logger.warning(f"  Cholesky still failed after PSD clip — applied jitter={jitter:.2e}")
 
     # Generate samples
     rng = np.random.default_rng(seed)
@@ -3848,6 +3879,7 @@ def save_all_legendre_coefficients(
     all_samples: Dict[int, Dict[int, np.ndarray]],
     output_dir: str,
     max_degree: int,
+    filename: str = 'legendre_coefficients_all_samples.parquet',
 ) -> str:
     """
     Save all Legendre coefficients (nominal + all MC samples) to Parquet.
@@ -3922,7 +3954,7 @@ def save_all_legendre_coefficients(
     df = df.sort_values(['sample_idx', 'energy_index']).reset_index(drop=True)
 
     # Save as Parquet (compact binary columnar format)
-    parquet_file = output_path / 'legendre_coefficients_all_samples.parquet'
+    parquet_file = output_path / filename
     df.to_parquet(parquet_file, engine='pyarrow', index=False)
 
     return str(parquet_file)

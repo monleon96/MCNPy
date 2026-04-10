@@ -1072,6 +1072,26 @@ def _diagnostics_whiten_mahalanobis(
     }
 
 
+def _classify_sampling_regime(n: int, p: int, k_eff: int) -> dict:
+    """Classify sampling regime based on sample-to-parameter ratio."""
+    ratio = n / max(p, 1)
+    expected_max_corr = math.sqrt(2 * math.log(max(k_eff, 2)) / max(n, 2))
+    if n >= 10 * p:
+        regime = "well_sampled"
+        label = f"Well-sampled (n/p = {ratio:.0f})"
+    elif n >= p:
+        regime = "moderate"
+        label = f"Moderately sampled (n/p = {ratio:.1f})"
+    else:
+        regime = "high_dimensional"
+        label = f"High-dimensional (n={n} < p={p})"
+    return {
+        "regime": regime, "label": label, "ratio": ratio,
+        "expected_max_corr": expected_max_corr,
+        "n": n, "p": p, "k_eff": k_eff,
+    }
+
+
 def _log_fast_qc_summary(
     *,
     space: str,
@@ -1082,16 +1102,24 @@ def _log_fast_qc_summary(
     logger=None
 ):
     """
-    Provide a clear, user-friendly summary for non-experts.
-    Classifies as PASS/WARN/FAIL with actionable guidance.
+    Provide a clear, user-friendly sampling quality summary.
+
+    The assessment distinguishes between:
+      - Tier 1 (Sampling Correctness): metrics that verify whether the
+        sampling procedure produced correct draws from the target
+        distribution. These are valid regardless of sample size.
+      - Tier 2 (Covariance Reconstruction): metrics that measure how well
+        the original covariance can be recovered from the samples. These
+        require n >> p to be meaningful and do NOT indicate sampling errors
+        when n < p.
+
+    The overall verdict is driven by Tier 1. Tier 2 is informational.
     """
-    # Enhanced thresholds with more nuanced categories
-    # NOTE: With corrected effective subspace whitening, whitening errors should be much lower
-    TH_FROB_EXCELLENT, TH_FROB_GOOD, TH_FROB_WARN, TH_FROB_POOR = 1.0, 5.0, 15.0, 30.0
-    TH_WHT_EXCELLENT, TH_WHT_GOOD, TH_WHT_WARN, TH_WHT_POOR = 2.0, 5.0, 15.0, 30.0  # Adjusted for effective subspace
-    TH_OFF_EXCELLENT, TH_OFF_GOOD, TH_OFF_WARN, TH_OFF_POOR = 0.05, 0.15, 0.30, 0.60  # More lenient for rank-deficient cases
     Z_LIMIT = 3.0
 
+    n = metrics["n"]
+    p = metrics["p"]
+    k_eff = metrics["k_eff"]
     wht = metrics["whiten_rel_frob"]
     off = metrics["max_offdiag_corr"]
     wz = metrics["worst_z_mean_u"]
@@ -1099,7 +1127,18 @@ def _log_fast_qc_summary(
     expected_coverage = metrics["coverage_alpha"] * 100
     coverage_band = metrics["covered_band_pp"]
 
-    # Evaluate each metric
+    regime_info = _classify_sampling_regime(n, p, k_eff)
+    regime = regime_info["regime"]
+
+    # ------------------------------------------------------------------
+    # Helper
+    # ------------------------------------------------------------------
+    def _emit(msg):
+        if logger:
+            logger.info(msg)
+        else:
+            print(msg)
+
     def evaluate_metric(value, excellent, good, warn, poor):
         if value <= excellent:
             return "EXCELLENT"
@@ -1112,18 +1151,25 @@ def _log_fast_qc_summary(
         else:
             return "CRITICAL"
 
-    cov_quality = evaluate_metric(frob_cov_pct, TH_FROB_EXCELLENT, TH_FROB_GOOD, TH_FROB_WARN, TH_FROB_POOR)
-    wht_quality = evaluate_metric(wht, TH_WHT_EXCELLENT, TH_WHT_GOOD, TH_WHT_WARN, TH_WHT_POOR)
-    off_quality = evaluate_metric(off, TH_OFF_EXCELLENT, TH_OFF_GOOD, TH_OFF_WARN, TH_OFF_POOR)
-    
-    # Coverage evaluation
+    quality_tags = {
+        "EXCELLENT": "[EXCELLENT]",
+        "GOOD": "[GOOD]",
+        "ACCEPTABLE": "[WARN]",
+        "POOR": "[POOR]",
+        "CRITICAL": "[CRITICAL]",
+    }
+
+    # ------------------------------------------------------------------
+    # Tier 1 — Sampling Correctness (always meaningful)
+    # ------------------------------------------------------------------
+    # Coverage
     in_range = abs(covered_pct - expected_coverage) <= coverage_band
     cover_quality = "GOOD" if in_range else "POOR"
-    
-    # Z-score evaluation
+
+    # Z-score
     z_quality = "GOOD" if wz <= Z_LIMIT else ("ACCEPTABLE" if wz <= Z_LIMIT + 1.0 else "POOR")
-    
-    # Mean deviation evaluation
+
+    # Mean deviation
     mean_dev_rate = mean_dev_warns / max(total_dims, 1) * 100
     if mean_dev_rate == 0:
         mean_quality = "EXCELLENT"
@@ -1134,111 +1180,147 @@ def _log_fast_qc_summary(
     else:
         mean_quality = "POOR"
 
-    # Overall assessment
-    qualities = [cov_quality, wht_quality, off_quality, cover_quality, z_quality, mean_quality]
+    tier1 = [cover_quality, z_quality, mean_quality]
     quality_scores = {
         "EXCELLENT": 5, "GOOD": 4, "ACCEPTABLE": 3, "POOR": 2, "CRITICAL": 1
     }
-    
-    avg_score = np.mean([quality_scores[q] for q in qualities])
-    critical_count = sum(1 for q in qualities if q == "CRITICAL")
-    poor_count = sum(1 for q in qualities if q in ["CRITICAL", "POOR"])
-    
-    if critical_count > 0 or avg_score < 2.5:
+    tier1_score = np.mean([quality_scores[q] for q in tier1])
+
+    # ------------------------------------------------------------------
+    # Tier 2 — Covariance Reconstruction (informational when n < p)
+    # ------------------------------------------------------------------
+    # Thresholds depend on regime
+    if regime == "well_sampled":
+        TH_FROB = (1.0, 5.0, 15.0, 30.0)
+        TH_WHT = (2.0, 5.0, 15.0, 30.0)
+        TH_OFF = (0.05, 0.15, 0.30, 0.60)
+    elif regime == "moderate":
+        TH_FROB = (3.0, 10.0, 25.0, 50.0)
+        TH_WHT = (3.0, 8.0, 20.0, 40.0)
+        TH_OFF = (0.10, 0.25, 0.45, 0.80)
+    else:  # high_dimensional
+        TH_FROB = None  # not meaningful when n < p
+        TH_WHT = (5.0, 15.0, 30.0, 60.0)
+        # Scale off-diagonal thresholds by expected spurious baseline
+        base = regime_info["expected_max_corr"]
+        TH_OFF = tuple(
+            max(t, base * m)
+            for t, m in zip((0.05, 0.15, 0.30, 0.60), (2, 3, 4, 6))
+        )
+
+    cov_quality = evaluate_metric(frob_cov_pct, *TH_FROB) if TH_FROB else None
+    wht_quality = evaluate_metric(wht, *TH_WHT)
+    off_quality = evaluate_metric(off, *TH_OFF)
+
+    tier2 = [q for q in [cov_quality, wht_quality, off_quality] if q is not None]
+    tier2_score = np.mean([quality_scores[q] for q in tier2]) if tier2 else None
+
+    # ------------------------------------------------------------------
+    # Overall verdict — driven by Tier 1
+    # In the well-sampled regime, Tier 2 can also downgrade.
+    # ------------------------------------------------------------------
+    if regime == "well_sampled":
+        all_q = tier1 + tier2
+        avg = np.mean([quality_scores[q] for q in all_q])
+        crit = sum(1 for q in all_q if q == "CRITICAL")
+        poor = sum(1 for q in all_q if q in ("CRITICAL", "POOR"))
+    else:
+        avg = tier1_score
+        crit = sum(1 for q in tier1 if q == "CRITICAL")
+        poor = sum(1 for q in tier1 if q in ("CRITICAL", "POOR"))
+
+    if crit > 0 or avg < 2.5:
         overall_status = "CRITICAL"
-        status_tag = "[CRITICAL]"
-        recommendation = "DO NOT USE - Sampling is fundamentally flawed. Check covariance matrix and sampling parameters. Increase sample size."
-    elif poor_count >= 3 or avg_score < 3.0:
+    elif poor >= 2 or avg < 3.0:
         overall_status = "POOR"
-        status_tag = "[POOR]"
-        recommendation = "NOT RECOMMENDED - Significant issues detected. Results may be unreliable. Try increasing sample size."
-    elif avg_score < 3.5:
+    elif avg < 3.5:
         overall_status = "ACCEPTABLE"
-        status_tag = "[WARN]"
-        recommendation = "PROCEED WITH CAUTION - Some issues present, but may be acceptable for certain applications. Increase sample size if possible."
-    elif avg_score < 4.5:
+    elif avg < 4.5:
         overall_status = "GOOD"
-        status_tag = "[GOOD]"
-        recommendation = "GOOD QUALITY - Minor issues present, suitable for most applications."
     else:
         overall_status = "EXCELLENT"
-        status_tag = "[EXCELLENT]"
-        recommendation = "EXCELLENT QUALITY - High-quality sampling, suitable for all applications."
 
-    # Log the summary
-    separator = "=" * 60
-    
-    header = f"\n{separator}\n{status_tag} SAMPLING QUALITY ASSESSMENT ({space.upper()} SPACE)\n{separator}"
-    
-    if logger:
-        logger.info(header)
+    # ------------------------------------------------------------------
+    # Log output
+    # ------------------------------------------------------------------
+    sep = "=" * 60
+
+    _emit(f"\n{sep}")
+    _emit(f"SAMPLING QUALITY ASSESSMENT ({space.upper()} SPACE)")
+    _emit(sep)
+    _emit(f"  Samples: {n}  |  Parameters: {p}  |  Effective rank: {k_eff}")
+    _emit(f"  Regime: {regime_info['label']}")
+
+    # --- Tier 1: Sampling Correctness ---
+    _emit(f"\n  SAMPLING CORRECTNESS: {overall_status}")
+
+    if overall_status in ("GOOD", "EXCELLENT"):
+        _emit("    Samples are valid draws from the target distribution.")
+    elif overall_status == "ACCEPTABLE":
+        _emit("    Sampling appears correct with minor statistical deviations.")
+    elif overall_status == "POOR":
+        _emit("    Some correctness metrics show significant deviations.")
+        _emit("    Results should be interpreted with care. Consider increasing sample size.")
     else:
-        print(header)
+        _emit("    Correctness metrics indicate a problem with the sampling procedure.")
+        _emit("    Check the covariance matrix and decomposition. Increase sample size.")
 
-    # Main verdict
-    verdict_msg = f"  OVERALL: {overall_status}"
-    if logger:
-        logger.info(verdict_msg)
-    else:
-        print(verdict_msg)
+    _emit(f"    - Mean Consistency:     {quality_tags[z_quality]} {z_quality} (max |z|={wz:.1f})")
+    _emit(f"    - Parameter Deviations: {quality_tags[mean_quality]} {mean_quality} ({mean_dev_warns}/{total_dims} outside 3-sigma)")
+    _emit(f"    - Chi-squared Coverage: {quality_tags[cover_quality]} {cover_quality} ({covered_pct:.1f}% coverage, expected ~{expected_coverage:.0f}%)")
 
-    recommendation_msg = f"  RECOMMENDATION: {recommendation}"
-    if logger:
-        logger.info(recommendation_msg)
-    else:
-        print(recommendation_msg)
-
-    # Detailed breakdown
-    detail_header = f"\n  DETAILED BREAKDOWN:"
-    if logger:
-        logger.info(detail_header)
-    else:
-        print(detail_header)
-
-    quality_tags = {
-        "EXCELLENT": "[EXCELLENT]", "GOOD": "[GOOD]", "ACCEPTABLE": "[WARN]", "POOR": "[POOR]", "CRITICAL": "[CRITICAL]"
-    }
-
-    details = [
-        f"    • Covariance Reproduction: {quality_tags[cov_quality]} {cov_quality} ({frob_cov_pct:.1f}%)",
-        f"    • Statistical Whitening: {quality_tags[wht_quality]} {wht_quality} ({wht:.1f}%)",
-        f"    • Correlation Structure: {quality_tags[off_quality]} {off_quality} (max |r|={off:.3f})",
-        f"    • χ² Distribution: {quality_tags[cover_quality]} {cover_quality} ({covered_pct:.1f}% coverage)",
-        f"    • Mean Consistency: {quality_tags[z_quality]} {z_quality} (max |z|={wz:.1f})",
-        f"    • Parameter Deviations: {quality_tags[mean_quality]} {mean_quality} ({mean_dev_warns}/{total_dims})"
-    ]
-
-    for detail in details:
-        if logger:
-            logger.info(detail)
+    # --- Tier 2: Covariance Reconstruction ---
+    if regime == "high_dimensional":
+        _emit(f"\n  COVARIANCE RECONSTRUCTION FROM SAMPLES:")
+        _emit(f"    These metrics measure whether the original covariance matrix can")
+        _emit(f"    be recovered by computing the sample covariance from the generated")
+        _emit(f"    samples. This is NOT the same as whether the samples are correct.")
+        _emit(f"")
+        _emit(f"    The samples were generated FORWARD: the Cholesky decomposition of")
+        _emit(f"    the target covariance was used to transform independent random draws")
+        _emit(f"    into correlated samples. This guarantees each sample is a correct")
+        _emit(f"    draw from the target distribution.")
+        _emit(f"")
+        _emit(f"    Reconstructing the covariance BACKWARD (from samples) is a harder")
+        _emit(f"    statistical problem that requires n >> p. With {n} samples and")
+        _emit(f"    {p} parameters, the sample covariance has rank <= {min(n-1, p)} and")
+        _emit(f"    cannot reproduce all {p}x{p} entries. This does NOT affect the")
+        _emit(f"    validity of the samples for uncertainty propagation.")
+        _emit(f"")
+        if cov_quality is None:
+            _emit(f"    - Covariance Reproduction: {frob_cov_pct:.1f}% Frobenius error (not scored, rank-deficient)")
         else:
-            print(detail)
-
-    # Context for interpretation
-    context_header = f"\n  INTERPRETATION GUIDE:"
-    if logger:
-        logger.info(context_header)
+            _emit(f"    - Covariance Reproduction: {quality_tags[cov_quality]} {cov_quality} ({frob_cov_pct:.1f}%)")
+        _emit(f"    - Statistical Whitening:   {wht:.1f}% in {k_eff}-dim subspace (elevated, expected for n < p)")
+        _emit(f"    - Correlation Structure:   max |r|={off:.3f} (expected baseline ~{regime_info['expected_max_corr']:.2f} for n={n}, k={k_eff})")
     else:
-        print(context_header)
+        _emit(f"\n  COVARIANCE RECONSTRUCTION FROM SAMPLES:")
+        if cov_quality is not None:
+            _emit(f"    - Covariance Reproduction: {quality_tags[cov_quality]} {cov_quality} ({frob_cov_pct:.1f}%)")
+        _emit(f"    - Statistical Whitening:   {quality_tags[wht_quality]} {wht_quality} ({wht:.1f}%)")
+        _emit(f"    - Correlation Structure:   {quality_tags[off_quality]} {off_quality} (max |r|={off:.3f})")
 
-    context_lines = [
-        "    • EXCELLENT/GOOD: Sampling behaves as expected statistically",
-        "    • ACCEPTABLE: Minor deviations, usually fine for sensitivity studies",
-        "    • POOR: Significant issues, results should be interpreted carefully",
-        "    • CRITICAL: Fundamental problems, sampling should not be used"
-    ]
-
-    for line in context_lines:
-        if logger:
-            logger.info(line)
-        else:
-            print(line)
-
-    footer = f"{separator}"
-    if logger:
-        logger.info(footer)
+    # --- Recommendation ---
+    _emit(f"\n  RECOMMENDATION:")
+    if overall_status in ("GOOD", "EXCELLENT"):
+        _emit(f"    These samples are suitable for uncertainty propagation.")
+        if regime == "high_dimensional":
+            _emit(f"    Individual parameter uncertainties are well captured. To also")
+            _emit(f"    verify the full correlation structure from the samples, increase")
+            _emit(f"    sample count to at least {p} (n >= p).")
+        elif regime == "moderate":
+            _emit(f"    To improve covariance reconstruction fidelity, increase samples.")
+    elif overall_status == "ACCEPTABLE":
+        _emit(f"    Samples are usable for uncertainty propagation with minor caveats.")
+        _emit(f"    Increase sample size if higher statistical confidence is needed.")
+    elif overall_status == "POOR":
+        _emit(f"    Use with caution. Some correctness metrics deviate significantly.")
+        _emit(f"    Consider increasing the sample size or checking the input covariance.")
     else:
-        print(footer)
-    
-    # Return the comprehensive overall status for storage in results
+        _emit(f"    Sampling correctness could not be verified. Check the covariance")
+        _emit(f"    matrix, decomposition method, and sampling parameters before using")
+        _emit(f"    these samples. Increase sample size.")
+
+    _emit(sep)
+
     return overall_status

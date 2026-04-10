@@ -391,7 +391,7 @@ def nearest_psd_higham(
     if not preserve_diagonal:
         w, V = _robust_eigh(A_sym, label="Higham clip", verbose=verbose, logger=logger)
         w_clipped = np.maximum(w, eigval_floor)
-        X = V @ np.diag(w_clipped) @ V.T
+        X = (V * w_clipped[None, :]) @ V.T
         X = (X + X.T) / 2.0
         eigvals_after = _robust_eigvalsh(X, label="Higham clip result", verbose=verbose, logger=logger)
         frob_dist = float(np.linalg.norm(X - A_sym, "fro"))
@@ -436,7 +436,7 @@ def nearest_psd_higham(
             n_svd_iterations += 1
             svd_fallback_logged = True
         w_clipped = np.maximum(w, eigval_floor)
-        X_psd = V @ np.diag(w_clipped) @ V.T
+        X_psd = (V * w_clipped[None, :]) @ V.T
 
         # Dykstra correction
         D_S = X_psd - R
@@ -466,7 +466,7 @@ def nearest_psd_higham(
     if eigvals_final[0] < 0:
         w_f, V_f = _robust_eigh(Y, label="Higham final clip", verbose=verbose, logger=logger)
         w_f = np.maximum(w_f, eigval_floor)
-        Y = V_f @ np.diag(w_f) @ V_f.T
+        Y = (V_f * w_f[None, :]) @ V_f.T
         Y = (Y + Y.T) / 2.0
 
     # Final diagnostics

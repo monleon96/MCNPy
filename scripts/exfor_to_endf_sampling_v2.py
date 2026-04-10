@@ -149,7 +149,7 @@ ENDF_FILE = "/share_snc/snc/JuanMonleon/jeff40_with_MF4_from_jeff33/26-Fe-56g.tx
 MF34_SOURCE_FILE = None                          # Separate MF34 source (None = use ENDF_FILE)
 EXFOR_DIRECTORY = "/share_snc/snc/JuanMonleon/EXFOR/data_v1/"
 EXFOR_DB_PATH = '/share_snc/snc/JuanMonleon/EXFOR/x4_iron_angular.db'
-OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_34/"
+OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_40/"
 TOF_PARAMETERS_FILE = "/share_snc/snc/JuanMonleon/EXFOR/exfor_tof_parameters.json"
 
 # --- DATA SOURCE ----------------------------------------------------------- #
@@ -190,7 +190,7 @@ NORMALIZATION_SIGMA = 0.05                       # Per-experiment normalization 
 NORM_DIST = "lognormal"                          # "lognormal" (always positive) or "normal"
 # Experiment exclusion & uncertainty floor
 EXCLUDE_EXPERIMENTS = ["32246002"]                # Experiments to exclude (e.g. "32246002" = Tostkii)
-MIN_RELATIVE_UNCERTAINTY = 0.05                  # Minimum relative uncertainty floor (0 = disabled)
+MIN_RELATIVE_UNCERTAINTY = 0.01                  # Minimum relative uncertainty floor (0 = disabled)
 UNCERTAINTY_FLOOR_STRATEGY = 'bin_median'        # 'fixed' or 'bin_median'
 
 # --- MODEL AVERAGING ------------------------------------------------------- #
@@ -235,6 +235,7 @@ MAX_RELATIVE_STD_CAP = 1.0                       # Max relative std when cap is 
 REGULARIZE_NEAR_ZERO_REL_UNC = True              # Regularize explosive rel_std near zero means
 NEAR_ZERO_SNR_THRESHOLD = 1.0                    # Flag if |mean|/sigma_abs < threshold
 NEAR_ZERO_N_NEIGHBORS = 3                        # Valid neighbors to seek on each side
+APPLY_BETWEEN_EXP_FLOOR = False                 # Between-experiment scatter floor (disabled: redundant with band discrepancy)
 # Post-processing pipeline (set APPLY_COV_POSTPROCESSING=False to skip all)
 APPLY_COV_POSTPROCESSING = False
 SMOOTH_MIN_REL_STD = 0.005                       # Entries below this treated as absent (0.5%)
@@ -254,7 +255,7 @@ POSITIVITY_CHECK_POINTS = 101                    # Number of mu points in [-1, 1
 # --- MULTIGROUP COVARIANCE ------------------------------------------------- #
 GENERATE_MULTIGROUP_COVARIANCE = True            # Enable adaptive multigroup collapse
 MULTIGROUP_RHO_MIN = 0.85                        # Min l=1 adjacent correlation to merge groups
-MF34_COVARIANCE_TYPE = "multigroup"              # "fine", "multigroup", or "both"
+MF34_COVARIANCE_TYPE = "both"              # "fine", "multigroup", or "both"
 USE_ORIGINAL_MF34_GRID = False                   # Force grid from original MF34
 MERGE_ORIGINAL_MF34 = True                       # Merge pipeline MF34 with original (full range)
 MULTIGROUP_VARIANCE_PCT_MIN = 67                 # Base percentile for homogeneous groups
@@ -263,7 +264,7 @@ MULTIGROUP_VARIANCE_RATIO_REF = 5.0              # Sigma ratio at which percenti
 MULTIGROUP_REGROUP_AFTER_SMOOTH = False          # Second-pass regrouping after smoothing
 
 # --- OUTPUT: Pipeline A (fitting) ------------------------------------------ #
-N_SAMPLES = 100                                  # Number of MC samples
+N_SAMPLES = 1000                                  # Number of MC samples
 BASE_SEED = 42                                   # Random seed for reproducibility
 GENERATE_NOMINAL_ENDF = True                     # Best-fit coefficients ENDF
 GENERATE_MC_MEAN_ENDF = False                    # MC mean coefficients ENDF
@@ -271,6 +272,7 @@ GENERATE_FITTING_SAMPLES = False                 # Individual MC sample ENDFs ->
 GENERATE_FITTING_ACE = False                     # Generate ACE files for fitting samples
 SAVE_COVARIANCE_FILES = False                    # Save covariance/correlation .npy files
 SAVE_CORRELATION_MATRICES = False                # Save correlation alongside covariance
+SAVE_FULL_CORRELATION_SAMPLES = True             # Persist raw multi-bin MC samples (KW_MC_TWO_PASS only)
 
 # --- OUTPUT: Pipeline B (MF34 sampling) ------------------------------------ #
 GENERATE_MF34_SAMPLES = False                    # Perturbed ENDF samples from MF34 -> endf/
@@ -1171,10 +1173,13 @@ def perform_nominal_fits(
         y_fit = legval(mu, nominal_coeffs)
 
         if use_band_discrepancy and tau_info:
-            sigma_eff, _ = compute_angular_band_discrepancy(
+            # Pass experiment IDs for per-experiment diagnostics on capped bands
+            _exp_ids = exfor_df['entry'].values if 'entry' in exfor_df.columns else None
+            sigma_eff, tau_info = compute_angular_band_discrepancy(
                 mu=mu, y=y, sigma=sigma, y_fit=y_fit,
                 min_points_per_band=min_points_per_band,
                 max_band_scale=max_band_scale,
+                experiment_ids=_exp_ids,
             )
             tau_F = tau_info.get('tau_F', 1.0)
             tau_M = tau_info.get('tau_M', 1.0)
@@ -1254,9 +1259,26 @@ def perform_nominal_fits(
             if degree_weights and len(degree_weights) > 1:
                 dw_str = " ".join(f"L{d}:{w:.0%}" for d, w in sorted(degree_weights.items()))
                 logger.info(f"  AICc weights: {dw_str}")
-            logger.info(
-                f"  Band scales: s_F={tau_F:.2f}, s_M={tau_M:.2f}, s_B={tau_B:.2f}"
-            )
+            raw_F = tau_info.get('raw_F', tau_F)
+            raw_M = tau_info.get('raw_M', tau_M)
+            raw_B = tau_info.get('raw_B', tau_B)
+            any_capped = (raw_F > tau_F + 0.005) or (raw_M > tau_M + 0.005) or (raw_B > tau_B + 0.005)
+            band_str = f"  Band scales: s_F={tau_F:.2f}, s_M={tau_M:.2f}, s_B={tau_B:.2f}"
+            if any_capped:
+                band_str += f" (raw: F={raw_F:.2f}, M={raw_M:.2f}, B={raw_B:.2f})"
+            logger.info(band_str)
+            # Per-experiment diagnostics for capped bands
+            _exp_diag = tau_info.get('exp_diag')
+            if _exp_diag:
+                band_names = {'F': 'Forward', 'M': 'Mid', 'B': 'Backward'}
+                for bnd, entries in _exp_diag.items():
+                    # Sort experiments by mean_abs_r descending (worst first)
+                    sorted_exps = sorted(entries.items(), key=lambda x: x[1]['mean_abs_r'], reverse=True)
+                    parts = []
+                    for exp_id, stats in sorted_exps:
+                        parts.append(f"{exp_id}(n={stats['n']}, |r|={stats['mean_abs_r']:.1f}, "
+                                     f"max|r|={stats['max_abs_r']:.1f})")
+                    logger.info(f"    [{band_names.get(bnd, bnd)} capped] {', '.join(parts)}")
             if mc_cap < frozen_degree:
                 logger.info(
                     f"  MC order cap: {mc_cap} (nominal L={frozen_degree}, "
@@ -1321,7 +1343,166 @@ def perform_nominal_fits(
             f"{gate_failed} bins failed → interpolate"
         )
 
+    # ================================================================
+    # End-of-fit summaries
+    # ================================================================
+    if logger and use_band_discrepancy:
+        _log_band_capping_summary(results, max_band_scale, logger)
+        _log_between_exp_summary(results, logger)
+        _log_experiment_bias_summary(results, logger)
+
     return results
+
+
+def _log_band_capping_summary(
+    results: List[NominalFitResult],
+    max_band_scale: float,
+    logger,
+) -> None:
+    """Log aggregate band-capping statistics and repeat-offender experiments."""
+    from collections import Counter
+
+    band_names = {'F': 'Forward', 'M': 'Mid', 'B': 'Backward'}
+    # Count capped bands and collect per-experiment stats
+    n_capped = {'F': 0, 'M': 0, 'B': 0}
+    # exp_id -> {band -> list of mean_abs_r}
+    exp_stats = {}
+
+    for r in results:
+        if not r.has_data or r.interpolated:
+            continue
+        ti = r.tau_info
+        for bnd in ('F', 'M', 'B'):
+            raw = ti.get(f'raw_{bnd}', ti.get(f'tau_{bnd}', 1.0))
+            if raw >= max_band_scale - 0.005:
+                n_capped[bnd] += 1
+
+        exp_diag = ti.get('exp_diag')
+        if not exp_diag:
+            continue
+        for bnd, entries in exp_diag.items():
+            for exp_id, stats in entries.items():
+                if exp_id not in exp_stats:
+                    exp_stats[exp_id] = {'F': [], 'M': [], 'B': [], 'abs_r': [], 'signed_r': []}
+                exp_stats[exp_id][bnd].append(stats['mean_abs_r'])
+                exp_stats[exp_id]['abs_r'].append(stats['mean_abs_r'])
+
+    total_capped = sum(n_capped.values())
+    if total_capped == 0:
+        return
+
+    logger.info("")
+    logger.info("  === Band capping summary ===")
+    logger.info(f"  {total_capped} band-scale values capped at {max_band_scale:.1f} "
+                f"(F:{n_capped['F']}, M:{n_capped['M']}, B:{n_capped['B']})")
+
+    if exp_stats:
+        # Rank experiments by total number of capped-band appearances
+        ranked = sorted(exp_stats.items(),
+                        key=lambda x: len(x[1]['abs_r']), reverse=True)
+        logger.info("  Experiments most frequently in capped bands:")
+        for exp_id, stats in ranked[:10]:  # Top 10
+            total = len(stats['abs_r'])
+            band_counts = []
+            for bnd in ('B', 'M', 'F'):
+                cnt = len(stats[bnd])
+                if cnt > 0:
+                    band_counts.append(f"{bnd}:{cnt}")
+            mean_r = float(np.mean(stats['abs_r']))
+            logger.info(f"    {exp_id}: {total} bins ({', '.join(band_counts)}), "
+                        f"mean|r|={mean_r:.1f}")
+
+
+def _log_between_exp_summary(
+    results: List[NominalFitResult],
+    logger,
+) -> None:
+    """Log between-experiment scatter summary by energy region."""
+    # Collect bins with scatter and their inflation potential
+    scatter_bins = []
+    for r in results:
+        if not r.has_data or r.interpolated or r.between_exp_scatter is None:
+            continue
+        scatter_bins.append(r)
+
+    n_total = sum(1 for r in results if r.has_data and not r.interpolated)
+    n_with_scatter = len(scatter_bins)
+    if n_with_scatter == 0:
+        return
+
+    logger.info("")
+    logger.info("  === Between-experiment scatter summary ===")
+    logger.info(f"  {n_with_scatter}/{n_total} bins had between-experiment scatter computed")
+
+    # Find energy regions with largest scatter (l=1, most physically meaningful)
+    l1_scatter = [(r.energy_mev, r.between_exp_scatter[0]) for r in scatter_bins
+                  if len(r.between_exp_scatter) > 0]
+    if not l1_scatter:
+        return
+
+    # Sort by scatter magnitude, report top energy regions
+    l1_scatter.sort(key=lambda x: x[1], reverse=True)
+    logger.info("  Bins with largest l=1 scatter (top 10):")
+    for energy, scatter_val in l1_scatter[:10]:
+        logger.info(f"    E={energy:.4f} MeV: scatter_l1={scatter_val:.4f}")
+
+
+def _log_experiment_bias_summary(
+    results: List[NominalFitResult],
+    logger,
+) -> None:
+    """Log per-experiment systematic bias across all energy bins.
+
+    For each experiment, compute the mean signed normalized residual
+    across all bins.  A persistent positive or negative bias indicates
+    a normalization offset that the band scale cannot distinguish from
+    random scatter.
+    """
+    from collections import defaultdict
+
+    exp_residuals = defaultdict(list)  # exp_id -> list of signed residuals
+
+    for r in results:
+        if not r.has_data or r.interpolated:
+            continue
+        df = r.exfor_df
+        if 'entry' not in df.columns:
+            continue
+        mu = df['mu'].to_numpy()
+        y = df['value'].to_numpy()
+        sigma = r.sigma_eff
+        y_fit = np.polynomial.legendre.legval(mu, r.nominal_coeffs)
+        signed_r = (y - y_fit) / sigma
+        entries = df['entry'].values
+
+        for exp_id in np.unique(entries):
+            mask = entries == exp_id
+            exp_residuals[exp_id].extend(signed_r[mask].tolist())
+
+    if not exp_residuals:
+        return
+
+    logger.info("")
+    logger.info("  === Experiment systematic bias ===")
+    # Compute mean signed residual and total points per experiment
+    bias_data = []
+    for exp_id, resids in exp_residuals.items():
+        n = len(resids)
+        mean_r = float(np.mean(resids))
+        std_r = float(np.std(resids))
+        bias_data.append((exp_id, n, mean_r, std_r))
+
+    # Sort by absolute mean bias
+    bias_data.sort(key=lambda x: abs(x[2]), reverse=True)
+    logger.info(f"  {'Experiment':<12} {'N_pts':>7} {'mean_r':>8} {'std_r':>7}  note")
+    for exp_id, n, mean_r, std_r in bias_data:
+        # Flag if bias is statistically significant (|mean| > 2/sqrt(N))
+        threshold = 2.0 / np.sqrt(max(n, 1))
+        flag = ""
+        if abs(mean_r) > threshold and n >= 10:
+            direction = "high" if mean_r > 0 else "low"
+            flag = f"  ← systematic {direction} ({abs(mean_r)/threshold:.1f}σ)"
+        logger.info(f"  {str(exp_id):<12} {n:>7} {mean_r:>+8.3f} {std_r:>7.2f}{flag}")
 
 
 # Import PrecomputedEnergyData, _precompute_energy_data, _sample_one_realization, run_mc_per_realization
@@ -1583,11 +1764,13 @@ def run_exfor_to_endf_sampling_v2(
     regularize_near_zero: bool = True,
     near_zero_snr_threshold: float = 1.0,
     near_zero_n_neighbors: int = 3,
+    apply_between_exp_floor: bool = True,
     apply_cov_postprocessing: bool = True,
     apply_positivity_projection: bool = False,
     positivity_check_points: int = 50,
     # File output options
     save_correlation_matrices: bool = False,
+    save_full_correlation_samples: bool = False,
     # ACE common options (shared NJOY config)
     ace_temperatures: Optional[List[float]] = None,
     ace_njoy_exe: Optional[str] = None,
@@ -1759,6 +1942,7 @@ def run_exfor_to_endf_sampling_v2(
     if regularize_near_zero:
         _logger.info(f"  NEAR_ZERO_SNR_THRESHOLD = {near_zero_snr_threshold}")
         _logger.info(f"  NEAR_ZERO_N_NEIGHBORS = {near_zero_n_neighbors}")
+    _logger.info(f"  APPLY_BETWEEN_EXP_FLOOR = {apply_between_exp_floor}")
     _logger.info(f"  APPLY_COV_POSTPROCESSING = {apply_cov_postprocessing}")
     if apply_cov_postprocessing:
         _dip_str = "None (disabled)" if SMOOTH_DIP_FRACTION is None else f"{SMOOTH_DIP_FRACTION} ({SMOOTH_DIP_FRACTION*100:.0f}%)"
@@ -1802,6 +1986,7 @@ def run_exfor_to_endf_sampling_v2(
     _logger.info(f"  GENERATE_FITTING_ACE = {generate_fitting_ace}")
     _logger.info(f"  SAVE_COVARIANCE_FILES = {save_covariance_files}")
     _logger.info(f"  SAVE_CORRELATION_MATRICES = {save_correlation_matrices}")
+    _logger.info(f"  SAVE_FULL_CORRELATION_SAMPLES = {save_full_correlation_samples}")
     _logger.info("")
 
     # -- Output: Pipeline B (MF34 sampling) --
@@ -2270,6 +2455,24 @@ def run_exfor_to_endf_sampling_v2(
 
             _logger.info(f"  Per-bin stochastic pass completed: {len(bin_args_list)} bins")
 
+            # Persist raw multi-bin MC samples (full non-Gaussian joint distribution)
+            # before they are collapsed to a covariance and replaced by Cholesky draws.
+            if save_full_correlation_samples:
+                try:
+                    full_corr_path = save_all_legendre_coefficients(
+                        nominal_results=nominal_results,
+                        all_samples=kw_samples,
+                        output_dir=str(output_path),
+                        max_degree=max_degree,
+                        filename='legendre_coefficients_full_correlations.parquet',
+                    )
+                    _logger.info(f"  [INFO] [MC] Full-correlation samples saved to: {full_corr_path}")
+                except Exception as e:
+                    _logger.error(
+                        f"[ERROR] [MC] Failed to save full-correlation samples: {str(e)}",
+                        console=True,
+                    )
+
             # Combine: correlations from kw_samples, variance from per-bin
             energy_indices_kw = [nr.energy_index for nr in nominal_results if nr.has_data]
             nr_by_idx_kw = {nr.energy_index: nr for nr in nominal_results}
@@ -2392,14 +2595,18 @@ def run_exfor_to_endf_sampling_v2(
 
                 cov_combined = corr_hyb * np.outer(std_perbin, std_perbin)
 
-                # PSD projection via eigenvalue clipping
-                eigenvalues, eigenvectors = np.linalg.eigh(cov_combined)
+                # PSD projection via eigenvalue clip (single-step, fast)
+                eigenvalues = np.linalg.eigvalsh(cov_combined)
                 min_eig = np.min(eigenvalues)
                 if min_eig < -1e-10:
-                    eigenvalues = np.maximum(eigenvalues, 0.0)
-                    cov_combined = eigenvectors @ np.diag(eigenvalues) @ eigenvectors.T
-                    cov_combined = (cov_combined + cov_combined.T) / 2.0
-                    _logger.info(f"  Hybrid blend: PSD projection applied (min_eig={min_eig:.2e})")
+                    from kika.cov.decomposition import nearest_psd_higham
+                    cov_combined, _psd_info = nearest_psd_higham(
+                        cov_combined, preserve_diagonal=False, eigval_floor=1e-14,
+                        verbose=False, logger=_logger,
+                    )
+                    _max_dc = _psd_info.get('max_diagonal_change', 0.0)
+                    _logger.info(f"  Hybrid blend: PSD projection applied "
+                                 f"(min_eig={min_eig:.2e}, max_diag_change={_max_dc:.2e})")
 
                 # Log alpha and range-aware blend statistics
                 n_interp = int(np.sum(alpha_per_energy == 0.0))
@@ -2967,25 +3174,27 @@ def run_exfor_to_endf_sampling_v2(
                 if verbose_diagnostics:
                     log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-nz-nom", _logger, verbose=True)
 
-            if apply_cov_postprocessing:
-                # Step 1: Between-experiment scatter floor
-                cov_matrix_nominal, _bexp_nom = apply_between_experiment_floor(
-                    cov_rel=cov_matrix_nominal,
-                    nominal_results=nominal_results,
-                    energy_indices=energy_indices,
-                    max_order=max_degree,
-                    logger=_logger,
-                )
-                cov_matrix, _bexp_avg = apply_between_experiment_floor(
-                    cov_rel=cov_matrix,
-                    nominal_results=nominal_results,
-                    energy_indices=energy_indices,
-                    max_order=max_degree,
-                    logger=_logger,
-                )
-                if verbose_diagnostics:
-                    log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-between-exp", _logger, verbose=True)
+            # Between-experiment scatter floor (independent of postprocessing pipeline)
+            cov_matrix_nominal, _bexp_nom = apply_between_experiment_floor(
+                cov_rel=cov_matrix_nominal,
+                nominal_results=nominal_results,
+                energy_indices=energy_indices,
+                max_order=max_degree,
+                logger=_logger,
+                apply=apply_between_exp_floor,
+            )
+            cov_matrix, _bexp_avg = apply_between_experiment_floor(
+                cov_rel=cov_matrix,
+                nominal_results=nominal_results,
+                energy_indices=energy_indices,
+                max_order=max_degree,
+                logger=_logger,
+                apply=apply_between_exp_floor,
+            )
+            if verbose_diagnostics:
+                log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-between-exp", _logger, verbose=True)
 
+            if apply_cov_postprocessing:
                 # Step 2: Dip/spike smoothing & absent-order interpolation
                 cov_matrix_nominal, _smooth_nom = smooth_absent_order_uncertainties(
                     cov_rel=cov_matrix_nominal,
@@ -3747,11 +3956,13 @@ if __name__ == "__main__":
         regularize_near_zero=REGULARIZE_NEAR_ZERO_REL_UNC,
         near_zero_snr_threshold=NEAR_ZERO_SNR_THRESHOLD,
         near_zero_n_neighbors=NEAR_ZERO_N_NEIGHBORS,
+        apply_between_exp_floor=APPLY_BETWEEN_EXP_FLOOR,
         apply_cov_postprocessing=APPLY_COV_POSTPROCESSING,
         apply_positivity_projection=APPLY_POSITIVITY_PROJECTION,
         positivity_check_points=POSITIVITY_CHECK_POINTS,
         # File output options
         save_correlation_matrices=SAVE_CORRELATION_MATRICES,
+        save_full_correlation_samples=SAVE_FULL_CORRELATION_SAMPLES,
         # ACE common options
         ace_temperatures=ACE_TEMPERATURES,
         ace_njoy_exe=ACE_NJOY_EXE,
