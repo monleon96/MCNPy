@@ -8,8 +8,8 @@ sys.path.insert(0, os.path.abspath('../..'))
 
 # -- Project information -----------------------------------------------------
 project = 'KIKA'
-copyright = f"{datetime.datetime.now().year}, Juan Antonio Monleon de la Lluvia <juanmonleon96@gmail.com>"
-author = "Juan Antonio Monleon de la Lluvia <juanmonleon96@gmail.com>"
+copyright = f"{datetime.datetime.now().year}, Juan Antonio Monleon de la Lluvia <juanjuanmonleon@gmail.com>"
+author = "Juan Antonio Monleon de la Lluvia <juanjuanmonleon@gmail.com>"
 release = "0.1.2"
 
 # -- General configuration ---------------------------------------------------

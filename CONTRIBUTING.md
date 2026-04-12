@@ -4,7 +4,7 @@ Thank you for your interest in contributing to KIKA! This guide covers everythin
 
 ## Reporting Bugs & Suggesting Features
 
-Open a [GitHub issue](https://github.com/monleon96/kika/issues) with a clear description. For bugs, include:
+Open a [GitHub issue](https://github.com/juanmonleon/kika/issues) with a clear description. For bugs, include:
 
 - Steps to reproduce
 - Expected vs. actual behavior

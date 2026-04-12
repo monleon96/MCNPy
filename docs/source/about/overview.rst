@@ -5,7 +5,7 @@ KIKA is a comprehensive Python toolkit for nuclear data analysis and Monte Carlo
 
 The library provides modern, lightweight alternatives to traditional tools, focusing on a clear, class-based design and seamless integration with the Python scientific ecosystem (NumPy, pandas, xarray, matplotlib).
 
-Originally created for personal use, KIKA is now available publicly to support the nuclear engineering and radiation transport community. Development continues according to the author's work requirements. Community contributions are warmly welcomed via GitHub at `https://github.com/monleon96/KIKA.git <https://github.com/monleon96/KIKA.git>`_.
+Originally created for personal use, KIKA is now available publicly to support the nuclear engineering and radiation transport community. Development continues according to the author's work requirements. Community contributions are warmly welcomed via GitHub at `https://github.com/juanmonleon/KIKA.git <https://github.com/juanmonleon/KIKA.git>`_.
 
 Current Features
 ----------------

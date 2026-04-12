@@ -18,7 +18,7 @@ You can run these tutorials by cloning the KIKA repository and opening the noteb
 
 .. code-block:: bash
 
-   git clone https://github.com/monleon96/KIKA.git
+   git clone https://github.com/juanmonleon/KIKA.git
    cd KIKA/examples
    jupyter notebook
 

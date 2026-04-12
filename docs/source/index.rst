@@ -2,7 +2,7 @@ KIKA Documentation
 ===================
 
 .. image:: https://img.shields.io/badge/version-0.1.2-blue.svg
-   :target: https://github.com/monleon96/kika
+   :target: https://github.com/juanmonleon/kika
    :alt: Version
 
 **A comprehensive Python toolkit for nuclear data analysis**
