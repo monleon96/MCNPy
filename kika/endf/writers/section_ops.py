@@ -46,25 +46,42 @@ def remove_sections(
     remove_specific.discard((1, 451))
 
     lines = content.splitlines(keepends=True)
+
+    # Pre-pass: parse each line once and record the earliest index of a
+    # surviving data line per MF. This replaces an inner kept_lines scan
+    # (previously O(N²) across all SEND records) with an O(N) lookup.
+    parsed: List[Optional[Tuple[int, int]]] = [None] * len(lines)
+    first_surviving_idx: dict = {}
+    for i, line in enumerate(lines):
+        if len(line.rstrip('\n')) < 75:
+            continue
+        _, mf, mt = parse_endf_id(line)
+        if mf is None or mt is None:
+            continue
+        parsed[i] = (mf, mt)
+        if mf > 0 and mt > 0:
+            is_protected = (mf == 1 and mt == 451)
+            will_survive = is_protected or not (
+                mf in remove_whole_mf or (mf, mt) in remove_specific
+            )
+            if will_survive and mf not in first_surviving_idx:
+                first_surviving_idx[mf] = i
+
     kept_lines = []
     sections_removed = set()
 
-    for line in lines:
-        if len(line.rstrip('\n')) < 75:
+    for i, line in enumerate(lines):
+        p = parsed[i]
+        if p is None:
             kept_lines.append(line)
             continue
-
-        mat, mf, mt = parse_endf_id(line)
-        if mf is None or mt is None:
-            kept_lines.append(line)
-            continue
+        mf, mt = p
 
         # Protect MF1/MT451
         if mf == 1 and mt == 451:
             kept_lines.append(line)
             continue
 
-        # Check if this line belongs to a section being removed
         should_remove = False
 
         if mf > 0 and mt > 0:
@@ -73,33 +90,14 @@ def remove_sections(
                 should_remove = True
                 sections_removed.add((mf, mt))
         elif mf > 0 and mt == 0:
-            # SEND line — remove if its MF is being fully removed,
-            # or if no data lines remain for this MF
+            # SEND line — drop if its MF is being fully removed, or if
+            # no surviving data line for this MF appears before it
+            # (matches the original kept_lines-scan semantics).
             if mf in remove_whole_mf:
                 should_remove = True
             else:
-                # Check if ALL mt sections of this mf were removed
-                # We need to check if any data line for this mf still exists in kept_lines
-                has_remaining = False
-                for prev_line in kept_lines:
-                    if len(prev_line.rstrip('\n')) < 75:
-                        continue
-                    pm, pmf, pmt = parse_endf_id(prev_line)
-                    if pmf == mf and pmt is not None and pmt > 0:
-                        if pmf != 1 or pmt != 451:
-                            # Check it wasn't one we're removing
-                            if (pmf, pmt) not in remove_specific:
-                                has_remaining = True
-                                break
-                            elif (pmf, pmt) in remove_specific:
-                                continue
-                            else:
-                                has_remaining = True
-                                break
-                        else:
-                            has_remaining = True
-                            break
-                if not has_remaining:
+                earliest = first_surviving_idx.get(mf)
+                if earliest is None or earliest >= i:
                     should_remove = True
 
         if not should_remove:
