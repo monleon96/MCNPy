@@ -143,6 +143,13 @@ def _verify_sample_covariance(
         _out(f"  Sample quality assessment: {quality}")
         if n_samples < 1000:
             _out(f"  Note: Quality improves with more samples (current: {n_samples})")
+        if n_samples <= n_params:
+            _out(
+                f"  Note: n_samples ({n_samples}) <= n_parameters ({n_params}); "
+                f"empirical covariance is rank-deficient (rank <= {n_samples - 1}). "
+                f"Frobenius error reflects this estimator limit, not a sampling defect — "
+                f"uncertainty propagation from the perturbed files is unaffected."
+            )
         _out(separator)
     
     return metrics

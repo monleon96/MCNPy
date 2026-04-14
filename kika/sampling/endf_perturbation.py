@@ -25,15 +25,16 @@ from kika.endf.classes.mf import MF
 from kika._utils import zaid_to_symbol, temperature_to_suffix
 from kika.njoy.run_njoy import run_njoy
 from kika.endf.read_endf import read_endf
-from kika.ace.xsdir import create_xsdir_files_for_ace
+from kika.ace.xsdir import create_xsdir_files_for_ace, _rewrite_xsdir_for_zaids
 
 
 # Reuse the DualLogger and utilities from sampling.utils
 from kika.sampling.utils import (
     _format_energy_group_name,
-    DualLogger, 
+    DualLogger,
     _get_logger,
-    _set_logger
+    _set_logger,
+    normalize_mt_list,
 )
 
 # Import NJOY runner for ACE generation
@@ -510,7 +511,7 @@ def load_mf34_covariance(path: str) -> Optional[LegendreCovariance]:
 
 def perturb_ENDF_files(
     endf_files: Union[str, List[str]],
-    mt_list: List[int],
+    mt_list: Union[List[int], List[List[int]]],
     legendre_coeffs: List[int],
     num_samples: int,
     mf34_cov_files: Optional[Union[str, List[str]]] = None,
@@ -530,6 +531,7 @@ def perturb_ENDF_files(
     njoy_version: str = "NJOY 2016.78",
     xsdir_file: Optional[str] = None,
     energy_ranges: Optional[List[Tuple[float, float]]] = None,
+    only_xsdir: bool = False,
 ):
     """
     Perturb ENDF nuclear data files using MF34 angular covariance matrices.
@@ -542,8 +544,10 @@ def perturb_ENDF_files(
     ----------
     endf_files : Union[str, List[str]]
         Path(s) to ENDF file(s) to be perturbed
-    mt_list : List[int]
-        List of MT reaction numbers to perturb. Empty list means all available MTs
+    mt_list : List[int] or List[List[int]]
+        MT reactions to perturb. Either a flat list (applied to every ENDF file)
+        or a list-of-lists with one entry per ENDF file. An empty inner list
+        means "perturb all available MTs" for that file.
     legendre_coeffs : List[int]
         List of Legendre coefficient indices to perturb (e.g., [0, 1, 2])
     num_samples : int
@@ -622,6 +626,33 @@ def perturb_ENDF_files(
     _logger.info(f"[INFO] [ENDF] Output directory: {os.path.abspath(output_dir)}", console=True)
     if generate_ace:
         _logger.info("[INFO] [ENDF] ACE generation enabled", console=True)
+
+    if only_xsdir:
+        if dry_run:
+            raise ValueError("only_xsdir and dry_run cannot both be True")
+        _logger.info(
+            "[INFO] [ENDF] only_xsdir=True — skipping ENDF perturbation and NJOY; "
+            "rewrapping xsdir entries for the requested isotopes only.",
+            console=True,
+        )
+        if isinstance(endf_files, str):
+            endf_files_list = [endf_files]
+        else:
+            endf_files_list = list(endf_files)
+        zaids = []
+        for ef in endf_files_list:
+            try:
+                zaids.append(read_endf(ef).zaid)
+            except Exception as e:
+                _logger.error(f"  [ERROR] [ENDF] Could not read zaid from {ef}: {e}")
+        count = _rewrite_xsdir_for_zaids(
+            zaids=zaids,
+            output_dir=output_dir,
+            xsdir_file=xsdir_file,
+            logger=_logger,
+        )
+        _logger.info(f"[INFO] [ENDF] only_xsdir complete: {count} file(s) modified", console=True)
+        return
     
     # Validate NJOY parameters if ACE generation is requested
     if generate_ace:
@@ -670,7 +701,16 @@ def perturb_ENDF_files(
         for i, f in enumerate(mf34_cov_files):
             _logger.info(f"    [{i+1}] {f}")
 
-    _logger.info(f"  MT_REACTIONS = {mt_list}")
+    # Normalize MT input to a per-file list-of-lists (broadcasts a flat list).
+    mt_lists = normalize_mt_list(mt_list, len(endf_files), unit_label="ENDF files")
+    unique_mt_lists = {tuple(sub) for sub in mt_lists}
+    if len(unique_mt_lists) <= 1:
+        _logger.info(f"  MT_REACTIONS = {mt_lists[0] if mt_lists[0] else 'All available'}")
+    else:
+        _logger.info("  MT_REACTIONS = per-file (see below)")
+        for endf_path, mts in zip(endf_files, mt_lists):
+            display = mts if mts else "All available"
+            _logger.info(f"    - {os.path.basename(endf_path)}: {display}")
     _logger.info(f"  LEGENDRE_COEFFS = {legendre_coeffs}")
     _logger.info(f"  NUM_SAMPLES = {num_samples}")
     _logger.info(f"  SAMPLING_SPACE = {space}")
@@ -712,6 +752,8 @@ def perturb_ENDF_files(
     total_warnings_count = 0
 
     for i, endf_file in enumerate(endf_files):
+        # Pick the MT list for this specific ENDF file (per-file or broadcast).
+        mt_list = mt_lists[i]
         step_num = i + 1
         step_t0 = time.time()
         _logger.info(f"#-- STEP {step_num}: Process {os.path.basename(endf_file)} ({step_num}/{len(endf_files)}) ------------------------------------------------")

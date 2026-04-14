@@ -1690,6 +1690,16 @@ def precompute_overlap_weights(
     return overlap_weights
 
 
+# -- Worker-shared state for Pool initializer (avoids re-pickling per sample) --
+_kw_shared: Optional[dict] = None
+
+
+def _init_kw_worker(shared: dict) -> None:
+    """Pool initializer: store shared data in module-level global."""
+    global _kw_shared
+    _kw_shared = shared
+
+
 def _run_one_kw_sample(args_tuple):
     """Single kernel-weighted multi-bin MC sample (top-level for Pool.map).
 
@@ -1701,30 +1711,60 @@ def _run_one_kw_sample(args_tuple):
 
     The SAME perturbed dataset is used for ALL bins it contributes to,
     creating cross-bin correlations.
+
+    Accepts either:
+      - a single int (sample index) when shared data was set via _init_kw_worker
+      - a full args tuple (legacy path, sequential fallback)
     """
-    (
-        s_idx,
-        overlap_weights,
-        energy_bins_data,
-        sigma_norm,
-        norm_dist,
-        max_degree,
-        ridge_lambda,
-        base_seed,
-        use_band_discrepancy,
-        min_points_per_band,
-        max_band_scale,
-        freeze_c0,
-        max_sample_order,
-        apply_positivity_projection,
-        positivity_check_points,
-        nominal_coeffs_by_bin,
-        frozen_degrees_by_bin,
-        max_experiment_weight_fraction,
-        min_relative_uncertainty,
-        tau_info_by_bin,
-        mc_order_cap_by_bin,
-    ) = args_tuple
+    if isinstance(args_tuple, int):
+        # Fast path: shared data lives in _kw_shared (set by Pool initializer)
+        s_idx = args_tuple
+        sh = _kw_shared
+        overlap_weights = sh['overlap_weights']
+        energy_bins_data = sh['energy_bins_data']
+        sigma_norm = sh['sigma_norm']
+        norm_dist = sh['norm_dist']
+        max_degree = sh['max_degree']
+        ridge_lambda = sh['ridge_lambda']
+        base_seed = sh['base_seed']
+        use_band_discrepancy = sh['use_band_discrepancy']
+        min_points_per_band = sh['min_points_per_band']
+        max_band_scale = sh['max_band_scale']
+        freeze_c0 = sh['freeze_c0']
+        max_sample_order = sh['max_sample_order']
+        apply_positivity_projection = sh['apply_positivity_projection']
+        positivity_check_points = sh['positivity_check_points']
+        nominal_coeffs_by_bin = sh['nominal_coeffs_by_bin']
+        frozen_degrees_by_bin = sh['frozen_degrees_by_bin']
+        max_experiment_weight_fraction = sh['max_experiment_weight_fraction']
+        min_relative_uncertainty = sh['min_relative_uncertainty']
+        tau_info_by_bin = sh['tau_info_by_bin']
+        mc_order_cap_by_bin = sh['mc_order_cap_by_bin']
+    else:
+        # Legacy path: full args tuple (sequential mode or old callers)
+        (
+            s_idx,
+            overlap_weights,
+            energy_bins_data,
+            sigma_norm,
+            norm_dist,
+            max_degree,
+            ridge_lambda,
+            base_seed,
+            use_band_discrepancy,
+            min_points_per_band,
+            max_band_scale,
+            freeze_c0,
+            max_sample_order,
+            apply_positivity_projection,
+            positivity_check_points,
+            nominal_coeffs_by_bin,
+            frozen_degrees_by_bin,
+            max_experiment_weight_fraction,
+            min_relative_uncertainty,
+            tau_info_by_bin,
+            mc_order_cap_by_bin,
+        ) = args_tuple
 
     rng = np.random.default_rng(base_seed + s_idx)
 
@@ -2064,42 +2104,41 @@ def run_mc_with_kernel_weights(
             if hasattr(nr, 'mc_order_cap') and nr.mc_order_cap is not None:
                 mc_order_cap_by_bin[nr.energy_index] = nr.mc_order_cap
 
-    args_list = [
-        (
-            s_idx,
-            overlap_weights,
-            energy_bins_data,
-            sigma_norm,
-            norm_dist,
-            max_degree,
-            ridge_lambda,
-            base_seed,
-            use_band_discrepancy,
-            min_points_per_band,
-            max_band_scale,
-            freeze_c0,
-            max_sample_order,
-            apply_positivity_projection,
-            positivity_check_points,
-            nominal_coeffs_by_bin,
-            frozen_degrees_by_bin,
-            max_experiment_weight_fraction,
-            min_relative_uncertainty,
-            tau_info_by_bin,
-            mc_order_cap_by_bin,
-        )
-        for s_idx in range(n_samples)
-    ]
+    # Shared data dict — pickled once per worker (not once per sample)
+    shared_data = {
+        'overlap_weights': overlap_weights,
+        'energy_bins_data': energy_bins_data,
+        'sigma_norm': sigma_norm,
+        'norm_dist': norm_dist,
+        'max_degree': max_degree,
+        'ridge_lambda': ridge_lambda,
+        'base_seed': base_seed,
+        'use_band_discrepancy': use_band_discrepancy,
+        'min_points_per_band': min_points_per_band,
+        'max_band_scale': max_band_scale,
+        'freeze_c0': freeze_c0,
+        'max_sample_order': max_sample_order,
+        'apply_positivity_projection': apply_positivity_projection,
+        'positivity_check_points': positivity_check_points,
+        'nominal_coeffs_by_bin': nominal_coeffs_by_bin,
+        'frozen_degrees_by_bin': frozen_degrees_by_bin,
+        'max_experiment_weight_fraction': max_experiment_weight_fraction,
+        'min_relative_uncertainty': min_relative_uncertainty,
+        'tau_info_by_bin': tau_info_by_bin,
+        'mc_order_cap_by_bin': mc_order_cap_by_bin,
+    }
 
     if n_workers > 1:
         if logger:
             logger.info(f"  Running kernel-weight MC with {n_workers} workers, {n_samples} samples")
-        with Pool(n_workers) as pool:
-            results = pool.map(_run_one_kw_sample, args_list)
+        with Pool(n_workers, initializer=_init_kw_worker, initargs=(shared_data,)) as pool:
+            results = pool.map(_run_one_kw_sample, range(n_samples))
     else:
         if logger:
             logger.info(f"  Running kernel-weight MC sequentially, {n_samples} samples")
-        results = [_run_one_kw_sample(a) for a in args_list]
+        # Sequential: set shared state directly, pass int indices
+        _init_kw_worker(shared_data)
+        results = [_run_one_kw_sample(s_idx) for s_idx in range(n_samples)]
 
     # Assemble into expected format
     all_samples: Dict[int, Dict[int, np.ndarray]] = {s_idx: {} for s_idx in range(n_samples)}
@@ -3302,18 +3341,18 @@ def _extract_correlation_matrix(cov: np.ndarray) -> np.ndarray:
 
 def inject_within_bin_correlations(
     corr_cross: np.ndarray,
-    cov_perbin: np.ndarray,
+    corr_perbin: np.ndarray,
     n_energies: int,
     block_size: int,
 ) -> np.ndarray:
-    """Replace within-bin diagonal blocks of a correlation matrix with Pass-1 values.
+    """Replace within-bin diagonal blocks of a correlation matrix with per-bin values.
 
     Parameters
     ----------
     corr_cross : np.ndarray
         Correlation matrix whose off-diagonal (cross-bin) blocks are kept.
-    cov_perbin : np.ndarray
-        Full covariance matrix from the per-bin MC pass, used to extract
+    corr_perbin : np.ndarray
+        Correlation matrix from the per-bin MC pass, used to inject
         within-bin cross-order correlations.
     n_energies : int
         Number of energy bins.
@@ -3323,10 +3362,9 @@ def inject_within_bin_correlations(
     Returns
     -------
     np.ndarray
-        Correlation matrix with within-bin blocks from Pass 1 and
+        Correlation matrix with within-bin blocks from *corr_perbin* and
         cross-bin blocks from *corr_cross*.
     """
-    corr_perbin = _extract_correlation_matrix(cov_perbin)
     corr_out = corr_cross.copy()
     for ie in range(n_energies):
         s = ie * block_size
@@ -3410,6 +3448,7 @@ def build_gaussian_correlation_covariance(
     max_order: int,
     logger=None,
     valid_mask: Optional[np.ndarray] = None,
+    corr_stochastic_in: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Build a full relative covariance matrix with Gaussian-decay energy correlations.
@@ -3435,6 +3474,11 @@ def build_gaussian_correlation_covariance(
         Number of Legendre orders per energy bin.
     logger : optional
         Logger for diagnostics.
+    corr_stochastic_in : np.ndarray, optional
+        Pre-computed correlation matrix from absolute covariance.  When
+        provided, this is used instead of extracting correlation from
+        *cov_stochastic* (which is relative and can flip signs for
+        parameters with negative means).
 
     Returns
     -------
@@ -3464,11 +3508,14 @@ def build_gaussian_correlation_covariance(
         logger.info(f"  {n_zero_var}/{n} parameters have near-zero stochastic variance")
 
     # 2. Extract stochastic correlation matrix
-    std_safe = std_total.copy()
-    std_safe[std_safe < 1e-30] = 1.0
-    corr_stochastic = cov_stochastic / np.outer(std_safe, std_safe)
-    np.fill_diagonal(corr_stochastic, 1.0)
-    corr_stochastic = np.clip(corr_stochastic, -1.0, 1.0)
+    if corr_stochastic_in is not None:
+        corr_stochastic = corr_stochastic_in
+    else:
+        std_safe = std_total.copy()
+        std_safe[std_safe < 1e-30] = 1.0
+        corr_stochastic = cov_stochastic / np.outer(std_safe, std_safe)
+        np.fill_diagonal(corr_stochastic, 1.0)
+        corr_stochastic = np.clip(corr_stochastic, -1.0, 1.0)
 
     # 3. Build energy and sigma_E arrays for each parameter
     param_energies = np.zeros(n)

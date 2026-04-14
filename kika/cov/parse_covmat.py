@@ -1654,7 +1654,7 @@ def read_covfil(file_path: str, energy_unit: str = 'eV') -> Union[CrossSectionCo
         covmat = CrossSectionCovariance(num_groups=ngrp, energy_unit=energy_unit)
         covmat.energy_grid = energy_grid
         for iso_row, mt_row, iso_col, mt_col, matrix in blocks:
-            covmat.add_matrix(iso_row, mt_row, iso_col, mt_col, matrix)
+            covmat.add_matrix(iso_row, mt_row, iso_col, mt_col, matrix, is_relative=True)
         covmat.cross_sections.update(xs_dict)
         if covmat.num_matrices == 0:
             raise EmptyParsingError(

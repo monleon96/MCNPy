@@ -243,6 +243,58 @@ class MF33MT(MT):
         return matrix, row_energies, col_energies
 
     @staticmethod
+    def _group_average_xs(
+        mf3_section: object,
+        energy_grid: List[float],
+        n_samples: int = 64,
+    ) -> np.ndarray:
+        """Compute lethargy-weighted group-averaged cross sections.
+
+        For each energy bin [E_i, E_{i+1}], evaluates:
+
+            σ̄ = ∫ σ(E) / E dE  /  ∫ 1/E dE
+
+        using Gauss-Legendre quadrature in log-E space for accuracy.
+
+        Parameters
+        ----------
+        mf3_section : MF3MT
+            Section with ``get_cross_section(energy)`` method.
+        energy_grid : list of float
+            Energy bin boundaries (N+1 points → N bins).
+        n_samples : int
+            Number of quadrature points per bin (default 64).
+
+        Returns
+        -------
+        np.ndarray of shape (N,)
+            Group-averaged cross sections (barns).
+        """
+        grid = np.asarray(energy_grid, dtype=float)
+        n_bins = len(grid) - 1
+        result = np.zeros(n_bins)
+
+        # Gauss-Legendre nodes and weights on [-1, 1]
+        nodes, weights = np.polynomial.legendre.leggauss(n_samples)
+
+        for g in range(n_bins):
+            ln_lo = np.log(grid[g])
+            ln_hi = np.log(grid[g + 1])
+            if ln_hi <= ln_lo:
+                continue
+            half_width = 0.5 * (ln_hi - ln_lo)
+            mid = 0.5 * (ln_lo + ln_hi)
+            # Map nodes to [ln_lo, ln_hi]
+            ln_e = mid + half_width * nodes
+            e_pts = np.exp(ln_e)
+            xs_pts = np.asarray(
+                mf3_section.get_cross_section(e_pts), dtype=float
+            )
+            # ∫ σ(E) dln(E) / ∫ dln(E) = weighted average over quadrature
+            result[g] = np.dot(weights, xs_pts) / np.sum(weights)
+        return result
+
+    @staticmethod
     def _project_matrix_piecewise_constant(
         component_matrix: np.ndarray,
         native_row_grid: List[float],
@@ -390,11 +442,11 @@ class MF33MT(MT):
         mt_i: int,
         mt_j: int,
         sibling_sections: Dict[int, 'MF33MT'],
-    ) -> Optional[Tuple[np.ndarray, List[float]]]:
+    ) -> Optional[Tuple[np.ndarray, List[float], bool]]:
         """Get the diagonal of the cross-MT covariance Cov(MT_i, MT_j).
 
         Searches subsections of MT_i for mt1=MT_j, then MT_j for mt1=MT_i.
-        Returns (diagonal, energy_grid) or None if not found.
+        Returns (diagonal, energy_grid, is_relative) or None if not found.
         """
         # Search MT_i's section for a subsection referencing MT_j
         for src_mt, tgt_mt in [(mt_i, mt_j), (mt_j, mt_i)]:
@@ -409,8 +461,8 @@ class MF33MT(MT):
                 mt_label=f"MT{src_mt}→MT{tgt_mt}",
             )
             if result is not None:
-                diag, grid, _is_rel = result
-                return diag, grid
+                diag, grid, is_rel = result
+                return diag, grid, is_rel
 
         return None
 
@@ -419,13 +471,27 @@ class MF33MT(MT):
         sibling_sections: Dict[int, 'MF33MT'],
         energy_unit: str = 'eV',
         _resolving: Optional[Set[int]] = None,
+        mf3_sections: Optional[Dict[int, object]] = None,
     ) -> Optional['CrossSectionCovariance']:
         """Resolve NC LTY=0 (derived redundant) covariance via the sum rule.
 
-        For a derived cross section σ_MT = Σ c_i × σ_{MTi}, the covariance is:
-            Cov(MT, MT) = Σ_i Σ_j c_i × c_j × Cov(MTi, MTj)
+        The ENDF sum rule is defined in absolute covariance space:
 
-        This method computes the full propagation including cross-MT terms.
+            σ_MT = Σ c_i × σ_{MTi}
+            Cov_abs(σ_MT, σ_MT) = Σ_i Σ_j c_i c_j Cov_abs(σ_i, σ_j)
+
+        When contributing MTs store *relative* covariances (LB=1,2,3,4,5,6),
+        these must be converted to absolute before summation:
+
+            Cov_abs(σ_i, σ_j) = Cov_rel(σ_i, σ_j) × σ_i × σ_j
+
+        The result is converted back to relative variance:
+
+            Var_rel(σ_MT) = Var_abs(σ_MT) / σ_MT²
+
+        This requires pointwise cross-section data from MF3.  If ``mf3_sections``
+        is not provided, the method falls back to the (incorrect) direct sum of
+        relative covariances and logs a warning.
 
         Parameters
         ----------
@@ -435,6 +501,9 @@ class MF33MT(MT):
             Energy unit ('eV' or 'MeV').
         _resolving : set of int, optional
             Set of MT numbers currently being resolved (recursion guard).
+        mf3_sections : dict, optional
+            Map of MT number → MF3MT section (pointwise cross sections).
+            Required for correct relative-to-absolute conversion.
 
         Returns
         -------
@@ -477,8 +546,8 @@ class MF33MT(MT):
         resolving = (_resolving or set()) | {self.number}
 
         # Step 1: Get self-covariance diagonals for each contributing MT
-        # diag_by_mt: {mt: (diagonal_variance, energy_grid)}
-        diag_by_mt: Dict[int, Tuple[np.ndarray, List[float]]] = {}
+        # diag_by_mt: {mt: (diagonal_variance, energy_grid, is_relative)}
+        diag_by_mt: Dict[int, Tuple[np.ndarray, List[float], bool]] = {}
 
         for mt_i in mti_list:
             if mt_i in resolving:
@@ -496,6 +565,7 @@ class MF33MT(MT):
                     energy_unit=energy_unit,
                     sibling_sections=sibling_sections,
                     _resolving=resolving,
+                    mf3_sections=mf3_sections,
                 )
             except Exception as e:
                 logger.warning(f"MT{self.number}: failed to resolve MT{mt_i}: {e}")
@@ -507,8 +577,9 @@ class MF33MT(MT):
                         and xs_cov_i.reaction_cols[idx] == mt_i):
                     mat = xs_cov_i.matrices[idx]
                     grid = xs_cov_i.energy_grids[idx] if xs_cov_i.energy_grids else None
+                    is_rel = xs_cov_i.is_relative[idx] if xs_cov_i.is_relative else True
                     if grid is not None:
-                        diag_by_mt[mt_i] = (np.diag(mat), grid)
+                        diag_by_mt[mt_i] = (np.diag(mat), grid, is_rel)
                     break
 
         if not diag_by_mt:
@@ -517,7 +588,7 @@ class MF33MT(MT):
 
         # Step 2: Build union energy grid from all contributing grids
         all_energies: Set[float] = set()
-        for diag, grid in diag_by_mt.values():
+        for diag, grid, _ in diag_by_mt.values():
             all_energies.update(grid)
         union_grid = sorted(all_energies)
 
@@ -528,7 +599,9 @@ class MF33MT(MT):
 
         # Step 3: Project all self-covariance diagonals onto union grid
         proj_diag: Dict[int, np.ndarray] = {}
-        for mt_i, (diag, grid) in diag_by_mt.items():
+        is_rel_by_mt: Dict[int, bool] = {}
+        for mt_i, (diag, grid, is_rel) in diag_by_mt.items():
+            is_rel_by_mt[mt_i] = is_rel
             if grid == union_grid:
                 proj_diag[mt_i] = diag
             else:
@@ -536,50 +609,158 @@ class MF33MT(MT):
                     diag, grid, union_grid
                 )
 
-        # Step 4: Compute derived variance using full propagation formula
-        # Var(MT_k)_g = Σ_i Σ_j c_i * c_j * Cov(MTi, MTj)_g
-        derived_var = np.zeros(union_m)
+        # Step 4: Build a fine output grid and evaluate the sum rule
+        #         pointwise.
+        #
+        # Var_rel is piecewise-constant on the coarse MF33 grid, but σ(E)
+        # varies continuously.  We subdivide wide coarse bins with log-
+        # spaced points so that σ(E) is sampled at sufficient resolution,
+        # then evaluate pointwise:
+        #
+        #   Var_abs(E) = Σ_i c_i² × Var_rel_i(coarse_bin) × σ_i(E)²
+        #   Var_rel_derived(E) = Var_abs(E) / σ_derived(E)²
+        #
+        have_xs = mf3_sections is not None
+        any_relative = any(is_rel_by_mt.get(mt, True) for mt in mti_list
+                          if mt in proj_diag)
+        if any_relative and not have_xs:
+            logger.warning(
+                f"MT{self.number}: NC LTY=0 sum rule requires MF3 cross sections "
+                f"to convert relative covariances to absolute. Pass mf3_sections "
+                f"to to_xs_covmat() for correct results. Falling back to direct "
+                f"summation of relative covariances (WILL OVERESTIMATE uncertainty "
+                f"for reactions with small cross sections)."
+            )
+
+        # Step 4a: Subdivide coarse bins into fine bins (~10 per decade)
+        if have_xs:
+            pts_per_decade = 10
+            fine_boundaries: List[float] = []
+            coarse_idx_list: List[int] = []  # maps fine bin → coarse bin
+            for g in range(union_m):
+                e_lo, e_hi = union_grid[g], union_grid[g + 1]
+                n_decades = np.log10(e_hi / e_lo)
+                n_sub = max(1, int(np.ceil(n_decades * pts_per_decade)))
+                sub = np.geomspace(e_lo, e_hi, n_sub + 1)
+                if not fine_boundaries:
+                    fine_boundaries.append(float(sub[0]))
+                for s in range(n_sub):
+                    fine_boundaries.append(float(sub[s + 1]))
+                    coarse_idx_list.append(g)
+
+            fine_grid = np.array(fine_boundaries)
+            fine_m = len(fine_grid) - 1
+            coarse_idx = np.array(coarse_idx_list, dtype=int)
+
+            # Replicate coarse Var_rel onto fine grid via fancy indexing
+            fine_diag: Dict[int, np.ndarray] = {}
+            for mt_i, coarse_var in proj_diag.items():
+                fine_diag[mt_i] = coarse_var[coarse_idx]
+        else:
+            fine_grid = np.array(union_grid)
+            fine_m = union_m
+            fine_diag = proj_diag
+            coarse_idx = None
+
+        # Step 4b: Evaluate pointwise cross sections at fine midpoints
+        xs_fine: Dict[int, np.ndarray] = {}
+        if have_xs:
+            midpoints = np.sqrt(fine_grid[:-1] * fine_grid[1:])
+            for mt_i in mti_list:
+                if mt_i in mf3_sections:
+                    xs_fine[mt_i] = np.asarray(
+                        mf3_sections[mt_i].get_cross_section(midpoints),
+                        dtype=float,
+                    )
+
+            # Cross section for the derived MT
+            if self.number in mf3_sections:
+                xs_derived = np.asarray(
+                    mf3_sections[self.number].get_cross_section(midpoints),
+                    dtype=float,
+                )
+            else:
+                xs_derived = np.zeros(fine_m)
+                for ii, mt_i in enumerate(mti_list):
+                    if mt_i in xs_fine:
+                        xs_derived += ci_list[ii] * xs_fine[mt_i]
+
+        # Step 4c: Pre-compute cross-MT covariance diagonals (cache to
+        #          avoid redundant lookups in the O(n²) loop)
+        cross_data: Dict[Tuple[int, int], Tuple[np.ndarray, bool]] = {}
+        for ii in range(nci):
+            mt_i = mti_list[ii]
+            for jj in range(ii + 1, nci):
+                mt_j = mti_list[jj]
+                cross = self._get_cross_mt_diagonal(
+                    mt_i, mt_j, sibling_sections
+                )
+                if cross is not None:
+                    cross_diag, cross_grid, cross_is_rel = cross
+                    if cross_grid == union_grid:
+                        coarse_cross = cross_diag
+                    else:
+                        coarse_cross = self._project_diagonal_piecewise_constant(
+                            cross_diag, cross_grid, union_grid
+                        )
+                    # Replicate onto fine grid
+                    if coarse_idx is not None:
+                        fine_cross = coarse_cross[coarse_idx]
+                    else:
+                        fine_cross = coarse_cross
+                    cross_data[(mt_i, mt_j)] = (fine_cross, cross_is_rel)
+
+        # Step 5: Compute derived variance in ABSOLUTE space (fine grid)
+        derived_var_abs = np.zeros(fine_m)
 
         for ii, mt_i in enumerate(mti_list):
             c_i = ci_list[ii]
 
-            # Diagonal term: c_i^2 * Var(MT_i)
-            if mt_i in proj_diag:
-                derived_var += c_i * c_i * proj_diag[mt_i]
+            # Diagonal term: c_i² × Var(MT_i)
+            if mt_i in fine_diag:
+                var_i = fine_diag[mt_i]
+                if is_rel_by_mt.get(mt_i, True) and mt_i in xs_fine:
+                    var_i = var_i * xs_fine[mt_i] ** 2
+                derived_var_abs += c_i * c_i * var_i
 
-            # Cross-MT terms: 2 * c_i * c_j * Cov(MTi, MTj) for j > i
+            # Cross-MT terms: 2 × c_i × c_j × Cov(MTi, MTj)  for j > i
             for jj in range(ii + 1, nci):
                 mt_j = mti_list[jj]
                 c_j = ci_list[jj]
 
-                cross = self._get_cross_mt_diagonal(mt_i, mt_j, sibling_sections)
-                if cross is not None:
-                    cross_diag, cross_grid = cross
-                    if cross_grid == union_grid:
-                        proj_cross = cross_diag
-                    else:
-                        proj_cross = self._project_diagonal_piecewise_constant(
-                            cross_diag, cross_grid, union_grid
-                        )
-                    derived_var += 2.0 * c_i * c_j * proj_cross
+                pair = cross_data.get((mt_i, mt_j))
+                if pair is not None:
+                    fine_cross, cross_is_rel = pair
+                    if cross_is_rel and mt_i in xs_fine and mt_j in xs_fine:
+                        fine_cross = fine_cross * xs_fine[mt_i] * xs_fine[mt_j]
+                    derived_var_abs += 2.0 * c_i * c_j * fine_cross
 
-        # Clamp any negative variance to zero (numerical noise)
-        derived_var = np.maximum(derived_var, 0.0)
+        # Step 6: Convert back to relative variance
+        derived_var = np.maximum(derived_var_abs, 0.0)
+        if have_xs:
+            with np.errstate(divide='ignore', invalid='ignore'):
+                derived_var = np.where(
+                    xs_derived > 0,
+                    derived_var / xs_derived ** 2,
+                    0.0,
+                )
 
-        # Build result as a diagonal matrix (only diagonal is meaningful)
+        # Build result on the fine grid
+        output_grid = list(fine_grid)
         derived_matrix = np.diag(derived_var)
         isotope = int(self._za)
         result = CrossSectionCovariance(energy_unit=energy_unit)
         result.add_matrix(
             isotope, self.number, isotope, self.number,
             derived_matrix,
-            energy_grid=union_grid,
+            energy_grid=output_grid,
             is_relative=True,  # NC LTY=0 derived covariance is always relative
         )
 
         logger.info(
-            f"MT{self.number}: NC LTY=0 resolved — {union_m} groups, "
-            f"sqrt(diag) range [{np.sqrt(derived_var.min()):.4g}, {np.sqrt(derived_var.max()):.4g}]"
+            f"MT{self.number}: NC LTY=0 resolved — {fine_m} bins "
+            f"(from {union_m} coarse), sqrt(diag) range "
+            f"[{np.sqrt(derived_var.min()):.4g}, {np.sqrt(derived_var.max()):.4g}]"
         )
         return result
 
@@ -592,6 +773,7 @@ class MF33MT(MT):
         energy_unit: str = 'eV',
         sibling_sections: Optional[Dict[int, 'MF33MT']] = None,
         _resolving: Optional[Set[int]] = None,
+        mf3_sections: Optional[Dict[int, object]] = None,
     ) -> 'CrossSectionCovariance':
         """
         Convert MF33 data to a CrossSectionCovariance object.
@@ -610,6 +792,10 @@ class MF33MT(MT):
             Required for NC LTY=0 resolution. If None, NC records are skipped.
         _resolving : set of int, optional
             MT numbers currently being resolved (recursion guard, internal use).
+        mf3_sections : dict, optional
+            Map of MT number → MF3MT (pointwise cross sections from File 3).
+            Required for correct NC LTY=0 resolution when contributing MTs
+            store relative covariances.
 
         Returns
         -------
@@ -632,7 +818,8 @@ class MF33MT(MT):
                     if nc.lty == 0 and sibling_sections is not None:
                         resolving = (_resolving or set()) | {self.number}
                         nc_result = self.resolve_nc_lty0(
-                            sibling_sections, energy_unit, resolving
+                            sibling_sections, energy_unit, resolving,
+                            mf3_sections=mf3_sections,
                         )
                         if nc_result is not None:
                             for idx in range(len(nc_result.matrices)):

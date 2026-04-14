@@ -9,7 +9,7 @@ import logging
 import os
 import numpy as np
 import pandas as pd
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from kika.cov.parse_covmat import read_coverx, read_covfil, read_boxer, read_scale_covmat, read_njoy_covmat
 from kika._utils import zaid_to_symbol
@@ -352,3 +352,61 @@ def _finalize_master_perturbation_matrix(matrix_dir: str, verbose: bool = True) 
             logger.warning(f"[MATRIX] [FINALIZE] Could not clean up temporary directory: {e}")
     
     return master_file
+
+def normalize_mt_list(
+    mt_list: Union[List[int], List[List[int]], None],
+    n_units: int,
+    unit_label: str = "files",
+) -> List[List[int]]:
+    """Normalize mt_list into a per-unit list-of-lists of length ``n_units``.
+
+    Accepts either a flat ``List[int]`` (broadcast to every unit) or a
+    ``List[List[int]]`` (one list per unit). An empty inner list means
+    "perturb every reaction available in the covariance" for that unit.
+
+    Parameters
+    ----------
+    mt_list : List[int] or List[List[int]] or None
+        The user-provided MT selection.
+    n_units : int
+        The number of ace/endf files (or ZAIDs) the run operates on.
+    unit_label : str, default "files"
+        Word used in error messages (e.g. "files", "ZAIDs").
+
+    Returns
+    -------
+    List[List[int]]
+        A list of length ``n_units``. Each inner list is a copy of the input.
+
+    Raises
+    ------
+    TypeError
+        If the input is neither a flat list of ints nor a list of lists of ints.
+    ValueError
+        If a nested list is provided whose length does not match ``n_units``.
+    """
+    if mt_list is None or len(mt_list) == 0:
+        return [[] for _ in range(n_units)]
+
+    if all(isinstance(x, int) for x in mt_list):
+        return [list(mt_list) for _ in range(n_units)]
+
+    if not all(isinstance(x, (list, tuple)) for x in mt_list):
+        raise TypeError(
+            "mt_list must be a flat List[int] or a List[List[int]]; "
+            f"got a mixed/unsupported structure: {mt_list!r}"
+        )
+
+    if len(mt_list) != n_units:
+        raise ValueError(
+            f"mt_list has {len(mt_list)} entries but {n_units} {unit_label} were provided; "
+            "they must match."
+        )
+
+    for i, sub in enumerate(mt_list):
+        if not all(isinstance(x, int) for x in sub):
+            raise TypeError(
+                f"mt_list[{i}] must contain only integers; got {sub!r}"
+            )
+
+    return [list(sub) for sub in mt_list]

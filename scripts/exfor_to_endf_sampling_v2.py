@@ -178,7 +178,7 @@ DF_METHOD = "hat"                                # Degrees of freedom: "hat" or 
 # Band-based discrepancy
 USE_BAND_DISCREPANCY = True                      # Use band-based uncertainty (vs global Birge)
 MIN_POINTS_PER_BAND = 5                          # Min points to estimate s_b per band
-MAX_BAND_SCALE_FACTOR = 3.0                      # Max multiplicative scale per band
+MAX_BAND_SCALE_FACTOR = 5.0                      # Max multiplicative scale per band
 TAU_SMOOTHING_WINDOW = 1                         # Moving median window for s_b(E) (1 = disabled)
 TAU_PRIOR_FLOOR = False                          # Apply tau prior floor from well-supported bins
 TAU_PRIOR_NEFF_THRESHOLD = 5.0                   # Min N_eff to count as "well-supported"
@@ -2486,21 +2486,24 @@ def run_exfor_to_endf_sampling_v2(
                     _valid_mask_kw[ie * max_degree + l] = True
 
             _snr_thr = near_zero_snr_threshold if regularize_near_zero else 0.0
-            cov_kw, _, _, _, _ = compute_covariance_from_samples(
+            cov_kw, corr_kw, _, _, _ = compute_covariance_from_samples(
                 all_samples=kw_samples, energy_indices=energy_indices_kw,
                 max_order=max_degree, valid_mask=_valid_mask_kw,
                 snr_threshold=_snr_thr, n_neighbors=near_zero_n_neighbors,
                 logger=_logger,
             )
-            cov_perbin, _, _, mc_mean_perbin, _ = compute_covariance_from_samples(
+            cov_perbin, corr_perbin, _, mc_mean_perbin, _ = compute_covariance_from_samples(
                 all_samples=all_samples_perbin, energy_indices=energy_indices_kw,
                 max_order=max_degree, valid_mask=_valid_mask_kw,
                 snr_threshold=_snr_thr, n_neighbors=near_zero_n_neighbors,
                 logger=_logger,
             )
 
-            # Extract correlation from KW, variance from per-bin
-            corr_kw = _extract_correlation_matrix(cov_kw)
+            # Use correlation from absolute covariance (returned by
+            # compute_covariance_from_samples), NOT re-extracted from relative
+            # covariance.  Extracting from relative cov flips the sign of
+            # off-diagonal entries when mean_i and mean_j have opposite signs
+            # (e.g. a_1 > 0 and a_2 < 0), corrupting cross-order correlations.
             std_perbin = np.sqrt(np.maximum(np.diag(cov_perbin), 0.0))
 
             if _is_hybrid:
@@ -2512,6 +2515,7 @@ def run_exfor_to_endf_sampling_v2(
                     max_order=max_degree,
                     logger=None,
                     valid_mask=_valid_mask_kw,
+                    corr_stochastic_in=corr_perbin,
                 )
                 corr_gauss = _extract_correlation_matrix(cov_gauss)
 
@@ -2590,7 +2594,7 @@ def run_exfor_to_endf_sampling_v2(
 
                 # Within-bin cross-order correlations from Pass 1
                 corr_hyb = inject_within_bin_correlations(
-                    corr_hyb, cov_perbin, len(energy_indices_kw), max_degree,
+                    corr_hyb, corr_perbin, len(energy_indices_kw), max_degree,
                 )
 
                 cov_combined = corr_hyb * np.outer(std_perbin, std_perbin)
@@ -2630,7 +2634,7 @@ def run_exfor_to_endf_sampling_v2(
             else:  # pure kernel_weight_mc
                 # Within-bin cross-order correlations from Pass 1
                 corr_kw = inject_within_bin_correlations(
-                    corr_kw, cov_perbin, len(energy_indices_kw), max_degree,
+                    corr_kw, corr_perbin, len(energy_indices_kw), max_degree,
                 )
                 cov_combined = corr_kw * np.outer(std_perbin, std_perbin)
 

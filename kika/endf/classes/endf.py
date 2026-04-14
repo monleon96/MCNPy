@@ -292,7 +292,37 @@ class ENDF:
         if 33 in self.files and mt in self.files[33].mt:
             try:
                 mf33_mt = self.files[33].mt[mt]
-                mf33_covmat = mf33_mt.to_xs_covmat()
+
+                # Build sibling and MF3 section maps for NC LTY=0 resolution
+                mf33_siblings = {
+                    int(k): v for k, v in self.files[33].sections.items()
+                    if int(k) != mt
+                } if hasattr(self.files[33], 'sections') else None
+
+                # Auto-reconstruct from MF2 if available and not yet done
+                if self._pendf is None and 2 in self.files and 3 in self.files:
+                    try:
+                        self.reconstruct_xs()
+                    except Exception:
+                        pass  # reconstruction optional; raw MF3 used as fallback
+
+                # Build cross-section map: start with raw MF3, then overlay
+                # reconstructed (PENDF) data for MTs that need resonance
+                # contributions (MT1, MT2, MT102, ...).
+                mf3_secs = None
+                if 3 in self.files and hasattr(self.files[3], 'sections'):
+                    mf3_secs = {int(k): v for k, v in
+                                self.files[3].sections.items()}
+                if self._pendf:
+                    if mf3_secs is None:
+                        mf3_secs = {}
+                    for k, v in self._pendf.items():
+                        mf3_secs[int(k)] = v
+
+                mf33_covmat = mf33_mt.to_xs_covmat(
+                    sibling_sections=mf33_siblings,
+                    mf3_sections=mf3_secs,
+                )
 
                 isotope_id = self.zaid if self.zaid is not None else int(mf33_mt._za)
 

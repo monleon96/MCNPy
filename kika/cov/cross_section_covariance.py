@@ -1131,16 +1131,33 @@ class CrossSectionCovariance:
                 f"Available pairs: {pairs}"
             )
         
-        # Get the diagonal of the covariance matrix (relative variances)
+        # Get the diagonal of the covariance matrix
         G = iso_covmat.num_groups
         full_cov = iso_covmat.covariance_matrix
-        diag = np.sqrt(np.diag(full_cov))  # Relative standard deviations
-        
+        diag = np.sqrt(np.maximum(np.diag(full_cov), 0.0))
+
         # Find the block index for this (zaid, mt) pair
         block_idx = pairs.index((zaid, mt))
-        
+
         # Extract the uncertainties for this reaction
         uncertainties = diag[block_idx * G : (block_idx + 1) * G]
+
+        # Determine if this block is relative or absolute
+        mat_is_relative = True  # default: assume relative
+        for mi, (ir, rr, ic, rc) in enumerate(zip(
+            iso_covmat.isotope_rows, iso_covmat.reaction_rows,
+            iso_covmat.isotope_cols, iso_covmat.reaction_cols)):
+            if ir == zaid and rr == mt and ic == zaid and rc == mt:
+                if mi < len(iso_covmat.is_relative):
+                    mat_is_relative = iso_covmat.is_relative[mi]
+                break
+
+        if not mat_is_relative and (zaid, mt) in self.cross_sections:
+            # Absolute covariance: divide by cross section to get relative
+            xs = np.asarray(self.cross_sections[(zaid, mt)], dtype=float)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                uncertainties = uncertainties / np.abs(xs)
+                uncertainties = np.nan_to_num(uncertainties, nan=0.0, posinf=0.0, neginf=0.0)
         
         # If specific energy requested, find the corresponding group
         if energy_mev is not None:
@@ -1703,8 +1720,21 @@ class CrossSectionCovariance:
 
                 diag_variance = np.diag(cov_matrix)[mt_rows]
 
-                # Prefer relative-to-cross-section percent if nominal data exists; otherwise fall back to sqrt(variance)*100
-                if (zaid, m) in self.cross_sections:
+                # Determine if the diagonal block for this (zaid, m) is relative
+                mat_is_relative = True  # default: assume relative
+                for mi, (ir, rr, ic, rc) in enumerate(zip(
+                    iso_cov.isotope_rows, iso_cov.reaction_rows,
+                    iso_cov.isotope_cols, iso_cov.reaction_cols)):
+                    if ir == zaid and rr == m and ic == zaid and rc == m:
+                        if mi < len(iso_cov.is_relative):
+                            mat_is_relative = iso_cov.is_relative[mi]
+                        break
+
+                if mat_is_relative:
+                    # Data is already relative variance -> sqrt * 100
+                    sigma_percent = np.sqrt(np.abs(diag_variance)) * 100.0
+                elif (zaid, m) in self.cross_sections:
+                    # Absolute variance -> divide by cross section to get relative
                     nominal_xs_full = np.asarray(self.cross_sections[(zaid, m)], dtype=float)
                     nominal_xs = nominal_xs_full[keep_mask] if nominal_xs_full.size == iso_cov.num_groups else nominal_xs_full
 
@@ -1712,6 +1742,7 @@ class CrossSectionCovariance:
                         sigma_percent = np.sqrt(np.abs(diag_variance)) / np.abs(nominal_xs) * 100.0
                         sigma_percent = np.nan_to_num(sigma_percent, nan=0.0, posinf=0.0, neginf=0.0)
                 else:
+                    # Absolute variance but no cross sections -- fall back to sqrt * 100
                     sigma_percent = np.sqrt(np.abs(diag_variance)) * 100.0
 
                 uncertainty_data[m] = sigma_percent

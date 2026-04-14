@@ -14,12 +14,13 @@ from kika.ace.parsers import read_ace
 from kika.ace.writers.write_ace import write_ace
 from kika._constants import MT_GROUPS
 from kika._utils import MeV_to_kelvin
-from kika.ace.xsdir import create_xsdir_files_for_ace
+from kika.ace.xsdir import create_xsdir_files_for_ace, _rewrite_xsdir_for_zaids, _read_ace_zaid
 from kika.sampling.utils import (
-    DualLogger, 
-    _get_logger, 
+    DualLogger,
+    _get_logger,
     _set_logger,
     load_covariance,
+    normalize_mt_list,
     _initialize_master_perturbation_matrix,
     _update_master_perturbation_matrix,
     _finalize_master_perturbation_matrix
@@ -80,7 +81,7 @@ def _process_sample(
 def perturb_ACE_files(
     ace_files: Union[str, List[str]],
     cov_files: Union[str, List[str]],
-    mt_list: List[int],
+    mt_list: Union[List[int], List[List[int]]],
     num_samples: int,
     space: str = "log",
     decomposition_method: str = "svd",
@@ -90,7 +91,8 @@ def perturb_ACE_files(
     seed: Optional[int] = None,
     nprocs: int = 1,
     dry_run: bool = False,
-    autofix: Optional[str] = None, 
+    only_xsdir: bool = False,
+    autofix: Optional[str] = None,
     high_val_thresh: float = 1.0,
     accept_tol: float = -1.0e-4,
     remove_blocks: Optional[Dict[int, Union[Tuple[int, int], List[Tuple[int, int]]]]] = None,
@@ -112,8 +114,11 @@ def perturb_ACE_files(
     cov_files : Union[str, List[str]]
         Path(s) to covariance matrix file(s) (SCALE or NJOY format).
         Can be a single file (used for all ACE files) or one file per ACE file.
-    mt_list : List[int]
-        List of MT reaction numbers to perturb. Empty list means all available MTs
+    mt_list : List[int] or List[List[int]]
+        MT reactions to perturb. Either a flat list (applied to every ACE file)
+        or a list-of-lists with one entry per ACE file (per-file selection).
+        An empty (or inner-empty) list means "perturb all MTs available in the
+        covariance" for that file.
     num_samples : int
         Number of perturbed ACE files to generate
     space : str, default "log"
@@ -197,19 +202,33 @@ def perturb_ACE_files(
         formatted_cov = f"{len(cov_files)} files"
         if len(cov_files) <= 3:
             formatted_cov = ", ".join(os.path.basename(f) for f in cov_files)
-    
-    # Format MT list
-    if len(mt_list) == 0:
-        formatted_mt = "All available MTs"
-    elif len(mt_list) <= 10:
-        formatted_mt = ", ".join(str(mt) for mt in mt_list)
+
+    # Normalize MT input to a per-file list-of-lists. Accepts either a flat
+    # ``List[int]`` (broadcast to every ACE file) or a pre-expanded
+    # ``List[List[int]]`` (one list per ACE file).
+    mt_lists = normalize_mt_list(mt_list, len(ace_files), unit_label="ACE files")
+
+    # Format MT list(s) for the log header
+    def _fmt_mts(mts):
+        if not mts:
+            return "All available MTs"
+        if len(mts) <= 10:
+            return ", ".join(str(mt) for mt in mts)
+        return f"{len(mts)} MTs: {', '.join(str(mt) for mt in mts[:5])}..."
+
+    unique_mt_lists = {tuple(sub) for sub in mt_lists}
+    if len(unique_mt_lists) <= 1:
+        formatted_mt = _fmt_mts(mt_lists[0])
     else:
-        formatted_mt = f"{len(mt_list)} MTs: {', '.join(str(mt) for mt in mt_list[:5])}..."
+        formatted_mt = "per-file (see below)"
     
     # Print all parameters TO LOG FILE
     _logger.info(f"  ACE_FILES = {formatted_ace}")
     _logger.info(f"  COV_FILES = {formatted_cov}")
     _logger.info(f"  MT_NUMBERS = {formatted_mt}")
+    if len(unique_mt_lists) > 1:
+        for ace_path, mts in zip(ace_files, mt_lists):
+            _logger.info(f"    - {os.path.basename(ace_path)}: {_fmt_mts(mts)}")
     _logger.info(f"  NUM_SAMPLES = {num_samples}")
     _logger.info(f"  SPACE = {space}")
     _logger.info(f"  DECOMPOSITION_METHOD = {decomposition_method}")
@@ -244,6 +263,29 @@ def perturb_ACE_files(
     if isinstance(cov_files, str):
         cov_files = [cov_files]
 
+    if only_xsdir:
+        if dry_run:
+            raise ValueError("only_xsdir and dry_run cannot both be True")
+        _logger.info(
+            "[INFO] [ACE] only_xsdir=True — skipping sampling/ACE writing; "
+            "rewrapping xsdir entries for the requested isotopes only.",
+            console=True,
+        )
+        zaids = []
+        for af in ace_files:
+            try:
+                zaids.append(_read_ace_zaid(af))
+            except Exception as e:
+                _logger.error(f"  [ERROR] [ACE] Could not read zaid from {af}: {e}")
+        count = _rewrite_xsdir_for_zaids(
+            zaids=zaids,
+            output_dir=output_dir,
+            xsdir_file=xsdir_file,
+            logger=_logger,
+        )
+        _logger.info(f"[INFO] [ACE] only_xsdir complete: {count} file(s) modified", console=True)
+        return
+
     # Validate input compatibility
     if len(cov_files) != 1 and len(cov_files) != len(ace_files):
         raise ValueError(
@@ -273,7 +315,7 @@ def perturb_ACE_files(
     job_t0 = time.time()
     warning_counts = {"covariance_load_failed": 0, "file_not_found": 0, "autofix_warnings": 0, "negative_factors": 0}
 
-    for i, (ace_file, cov_file) in enumerate(zip(ace_files, cov_files)):
+    for i, (ace_file, cov_file, mt_list) in enumerate(zip(ace_files, cov_files, mt_lists)):
 
         # ====== Start of ACE file processing ======
         step_t0 = time.time()
