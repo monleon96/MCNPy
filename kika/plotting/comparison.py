@@ -389,6 +389,9 @@ class ComparisonBuilder:
         self._legend_loc: str = 'best'
         self._legend_ncol: Optional[int] = None
         self._grid: bool = True
+        self._grid_alpha: float = 0.3
+        self._show_minor_grid: bool = False
+        self._minor_grid_alpha: float = 0.15
 
     # ---- fluent API -------------------------------------------------------
 
@@ -517,9 +520,18 @@ class ComparisonBuilder:
         self._legend_ncol = ncol
         return self
 
-    def set_grid(self, grid: bool = True) -> 'ComparisonBuilder':
-        """Enable or disable grid."""
+    def set_grid(
+        self,
+        grid: bool = True,
+        alpha: float = 0.3,
+        show_minor: bool = False,
+        minor_alpha: float = 0.15,
+    ) -> 'ComparisonBuilder':
+        """Configure grid display settings for reference and comparison panels."""
         self._grid = grid
+        self._grid_alpha = alpha
+        self._show_minor_grid = show_minor
+        self._minor_grid_alpha = minor_alpha
         return self
 
     # ---- interpolation inference ------------------------------------------
@@ -652,7 +664,12 @@ class ComparisonBuilder:
         builder.set_scales(log_x=self._use_log_x, log_y=self._diff_log_y)
         builder.set_limits(x_lim=self._x_lim, y_lim=self._diff_y_lim)
         builder.set_legend(loc=self._legend_loc, ncol=self._legend_ncol)
-        builder.set_grid(grid=self._grid)
+        builder.set_grid(
+            grid=self._grid,
+            alpha=self._grid_alpha,
+            show_minor=self._show_minor_grid,
+            minor_alpha=self._minor_grid_alpha,
+        )
 
         fig = builder.build(show=False)
         ax = fig.axes[0]
@@ -702,7 +719,12 @@ class ComparisonBuilder:
         builder.set_scales(log_x=self._use_log_x, log_y=self._use_log_y)
         builder.set_limits(x_lim=self._x_lim, y_lim=self._y_lim)
         builder.set_legend(loc=self._legend_loc, ncol=self._legend_ncol)
-        builder.set_grid(grid=self._grid)
+        builder.set_grid(
+            grid=self._grid,
+            alpha=self._grid_alpha,
+            show_minor=self._show_minor_grid,
+            minor_alpha=self._minor_grid_alpha,
+        )
 
         return builder.build(show=show)
 
@@ -760,7 +782,12 @@ class ComparisonBuilder:
         main_builder.set_scales(log_x=self._use_log_x, log_y=self._use_log_y)
         main_builder.set_limits(x_lim=self._x_lim, y_lim=self._y_lim)
         main_builder.set_legend(loc=self._legend_loc, ncol=self._legend_ncol)
-        main_builder.set_grid(grid=self._grid)
+        main_builder.set_grid(
+            grid=self._grid,
+            alpha=self._grid_alpha,
+            show_minor=self._show_minor_grid,
+            minor_alpha=self._minor_grid_alpha,
+        )
         main_builder.build()
 
         # Hide x-axis labels on main panel (shared with diff panel)
@@ -821,7 +848,12 @@ class ComparisonBuilder:
         )
         diff_builder.set_scales(log_x=self._use_log_x, log_y=self._diff_log_y)
         diff_builder.set_limits(x_lim=self._x_lim, y_lim=self._diff_y_lim)
-        diff_builder.set_grid(grid=self._grid)
+        diff_builder.set_grid(
+            grid=self._grid,
+            alpha=self._grid_alpha,
+            show_minor=self._show_minor_grid,
+            minor_alpha=self._minor_grid_alpha,
+        )
         diff_builder.build()
 
         # Remove legend from diff panel — colors match the main panel
