@@ -46,22 +46,32 @@ class NjoyReconstructError(RuntimeError):
         self.stderr_tail = stderr_tail
 
 
+_MAX_TOLERANCE = 0.1
+
+
 def _tolerance_fallback_sequence(initial: float) -> List[float]:
     """Return a sequence of tolerances to try if the initial value fails.
 
     Some ENDF files (e.g. Fe-56 JEFF-4.0) have threshold MT3 sections that
     reconr's ``lunion`` cannot linearize tightly without raising an
     "ill-behaved threshold" error.  We fall back to progressively looser
-    tolerances.  The sequence is capped at 0.02 — beyond that the
-    reconstruction is not useful.
+    tolerances (doubling each step) so the user is not stuck on files
+    that need only slightly more slack than the previous cap allowed.
+
+    Capped at :data:`_MAX_TOLERANCE` (10 %) — beyond that reconr output
+    is coarse enough that the reconstruction is no longer scientifically
+    useful, and we surface the original NJOY error to the caller instead
+    of silently producing a misleading PENDF.
     """
+    if initial >= _MAX_TOLERANCE:
+        return [initial]
     seq = [initial]
     val = initial
-    while val < 0.02:
-        val = min(val * 2.0, 0.02)
+    while val < _MAX_TOLERANCE:
+        val = min(val * 2.0, _MAX_TOLERANCE)
         if val > seq[-1]:
             seq.append(val)
-        if val >= 0.02:
+        if val >= _MAX_TOLERANCE:
             break
     return seq
 
@@ -110,7 +120,8 @@ def njoy_reconstruct(
     the live log output and returns only the final MT→CrossSection map.
 
     On an "ill-behaved threshold" error (common on some JEFF-4.0 files),
-    automatically retries with progressively looser tolerance up to 0.02.
+    automatically retries with progressively looser tolerance up to
+    :data:`_MAX_TOLERANCE`.
     """
     result: Optional[Dict[int, CrossSection]] = None
     for event in njoy_reconstruct_stream(
