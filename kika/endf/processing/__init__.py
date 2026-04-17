@@ -8,5 +8,6 @@ reconstruct(mf2_mt151, mf3_data=None, tolerance=1e-3)
 """
 
 from .reconstruct import reconstruct
+from .resonance_bounds import detect_resonance_bounds
 
-__all__ = ["reconstruct"]
+__all__ = ["reconstruct", "detect_resonance_bounds"]

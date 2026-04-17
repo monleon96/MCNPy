@@ -393,6 +393,21 @@ class ComparisonBuilder:
         self._show_minor_grid: bool = False
         self._minor_grid_alpha: float = 0.15
 
+        # Resonance-region group-average overlay. When set, each
+        # PlotData whose metadata contains a 'group_average_overlay'
+        # dict (edges, xs, bounds_used, weighting) participates in
+        # the averaged rendering:
+        #   'pointwise' — no overlay drawn; diff panel still shows
+        #       the averaged bin trace inside [bounds_used].
+        #   'average'   — pointwise masked inside [bounds_used] on
+        #       the main panel; averaged step overlay drawn in that
+        #       range.
+        #   'both'      — pointwise drawn across the full range, with
+        #       averaged step overlay on top inside [bounds_used].
+        self._main_display: Literal['pointwise', 'average', 'both'] = 'both'
+        # "ref: <label>" annotation on the diff and diff-only panels.
+        self._show_reference_label: bool = True
+
     # ---- fluent API -------------------------------------------------------
 
     def set_reference(self, data: PlotData, **styling) -> 'ComparisonBuilder':
@@ -534,12 +549,222 @@ class ComparisonBuilder:
         self._minor_grid_alpha = minor_alpha
         return self
 
+    def set_group_average(
+        self,
+        main_display: Literal['pointwise', 'average', 'both'] = 'both',
+    ) -> 'ComparisonBuilder':
+        """Configure resonance-region group-average rendering.
+
+        The overlay data itself is attached per-series via
+        ``PlotData.metadata['group_average_overlay']`` (a dict with keys
+        ``edges``, ``xs``, ``bounds_used``, ``weighting``). The
+        ``main_display`` argument controls what the main panel shows
+        inside the averaged energy window:
+
+        * ``'pointwise'`` — only pointwise curves, no averaged overlay.
+        * ``'average'`` — pointwise masked inside the window, averaged
+          step overlay rendered there; pointwise continues outside.
+        * ``'both'`` — pointwise drawn across the full range, averaged
+          step overlay drawn on top inside the window.
+
+        The diff panel always renders the bin-averaged diff trace inside
+        the window when both reference and comparison carry overlays —
+        that is the whole point of this comparison mode.
+        """
+        self._main_display = main_display
+        return self
+
+    def set_reference_label(self, show: bool = True) -> 'ComparisonBuilder':
+        """Toggle the 'ref: <label>' annotation on the diff panel."""
+        self._show_reference_label = show
+        return self
+
     # ---- interpolation inference ------------------------------------------
 
     def _infer_interpolation(self, data: PlotData) -> str:
         """Infer interpolation method from the PlotData subclass type."""
         class_name = type(data).__name__
         return _INTERPOLATION_DEFAULTS.get(class_name, 'log-log')
+
+    # ---- group-average overlay helpers ------------------------------------
+
+    @staticmethod
+    def _overlay_from(data: PlotData) -> Optional[dict]:
+        """Return the ``group_average_overlay`` payload from a series, or None."""
+        overlay = data.metadata.get('group_average_overlay') if data.metadata else None
+        if not overlay:
+            return None
+        edges = overlay.get('edges')
+        xs = overlay.get('xs')
+        bounds = overlay.get('bounds_used')
+        if edges is None or xs is None or bounds is None:
+            return None
+        return overlay
+
+    def _draw_main_overlay(
+        self, ax, data: PlotData, color: Optional[str],
+    ) -> bool:
+        """Draw the dashed step-post overlay on the main panel.
+
+        Returns True if an overlay was actually drawn (so the caller
+        can refresh the legend to pick up the new labeled line).
+        """
+        if self._main_display == 'pointwise':
+            return False
+        overlay = self._overlay_from(data)
+        if overlay is None:
+            return False
+        edges = np.asarray(overlay['edges'], dtype=float)
+        xs = np.asarray(overlay['xs'], dtype=float)
+        if edges.size < 2 or xs.size == 0:
+            return False
+        # steps-post needs one extra y to match edges length; repeat last.
+        y_step = np.concatenate([xs, xs[-1:]])
+        line_color = color or data.color
+        series_label = data.label or ''
+        avg_label = f'{series_label} (avg)' if series_label else None
+        ax.plot(
+            edges, y_step,
+            drawstyle='steps-post',
+            linestyle='--',
+            linewidth=(data.linewidth or 1.5),
+            color=line_color,
+            label=avg_label,
+            alpha=0.95,
+        )
+        return True
+
+    def _pointwise_mask_for_main(self, data: PlotData) -> Optional[PlotData]:
+        """Return a copy of ``data`` with pointwise y masked inside
+        the averaging window, or None when no mask is needed.
+
+        Used in ``main_display='average'`` mode so the only thing
+        rendered inside [Elow, Ehigh] is the averaged step overlay.
+        The first and last masked y-values are bridged to the averaged
+        step's leading and trailing bin values so the pointwise line
+        visually meets the step trace at the boundaries instead of
+        dropping out into a NaN gap.
+        """
+        if self._main_display != 'average':
+            return None
+        overlay = self._overlay_from(data)
+        if overlay is None:
+            return None
+        lo, hi = float(overlay['bounds_used'][0]), float(overlay['bounds_used'][1])
+        xs = np.asarray(overlay.get('xs', []), dtype=float)
+        x = np.asarray(data.x, dtype=float)
+        y = np.asarray(data.y, dtype=float)
+        in_range = (x >= lo) & (x <= hi)
+        if not np.any(in_range):
+            return None
+        idx = np.where(in_range)[0]
+        first_in, last_in = int(idx[0]), int(idx[-1])
+        new_y = y.copy()
+        new_y[first_in:last_in + 1] = np.nan
+        # Bridge to the step trace's leading / trailing values.
+        if xs.size > 0 and np.isfinite(xs[0]):
+            new_y[first_in] = float(xs[0])
+        if last_in > first_in and xs.size > 0 and np.isfinite(xs[-1]):
+            new_y[last_in] = float(xs[-1])
+
+        import copy as _copy
+        masked = _copy.copy(data)
+        masked.x = x
+        masked.y = new_y
+        # Shallow-copy metadata so callers don't accidentally mutate the
+        # original; strip the overlay entry so this clone isn't picked
+        # up for a second overlay draw pass.
+        masked.metadata = dict(data.metadata)
+        masked.metadata.pop('group_average_overlay', None)
+        return masked
+
+    @staticmethod
+    def _mask_pointwise_in_range(
+        diff_data: DifferencePlotData, lo: float, hi: float,
+        bridge_values: Optional[Tuple[float, float]] = None,
+    ) -> None:
+        """Replace diff values inside [lo, hi] with NaN so the averaged
+        step trace can occupy that region without visual overlap.
+
+        ``bridge_values=(left, right)`` overrides the first/last masked
+        y so the pointwise line has real (non-NaN) endpoints at the
+        range boundaries. Without bridges, matplotlib drops the last
+        segment before NaN and the first segment after NaN, leaving a
+        visible gap between the pointwise and the step trace. The
+        bridge values should be the averaged-step's leading and
+        trailing bin values so the pointwise line visually meets the
+        step exactly at the boundary.
+        """
+        x = np.asarray(diff_data.x, dtype=float)
+        y = np.asarray(diff_data.y, dtype=float)
+        in_range = (x >= lo) & (x <= hi)
+        if not np.any(in_range):
+            return
+        idx = np.where(in_range)[0]
+        first_in, last_in = int(idx[0]), int(idx[-1])
+        y = y.copy()
+        y[first_in:last_in + 1] = np.nan
+        if bridge_values is not None:
+            left, right = bridge_values
+            if np.isfinite(left):
+                y[first_in] = float(left)
+            if last_in > first_in and np.isfinite(right):
+                y[last_in] = float(right)
+        diff_data.y = y
+
+    def _compute_overlay_diff(
+        self, ref_overlay: dict, cmp_overlay: dict,
+    ) -> Optional[Tuple[np.ndarray, np.ndarray, Tuple[float, float]]]:
+        """Return (edges, diff_values, bounds) for bin-averaged diff, or None.
+
+        Both series are expected to share edges because the frontend
+        uses a single Elow/Ehigh/nBins/weighting config. If edges
+        mismatch (defensive guard), return None so the caller can
+        silently fall back to pointwise-only diff in that range.
+        """
+        ref_edges = np.asarray(ref_overlay['edges'], dtype=float)
+        cmp_edges = np.asarray(cmp_overlay['edges'], dtype=float)
+        if ref_edges.shape != cmp_edges.shape or not np.allclose(ref_edges, cmp_edges):
+            return None
+        ref_xs = np.asarray(ref_overlay['xs'], dtype=float)
+        cmp_xs = np.asarray(cmp_overlay['xs'], dtype=float)
+        if ref_xs.shape != cmp_xs.shape:
+            return None
+        with np.errstate(divide='ignore', invalid='ignore'):
+            if self._diff_mode == 'relative':
+                nonzero = np.abs(ref_xs) > 0
+                diff = np.full_like(ref_xs, np.nan)
+                diff[nonzero] = (cmp_xs[nonzero] - ref_xs[nonzero]) / ref_xs[nonzero]
+                if self._relative_in_percent:
+                    diff *= 100.0
+            else:
+                diff = cmp_xs - ref_xs
+        lo = float(min(ref_overlay['bounds_used'][0], cmp_overlay['bounds_used'][0]))
+        hi = float(max(ref_overlay['bounds_used'][1], cmp_overlay['bounds_used'][1]))
+        return ref_edges, diff, (lo, hi)
+
+    def _draw_overlay_diff(
+        self, ax, edges: np.ndarray, diff_values: np.ndarray, color: Optional[str],
+        linewidth: float,
+    ) -> None:
+        """Render a bin-averaged step-post diff trace on the diff panel.
+
+        Drawn solid (distinct from the dashed main-panel overlay) so the
+        diff panel reads as a continuous diff curve with the averaged
+        segment visually stitched into the pointwise segments.
+        """
+        if edges.size < 2 or diff_values.size == 0:
+            return
+        y_step = np.concatenate([diff_values, diff_values[-1:]])
+        ax.plot(
+            edges, y_step,
+            drawstyle='steps-post',
+            linestyle='-',
+            linewidth=linewidth or 1.5,
+            color=color,
+            label=None,
+            alpha=1.0,
+        )
 
     # ---- build ------------------------------------------------------------
 
@@ -616,6 +841,8 @@ class ComparisonBuilder:
         )
 
         colors = _get_color_palette(self._style)
+        overlay_diff_draws: List[Tuple[np.ndarray, np.ndarray, str, float]] = []
+        ref_overlay = self._overlay_from(self._reference)
         for i, (result, (cmp_data, _)) in enumerate(
             zip(results, self._comparisons)
         ):
@@ -631,6 +858,21 @@ class ComparisonBuilder:
                 diff_data.label = raw_diff_label or None
             color_idx = (i + 1) % len(colors)
             diff_color = cmp_data.color if cmp_data.color else colors[color_idx]
+
+            cmp_overlay = self._overlay_from(cmp_data)
+            if ref_overlay is not None and cmp_overlay is not None:
+                overlay_diff = self._compute_overlay_diff(ref_overlay, cmp_overlay)
+                if overlay_diff is not None:
+                    edges, diff_values, (lo, hi) = overlay_diff
+                    bridge = (
+                        float(diff_values[0]) if diff_values.size > 0 else float('nan'),
+                        float(diff_values[-1]) if diff_values.size > 0 else float('nan'),
+                    )
+                    self._mask_pointwise_in_range(diff_data, lo, hi, bridge_values=bridge)
+                    overlay_diff_draws.append(
+                        (edges, diff_values, diff_color, cmp_data.linewidth or 1.5)
+                    )
+
             builder.add_data(diff_data, color=diff_color)
 
         # Add scatter overlays to diff-only panel
@@ -674,20 +916,26 @@ class ComparisonBuilder:
         fig = builder.build(show=False)
         ax = fig.axes[0]
 
+        # Group-average bin-diff traces (step-post) on top of the
+        # masked pointwise diff.
+        for edges, diff_values, color, lw in overlay_diff_draws:
+            self._draw_overlay_diff(ax, edges, diff_values, color, lw)
+
         # Zero reference line
         if self._zero_line:
             ax.axhline(
                 y=0, color='grey', linestyle='--', linewidth=0.8, alpha=0.7,
             )
 
-        # Reference annotation
-        ref_label = self._reference.label or 'reference'
-        ax.text(
-            0.02, 0.97, f'ref: {ref_label}',
-            transform=ax.transAxes,
-            fontsize=11, va='top', ha='left',
-            fontstyle='italic', alpha=0.7,
-        )
+        # Reference annotation (diff-only panel)
+        if self._show_reference_label:
+            ref_label = self._reference.label or 'reference'
+            ax.text(
+                0.02, 0.97, f'ref: {ref_label}',
+                transform=ax.transAxes,
+                fontsize=11, va='top', ha='left',
+                fontstyle='italic', alpha=0.7,
+            )
 
         if show:
             plt.show()
@@ -705,9 +953,11 @@ class ComparisonBuilder:
             interactive=self._interactive,
         )
 
-        builder.add_data(self._reference, **self._reference_styling)
+        ref_for_main = self._pointwise_mask_for_main(self._reference) or self._reference
+        builder.add_data(ref_for_main, **self._reference_styling)
         for cmp_data, styling in self._comparisons:
-            builder.add_data(cmp_data, **styling)
+            cmp_for_main = self._pointwise_mask_for_main(cmp_data) or cmp_data
+            builder.add_data(cmp_for_main, **styling)
         for ovl_data, ovl_styling in self._overlays:
             builder.add_data(ovl_data, **ovl_styling)
         for ovl_data, ovl_styling in self._scatter_overlays:
@@ -726,7 +976,26 @@ class ComparisonBuilder:
             minor_alpha=self._minor_grid_alpha,
         )
 
-        return builder.build(show=show)
+        fig = builder.build(show=False)
+        ax = fig.axes[0]
+        overlay_drawn = self._draw_main_overlay(ax, self._reference, self._reference.color)
+        for cmp_data, _styling in self._comparisons:
+            if self._draw_main_overlay(ax, cmp_data, cmp_data.color):
+                overlay_drawn = True
+        if overlay_drawn:
+            _existing_legend = ax.get_legend()
+            if _existing_legend is not None:
+                _existing_legend.remove()
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:
+                legend_kwargs = {'loc': self._legend_loc}
+                if self._legend_ncol:
+                    legend_kwargs['ncol'] = self._legend_ncol
+                ax.legend(handles, labels, **legend_kwargs)
+
+        if show:
+            plt.show()
+        return fig
 
     def _build_dual_panel(
         self, results: List[ComparisonResult], show: bool,
@@ -771,9 +1040,14 @@ class ComparisonBuilder:
             font_family=self._font_family,
             notebook_mode=notebook,
         )
-        main_builder.add_data(self._reference, **self._reference_styling)
+        # In 'average' display mode, add masked copies of reference and
+        # comparisons so the pointwise trace is blank inside the
+        # averaging window — the step overlay fills that region.
+        ref_for_main = self._pointwise_mask_for_main(self._reference) or self._reference
+        main_builder.add_data(ref_for_main, **self._reference_styling)
         for cmp_data, styling in self._comparisons:
-            main_builder.add_data(cmp_data, **styling)
+            cmp_for_main = self._pointwise_mask_for_main(cmp_data) or cmp_data
+            main_builder.add_data(cmp_for_main, **styling)
         for ovl_data, ovl_styling in self._overlays:
             main_builder.add_data(ovl_data, **ovl_styling)
         for ovl_data, ovl_styling in self._scatter_overlays:
@@ -790,6 +1064,27 @@ class ComparisonBuilder:
         )
         main_builder.build()
 
+        # Group-average overlays on main panel (dashed step-post, same
+        # color as the pointwise trace, labeled "<series> (avg)").
+        overlay_drawn = False
+        if self._draw_main_overlay(ax_main, self._reference, self._reference.color):
+            overlay_drawn = True
+        for cmp_data, _styling in self._comparisons:
+            if self._draw_main_overlay(ax_main, cmp_data, cmp_data.color):
+                overlay_drawn = True
+
+        # Refresh the legend so the overlay entries appear.
+        if overlay_drawn:
+            _existing_legend = ax_main.get_legend()
+            if _existing_legend is not None:
+                _existing_legend.remove()
+            handles, labels = ax_main.get_legend_handles_labels()
+            if handles:
+                legend_kwargs = {'loc': self._legend_loc}
+                if self._legend_ncol:
+                    legend_kwargs['ncol'] = self._legend_ncol
+                ax_main.legend(handles, labels, **legend_kwargs)
+
         # Hide x-axis labels on main panel (shared with diff panel)
         ax_main.set_xlabel('')
         ax_main.tick_params(axis='x', labelbottom=False)
@@ -802,6 +1097,11 @@ class ComparisonBuilder:
         )
 
         colors = _get_color_palette(self._style)
+        # Track overlay diffs to draw after the builder renders the
+        # pointwise traces — this way the step trace sits on top of
+        # the masked pointwise and shares the same axis limits.
+        overlay_diff_draws: List[Tuple[np.ndarray, np.ndarray, str, float]] = []
+        ref_overlay = self._overlay_from(self._reference)
         for i, (result, (cmp_data, _)) in enumerate(
             zip(results, self._comparisons)
         ):
@@ -817,6 +1117,25 @@ class ComparisonBuilder:
                 diff_data.label = None  # Default: suppress in dual-panel
             else:
                 diff_data.label = raw_diff_label or None
+
+            # If both reference and this comparison carry group-average
+            # overlays, compute the bin-averaged diff, mask the
+            # pointwise diff inside the bounds window, and queue the
+            # averaged-step trace to draw over the masked region.
+            cmp_overlay = self._overlay_from(cmp_data)
+            if ref_overlay is not None and cmp_overlay is not None:
+                overlay_diff = self._compute_overlay_diff(ref_overlay, cmp_overlay)
+                if overlay_diff is not None:
+                    edges, diff_values, (lo, hi) = overlay_diff
+                    bridge = (
+                        float(diff_values[0]) if diff_values.size > 0 else float('nan'),
+                        float(diff_values[-1]) if diff_values.size > 0 else float('nan'),
+                    )
+                    self._mask_pointwise_in_range(diff_data, lo, hi, bridge_values=bridge)
+                    overlay_diff_draws.append(
+                        (edges, diff_values, diff_color, cmp_data.linewidth or 1.5)
+                    )
+
             diff_builder.add_data(diff_data, **diff_styling)
 
         # Add scatter overlays to diff panel (e.g., EXFOR experimental data)
@@ -856,6 +1175,11 @@ class ComparisonBuilder:
         )
         diff_builder.build()
 
+        # Group-average bin-diff traces (step-post) rendered after the
+        # pointwise diff so they sit on top of the NaN-masked gaps.
+        for edges, diff_values, color, lw in overlay_diff_draws:
+            self._draw_overlay_diff(ax_diff, edges, diff_values, color, lw)
+
         # Remove legend from diff panel — colors match the main panel
         _diff_legend = ax_diff.get_legend()
         if _diff_legend:
@@ -868,13 +1192,14 @@ class ComparisonBuilder:
             )
 
         # Reference annotation — colors match the main panel legend
-        ref_label = self._reference.label or 'reference'
-        ax_diff.text(
-            0.02, 0.97, f'ref: {ref_label}',
-            transform=ax_diff.transAxes,
-            fontsize=11, va='top', ha='left',
-            fontstyle='italic', alpha=0.7,
-        )
+        if self._show_reference_label:
+            ref_label = self._reference.label or 'reference'
+            ax_diff.text(
+                0.02, 0.97, f'ref: {ref_label}',
+                transform=ax_diff.transAxes,
+                fontsize=11, va='top', ha='left',
+                fontstyle='italic', alpha=0.7,
+            )
 
         if show:
             plt.show()

@@ -362,21 +362,27 @@ class ENDF:
         return self._pendf
 
     def reconstruct_xs(self, tolerance: float = 1e-3) -> Dict:
-        """Reconstruct pointwise cross sections from MF2 resonance parameters.
+        """DEPRECATED / NOT WORKING — do not use.
 
-        Results are stored in ``self.pendf`` as ``Dict[int, MF3MT]`` keyed by
-        MT number.  The original ``self.mf[3]`` data is preserved unchanged.
+        The in-Python resonance reconstructor is incomplete and produces
+        incorrect cross sections on real evaluations. Use NJOY reconr
+        instead via :func:`kika.processing.njoy_reconstruct` (or, for
+        MF33 NC LTY=0 sum-rule resolution, pass ``njoy_executable=...``
+        to :func:`kika.processing.resolve_derived_covariance`).
 
-        Parameters
-        ----------
-        tolerance : float
-            Linearization tolerance (default 0.1%).
-
-        Returns
-        -------
-        Dict[int, MF3MT]
-            Reconstructed cross sections.
+        Kept in-tree only so older notebooks import cleanly; may be
+        revisited in the future.
         """
+        import warnings
+
+        warnings.warn(
+            "endf.reconstruct_xs() is not working correctly and should "
+            "not be used. Use kika.processing.njoy_reconstruct or "
+            "kika.processing.resolve_derived_covariance(..., "
+            "njoy_executable=...) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         from ..processing.reconstruct import reconstruct
 
         mf2 = self.mf[2].mt[151]

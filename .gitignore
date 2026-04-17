@@ -34,6 +34,7 @@ kika/sampling/test_endf_pert/
 kika/sampling/test_ace_pert/
 kika/sampling/testing/
 kika/endf/files/
+tmp_inspect/
 kika/cov/legacy/
 kika/cov/tests/test_new_plotting_implementations.ipynb
 kika/cov/tests/test_plotbuilder_direct.ipynb
