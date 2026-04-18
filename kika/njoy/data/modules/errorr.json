@@ -193,6 +193,38 @@
             "min": 0.0
           },
           "help": "<b>'dap'</b><br><br>Scattering radius uncertainty (fm). Overrides the value from ENDF file when specified."
+        },
+        {
+          "name": "eb",
+          "display_name": "Break energy Eb",
+          "type": "float",
+          "default": null,
+          "constraints": { "min": 0.0 },
+          "help": "<b>'eb'</b><br><br>Thermal break energy (eV) for composite analytic weight function (iwt=4)."
+        },
+        {
+          "name": "tb",
+          "display_name": "Temperature Tb",
+          "type": "float",
+          "default": null,
+          "constraints": { "min": 0.0 },
+          "help": "<b>'tb'</b><br><br>Thermal temperature (K) for composite analytic weight function (iwt=4)."
+        },
+        {
+          "name": "ec",
+          "display_name": "Fission break energy Ec",
+          "type": "float",
+          "default": null,
+          "constraints": { "min": 0.0 },
+          "help": "<b>'ec'</b><br><br>Fission break energy (eV) for composite analytic weight function (iwt=4)."
+        },
+        {
+          "name": "tc",
+          "display_name": "Fission temperature Tc",
+          "type": "float",
+          "default": null,
+          "constraints": { "min": 0.0 },
+          "help": "<b>'tc'</b><br><br>Fission temperature (K) for composite analytic weight function (iwt=4)."
         }
       ]
     },

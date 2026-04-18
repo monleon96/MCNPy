@@ -78,8 +78,21 @@ def generate(p: dict) -> Lines:
         f"{nendf} {npend} {ngout} {nout} /",
         f"{matd} {ign} {iwt} {iprint_val} {irelco} /",
         f"{mprint} {tempin} /",
-        " ".join(card7_parts) + " /",
     ]
+
+    # Card 5a: analytic flux params (only when |iwt|=4)
+    if abs(iwt) == 4:
+        eb = p.get("eb")
+        tb = p.get("tb")
+        ec = p.get("ec")
+        tc = p.get("tc")
+        if any(v is None for v in (eb, tb, ec, tc)):
+            raise ValueError(
+                "iwt=4 requires analytic flux parameters: eb, tb, ec, tc."
+            )
+        lines.append(f"{fmt_float(eb)} {fmt_float(tb)} {fmt_float(ec)} {fmt_float(tc)} /")
+
+    lines.append(" ".join(card7_parts) + " /")
 
     # Card 12a/12b: custom energy group boundaries (only when ign=1 or 19)
     if ign in (1, 19):
@@ -106,10 +119,19 @@ def parse(card_lines: list[str]) -> dict:
     c2 = parse_card_values(card_lines[1])
     # Card 5: mprint tempin
     c5 = parse_card_values(card_lines[2])
-    # Card 7: iread mfcov [irespr] [legord] [ifissp] [efmean] [dap]
-    c7 = parse_card_values(card_lines[3])
 
     ign = int(c2[1])
+    iwt = int(c2[2])
+
+    # Card 5a: eb tb ec tc — present only when |iwt|=4
+    card5a_idx: int | None = None
+    c7_idx = 3
+    if abs(iwt) == 4:
+        card5a_idx = 3
+        c7_idx = 4
+
+    # Card 7: iread mfcov [irespr] [legord] [ifissp] [efmean] [dap]
+    c7 = parse_card_values(card_lines[c7_idx])
 
     result: dict = {
         "nendf": int(c1[0]),
@@ -118,7 +140,7 @@ def parse(card_lines: list[str]) -> dict:
         "nout": int(c1[3]),
         "matd": int(c2[0]),
         "ign": ign,
-        "iwt": int(c2[2]),
+        "iwt": iwt,
         "iprint": int(c2[3]),
         "irelco": int(c2[4]),
         "mprint": int(c5[0]),
@@ -126,6 +148,14 @@ def parse(card_lines: list[str]) -> dict:
         "iread": int(c7[0]),
         "mfcov": int(c7[1]),
     }
+
+    if card5a_idx is not None:
+        c5a = parse_card_values(card_lines[card5a_idx])
+        result["eb"] = float(c5a[0])
+        result["tb"] = float(c5a[1])
+        result["ec"] = float(c5a[2])
+        result["tc"] = float(c5a[3])
+
     if len(c7) > 2:
         result["irespr"] = int(c7[2])
     if len(c7) > 3:
@@ -142,12 +172,17 @@ def parse(card_lines: list[str]) -> dict:
         "nendf": [0], "npend": [0], "ngout": [0], "nout": [0],
         "matd": [1], "ign": [1], "iwt": [1], "iprint": [1], "irelco": [1],
         "mprint": [2], "tempin": [2],
-        "iread": [3], "mfcov": [3], "irespr": [3], "legord": [3],
-        "ifissp": [3], "efmean": [3], "dap": [3],
+        "iread": [c7_idx], "mfcov": [c7_idx], "irespr": [c7_idx], "legord": [c7_idx],
+        "ifissp": [c7_idx], "efmean": [c7_idx], "dap": [c7_idx],
     }
+    if card5a_idx is not None:
+        lm["eb"] = [card5a_idx]
+        lm["tb"] = [card5a_idx]
+        lm["ec"] = [card5a_idx]
+        lm["tc"] = [card5a_idx]
 
     # Cards 12a/12b: custom energy boundaries (ign=1 or 19, may span multiple lines)
-    idx = 4
+    idx = c7_idx + 1
     if ign in (1, 19) and idx < len(card_lines):
         ngn_vals = parse_card_values(card_lines[idx])
         result["ngn"] = int(ngn_vals[0])

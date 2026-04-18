@@ -1984,12 +1984,17 @@ class PlotBuilder:
             # Rotate tick labels
             if 'rotate_x' in self._tick_params:
                 rotation = self._tick_params['rotate_x']
-                # Also adjust horizontal alignment for better appearance
-                ha = 'right' if rotation > 0 else 'center'
-                self.ax.tick_params(axis='x', rotation=rotation)
+                # Flip sign so labels lean "/" (top-right, bottom-left) instead of "\".
+                # rotation_mode='anchor' pins the top-left corner of each label to its
+                # tick, eliminating the visual drift that the default mode produces.
+                mpl_rotation = -rotation
+                ha = 'left' if rotation > 0 else 'center'
+                self.ax.tick_params(axis='x', rotation=mpl_rotation)
                 for label in self.ax.get_xticklabels():
-                    label.set_rotation(rotation)
+                    label.set_rotation(mpl_rotation)
                     label.set_ha(ha)
+                    label.set_va('top')
+                    label.set_rotation_mode('anchor')
             
             if 'rotate_y' in self._tick_params:
                 rotation = self._tick_params['rotate_y']
