@@ -9,6 +9,8 @@ from typing import List, Sequence, Optional, Tuple, Dict, Any
 from kika.cov.cross_section_covariance import CrossSectionCovariance
 from kika.cov.decomposition import (
     cap_variance_congruence,
+    flag_threshold_bins,
+    rescale_threshold_bins_congruence,
     cholesky_decomposition as _cholesky_decomposition,
     eigen_decomposition as _eigen_decomposition,
     svd_decomposition as _svd_decomposition,
@@ -285,6 +287,7 @@ def generate_samples(
     accept_tol: float = -1.0e-4,
     psd_method: str = "higham",
     max_relative_std: Optional[float] = 3.0,
+    mt_thresholds: Optional[Dict[int, float]] = None,
     verbose: bool = True,
     label: str = "",
 ) -> Tuple[np.ndarray, Optional[List[int]], Optional[Dict[str, Any]]]:
@@ -431,6 +434,36 @@ def generate_samples(
         cov_mat = cov_fixed.log_covariance_matrix
     else:
         raise ValueError("space must be 'linear' or 'log'")
+
+    # ------------------------------------------------------------------
+    # 2a. Targeted rescaling of NJOY threshold-spanning bins.
+    # Detect bins where a reaction threshold (from ACE σ(E)) falls inside a
+    # multigroup boundary and rescale the variance to the per-MT median of
+    # other groups. Runs before the global cap so the cap acts only on
+    # residual outliers and Higham gets a cleaner input.
+    threshold_flag_info: Optional[Dict[str, Any]] = None
+    threshold_rescale_info: Optional[Dict[str, Any]] = None
+    if mt_thresholds and num_groups > 0 and len(param_pairs) > 0:
+        flagged_indices, targets, detection_log = flag_threshold_bins(
+            cov_mat, mt_thresholds, param_pairs, num_groups, bins,
+            space=space, verbose=verbose, logger=logger, label=label,
+        )
+        threshold_flag_info = {
+            "n_flagged": len(flagged_indices),
+            "detection_log": detection_log,
+        }
+        if flagged_indices:
+            cov_mat, threshold_rescale_info = rescale_threshold_bins_congruence(
+                cov_mat, flagged_indices, targets,
+                param_pairs=param_pairs, num_groups=num_groups, bins=bins,
+                verbose=verbose, logger=logger, label=label,
+            )
+        # Greppable summary metrics
+        n_resc = threshold_rescale_info["n_actually_rescaled"] if threshold_rescale_info else 0
+        if logger is not None:
+            ctx = f" [{label}]" if label else ""
+            logger.info(f">> threshold_bins_flagged{ctx} = {len(flagged_indices)}")
+            logger.info(f">> threshold_bins_rescaled{ctx} = {n_resc}")
 
     # ------------------------------------------------------------------
     # 2b. Cap extreme variances (threshold-reaction spikes, etc.)

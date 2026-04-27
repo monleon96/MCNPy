@@ -6,7 +6,7 @@ CrossSectionCovariance and LegendreCovariance classes without code duplication.
 """
 
 import numpy as np
-from typing import Dict, Optional, Tuple, Protocol, runtime_checkable
+from typing import Dict, List, Optional, Sequence, Tuple, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -287,6 +287,297 @@ def cap_variance_congruence(
         _log_message(separator, logger, verbose)
 
     return cov_capped, info
+
+
+def flag_threshold_bins(
+    cov_mat: np.ndarray,
+    mt_thresholds: Dict[int, float],
+    param_pairs: Sequence[Tuple[int, int]],
+    num_groups: int,
+    bins: Sequence[float],
+    *,
+    space: str = "log",
+    min_groups_for_median: int = 3,
+    verbose: bool = True,
+    logger=None,
+    label: str = "",
+) -> Tuple[List[int], List[float], List[Dict]]:
+    """
+    Identify threshold-spanning bins from per-MT reaction thresholds (e.g.,
+    extracted from ACE σ(E)) and compute a per-bin replacement variance.
+
+    For each (zaid, mt) entry in ``param_pairs`` whose MT appears in
+    ``mt_thresholds``, locate the unique group ``g`` such that
+    ``bins[g] <= E_thresh < bins[g+1]``. That bin straddles the reaction
+    threshold and is the canonical NJOY artifact location: ⟨σ⟩ is pulled
+    down by the below-threshold tail, blowing up the relative uncertainty.
+
+    The replacement target for that bin's diagonal variance is the median of
+    the diagonal over the same MT's *other* groups (finite, positive).
+    Returns indices and targets only — actual rescaling is performed by
+    ``rescale_threshold_bins_congruence``.
+
+    Parameters
+    ----------
+    cov_mat : (n,n) np.ndarray
+        Covariance matrix (linear or log space; matching ``space``).
+    mt_thresholds : dict
+        ``{mt: E_threshold}`` in the same energy units as ``bins`` (MeV here).
+    param_pairs : list of (zaid, mt) tuples
+        Maps row/col blocks to (isotope, reaction).
+    num_groups : int
+        Energy groups per (zaid, mt) block.
+    bins : array-like
+        Group boundaries, length ``num_groups + 1``.
+    space : {"log", "linear"}
+        Only used in the log lines (interpretation of σ²).
+    min_groups_for_median : int
+        Skip a flagged bin when fewer than this many same-MT neighbors are
+        usable; the bin remains for the global cap to handle.
+
+    Returns
+    -------
+    flagged_indices : list of int
+        Flat covariance indices for bins flagged as threshold-spanning.
+    targets : list of float
+        Target variance per flagged index (one-to-one with ``flagged_indices``).
+    detection_log : list of dict
+        Per-flagged-bin detail (zaid, mt, group, energy_lo, energy_hi,
+        E_thresh, current_variance, target_variance, n_groups_used).
+    """
+    bins_arr = np.asarray(bins, dtype=float)
+    diag = np.diag(cov_mat)
+
+    flagged_indices: List[int] = []
+    targets: List[float] = []
+    detection_log: List[Dict] = []
+    skipped_too_few: List[Dict] = []
+
+    for pair_idx, (zaid, mt) in enumerate(param_pairs):
+        E_thresh = mt_thresholds.get(int(mt))
+        if E_thresh is None:
+            continue
+        # Locate the group containing E_thresh
+        # bins[g] <= E_thresh < bins[g+1]  ->  g = searchsorted(bins, E, 'right') - 1
+        g = int(np.searchsorted(bins_arr, E_thresh, side="right") - 1)
+        if g < 0 or g >= num_groups:
+            continue
+
+        flat = pair_idx * num_groups + g
+        current_var = float(diag[flat])
+        if not np.isfinite(current_var) or current_var <= 0.0:
+            continue  # nothing to rescale
+
+        # Collect same-MT diagonal entries excluding the flagged group
+        block_start = pair_idx * num_groups
+        block_diag = diag[block_start: block_start + num_groups]
+        other_mask = np.ones(num_groups, dtype=bool)
+        other_mask[g] = False
+        other_vals = block_diag[other_mask]
+        finite_pos = other_vals[np.isfinite(other_vals) & (other_vals > 0)]
+
+        if finite_pos.size < min_groups_for_median:
+            skipped_too_few.append({
+                "zaid": int(zaid), "mt": int(mt), "group": g,
+                "n_usable": int(finite_pos.size),
+            })
+            continue
+
+        target = float(np.median(finite_pos))
+        n_used = int(finite_pos.size)
+
+        e_lo = float(bins_arr[g]) if g < len(bins_arr) - 1 else float("nan")
+        e_hi = float(bins_arr[g + 1]) if g < len(bins_arr) - 1 else float("nan")
+
+        flagged_indices.append(flat)
+        targets.append(target)
+        detection_log.append({
+            "index": flat,
+            "zaid": int(zaid),
+            "mt": int(mt),
+            "group": g,
+            "energy_lo": e_lo,
+            "energy_hi": e_hi,
+            "E_thresh": float(E_thresh),
+            "current_variance": current_var,
+            "target_variance": target,
+            "n_groups_used": n_used,
+        })
+
+    if verbose or logger is not None:
+        ctx = f" [{label}]" if label else ""
+        sep = "-" * 60
+        if flagged_indices:
+            _log_message(f"\n[COVARIANCE] [THRESHOLD-BIN DETECTION]{ctx}\n{sep}", logger, verbose)
+            _log_message(
+                f"  Flagged {len(flagged_indices)} bin(s) as threshold-spanning "
+                f"(using ACE σ(E) thresholds, space={space}):",
+                logger, verbose,
+            )
+            for d in detection_log:
+                _log_message(
+                    f"    MT={d['mt']}, G={d['group']} "
+                    f"[{d['energy_lo']:.2e},{d['energy_hi']:.2e}] MeV: "
+                    f"E_thresh={d['E_thresh']:.3e}, "
+                    f"σ²={d['current_variance']:.3e}, "
+                    f"target={d['target_variance']:.3e} "
+                    f"(median of {d['n_groups_used']} groups)",
+                    logger, verbose,
+                )
+            if skipped_too_few:
+                _log_message(
+                    f"  Skipped {len(skipped_too_few)} bin(s) with fewer than "
+                    f"{min_groups_for_median} usable same-MT neighbors:",
+                    logger, verbose,
+                )
+                for s in skipped_too_few:
+                    _log_message(
+                        f"    MT={s['mt']}, G={s['group']}: only {s['n_usable']} usable",
+                        logger, verbose,
+                    )
+            _log_message(sep, logger, verbose)
+        else:
+            # No flags — emit a single quiet line so it's visible in the log
+            _log_message(
+                f"  [COVARIANCE] [THRESHOLD-BIN DETECTION]{ctx}: 0 bins flagged "
+                f"({len(mt_thresholds)} MT thresholds checked)",
+                logger, verbose,
+            )
+
+    return flagged_indices, targets, detection_log
+
+
+def rescale_threshold_bins_congruence(
+    cov_mat: np.ndarray,
+    flagged_indices: Sequence[int],
+    targets: Sequence[float],
+    *,
+    param_pairs=None,
+    num_groups: int = 0,
+    bins=None,
+    verbose: bool = True,
+    logger=None,
+    label: str = "",
+) -> Tuple[np.ndarray, Dict]:
+    """
+    Rescale specific diagonal entries to per-index target variances via a
+    congruence transform. One-sided: never inflates a variance.
+
+    For each flagged index ``i`` with target ``t_i``:
+        s_i = sqrt(t_i / σ²_i)   if σ²_i > t_i
+              1.0                 otherwise
+    Then ``Σ' = diag(s) @ Σ @ diag(s)``. PSD-preserving, correlation-preserving.
+
+    This complements ``cap_variance_congruence`` (which applies a single global
+    cap): use this for *targeted* rescaling of bins identified as artifacts
+    (e.g. NJOY threshold-spanning bins flagged by ``flag_threshold_bins``).
+
+    Parameters
+    ----------
+    cov_mat : (n,n) np.ndarray
+        Covariance matrix. A copy is returned; input is not modified.
+    flagged_indices : sequence of int
+        Flat covariance indices to (potentially) rescale.
+    targets : sequence of float
+        Target variance for each flagged index, one-to-one with
+        ``flagged_indices``.
+    param_pairs, num_groups, bins : optional
+        For per-entry logging (zaid/mt/group/energy ranges).
+    verbose, logger, label : logging controls.
+
+    Returns
+    -------
+    cov_rescaled : np.ndarray
+        Rescaled covariance.
+    info : dict
+        ``n_flagged``, ``n_actually_rescaled``, ``rescaled_entries`` (list of
+        dicts with index, zaid, mt, group, energy_lo, energy_hi,
+        original_variance, target_variance, scale_factor).
+    """
+    n = cov_mat.shape[0]
+    flagged = list(flagged_indices)
+    targets = list(targets)
+    if len(flagged) != len(targets):
+        raise ValueError("flagged_indices and targets must have equal length")
+
+    info: Dict = {
+        "n_flagged": len(flagged),
+        "n_actually_rescaled": 0,
+        "rescaled_entries": [],
+    }
+
+    if not flagged:
+        return cov_mat.copy(), info
+
+    diag = np.diag(cov_mat)
+    s = np.ones(n)
+    rescaled_details: List[Dict] = []
+
+    for idx, target in zip(flagged, targets):
+        cur = float(diag[idx])
+        if not np.isfinite(cur) or cur <= 0.0 or not np.isfinite(target) or target <= 0.0:
+            continue
+        if cur <= target:
+            continue  # one-sided: never inflate
+        scale = float(np.sqrt(target / cur))
+        s[idx] = scale
+
+        entry = {
+            "index": int(idx),
+            "original_variance": cur,
+            "target_variance": float(target),
+            "scale_factor": scale,
+        }
+        if param_pairs is not None and num_groups > 0:
+            pair_idx, grp_idx = divmod(idx, num_groups)
+            if pair_idx < len(param_pairs):
+                zaid, mt = param_pairs[pair_idx]
+                entry["zaid"] = int(zaid)
+                entry["mt"] = int(mt)
+                entry["group"] = int(grp_idx)
+                if bins is not None and grp_idx < len(bins) - 1:
+                    entry["energy_lo"] = float(bins[grp_idx])
+                    entry["energy_hi"] = float(bins[grp_idx + 1])
+        rescaled_details.append(entry)
+
+    info["n_actually_rescaled"] = len(rescaled_details)
+    info["rescaled_entries"] = rescaled_details
+
+    if not rescaled_details:
+        return cov_mat.copy(), info
+
+    cov_rescaled = cov_mat * np.outer(s, s)
+
+    if verbose or logger is not None:
+        ctx = f" [{label}]" if label else ""
+        sep = "-" * 60
+        _log_message(f"\n[COVARIANCE] [THRESHOLD-BIN RESCALE]{ctx}\n{sep}", logger, verbose)
+        _log_message(
+            f"  Rescaled {len(rescaled_details)}/{len(flagged)} flagged bins "
+            f"(others already at or below target):",
+            logger, verbose,
+        )
+        for d in rescaled_details:
+            if "mt" in d:
+                e_range = ""
+                if "energy_lo" in d:
+                    e_range = f" [{d['energy_lo']:.2e},{d['energy_hi']:.2e}]"
+                _log_message(
+                    f"    MT={d['mt']}, G={d['group']}{e_range}: "
+                    f"σ²={d['original_variance']:.3e} → {d['target_variance']:.3e}, "
+                    f"s={d['scale_factor']:.3f}",
+                    logger, verbose,
+                )
+            else:
+                _log_message(
+                    f"    index={d['index']}: "
+                    f"σ²={d['original_variance']:.3e} → {d['target_variance']:.3e}, "
+                    f"s={d['scale_factor']:.3f}",
+                    logger, verbose,
+                )
+        _log_message(sep, logger, verbose)
+
+    return cov_rescaled, info
 
 
 def nearest_psd_higham(

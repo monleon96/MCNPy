@@ -570,9 +570,34 @@ def perturb_ACE_files(
         else:
             raise ValueError(f"Unknown energy unit '{cov.energy_unit}' in covariance matrix")
 
+        # Extract per-MT reaction thresholds from ACE σ(E) (in MeV).
+        # Used to flag NJOY threshold-spanning bins so their variance can be
+        # rescaled to the per-MT median before PSD projection.
+        mt_thresholds: Dict[int, float] = {}
+        if ace.cross_section is not None:
+            for mt in mt_perturb:
+                reac = ace.cross_section.reaction.get(mt)
+                if reac is None:
+                    continue
+                xs_arr = np.asarray(reac.xs_values, dtype=float)
+                e_arr = np.asarray(reac.energies, dtype=float)
+                if xs_arr.size == 0 or e_arr.size == 0:
+                    continue
+                nz = np.where(xs_arr > 0.0)[0]
+                # nz[0] == 0 means the reaction is open at the first ACE energy
+                # (no threshold inside the union grid) — skip.
+                if nz.size > 0 and nz[0] > 0:
+                    mt_thresholds[int(mt)] = float(e_arr[nz[0]])
+        _logger.info(
+            f"  [INFO] [ACE] Extracted {len(mt_thresholds)} reaction threshold(s) "
+            f"from ACE σ(E) for NJOY artifact detection"
+        )
+        for mt, e in sorted(mt_thresholds.items()):
+            _logger.info(f"    MT={mt}: E_threshold = {e:.4e} MeV")
+
         # Save pre-autofix MT list
         pre_autofix_mts = list(mt_perturb)
-        
+
         try:
             factors, mt_perturb_final, fix_info = generate_samples(
                 cov                  = cov,
@@ -588,6 +613,7 @@ def perturb_ACE_files(
                 accept_tol           = accept_tol,
                 psd_method           = psd_method,
                 max_relative_std     = max_relative_std,
+                mt_thresholds        = mt_thresholds,
                 verbose              = verbose,
                 label                = str(zaid),
             )
