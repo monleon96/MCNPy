@@ -94,6 +94,37 @@ def generate(p: dict) -> Lines:
 
     lines.append(" ".join(card7_parts) + " /")
 
+    # Cards 8/8a (iread=1) or Card 10 (iread=2): manual MT selection.
+    # nek=0 is hardcoded — the energy-dependent xsec correlation matrix
+    # (Cards 8b/9) is not exposed.
+    if iread == 1:
+        mts_raw = p.get("mts")
+        if mts_raw is None or (isinstance(mts_raw, str) and not mts_raw.strip()):
+            mts_list: list[str] = []
+        elif isinstance(mts_raw, list):
+            mts_list = [str(int(v)) for v in mts_raw]
+        else:
+            mts_list = str(mts_raw).split()
+        if not mts_list:
+            raise ValueError(
+                "ERRORR iread=1 requires a non-empty 'mts' list of MT numbers."
+            )
+        nmt = len(mts_list)
+        lines.append(f"{nmt} 0 /")
+        lines.append(" ".join(mts_list) + " /")
+    elif iread == 2:
+        pairs = p.get("mat1mt1_pairs") or []
+        for entry in pairs:
+            if isinstance(entry, (list, tuple)):
+                m1, t1 = entry[0], entry[1]
+            else:
+                parts = str(entry).split()
+                if len(parts) < 2:
+                    continue
+                m1, t1 = parts[0], parts[1]
+            lines.append(f"{int(m1)} {int(t1)} /")
+        lines.append("0 0 /")
+
     # Card 12a/12b: custom energy group boundaries (only when ign=1 or 19)
     if ign in (1, 19):
         if egn is None or (isinstance(egn, str) and not egn.strip()):
@@ -181,8 +212,51 @@ def parse(card_lines: list[str]) -> dict:
         lm["ec"] = [card5a_idx]
         lm["tc"] = [card5a_idx]
 
-    # Cards 12a/12b: custom energy boundaries (ign=1 or 19, may span multiple lines)
     idx = c7_idx + 1
+
+    # Cards 8/8a (iread=1) or Card 10 (iread=2): manual MT selection
+    iread_val = int(c7[0])
+    if iread_val == 1 and idx < len(card_lines):
+        c8 = parse_card_values(card_lines[idx])
+        nmt = int(c8[0]) if c8 else 0
+        nek = int(c8[1]) if len(c8) > 1 else 0
+        c8_idx = idx
+        idx += 1
+        if idx < len(card_lines) and nmt > 0:
+            mts_vals, mts_consumed = parse_multiline_card(card_lines, idx)
+            result["mts"] = [int(float(v)) for v in mts_vals[:nmt]]
+            lm["mts"] = list(range(c8_idx, idx + mts_consumed))
+            idx += mts_consumed
+        if nek > 0:
+            # Skip Card 8b (nek+1 energy bounds) and Card 9 (akxy matrix)
+            if idx < len(card_lines):
+                _, eb_consumed = parse_multiline_card(card_lines, idx)
+                idx += eb_consumed
+            for _ in range(nmt * nek):
+                if idx >= len(card_lines):
+                    break
+                _, row_consumed = parse_multiline_card(card_lines, idx)
+                idx += row_consumed
+            result["_iread1_nek_skipped"] = True
+    elif iread_val == 2 and idx < len(card_lines):
+        pairs: list[list[int]] = []
+        pair_lines: list[int] = []
+        while idx < len(card_lines):
+            toks = parse_card_values(card_lines[idx])
+            if len(toks) < 2:
+                break
+            m1 = int(float(toks[0]))
+            t1 = int(float(toks[1]))
+            pair_lines.append(idx)
+            idx += 1
+            if m1 == 0:
+                break
+            pairs.append([m1, t1])
+        if pairs:
+            result["mat1mt1_pairs"] = pairs
+            lm["mat1mt1_pairs"] = pair_lines
+
+    # Cards 12a/12b: custom energy boundaries (ign=1 or 19, may span multiple lines)
     if ign in (1, 19) and idx < len(card_lines):
         ngn_vals = parse_card_values(card_lines[idx])
         result["ngn"] = int(ngn_vals[0])

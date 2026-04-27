@@ -142,6 +142,28 @@
           "help": "<b>'mfcov'</b><br><br>ENDF covariance file to process."
         },
         {
+          "name": "iread",
+          "display_name": "MT selection mode",
+          "type": "option",
+          "default": 0,
+          "constraints": {
+            "options": [
+              {"value": 0, "label": "0 - All MTs from MF33 (default)"},
+              {"value": 1, "label": "1 - Manual MT list"},
+              {"value": 2, "label": "2 - Extra (mat1, mt1) pairs (advanced)"}
+            ]
+          },
+          "help": "<b>'iread'</b> — MT selection mode<br><br><ul><li><b>0</b> (default) — process every MT found in MF33 automatically.</li><li><b>1</b> — process only the MTs you list in the <i>mts</i> field. Use this when an evaluation's MF33 contains derivation formulas (NC subsections) that reference MT numbers absent from MF33, causing ERRORR to abort in <code>gridd</code>.</li><li><b>2</b> — default MT list plus extra (MAT, MT) pairs (advanced — no GUI editor; hand-edit the deck).</li></ul><br><b>Note:</b> the <code>nek &gt; 0</code> sub-mode of iread=1 (energy-dependent xsec correlation, Cards 8b/9) is not exposed. <code>nek=0</code> is always emitted, which is the common case (independent cross sections)."
+        },
+        {
+          "name": "mts",
+          "display_name": "MT list",
+          "type": "multi",
+          "default": null,
+          "constraints": {"min": 1},
+          "help": "<b>'mts'</b> — explicit MT list (used only when <i>iread</i> = 1)<br><br>Space-separated MT numbers (positive integers) for the reactions ERRORR should process. Any MT not in this list is skipped, even if MF33 contains its covariance.<br><br>Typical Fe-57 minimal set: <code>1 2 16 51 52 53 54 55 91 102 103</code><br><br>The number of MTs (<i>nmt</i>) is computed automatically; <i>nek</i> is always 0 (Cards 8b/9 not supported)."
+        },
+        {
           "name": "irespr",
           "display_name": "Resonance parameter",
           "type": "option",
@@ -248,6 +270,11 @@
       "parameters": [
         {
           "name": "ngn",
+          "default": null,
+          "type": "auto"
+        },
+        {
+          "name": "mat1mt1_pairs",
           "default": null,
           "type": "auto"
         }
