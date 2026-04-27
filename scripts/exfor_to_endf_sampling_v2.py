@@ -81,6 +81,9 @@ from scripts.exfor_utils import (
     build_gaussian_relevance_matrix,
     _extract_correlation_matrix,
     inject_within_bin_correlations,
+    log_psd_diagnostics,
+    psd_repair_correlation_active,
+    threshold_small_correlations,
     compute_bin_reliability_alpha,
     generate_cholesky_samples,
     cap_covariance_relative_uncertainty,
@@ -255,6 +258,12 @@ POSITIVITY_CHECK_POINTS = 101                    # Number of mu points in [-1, 1
 # --- MULTIGROUP COVARIANCE ------------------------------------------------- #
 GENERATE_MULTIGROUP_COVARIANCE = True            # Enable adaptive multigroup collapse
 MULTIGROUP_RHO_MIN = 0.85                        # Min l=1 adjacent correlation to merge groups
+MULTIGROUP_USE_RAW_MC_CORR = True                # Feed multigroup collapse with raw KW correlations + Pass-2 std,
+                                                  # bypassing the inject + Higham-smear path. No effect when
+                                                  # KW_MC_TWO_PASS=False. See plan: ok-i-watn-you-floofy-hickey.md
+MULTIGROUP_CORRELATION_THRESHOLD = 0.0           # Hard-zero |rho| < threshold in the multigroup correlation matrix.
+                                                  # Set to 0.0 to disable. ENDF-6 has wide dynamic range; the natural
+                                                  # floor is sampling noise (~ 1/sqrt(N) for N samples).
 MF34_COVARIANCE_TYPE = "both"              # "fine", "multigroup", or "both"
 USE_ORIGINAL_MF34_GRID = False                   # Force grid from original MF34
 MERGE_ORIGINAL_MF34 = True                       # Merge pipeline MF34 with original (full range)
@@ -2486,18 +2495,20 @@ def run_exfor_to_endf_sampling_v2(
                     _valid_mask_kw[ie * max_degree + l] = True
 
             _snr_thr = near_zero_snr_threshold if regularize_near_zero else 0.0
-            cov_kw, corr_kw, _, _, _ = compute_covariance_from_samples(
+            cov_kw, corr_kw, _, mc_mean_kw, _ = compute_covariance_from_samples(
                 all_samples=kw_samples, energy_indices=energy_indices_kw,
                 max_order=max_degree, valid_mask=_valid_mask_kw,
                 snr_threshold=_snr_thr, n_neighbors=near_zero_n_neighbors,
                 logger=_logger,
             )
+            log_psd_diagnostics(corr_kw, "corr_kw (Pass 1)", _logger)
             cov_perbin, corr_perbin, _, mc_mean_perbin, _ = compute_covariance_from_samples(
                 all_samples=all_samples_perbin, energy_indices=energy_indices_kw,
                 max_order=max_degree, valid_mask=_valid_mask_kw,
                 snr_threshold=_snr_thr, n_neighbors=near_zero_n_neighbors,
                 logger=_logger,
             )
+            log_psd_diagnostics(corr_perbin, "corr_perbin (Pass 2)", _logger)
 
             # Use correlation from absolute covariance (returned by
             # compute_covariance_from_samples), NOT re-extracted from relative
@@ -2505,6 +2516,105 @@ def run_exfor_to_endf_sampling_v2(
             # off-diagonal entries when mean_i and mean_j have opposite signs
             # (e.g. a_1 > 0 and a_2 < 0), corrupting cross-order correlations.
             std_perbin = np.sqrt(np.maximum(np.diag(cov_perbin), 0.0))
+
+            # Phase 2: TMC-ready calibrated parquet — Pass-1 correlation
+            # structure (raw, non-Gaussian) with Pass-2 calibrated marginals.
+            # Per-parameter affine rescaling preserves Pearson and rank
+            # correlations exactly.
+            if save_full_correlation_samples:
+                try:
+                    _n_p = len(energy_indices_kw) * max_degree
+                    _sm_kw = np.zeros((n_samples, _n_p))
+                    _sm_pb = np.zeros((n_samples, _n_p))
+                    for _s in range(n_samples):
+                        for _k, _e in enumerate(energy_indices_kw):
+                            _kw_c = kw_samples[_s].get(_e, np.zeros(max_degree))
+                            _pb_c = all_samples_perbin[_s].get(_e, np.zeros(max_degree))
+                            _st = _k * max_degree
+                            _sm_kw[_s, _st:_st + min(len(_kw_c), max_degree)] = _kw_c[:max_degree]
+                            _sm_pb[_s, _st:_st + min(len(_pb_c), max_degree)] = _pb_c[:max_degree]
+                    _abs_mean_kw = _sm_kw.mean(axis=0)
+                    _abs_std_kw = _sm_kw.std(axis=0, ddof=0)
+                    _abs_mean_pb = _sm_pb.mean(axis=0)
+                    _abs_std_pb = _sm_pb.std(axis=0, ddof=0)
+                    _eps = 1e-30
+                    _n_zero = int(np.sum(_abs_std_kw < _eps))
+                    if _n_zero > 0:
+                        _logger.info(
+                            f"  [Phase 2] {_n_zero}/{_n_p} parameters had std_kw < {_eps:.0e}; "
+                            f"calibrated values set deterministically to Pass-2 mean"
+                        )
+                    _scale = np.where(
+                        _abs_std_kw >= _eps,
+                        _abs_std_pb / np.maximum(_abs_std_kw, _eps),
+                        0.0,
+                    )
+                    _sm_cal = _abs_mean_pb[None, :] + (_sm_kw - _abs_mean_kw[None, :]) * _scale[None, :]
+                    _kw_cal = {_s: {} for _s in range(n_samples)}
+                    for _s in range(n_samples):
+                        for _k, _e in enumerate(energy_indices_kw):
+                            _st = _k * max_degree
+                            _kw_cal[_s][_e] = _sm_cal[_s, _st:_st + max_degree].copy()
+                    _cal_path = save_all_legendre_coefficients(
+                        nominal_results=nominal_results,
+                        all_samples=_kw_cal,
+                        output_dir=str(output_path),
+                        max_degree=max_degree,
+                        filename='legendre_coefficients_full_correlations_calibrated.parquet',
+                    )
+                    _logger.info(f"  [INFO] [Phase 2] Calibrated TMC parquet: {_cal_path}")
+                    _logger.info(
+                        "  [INFO] [Phase 2] Pearson correlations preserved exactly; "
+                        "marginals match Pass-2 mean/std (recommended TMC input)"
+                    )
+                except Exception as _exc:
+                    _logger.error(
+                        f"[ERROR] [Phase 2] Failed to save calibrated parquet: {_exc}",
+                        console=True,
+                    )
+
+            # Phase 4: Loss-of-correlation diagnostic — flag parameter pairs
+            # with significant non-Gaussian dependence that MF34 (Pearson
+            # covariance only) cannot preserve. Uses the same Pass-1 KW samples.
+            try:
+                from scripts.correlation_loss_diagnostic import (
+                    compute_correlation_loss_diagnostic,
+                )
+                _n_p4 = len(energy_indices_kw) * max_degree
+                _sm_kw_p4 = np.zeros((n_samples, _n_p4))
+                for _s in range(n_samples):
+                    for _k, _e in enumerate(energy_indices_kw):
+                        _kw_c = kw_samples[_s].get(_e, np.zeros(max_degree))
+                        _st = _k * max_degree
+                        _sm_kw_p4[_s, _st:_st + min(len(_kw_c), max_degree)] = _kw_c[:max_degree]
+                _param_labels_p4 = [
+                    (e_idx, l + 1)
+                    for e_idx in energy_indices_kw
+                    for l in range(max_degree)
+                ]
+                _e_mev_lookup = {
+                    nr.energy_index: nr.energy_mev
+                    for nr in nominal_results
+                }
+                # Active mask: valid + non-zero variance + above-SNR
+                _abs_std_p4 = std_perbin * np.abs(mc_mean_perbin)
+                _active_p4 = (
+                    _valid_mask_kw
+                    & (_abs_std_p4 > 0)
+                    & (np.abs(mc_mean_perbin) >= near_zero_snr_threshold * _abs_std_p4)
+                )
+                compute_correlation_loss_diagnostic(
+                    sample_matrix=_sm_kw_p4,
+                    param_labels=_param_labels_p4,
+                    energy_mev_lookup=_e_mev_lookup,
+                    active_mask=_active_p4,
+                    logger=_logger,
+                )
+            except Exception as _exc:
+                _logger.error(
+                    f"[ERROR] [Phase 4] Loss-of-correlation diagnostic failed: {_exc}",
+                    console=True,
+                )
 
             if _is_hybrid:
                 # Build Gaussian parametric correlation as fallback
@@ -2592,25 +2702,31 @@ def run_exfor_to_endf_sampling_v2(
                 np.fill_diagonal(corr_hyb, 1.0)
                 corr_hyb = np.clip(corr_hyb, -1.0, 1.0)
 
+                log_psd_diagnostics(corr_hyb, "corr_hyb (post-blend, pre-inject)", _logger)
+
                 # Within-bin cross-order correlations from Pass 1
                 corr_hyb = inject_within_bin_correlations(
                     corr_hyb, corr_perbin, len(energy_indices_kw), max_degree,
                 )
+                log_psd_diagnostics(corr_hyb, "corr_hyb (post-inject)", _logger)
+
+                # Phase 3 (Fix 1 + Fix 2): repair PSD on correlation space
+                # (scale-free) and exclude dead parameters via Schur complement.
+                # Dead = unfitted, zero-variance, or low-SNR (|mean| < snr_thr * std_abs).
+                _abs_std_perbin = std_perbin * np.abs(mc_mean_perbin)
+                _dead_mask = (
+                    (~_valid_mask_kw)
+                    | (_abs_std_perbin <= 0)
+                    | (np.abs(mc_mean_perbin) < near_zero_snr_threshold * _abs_std_perbin)
+                )
+                corr_hyb = psd_repair_correlation_active(
+                    corr_hyb, _dead_mask,
+                    label="corr_hyb (hybrid)", logger=_logger,
+                )
+                log_psd_diagnostics(corr_hyb, "corr_hyb (post-PSD-repair)", _logger)
 
                 cov_combined = corr_hyb * np.outer(std_perbin, std_perbin)
-
-                # PSD projection via eigenvalue clip (single-step, fast)
-                eigenvalues = np.linalg.eigvalsh(cov_combined)
-                min_eig = np.min(eigenvalues)
-                if min_eig < -1e-10:
-                    from kika.cov.decomposition import nearest_psd_higham
-                    cov_combined, _psd_info = nearest_psd_higham(
-                        cov_combined, preserve_diagonal=False, eigval_floor=1e-14,
-                        verbose=False, logger=_logger,
-                    )
-                    _max_dc = _psd_info.get('max_diagonal_change', 0.0)
-                    _logger.info(f"  Hybrid blend: PSD projection applied "
-                                 f"(min_eig={min_eig:.2e}, max_diag_change={_max_dc:.2e})")
+                log_psd_diagnostics(cov_combined, "cov_combined (post-rescale, hybrid)", _logger)
 
                 # Log alpha and range-aware blend statistics
                 n_interp = int(np.sum(alpha_per_energy == 0.0))
@@ -2636,7 +2752,24 @@ def run_exfor_to_endf_sampling_v2(
                 corr_kw = inject_within_bin_correlations(
                     corr_kw, corr_perbin, len(energy_indices_kw), max_degree,
                 )
+                log_psd_diagnostics(corr_kw, "corr_kw (post-inject, pure-KW)", _logger)
+
+                # Phase 3 (Fix 1 + Fix 2): same correlation-space PSD repair
+                # as the hybrid branch (was missing entirely in pure-KW mode).
+                _abs_std_perbin_pk = std_perbin * np.abs(mc_mean_perbin)
+                _dead_mask_pk = (
+                    (~_valid_mask_kw)
+                    | (_abs_std_perbin_pk <= 0)
+                    | (np.abs(mc_mean_perbin) < near_zero_snr_threshold * _abs_std_perbin_pk)
+                )
+                corr_kw = psd_repair_correlation_active(
+                    corr_kw, _dead_mask_pk,
+                    label="corr_kw (pure-KW)", logger=_logger,
+                )
+                log_psd_diagnostics(corr_kw, "corr_kw (post-PSD-repair, pure-KW)", _logger)
+
                 cov_combined = corr_kw * np.outer(std_perbin, std_perbin)
+                log_psd_diagnostics(cov_combined, "cov_combined (post-rescale, pure-KW)", _logger)
 
             # Generate Cholesky samples from combined covariance
             _logger.info(f"  Generating {n_samples} Cholesky samples from combined covariance")
@@ -2725,15 +2858,64 @@ def run_exfor_to_endf_sampling_v2(
         else:
             # Standard covariance from MC samples
             _snr_thr = near_zero_snr_threshold if regularize_near_zero else 0.0
-            cov_matrix, corr_matrix, param_labels, mc_mean_params, cov_abs = compute_covariance_from_samples(
-                all_samples=all_samples,
-                energy_indices=energy_indices,
-                max_order=max_degree,
-                valid_mask=valid_mask_s7,
-                snr_threshold=_snr_thr,
-                n_neighbors=near_zero_n_neighbors,
-                logger=_logger,
+
+            _use_raw_mc_corr = (
+                MULTIGROUP_USE_RAW_MC_CORR
+                and KW_MC_TWO_PASS
+                and CORRELATION_METHOD in ("kernel_weight_mc", "hybrid")
             )
+
+            if _use_raw_mc_corr:
+                # Fix 5: build covariance directly from raw KW correlations
+                # (PSD by construction, no inject step) combined with Pass-2
+                # calibrated per-bin std. This bypasses the inject + Higham
+                # smear path that produces spurious deep-negative correlations
+                # at remote off-diagonals. Trade-off: within-bin order
+                # correlations come from KW samples, not from per-bin
+                # stochastic samples.
+                _logger.info(
+                    "  [Fix 5] Multigroup input: raw KW correlations + "
+                    "Pass-2 std (bypassing inject + Higham smear)"
+                )
+
+                cov_matrix = corr_kw * np.outer(std_perbin, std_perbin)
+                corr_matrix = corr_kw.copy()
+                mc_mean_params = mc_mean_perbin.copy()
+                param_labels = [
+                    (e_idx, l + 1)
+                    for e_idx in energy_indices
+                    for l in range(max_degree)
+                ]
+                cov_abs = cov_matrix * np.outer(mc_mean_params, mc_mean_params)
+
+                # Log within-bin (corr_kw - corr_perbin) discrepancy: this is
+                # the cost of skipping the inject step. Frobenius norm per bin.
+                _n_bins = len(energy_indices)
+                _within_diffs = np.zeros(_n_bins)
+                for _ie in range(_n_bins):
+                    _s = _ie * max_degree
+                    _e = _s + max_degree
+                    _within_diffs[_ie] = np.linalg.norm(
+                        corr_kw[_s:_e, _s:_e] - corr_perbin[_s:_e, _s:_e],
+                        'fro',
+                    )
+                _logger.info(
+                    f"  [Fix 5] Within-bin (corr_kw - corr_perbin) Frobenius: "
+                    f"mean={np.mean(_within_diffs):.3e}, "
+                    f"median={np.median(_within_diffs):.3e}, "
+                    f"max={np.max(_within_diffs):.3e}"
+                )
+                log_psd_diagnostics(corr_matrix, "corr_for_multigroup (Fix 5)", _logger)
+            else:
+                cov_matrix, corr_matrix, param_labels, mc_mean_params, cov_abs = compute_covariance_from_samples(
+                    all_samples=all_samples,
+                    energy_indices=energy_indices,
+                    max_order=max_degree,
+                    valid_mask=valid_mask_s7,
+                    snr_threshold=_snr_thr,
+                    n_neighbors=near_zero_n_neighbors,
+                    logger=_logger,
+                )
 
         # Safety net: sanitize non-finite entries before multigroup collapse
         n_nonfinite = int(np.sum(~np.isfinite(cov_matrix)))
@@ -3679,6 +3861,28 @@ def run_exfor_to_endf_sampling_v2(
                             log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-ffill", _logger, verbose=True)
 
                     _logger.info(f"  Regrouped: {n_old} -> {len(multigroup_result.groups)} groups")
+
+            # Phase 5: Optional hard-zero of small multigroup correlations.
+            # Applied to both avg and nominal multigroup matrices before MF34
+            # write. ENDF-6 MF34 LB=5 is dense, so this does not save file
+            # size; it removes sub-noise correlations from the published file.
+            if (
+                MULTIGROUP_CORRELATION_THRESHOLD > 0
+                and multigroup_result is not None
+            ):
+                multigroup_result.cov_grouped, _ = threshold_small_correlations(
+                    multigroup_result.cov_grouped,
+                    threshold=MULTIGROUP_CORRELATION_THRESHOLD,
+                    label="MG cov_grouped (avg)",
+                    logger=_logger,
+                )
+                if cov_grouped_nominal is not None:
+                    cov_grouped_nominal, _ = threshold_small_correlations(
+                        cov_grouped_nominal,
+                        threshold=MULTIGROUP_CORRELATION_THRESHOLD,
+                        label="MG cov_grouped (nominal)",
+                        logger=_logger,
+                    )
 
             # Write multigroup MF34 if requested and available
             if mf34_covariance_type in ("multigroup", "both") and cov_grouped_nominal is not None:

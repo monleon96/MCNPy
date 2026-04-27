@@ -3373,6 +3373,209 @@ def inject_within_bin_correlations(
     return corr_out
 
 
+def psd_repair_correlation_active(
+    corr: np.ndarray,
+    dead_mask: np.ndarray,
+    eigenvalue_threshold: float = -1e-10,
+    eigval_floor: float = 1e-14,
+    label: str = "",
+    logger=None,
+) -> np.ndarray:
+    """Repair PSD of a correlation matrix, excluding dead parameters via Schur complement.
+
+    Dead parameters are reinserted as block-diagonal sentinels (off-diag=0,
+    diag=1), making the full matrix PSD by construction (block-diagonal sum
+    of two PSD pieces). Active parameters are repaired via Higham only if
+    the active-block min eigenvalue is below ``eigenvalue_threshold``.
+
+    Operating on a correlation matrix (unit diagonal) keeps Higham's repair
+    scale-free, avoiding the smearing that occurs when the same eigenvalue
+    clip is applied in covariance space (where damage scales with std).
+
+    Parameters
+    ----------
+    corr : np.ndarray (n, n)
+        Correlation matrix to repair (unit diagonal expected).
+    dead_mask : np.ndarray (n,) bool
+        True where parameter is "dead" (low SNR, unfitted, or zero variance)
+        and should be excluded from the eigendecomposition.
+    eigenvalue_threshold : float
+        Min eigenvalue below which Higham is triggered on the active subset.
+    eigval_floor : float
+        Floor passed to ``nearest_psd_higham``.
+    label : str
+        Short label for log messages.
+    logger : logger or None
+        Logger instance (optional).
+
+    Returns
+    -------
+    np.ndarray
+        Repaired correlation matrix. PSD by construction.
+    """
+    n = corr.shape[0]
+    active = ~dead_mask
+    n_active = int(np.sum(active))
+    n_dead = n - n_active
+
+    out = np.zeros_like(corr)
+    np.fill_diagonal(out, 1.0)
+
+    if n_active == 0:
+        if logger is not None:
+            logger.info(
+                f"  [PSD repair / {label}] all {n} parameters dead — "
+                f"returning identity sentinel"
+            )
+        return out
+
+    active_idx = np.where(active)[0]
+    corr_active = corr[np.ix_(active_idx, active_idx)]
+    eigs = np.linalg.eigvalsh(corr_active)
+    min_eig = float(np.min(eigs))
+
+    if min_eig < eigenvalue_threshold:
+        from kika.cov.decomposition import nearest_psd_higham
+        corr_active_repaired, _psd_info = nearest_psd_higham(
+            corr_active, preserve_diagonal=True, eigval_floor=eigval_floor,
+            verbose=False, logger=logger,
+        )
+        max_dc = _psd_info.get('max_diagonal_change', 0.0)
+        if logger is not None:
+            logger.info(
+                f"  [PSD repair / {label}] Higham on active subset: "
+                f"n_active={n_active}, n_dead={n_dead}, "
+                f"min_eig={min_eig:.3e}, max_diag_change={max_dc:.3e}"
+            )
+    else:
+        corr_active_repaired = corr_active
+        if logger is not None:
+            logger.info(
+                f"  [PSD repair / {label}] active subset already PSD: "
+                f"n_active={n_active}, n_dead={n_dead}, min_eig={min_eig:.3e}"
+            )
+
+    out[np.ix_(active_idx, active_idx)] = corr_active_repaired
+    np.fill_diagonal(out, 1.0)
+    return out
+
+
+def threshold_small_correlations(
+    cov_rel: np.ndarray,
+    threshold: float,
+    eigenvalue_threshold: float = -1e-10,
+    eigval_floor: float = 1e-14,
+    label: str = "",
+    logger=None,
+) -> Tuple[np.ndarray, dict]:
+    """Hard-zero off-diagonal correlations whose magnitude is below ``threshold``.
+
+    Operates on a covariance matrix (relative or absolute) by extracting
+    std, zeroing small correlations, and rebuilding cov with the same std.
+    PSD is validated via ``nearest_psd_higham`` as a fallback if hard
+    zeroing creates negative eigenvalues.
+
+    Note: ENDF-6 MF34 LB=5 stores the upper triangle dense, so this does
+    not save file size. The natural floor for ``threshold`` is sampling
+    noise (~ 1/sqrt(N) for N samples).
+
+    Returns
+    -------
+    Tuple of (thresholded covariance, info dict with n_zeroed/min_eig/higham_applied).
+    """
+    if threshold <= 0:
+        return cov_rel, {
+            'n_zeroed': 0, 'n_total_offdiag': 0,
+            'min_eig': None, 'higham_applied': False,
+        }
+
+    n = cov_rel.shape[0]
+    std = np.sqrt(np.maximum(np.diag(cov_rel), 0.0))
+    safe_std = std.copy()
+    safe_std[safe_std == 0] = 1.0
+    corr = cov_rel / np.outer(safe_std, safe_std)
+    np.fill_diagonal(corr, 1.0)
+
+    mask = np.abs(corr) < threshold
+    np.fill_diagonal(mask, False)
+    n_total_offdiag = n * (n - 1) // 2
+    n_zeroed = int(np.sum(mask)) // 2  # symmetric
+    corr[mask] = 0.0
+
+    cov_out = corr * np.outer(std, std)
+    eigs = np.linalg.eigvalsh(cov_out)
+    min_eig = float(np.min(eigs))
+    higham_applied = False
+
+    if min_eig < eigenvalue_threshold:
+        from kika.cov.decomposition import nearest_psd_higham
+        cov_out, _info = nearest_psd_higham(
+            cov_out, preserve_diagonal=True, eigval_floor=eigval_floor,
+            verbose=False, logger=logger,
+        )
+        higham_applied = True
+        eigs2 = np.linalg.eigvalsh(cov_out)
+        if not np.all(np.isfinite(eigs2)) or np.min(eigs2) < eigenvalue_threshold * 100:
+            raise RuntimeError(
+                f"Threshold step ({label}): Higham failed to restore PSD after "
+                f"hard-zero (final min_eig={float(np.min(eigs2)):.3e}). "
+                f"Consider lowering MULTIGROUP_CORRELATION_THRESHOLD."
+            )
+
+    info = {
+        'n_zeroed': n_zeroed,
+        'n_total_offdiag': n_total_offdiag,
+        'min_eig': min_eig,
+        'higham_applied': higham_applied,
+    }
+    if logger is not None:
+        frac = 100.0 * n_zeroed / max(n_total_offdiag, 1)
+        logger.info(
+            f"  [Threshold / {label}] zeroed {n_zeroed}/{n_total_offdiag} "
+            f"off-diagonals ({frac:.1f}%) at |rho|<{threshold:.2e}; "
+            f"min_eig={min_eig:.3e}, "
+            f"higham={'applied' if higham_applied else 'not needed'}"
+        )
+    return cov_out, info
+
+
+def log_psd_diagnostics(matrix: np.ndarray, label: str, logger) -> dict:
+    """Log eigenvalue spectrum diagnostics for a (cov or corr) matrix.
+
+    Reports min eigenvalue, count of negative eigenvalues, and total
+    negative mass (sum of negative eigenvalues). The negative mass is the
+    scalar most relevant to assessing PSD-repair smearing damage.
+
+    Parameters
+    ----------
+    matrix : np.ndarray
+        Symmetric matrix (covariance or correlation).
+    label : str
+        Short label identifying the checkpoint (e.g. "corr_kw").
+    logger : logger
+        Logger instance for the message.
+
+    Returns
+    -------
+    dict with keys 'min_eig', 'n_neg', 'neg_mass', 'n_total'.
+    """
+    eigs = np.linalg.eigvalsh(matrix)
+    n_total = int(len(eigs))
+    n_neg = int(np.sum(eigs < 0))
+    neg_mass = float(np.sum(eigs[eigs < 0])) if n_neg > 0 else 0.0
+    min_eig = float(np.min(eigs))
+    logger.info(
+        f"  [PSD diag] {label}: min_eig={min_eig:.3e}, "
+        f"n_neg={n_neg}/{n_total}, neg_mass={neg_mass:.3e}"
+    )
+    return {
+        'min_eig': min_eig,
+        'n_neg': n_neg,
+        'neg_mass': neg_mass,
+        'n_total': n_total,
+    }
+
+
 def build_gaussian_relevance_matrix(
     energy_bins: List,
     energy_indices: List[int],
