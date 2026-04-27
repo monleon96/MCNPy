@@ -1951,12 +1951,30 @@ class PlotBuilder:
                         except Exception:
                             pass
                 else:  # right / left
-                    _LR_RECT = {'right': [0, 0, 0.78, 1],
-                                'left':  [0.22, 0, 1, 1]}
+                    # Measure the legend in figure coords and give the axes
+                    # the remaining space. Clamp to a 0.3-wide axes floor so
+                    # a wildly large legend can't collapse the plot to zero;
+                    # past that point, switch to the "Legend Only" export.
                     try:
-                        self.fig.tight_layout(rect=_LR_RECT[_outside_dir])
+                        self.fig.canvas.draw()
+                        renderer = self.fig.canvas.get_renderer()
+                        leg_bb = self.ax.get_legend().get_window_extent(renderer) \
+                            .transformed(self.fig.transFigure.inverted())
+                        if _outside_dir == 'right':
+                            self.fig.tight_layout(
+                                rect=[0, 0, max(leg_bb.x0 - 0.01, 0.3), 1]
+                            )
+                        else:  # left
+                            self.fig.tight_layout(
+                                rect=[min(leg_bb.x1 + 0.01, 0.7), 0, 1, 1]
+                            )
                     except Exception:
-                        pass
+                        rect = [0, 0, 0.78, 1] if _outside_dir == 'right' \
+                            else [0.22, 0, 1, 1]
+                        try:
+                            self.fig.tight_layout(rect=rect)
+                        except Exception:
+                            pass
         
         # Apply tick parameters if specified
         if hasattr(self, '_tick_params') and self._tick_params:
