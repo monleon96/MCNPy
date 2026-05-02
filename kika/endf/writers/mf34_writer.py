@@ -195,6 +195,8 @@ def create_mf34_from_covariance(
     ltt: int = 1,
     mt1: Optional[int] = None,
     frame: str = "same-as-MF4",
+    *,
+    cov_c0_cl: Optional[np.ndarray] = None,
 ) -> MF34MT:
     """
     Create MF34MT object from Legendre coefficient covariance matrix.
@@ -352,7 +354,38 @@ def create_mf34_from_covariance(
     lct_map = {"same-as-MF4": 0, "LAB": 1, "CM": 2}
     lct = lct_map.get(frame, 0)
 
-    # Create sub-subsections for each (L, L1) pair
+    # Optional l=0 cross-correlation rows: Cov(δσ, a_l1) for l1 ∈ [1, max_order].
+    # These are a v3 extension — non-standard ENDF-6 because spec says a_0 = 1
+    # has no uncertainty. We repurpose L=0 sub-subsections to encode the
+    # MF3↔MF34 cross-correlation. Caveats:
+    #   - kika's MF34 parser uses ``NL*(NL+1)/2`` for the sub-subsection count
+    #     when MAT1=0, so a strict round-trip will miss the l=0 entries unless
+    #     the parser is also extended.
+    #   - External processing codes (NJOY ERRORR, etc.) may warn or ignore
+    #     these entries.
+    # Document this clearly upstream when enabling the feature.
+    if cov_c0_cl is not None:
+        expected_shape = (n_energies, n_energies * max_order)
+        if cov_c0_cl.shape != expected_shape:
+            raise ValueError(
+                f"cov_c0_cl shape {cov_c0_cl.shape} != expected {expected_shape} "
+                f"(N_energies, N_energies * max_order)"
+            )
+        for l1 in range(1, max_order + 1):
+            sub_subsec = SubSubsection()
+            sub_subsec.l = 0
+            sub_subsec.l1 = l1
+            sub_subsec.lct = lct
+            sub_subsec.ni = 1
+            col_indices = [j * max_order + (l1 - 1) for j in range(n_energies)]
+            sub_matrix = cov_c0_cl[:, col_indices]  # (N_energies, N_energies)
+            # L=0 ↔ L1 is asymmetric (rows = δσ, cols = a_l1) → LB=6
+            sub_subsec.records = [_make_lb6_record(
+                sub_matrix, list(energy_grid_ev), list(energy_grid_ev)
+            )]
+            subsection.sub_subsections.append(sub_subsec)
+
+    # Create sub-subsections for each (L, L1) pair with L, L1 ≥ 1.
     # Only upper triangle: L <= L1 (symmetric covariance)
     for l in range(1, max_order + 1):
         for l1 in range(l, max_order + 1):

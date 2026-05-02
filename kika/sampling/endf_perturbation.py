@@ -517,7 +517,7 @@ def perturb_ENDF_files(
     mf34_cov_files: Optional[Union[str, List[str]]] = None,
     space: str = "linear",
     decomposition_method: str = "svd",
-    psd_method: str = "higham",
+    psd_method: str = "auto",
     sampling_method: str = "sobol",
     output_dir: str = '.',
     seed: Optional[int] = None,

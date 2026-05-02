@@ -5,8 +5,9 @@ import logging
 import pandas as pd
 import json
 import time
+import threading
 from typing import List, Union, Optional, Dict, Tuple
-from multiprocessing import Pool
+from multiprocessing import Pool, Manager
 from datetime import datetime
 
 from kika.sampling.generators import generate_samples
@@ -23,8 +24,93 @@ from kika.sampling.utils import (
     normalize_mt_list,
     _initialize_master_perturbation_matrix,
     _update_master_perturbation_matrix,
-    _finalize_master_perturbation_matrix
+    _write_isotope_parquet,
+    _merge_isotope_metadata,
+    _finalize_master_perturbation_matrix,
 )
+
+
+class QueueLogger:
+    """Streaming drop-in for ``DualLogger`` used by parallel dry-run workers.
+
+    Each call pushes a ``(zaid_or_step, level, msg)`` tuple onto a shared
+    ``multiprocessing.Queue`` that a daemon thread in the parent drains and
+    forwards to the real logger immediately — so progress on long-running
+    Higham iterations is visible without waiting for the worker to exit.
+
+    The optional tag (zaid or step number) is stamped onto each record so
+    the parent can prefix isotope identity when isotope blocks interleave.
+    Pickleable (only stores the queue + a small string tag).
+    """
+
+    __slots__ = ("queue", "tag")
+
+    def __init__(self, queue, tag: str = ""):
+        self.queue = queue
+        self.tag = tag
+
+    def _emit(self, level: str, msg: str):
+        try:
+            self.queue.put((self.tag, level, str(msg)))
+        except Exception:
+            # If the queue is closed (parent died), don't take down the worker.
+            pass
+
+    def info(self, msg, *args, **kwargs):
+        self._emit("info", msg)
+
+    def warning(self, msg, *args, **kwargs):
+        self._emit("warning", msg)
+
+    def error(self, msg, *args, **kwargs):
+        self._emit("error", msg)
+
+    def debug(self, msg, *args, **kwargs):
+        self._emit("debug", msg)
+
+
+# Module-global slot used by the Pool initializer to hand the shared log
+# queue to forked workers. Set in ``_dryrun_worker_init`` and read by
+# ``_process_one_isotope_dryrun`` when constructing its QueueLogger.
+_DRYRUN_LOG_QUEUE = None
+_DRYRUN_BLAS_THREADS = 1
+
+
+def _dryrun_worker_init(queue, blas_threads: int):
+    """Pool initializer — runs once per worker process at startup.
+
+    Stores the shared log queue and the BLAS thread budget into module
+    globals so the per-task entry point can pick them up without having
+    to pickle the queue with every task.
+    """
+    global _DRYRUN_LOG_QUEUE, _DRYRUN_BLAS_THREADS
+    _DRYRUN_LOG_QUEUE = queue
+    _DRYRUN_BLAS_THREADS = max(1, int(blas_threads))
+
+
+def _drain_log_queue(queue, real_logger, stop_sentinel) -> None:
+    """Parent-side daemon thread: drain queue and forward to real logger.
+
+    Runs until it sees ``stop_sentinel`` posted by the parent after the
+    Pool has joined. The sentinel goes through Manager-queue pickling,
+    so we compare by equality (not identity).
+    """
+    while True:
+        try:
+            item = queue.get()
+        except (EOFError, OSError):
+            return
+        if item == stop_sentinel:
+            return
+        try:
+            _tag, level, msg = item
+            getattr(real_logger, level, real_logger.info)(msg)
+        except Exception:
+            # Never let the listener thread die from a malformed record.
+            try:
+                real_logger.warning(f"[ACE] Malformed log record dropped: {item!r}")
+            except Exception:
+                pass
 
 
 def _process_sample(
@@ -78,6 +164,516 @@ def _process_sample(
     )
 
 
+def _do_isotope_work(args: dict, log) -> dict:
+    """Per-isotope cov-load → autofix → factor sample → parquet write.
+
+    The body is a near-verbatim lift of the per-isotope loop in
+    ``perturb_ACE_files`` (lines roughly 320–700 of the legacy sequential
+    path), with shared-state writes replaced by local accumulators that
+    the caller merges.
+
+    All logging goes through ``log`` — pass a ``BufferedLogger`` for
+    parallel workers (records replayed in the parent), or the module
+    ``DualLogger`` for the sequential path.
+
+    Returns a dict with keys: ``zaid``, ``summary_fragment``,
+    ``skip_reason``, ``warning_increments``, ``metadata_fragment``,
+    ``factors_data``. ``skip_reason`` is non-None when the isotope was
+    skipped (missing ACE, missing covariance, autofix failure).
+    """
+    from kika.sampling.generators import CovarianceFixError, SoftAutofixWarning
+
+    ace_file = args["ace_file"]
+    cov_file = args["cov_file"]
+    mt_list = args["mt_list"]
+    num_samples = args["num_samples"]
+    space = args["space"]
+    decomposition_method = args["decomposition_method"]
+    sampling_method = args["sampling_method"]
+    psd_method = args["psd_method"]
+    autofix = args["autofix"]
+    high_val_thresh = args["high_val_thresh"]
+    accept_tol = args["accept_tol"]
+    max_relative_std = args["max_relative_std"]
+    energy_ranges = args["energy_ranges"]
+    matrix_dir = args["matrix_dir"]
+    remove_blocks = args["remove_blocks"]
+    seed = args["seed"]
+    verbose = args["verbose"]
+
+    warning_increments = {
+        "covariance_load_failed": 0,
+        "file_not_found": 0,
+        "autofix_warnings": 0,
+        "negative_factors": 0,
+    }
+
+    if not os.path.exists(ace_file):
+        log.error(f"  [ERROR] [ACE] ACE file not found: {ace_file}")
+        warning_increments["file_not_found"] += 1
+        zaid = os.path.splitext(os.path.basename(ace_file))[0]
+        summary_fragment = {
+            "ace_file": os.path.basename(ace_file),
+            "cov_file": os.path.basename(cov_file),
+            "mt_in_ace": [],
+            "mt_in_cov": [],
+            "mt_perturbed": [],
+            "removed_mts": {},
+            "autofix_info": {
+                "level": autofix,
+                "removed_pairs": [],
+                "removed_mts": [],
+                "removed_correlations": [],
+                "converged": False,
+                "soft_threshold_warning": False,
+            },
+            "warnings": [f"ACE file not found: {os.path.basename(ace_file)}"],
+        }
+        return {
+            "zaid": zaid,
+            "summary_fragment": summary_fragment,
+            "skip_reason": "ACE file not found",
+            "warning_increments": warning_increments,
+            "metadata_fragment": None,
+            "factors_data": None,
+        }
+
+    ace = read_ace(ace_file)
+    zaid = ace.zaid
+
+    summary_fragment = {
+        "ace_file": os.path.basename(ace_file),
+        "cov_file": os.path.basename(cov_file),
+        "mt_in_ace": sorted(set(ace.mt_numbers)),
+        "mt_in_cov": [],
+        "mt_perturbed": [],
+        "removed_mts": {},
+        "autofix_info": {
+            "level": autofix,
+            "removed_pairs": [],
+            "removed_mts": [],
+            "removed_correlations": [],
+            "converged": True,
+            "soft_threshold_warning": False,
+        },
+        "warnings": [],
+    }
+
+    cov = load_covariance(cov_file)
+    if cov is None:
+        log.error(f"  [ERROR] [ACE] Unable to load a valid covariance matrix for {cov_file}")
+        warning_increments["covariance_load_failed"] += 1
+        summary_fragment["warnings"].append(
+            f"No valid covariance file found: {os.path.basename(cov_file)}"
+        )
+        return {
+            "zaid": zaid,
+            "summary_fragment": summary_fragment,
+            "skip_reason": "No valid covariance file found",
+            "warning_increments": warning_increments,
+            "metadata_fragment": None,
+            "factors_data": None,
+        }
+
+    log.info(f"  [INFO] [ACE] Covariance file: {cov_file}")
+    log.info(f"  [INFO] [ACE] Isotope: {zaid}")
+
+    if cov.num_matrices == 0:
+        log.info(f"  [WARN] [ACE] No covariance found in {zaid}. Skipping.")
+        summary_fragment["warnings"].append("No covariance data found in matrix")
+        return {
+            "zaid": zaid,
+            "summary_fragment": summary_fragment,
+            "skip_reason": "No covariance data found in matrix",
+            "warning_increments": warning_increments,
+            "metadata_fragment": None,
+            "factors_data": None,
+        }
+
+    if remove_blocks and zaid in remove_blocks:
+        log.info(f"  [INFO] [ACE] Applying user-specified block removals for isotope {zaid}")
+        removal_spec = remove_blocks[zaid]
+        if isinstance(removal_spec, tuple):
+            blocks_to_remove = [removal_spec]
+        else:
+            blocks_to_remove = list(removal_spec)
+        log.info(f"  Blocks to remove: {blocks_to_remove}")
+        reactions_before = cov.reactions_by_isotope(zaid)
+        log.info(f"  Reactions before removal: {sorted(reactions_before)}")
+        try:
+            cov = cov.remove_matrix(isotope=zaid, reaction_pairs=blocks_to_remove)
+            reactions_after = cov.reactions_by_isotope(zaid)
+            log.info(f"  Reactions after removal:  {sorted(reactions_after)}")
+            removed_reactions = set(reactions_before) - set(reactions_after)
+            for mt in removed_reactions:
+                summary_fragment["removed_mts"][mt] = (
+                    f"User-specified block removal: {blocks_to_remove}"
+                )
+            if removed_reactions:
+                log.info(f"  Successfully removed reactions: {sorted(removed_reactions)}")
+            else:
+                log.info("  No reactions were removed (blocks may not have existed)")
+        except Exception as e:
+            log.error(f"  [ERROR] [ACE] Failed to remove blocks {blocks_to_remove}: {str(e)}")
+            summary_fragment["warnings"].append(
+                f"Failed to remove user-specified blocks: {str(e)}"
+            )
+
+    cov = cov.clean_cov(zaid)
+    mt_in_cov = cov.reactions_by_isotope(zaid)
+    summary_fragment["mt_in_cov"] = sorted(mt_in_cov)
+    mt_in_ace = sorted(set(ace.mt_numbers))
+
+    mt_positive = [mt for mt in mt_list if mt > 0]
+    mt_negative = [abs(mt) for mt in mt_list if mt < 0]
+
+    expanded_mt_negative = set(mt_negative)
+    for excluded_mt in mt_negative:
+        for single, rng in MT_GROUPS:
+            if single == excluded_mt:
+                expanded_mt_negative.update(rng)
+                break
+
+    if len(mt_positive) == 0:
+        mt_request = mt_in_ace
+    else:
+        mt_request = sorted(mt_positive)
+
+    if mt_negative:
+        if len(expanded_mt_negative) > len(mt_negative):
+            log.info(f"  [INFO] [ACE] Excluding MTs: {sorted(mt_negative)}")
+            additional = sorted(expanded_mt_negative - set(mt_negative))
+            if additional:
+                log.info(f"  [INFO] [ACE] Also excluding associated range MTs: {additional}")
+        else:
+            log.info(f"  [INFO] [ACE] Excluding MTs: {sorted(mt_negative)}")
+        mt_request = [mt for mt in mt_request if mt not in expanded_mt_negative]
+
+    original_mt_perturb = set(mt_in_cov) & set(mt_request) & set(mt_in_ace)
+    mt_perturb = set(mt_in_cov) & set(mt_request) & set(mt_in_ace)
+    group_removed_mts = {}
+
+    for single, rng in MT_GROUPS:
+        cov_has_single = single in mt_in_cov
+        cov_in_range = [mt for mt in mt_in_cov if mt in rng]
+        list_has_single = single in mt_request
+        list_in_range = [mt for mt in mt_request if mt in rng]
+        ace_in_range = [mt for mt in mt_in_ace if mt in rng]
+        single_is_excluded = single in expanded_mt_negative
+
+        if cov_has_single and (list_has_single or (list_in_range and ace_in_range)) and not single_is_excluded:
+            mt_perturb.add(single)
+        else:
+            if single in mt_perturb:
+                if single_is_excluded:
+                    if single in mt_negative:
+                        group_removed_mts[single] = f"MT={single} explicitly excluded via negative MT specification"
+                    else:
+                        group_removed_mts[single] = f"MT={single} excluded because summary MT was negatively specified"
+                elif not (cov_has_single and (list_has_single or (list_in_range and ace_in_range))):
+                    group_removed_mts[single] = f"Missing data in covariance or ACE file for MT={single} or its associated range"
+            mt_perturb.discard(single)
+            if cov_has_single:
+                cov = cov.remove_matrix(zaid, [(single, 0)])
+
+        if cov_in_range:
+            if (list_has_single or list_in_range) and ace_in_range and not single_is_excluded:
+                triple = set(cov_in_range) & set(mt_request) & set(mt_in_ace)
+                removed_range = set(cov_in_range) - triple
+                for mt in removed_range:
+                    if mt in original_mt_perturb:
+                        if mt in expanded_mt_negative:
+                            group_removed_mts[mt] = f"MT={mt} excluded because summary MT={single} was negatively specified"
+                        else:
+                            group_removed_mts[mt] = f"MT not in triple intersection for range associated with MT={single}"
+                mt_perturb.update(triple)
+                to_remove = [(mt, 0) for mt in cov_in_range if mt not in triple]
+                if to_remove:
+                    cov = cov.remove_matrix(zaid, to_remove)
+            else:
+                to_remove = [(mt, 0) for mt in cov_in_range]
+                for mt in cov_in_range:
+                    if mt in original_mt_perturb:
+                        if single_is_excluded and mt in expanded_mt_negative:
+                            group_removed_mts[mt] = f"MT={mt} excluded because summary MT={single} was negatively specified"
+                        else:
+                            group_removed_mts[mt] = f"MT range removed because required data missing in ACE or request list"
+                cov = cov.remove_matrix(zaid, to_remove)
+                for mt in cov_in_range:
+                    mt_perturb.discard(mt)
+
+    for mt, reason in group_removed_mts.items():
+        summary_fragment["removed_mts"][mt] = reason
+
+    mt_perturb = sorted(mt_perturb)
+    remaining = cov.reactions_by_isotope(zaid)
+    to_remove = [(mt, 0) for mt in remaining if mt not in mt_perturb]
+    if to_remove:
+        cov = cov.remove_matrix(zaid, to_remove)
+
+    log.info("  [INFO] [ACE] MT selection:")
+    log.info(f"    MTs in ACE file:          {mt_in_ace}")
+    log.info(f"    MTs in covariance matrix: {mt_in_cov}")
+    log.info(f"    MTs to be perturbed:      {mt_perturb}")
+    log.info(f">> mt_count = {len(mt_perturb)}")
+
+    energy_grid_eV = cov.energy_grid
+    if cov.energy_unit == 'eV':
+        energy_grid = [e / 1e6 for e in energy_grid_eV]
+        log.info("  [INFO] [ACE] Converted energy grid from eV to MeV for ACE compatibility")
+    elif cov.energy_unit == 'MeV':
+        energy_grid = energy_grid_eV
+    else:
+        raise ValueError(f"Unknown energy unit '{cov.energy_unit}' in covariance matrix")
+
+    mt_thresholds: Dict[int, float] = {}
+    threshold_source: Dict[int, str] = {}
+    # Track MTs whose σ(E) was *consulted* in ACE (regardless of whether a
+    # threshold was extracted). An MT with σ(E) data but nz[0]==0 (open at
+    # the first ACE energy) is a no-threshold reaction (elastic, capture,
+    # etc.) — those must NOT receive a cov-diag fallback, otherwise we
+    # would invent a fake threshold for a reaction that has none and the
+    # subthreshold mask would later drop real physical bins.
+    mt_consulted_in_ace: set = set()
+    if ace.cross_section is not None:
+        for mt in mt_perturb:
+            reac = ace.cross_section.reaction.get(mt)
+            if reac is None:
+                continue
+            xs_arr = np.asarray(reac.xs_values, dtype=float)
+            e_arr = np.asarray(reac.energies, dtype=float)
+            if xs_arr.size == 0 or e_arr.size == 0:
+                continue
+            mt_consulted_in_ace.add(int(mt))
+            nz = np.where(xs_arr > 0.0)[0]
+            if nz.size > 0 and nz[0] > 0:
+                mt_thresholds[int(mt)] = float(e_arr[nz[0]])
+                threshold_source[int(mt)] = "ace"
+
+    # Fallback ONLY for MTs whose σ(E) is genuinely absent from ACE (e.g.,
+    # MT=108 in some libraries). Use the cov-diagonal: take the bin with
+    # the largest σ² in the MT block and treat its lower edge as the proxy
+    # threshold — NJOY threshold artifacts manifest as a single high-σ²
+    # spike in the threshold-spanning bin.
+    cov_diag_full = np.diag(cov.covariance_matrix)
+    bins_arr_mev = np.asarray(energy_grid, dtype=float)
+    cov_param_pairs = cov._get_param_pairs()
+    cov_num_groups = cov.num_groups
+    for pair_idx, (z, mt) in enumerate(cov_param_pairs):
+        mt_int = int(mt)
+        if (int(z) != int(zaid)
+                or mt_int in mt_thresholds
+                or mt_int in mt_consulted_in_ace):
+            continue
+        block = cov_diag_full[pair_idx * cov_num_groups:(pair_idx + 1) * cov_num_groups]
+        finite_pos = np.isfinite(block) & (block > 0)
+        if not finite_pos.any():
+            continue
+        g_max = int(np.argmax(np.where(finite_pos, block, -np.inf)))
+        if g_max < len(bins_arr_mev) - 1:
+            mt_thresholds[mt_int] = float(bins_arr_mev[g_max])
+            threshold_source[mt_int] = "cov-diag"
+
+    log.info(
+        f"  [INFO] [ACE] Extracted {len(mt_thresholds)} reaction threshold(s) "
+        f"from ACE σ(E) for NJOY artifact detection"
+    )
+    for mt, e in sorted(mt_thresholds.items()):
+        src = threshold_source.get(mt, "ace")
+        tag = "" if src == "ace" else f"  [{src}]"
+        log.info(f"    MT={mt}: E_threshold = {e:.4e} MeV{tag}")
+
+    pre_autofix_mts = list(mt_perturb)
+
+    try:
+        factors, mt_perturb_final, fix_info = generate_samples(
+            cov=cov,
+            space=space,
+            n_samples=num_samples,
+            decomposition_method=decomposition_method,
+            sampling_method=sampling_method,
+            seed=None if seed is None else seed + zaid,
+            mt_numbers=mt_perturb,
+            energy_grid=energy_grid,
+            autofix=autofix,
+            high_val_thresh=high_val_thresh,
+            accept_tol=accept_tol,
+            psd_method=psd_method,
+            max_relative_std=max_relative_std,
+            mt_thresholds=mt_thresholds,
+            verbose=verbose,
+            label=str(zaid),
+        )
+    except SoftAutofixWarning as e:
+        log.error(f"  [ERROR] [ACE] Soft autofix warning for isotope {zaid}")
+        log.error(f"    Error details: {str(e)}")
+        warning_increments["autofix_warnings"] += 1
+        summary_fragment["warnings"].append(
+            "Soft autofix failed to meet eigenvalue threshold and decomposition failed"
+        )
+        summary_fragment["autofix_info"]["converged"] = False
+        summary_fragment["autofix_info"]["soft_threshold_warning"] = True
+        return {
+            "zaid": zaid,
+            "summary_fragment": summary_fragment,
+            "skip_reason": str(e),
+            "warning_increments": warning_increments,
+            "metadata_fragment": None,
+            "factors_data": None,
+        }
+    except CovarianceFixError as e:
+        log.error(f"  [ERROR] [ACE] Covariance matrix fixing failed for isotope {zaid}")
+        log.error(f"    Error details: {str(e)}")
+        log.error(
+            f"    Suggestion: Try processing isotope {zaid} separately with "
+            "autofix='medium' or 'hard'"
+        )
+        warning_increments["autofix_warnings"] += 1
+        summary_fragment["warnings"].append(
+            "Covariance matrix could not be fixed to meet eigenvalue threshold"
+        )
+        summary_fragment["autofix_info"]["converged"] = False
+        return {
+            "zaid": zaid,
+            "summary_fragment": summary_fragment,
+            "skip_reason": str(e),
+            "warning_increments": warning_increments,
+            "metadata_fragment": None,
+            "factors_data": None,
+        }
+
+    if autofix is not None and fix_info is not None:
+        if fix_info.get("soft_autofix_failed", False):
+            summary_fragment["autofix_info"]["soft_threshold_warning"] = True
+            min_eigenvalue = fix_info.get("min_eigenvalue", float('nan'))
+            summary_fragment["warnings"].append(
+                f"Soft autofix failed to meet eigenvalue threshold "
+                f"(λ_min={min_eigenvalue:.4e} < {accept_tol:.4e}) but decomposition succeeded"
+            )
+        removed_in_autofix = set(pre_autofix_mts) - set(mt_perturb_final if mt_perturb_final else [])
+        for mt in removed_in_autofix:
+            summary_fragment["removed_mts"][mt] = (
+                f"Removed during covariance autofix (level='{autofix}')"
+            )
+            summary_fragment["autofix_info"]["removed_mts"].append(mt)
+        if fix_info.get("removed_correlations"):
+            summary_fragment["autofix_info"]["removed_correlations"] = fix_info["removed_correlations"]
+        if fix_info.get("removed_pairs"):
+            summary_fragment["autofix_info"]["removed_pairs"] = fix_info["removed_pairs"]
+
+    if energy_ranges is not None and factors is not None and mt_perturb_final:
+        factors = _mask_factors_by_energy_range_ace(
+            factors, mt_perturb_final, energy_grid, energy_ranges, space
+        )
+        log.info(f"  [INFO] [ACE] Applied energy range masking for {zaid}")
+
+    summary_fragment["mt_perturbed"] = mt_perturb_final if mt_perturb_final else []
+    if factors is not None:
+        log.info(f">> factors_shape = {factors.shape}")
+
+    factors_data = None
+    metadata_fragment = None
+    if mt_perturb_final and factors is not None:
+        factors_data = {
+            "factors": factors.astype(np.float32),
+            "mt_numbers": mt_perturb_final,
+            "energy_grid": energy_grid,
+        }
+        metadata_fragment = _write_isotope_parquet(
+            matrix_dir, zaid, factors, mt_perturb_final, energy_grid,
+            verbose=verbose, logger=log,
+        )
+
+    return {
+        "zaid": zaid,
+        "summary_fragment": summary_fragment,
+        "skip_reason": None,
+        "warning_increments": warning_increments,
+        "metadata_fragment": metadata_fragment,
+        "factors_data": factors_data,
+    }
+
+
+def _process_one_isotope_dryrun(args: dict) -> dict:
+    """Top-level worker for parallel dry-run mode. Pickleable.
+
+    Wraps ``_do_isotope_work`` with a per-worker streaming ``QueueLogger``,
+    timing, step header/footer, and a try/except so one bad isotope
+    doesn't kill the pool. Log records flow to the parent listener thread
+    in real time so progress is visible during long Higham iterations.
+    """
+    import traceback
+
+    # 1) Cap BLAS threads inside this worker. Without a cap, NumPy/SciPy
+    # spin up one thread per core per worker; with N workers in the pool
+    # that oversubscribes the machine and every Higham iteration thrashes.
+    # The parent picks the budget (cores / workers); we just enforce it.
+    try:
+        from threadpoolctl import threadpool_limits
+        _tp = threadpool_limits(_DRYRUN_BLAS_THREADS)
+    except ImportError:
+        _tp = None
+
+    # 2) Replace the inherited module-level DualLogger with a streaming
+    # QueueLogger. generate_samples and the cov-decomposition layer call
+    # _get_logger() to find the active logger; without this swap, all
+    # workers would race on the parent's DualLogger file handle.
+    step_num = args["step_num"]
+    log = QueueLogger(_DRYRUN_LOG_QUEUE, tag=f"step{step_num}")
+    _set_logger(log)
+
+    ace_file = args["ace_file"]
+    step_t0 = time.time()
+
+    log.info(
+        f"\n#-- STEP {step_num}: Process isotope from "
+        f"{os.path.basename(ace_file)} ------------------------------------------------"
+    )
+
+    zaid = None
+    summary_fragment = None
+    skip_reason = None
+    warning_increments = {
+        "covariance_load_failed": 0,
+        "file_not_found": 0,
+        "autofix_warnings": 0,
+        "negative_factors": 0,
+    }
+    metadata_fragment = None
+    factors_data = None
+    exception_str = None
+
+    try:
+        result = _do_isotope_work(args, log)
+        zaid = result["zaid"]
+        summary_fragment = result["summary_fragment"]
+        skip_reason = result["skip_reason"]
+        warning_increments = result["warning_increments"]
+        metadata_fragment = result["metadata_fragment"]
+        factors_data = result["factors_data"]
+    except Exception:
+        exception_str = traceback.format_exc()
+        log.error(f"[ACE] Worker exception in step {step_num}:\n{exception_str}")
+
+    elapsed = time.time() - step_t0
+    log.info(
+        f"#-- END STEP {step_num} (elapsed: {elapsed:.1f}s) -------------------------------------"
+    )
+
+    return {
+        "zaid": zaid,
+        "ace_basename": os.path.basename(ace_file),
+        "step_num": step_num,
+        "elapsed": elapsed,
+        "summary_fragment": summary_fragment,
+        "skip_reason": skip_reason,
+        "warning_increments": warning_increments,
+        "metadata_fragment": metadata_fragment,
+        "factors_data": factors_data,
+        "exception": exception_str,
+    }
+
+
 def perturb_ACE_files(
     ace_files: Union[str, List[str]],
     cov_files: Union[str, List[str]],
@@ -98,7 +694,7 @@ def perturb_ACE_files(
     remove_blocks: Optional[Dict[int, Union[Tuple[int, int], List[Tuple[int, int]]]]] = None,
     verbose: bool = True,
     energy_ranges: Optional[List[Tuple[float, float]]] = None,
-    psd_method: str = "higham",
+    psd_method: str = "auto",
     max_relative_std: Optional[float] = 3.0,
 ):
     """
@@ -315,7 +911,110 @@ def perturb_ACE_files(
     job_t0 = time.time()
     warning_counts = {"covariance_load_failed": 0, "file_not_found": 0, "autofix_warnings": 0, "negative_factors": 0}
 
+    # =====================================================================
+    #  PARALLEL DRY-RUN (one CPU per isotope, gated on dry_run + nprocs > 1)
+    # =====================================================================
+    use_parallel_dryrun = dry_run and nprocs > 1 and len(ace_files) > 1
+    if use_parallel_dryrun:
+        workers = min(nprocs, len(ace_files))
+        # Split the user's nprocs budget across workers for BLAS threading.
+        # Higham does many eigendecompositions on large dense matrices —
+        # giving each worker a couple of BLAS threads makes those eigh
+        # calls noticeably faster than the previous hardcoded 1.
+        blas_threads = max(1, nprocs // workers)
+        _logger.info(
+            f"  [INFO] [ACE] Dry-run parallel: {workers} workers across "
+            f"{len(ace_files)} isotopes ({blas_threads} BLAS thread(s)/worker)",
+            console=True,
+        )
+        tasks = [
+            {
+                "ace_file": af,
+                "cov_file": cf,
+                "mt_list": ml,
+                "num_samples": num_samples,
+                "space": space,
+                "decomposition_method": decomposition_method,
+                "sampling_method": sampling_method,
+                "psd_method": psd_method,
+                "autofix": autofix,
+                "high_val_thresh": high_val_thresh,
+                "accept_tol": accept_tol,
+                "max_relative_std": max_relative_std,
+                "energy_ranges": energy_ranges,
+                "matrix_dir": matrix_dir,
+                "remove_blocks": remove_blocks,
+                "seed": seed,
+                "step_num": idx + 1,
+                "verbose": verbose,
+            }
+            for idx, (af, cf, ml) in enumerate(zip(ace_files, cov_files, mt_lists))
+        ]
+        metadata_fragments = []
+
+        # Manager-backed queue is picklable across the Pool's fork boundary
+        # and survives worker churn; a plain mp.Queue would also work on
+        # Linux fork but Manager keeps the API identical on spawn-based
+        # platforms. The listener thread drains records in real time and
+        # forwards each one to the same DualLogger the sequential path uses.
+        with Manager() as manager:
+            log_queue = manager.Queue()
+            stop_sentinel = "__ACE_LOG_STOP__"
+            listener = threading.Thread(
+                target=_drain_log_queue,
+                args=(log_queue, _logger, stop_sentinel),
+                name="ACEDryRunLogListener",
+                daemon=True,
+            )
+            listener.start()
+
+            try:
+                with Pool(
+                    processes=workers,
+                    initializer=_dryrun_worker_init,
+                    initargs=(log_queue, blas_threads),
+                ) as pool:
+                    for result in pool.imap_unordered(_process_one_isotope_dryrun, tasks):
+                        if result.get("exception"):
+                            # Worker already streamed the traceback through
+                            # the queue; here we just record the failure.
+                            _logger.error(
+                                f"  [ERROR] [ACE] Worker for {result.get('ace_basename')} "
+                                f"raised an unexpected exception (see log above)"
+                            )
+                            continue
+
+                        zaid = result["zaid"]
+                        if result["summary_fragment"] is not None and zaid is not None:
+                            summary_data[zaid] = result["summary_fragment"]
+                        if result.get("skip_reason") and zaid is not None:
+                            skipped_isotopes[zaid] = result["skip_reason"]
+                        for k, v in result["warning_increments"].items():
+                            warning_counts[k] += v
+                        if result.get("metadata_fragment"):
+                            metadata_fragments.append(result["metadata_fragment"])
+                        if result.get("factors_data") is not None and zaid is not None:
+                            all_factors_data[zaid] = result["factors_data"]
+            finally:
+                # Tell the listener to stop and wait briefly for it to drain.
+                try:
+                    log_queue.put(stop_sentinel)
+                except Exception:
+                    pass
+                listener.join(timeout=5.0)
+
+        _merge_isotope_metadata(matrix_dir, metadata_fragments)
+        _logger.info(
+            f"  [INFO] [ACE] Dry-run parallel complete: "
+            f"{len(summary_data)} isotopes processed, "
+            f"{len(skipped_isotopes)} skipped",
+            console=True,
+        )
+
     for i, (ace_file, cov_file, mt_list) in enumerate(zip(ace_files, cov_files, mt_lists)):
+        # Skip the sequential body when the parallel path already did the work
+        if use_parallel_dryrun:
+            continue
 
         # ====== Start of ACE file processing ======
         step_t0 = time.time()
@@ -574,6 +1273,11 @@ def perturb_ACE_files(
         # Used to flag NJOY threshold-spanning bins so their variance can be
         # rescaled to the per-MT median before PSD projection.
         mt_thresholds: Dict[int, float] = {}
+        threshold_source: Dict[int, str] = {}
+        # See _run_dry_one for why we track ACE-consulted MTs separately:
+        # no-threshold reactions (elastic, capture) have ACE σ(E) but with
+        # nz[0]==0; the cov-diag fallback must NOT fire for them.
+        mt_consulted_in_ace: set = set()
         if ace.cross_section is not None:
             for mt in mt_perturb:
                 reac = ace.cross_section.reaction.get(mt)
@@ -583,17 +1287,42 @@ def perturb_ACE_files(
                 e_arr = np.asarray(reac.energies, dtype=float)
                 if xs_arr.size == 0 or e_arr.size == 0:
                     continue
+                mt_consulted_in_ace.add(int(mt))
                 nz = np.where(xs_arr > 0.0)[0]
                 # nz[0] == 0 means the reaction is open at the first ACE energy
                 # (no threshold inside the union grid) — skip.
                 if nz.size > 0 and nz[0] > 0:
                     mt_thresholds[int(mt)] = float(e_arr[nz[0]])
+                    threshold_source[int(mt)] = "ace"
+
+        # Fallback ONLY for MTs whose σ(E) is genuinely absent from ACE.
+        cov_diag_full = np.diag(cov.covariance_matrix)
+        bins_arr_mev = np.asarray(energy_grid, dtype=float)
+        cov_param_pairs = cov._get_param_pairs()
+        cov_num_groups = cov.num_groups
+        for pair_idx, (z, mt) in enumerate(cov_param_pairs):
+            mt_int = int(mt)
+            if (int(z) != int(zaid)
+                    or mt_int in mt_thresholds
+                    or mt_int in mt_consulted_in_ace):
+                continue
+            block = cov_diag_full[pair_idx * cov_num_groups:(pair_idx + 1) * cov_num_groups]
+            finite_pos = np.isfinite(block) & (block > 0)
+            if not finite_pos.any():
+                continue
+            g_max = int(np.argmax(np.where(finite_pos, block, -np.inf)))
+            if g_max < len(bins_arr_mev) - 1:
+                mt_thresholds[mt_int] = float(bins_arr_mev[g_max])
+                threshold_source[mt_int] = "cov-diag"
+
         _logger.info(
             f"  [INFO] [ACE] Extracted {len(mt_thresholds)} reaction threshold(s) "
             f"from ACE σ(E) for NJOY artifact detection"
         )
         for mt, e in sorted(mt_thresholds.items()):
-            _logger.info(f"    MT={mt}: E_threshold = {e:.4e} MeV")
+            src = threshold_source.get(mt, "ace")
+            tag = "" if src == "ace" else f"  [{src}]"
+            _logger.info(f"    MT={mt}: E_threshold = {e:.4e} MeV{tag}")
 
         # Save pre-autofix MT list
         pre_autofix_mts = list(mt_perturb)

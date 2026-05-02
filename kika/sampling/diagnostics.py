@@ -93,9 +93,12 @@ def _diagnostics_samples_linear(
     # Check means significantly off 1
     for dim in range(p):
         var_lin = cov_lin[dim, dim]
-        if var_lin == 0.0:
+        # Skip diagonals below numeric floor — typically below-threshold
+        # reactions where σ²≈0; sampler produces factor=1 every draw and
+        # (mean-1)/σ blows up to ±inf from float noise.
+        if not np.isfinite(var_lin) or var_lin < 1e-12:
             continue
-        
+
         se_f = np.sqrt(var_lin / n)
         z = (means_f[dim] - 1.0) / se_f
         if abs(z) <= z_limit:
@@ -230,7 +233,8 @@ def _diagnostics_samples_log(
     # Check for mean deviations in log space
     for dim in range(p):
         var_log = cov_log[dim, dim]
-        if var_log == 0.0:
+        # Skip diagonals below numeric floor (see linear-space note above)
+        if not np.isfinite(var_log) or var_log < 1e-12:
             continue
 
         mean_th = 1.0
@@ -601,9 +605,12 @@ def _diagnostics_endf_samples_linear(
     # Check means significantly off 1
     for dim in range(p):
         var_lin = cov_lin[dim, dim]
-        if var_lin == 0.0:
+        # Skip diagonals below numeric floor — typically below-threshold
+        # reactions where σ²≈0; sampler produces factor=1 every draw and
+        # (mean-1)/σ blows up to ±inf from float noise.
+        if not np.isfinite(var_lin) or var_lin < 1e-12:
             continue
-        
+
         se_f = np.sqrt(var_lin / n)
         z = (means_f[dim] - 1.0) / se_f
         if abs(z) <= z_limit:
@@ -721,7 +728,8 @@ def _diagnostics_endf_samples_log(
     # Check for mean deviations in log space
     for dim in range(p):
         var_log = cov_log[dim, dim]
-        if var_log == 0.0:
+        # Skip diagonals below numeric floor (see linear-space note above)
+        if not np.isfinite(var_log) or var_log < 1e-12:
             continue
 
         mean_th = 1.0

@@ -398,9 +398,136 @@ class CrossSectionCovariance:
 
 
     # ------------------------------------------------------------------
+    # Projection
+    # ------------------------------------------------------------------
+
+    def project_to_grid(
+        self,
+        target_bin_edges_ev: np.ndarray,
+        *,
+        xs_source: Optional[Any] = None,
+        target_mt: Optional[int] = None,
+        target_isotope: Optional[int] = None,
+    ) -> np.ndarray:
+        """Project a self-self covariance entry onto a target bin-edge grid.
+
+        Selects the matrix where ``reaction_row == reaction_col == target_mt``
+        (defaulting to the most common MT in the covariance) and projects
+        every matching self-self contribution onto the target grid via
+        ``kika.processing.multigroup`` (piecewise-constant overlap).
+
+        Parameters
+        ----------
+        target_bin_edges_ev : np.ndarray
+            Target bin edges in eV (length ``N+1``, strictly increasing).
+        xs_source : MF3MT or CrossSection, optional
+            Pointwise σ(E) used to convert any relative-form matrices to
+            absolute. Required when at least one matched entry has
+            ``is_relative=True``; otherwise that entry is skipped with a
+            warning.
+        target_mt : int, optional
+            MT to look up. Defaults to the first ``reaction_rows`` value.
+        target_isotope : int, optional
+            Isotope (ZA) to look up. Defaults to the first ``isotope_rows``
+            value.
+
+        Returns
+        -------
+        np.ndarray
+            Absolute covariance (b²), shape ``(N, N)``, symmetric.
+
+        Notes
+        -----
+        PSD enforcement is the caller's responsibility. Use
+        ``kika.cov.decomposition.cholesky_decomposition`` downstream when
+        a positive-definite factor is needed.
+        """
+        from kika.processing.multigroup import (
+            collapse_covariance,
+            compute_rebin_operator,
+            relative_to_absolute,
+        )
+        import warnings
+
+        edges = np.asarray(target_bin_edges_ev, dtype=float)
+        n_target = edges.size - 1
+        if n_target < 1:
+            raise ValueError("target_bin_edges_ev must have at least 2 entries")
+
+        if not self.matrices:
+            warnings.warn("CrossSectionCovariance has no matrices to project")
+            return np.zeros((n_target, n_target), dtype=float)
+
+        if target_mt is None:
+            target_mt = int(self.reaction_rows[0])
+        if target_isotope is None:
+            target_isotope = int(self.isotope_rows[0])
+
+        cov_total = np.zeros((n_target, n_target), dtype=float)
+        matched = 0
+        n_skipped_relative = 0
+
+        for i in range(len(self.matrices)):
+            iso_row = int(self.isotope_rows[i])
+            iso_col = int(self.isotope_cols[i])
+            mt_row = int(self.reaction_rows[i])
+            mt_col = int(self.reaction_cols[i])
+            if (
+                iso_row != target_isotope or iso_col != target_isotope
+                or mt_row != target_mt or mt_col != target_mt
+            ):
+                continue
+            matched += 1
+
+            if i >= len(self.energy_grids) or not self.energy_grids[i]:
+                warnings.warn(
+                    f"Matrix {i} for MT={target_mt} has no energy grid; skipping"
+                )
+                continue
+            native_grid = np.asarray(self.energy_grids[i], dtype=float)
+            native_mat = np.asarray(self.matrices[i], dtype=float)
+            is_rel = bool(self.is_relative[i]) if i < len(self.is_relative) else False
+
+            if is_rel:
+                if xs_source is None:
+                    n_skipped_relative += 1
+                    continue
+                native_centers = 0.5 * (native_grid[:-1] + native_grid[1:])
+                if hasattr(xs_source, "get_cross_section"):
+                    xs_at_centers = np.asarray(
+                        xs_source.get_cross_section(native_centers), dtype=float,
+                    )
+                else:
+                    xs_at_centers = np.asarray(
+                        np.interp(native_centers, xs_source.energies, xs_source.values),
+                        dtype=float,
+                    )
+                native_mat = relative_to_absolute(
+                    native_mat, xs_at_centers, xs_at_centers,
+                )
+
+            rebin_op = compute_rebin_operator(native_grid, edges)
+            cov_total = cov_total + collapse_covariance(native_mat, rebin_op)
+
+        if matched == 0:
+            warnings.warn(
+                f"No self-self covariance entry found for "
+                f"isotope={target_isotope}, MT={target_mt}; returning zeros"
+            )
+        if n_skipped_relative > 0:
+            warnings.warn(
+                f"Skipped {n_skipped_relative} relative covariance entries "
+                f"because xs_source was not provided — covariance is under-counted."
+            )
+
+        # Symmetrize defensively
+        cov_total = 0.5 * (cov_total + cov_total.T)
+        return cov_total
+
+    # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
-    
+
     @property
     def covariance_matrix(self) -> np.ndarray:
         """
@@ -2121,7 +2248,7 @@ class CrossSectionCovariance:
         self,
         *,
         space: str = "log",
-        psd_method: str = "higham",
+        psd_method: str = "auto",
         jitter_scale: float = 1e-10,
         max_jitter_ratio: float = 1e-3,
         verbose: bool = True,
@@ -3215,7 +3342,7 @@ class CrossSectionCovariance:
         report_tol: float = 1e-6,
         eigen_floor: float = 1e-12,
         project_psd: bool = True,
-        psd_method: str = "higham",
+        psd_method: str = "auto",
         verbose: bool = True,
     ):
         """
@@ -3314,7 +3441,22 @@ class CrossSectionCovariance:
 
         # --- optional PSD projection ---
         if project_psd:
+            from kika.cov.decomposition import _validate_psd_method, _PSD_AUTO_THRESHOLD
+            _validate_psd_method(psd_method)
             neg_count = int((w1 < 0).sum())
+
+            # Resolve "auto" using the already-computed eigendecomposition
+            if psd_method == "auto":
+                lam_max = max(float(w1.max()), 1e-300)
+                lam_min_neg = max(-float(w1.min()), 0.0)
+                ratio = lam_min_neg / lam_max
+                psd_method = "clip" if ratio < _PSD_AUTO_THRESHOLD else "higham"
+                if verbose:
+                    print(
+                        f"[COV] [CORRELATION] PSD auto: ratio={ratio:.3e} "
+                        f"(thresh={_PSD_AUTO_THRESHOLD:.0e}) -> {psd_method}"
+                    )
+
             if psd_method == "higham" and neg_count > 0:
                 from kika.cov.decomposition import nearest_psd_higham
                 if verbose:
@@ -3324,6 +3466,7 @@ class CrossSectionCovariance:
                     verbose=verbose,
                 )
             else:
+                # "clip", "none", or "higham" with no negatives → eigenvalue floor
                 if neg_count and verbose:
                     print(f"[COV] [CORRELATION] PSD-proj: {neg_count} eigenvalues < 0, floored to {eigen_floor:.1e}")
                 w2 = np.maximum(w1, eigen_floor)

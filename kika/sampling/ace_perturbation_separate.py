@@ -116,7 +116,7 @@ def perturb_seprate_ACE_files(
     remove_blocks: Optional[Dict[int, Union[Tuple[int, int], List[Tuple[int, int]]]]] = None,
     verbose: bool = True,
     energy_ranges: Optional[List[Tuple[float, float]]] = None,
-    psd_method: str = "higham",
+    psd_method: str = "auto",
     max_relative_std: Optional[float] = 3.0,
 ):
     """

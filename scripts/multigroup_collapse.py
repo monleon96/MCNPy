@@ -49,6 +49,12 @@ class MultigroupResult:
     groups: List[List[int]]               # Fine bin indices per group
     group_info: List[GroupInfo]           # Diagnostics per group
     valid_mask_grouped: np.ndarray = None # (N_groups * L,) bool – which MG params had valid fine data
+    scale_factors: Optional[np.ndarray] = None  # (N_groups * L,) — diagonal of S from
+                                                # apply_percentile_variance_scaling. v3 uses it
+                                                # to apply the same compensation to the a_l axis
+                                                # of the (σ, a_l) cross block; without it, the
+                                                # cross block ends up under-scaled relative to
+                                                # the variance-compensated a_l block.
 
 
 # =============================================================================
@@ -111,6 +117,7 @@ def find_adaptive_group_boundaries(
     fine_bin_widths_mev: np.ndarray,
     max_order: int,
     rho_min: float = 0.90,
+    sigma_ratio_max: Optional[float] = None,
     logger=None,
     diagnostics_file: Optional[Path] = None,
 ) -> Tuple[List[List[int]], List[GroupInfo]]:
@@ -119,13 +126,16 @@ def find_adaptive_group_boundaries(
 
     Algorithm (greedy merging):
     1. Start at i=0
-    2. Extend group [i0, i1]: merge if rho >= rho_min
+    2. Extend group [i0, i1]: merge if rho >= rho_min AND
+       (if sigma_ratio_max is set) the running group's max(σ)/min(σ) at l=1
+       remains <= sigma_ratio_max
     3. Finalize group, start next at i1+1
 
-    Variance heterogeneity within groups is not used as a merge criterion.
-    Instead, the percentile-based variance compensation applied after
-    collapsing adapts to the intra-group variance ratio (see
-    ``apply_percentile_variance_scaling``).
+    The optional sigma_ratio cap prevents merging strongly correlated bins
+    whose l=1 std differ by more than the configured factor — these are
+    physically heterogeneous and force the percentile-based variance
+    compensation to over-inflate the group variance.  When ``sigma_ratio_max``
+    is None, only the correlation criterion applies.
 
     Parameters
     ----------
@@ -143,6 +153,10 @@ def find_adaptive_group_boundaries(
         Maximum Legendre order (L)
     rho_min : float
         Minimum l=1 adjacent correlation to allow merging (default 0.90)
+    sigma_ratio_max : float, optional
+        Maximum running max(σ)/min(σ) at l=1 across the group being grown.
+        ``None`` (default) disables the gate, restoring the correlation-only
+        behavior.  Recommended range 3–10 for nuclear-data Legendre fits.
     logger : optional
         Logger for diagnostics
     diagnostics_file : Path, optional
@@ -162,6 +176,10 @@ def find_adaptive_group_boundaries(
     if logger:
         logger.info(f"  Grouping parameters:")
         logger.info(f"    rho_min = {rho_min}")
+        if sigma_ratio_max is not None:
+            logger.info(f"    sigma_ratio_max = {sigma_ratio_max}")
+        else:
+            logger.info(f"    sigma_ratio_max = (disabled)")
 
     # Pre-compute per-bin l=1 sigma for diagnostics
     sigma_l1_per_bin = np.array([
@@ -198,7 +216,8 @@ def find_adaptive_group_boundaries(
         while i1 + 1 < n_fine:
             rho = adj_rho[i1]
 
-            # Sigma ratio diagnostics (not used for merge decision)
+            # Running group sigma ratio: max/min of all positive l=1 sigmas
+            # in the candidate-extended group [i0 .. i1+1]
             sigmas_l1 = [s for s in sigma_l1_per_bin[i0:i1 + 2] if s > 0]
             ratio = max(sigmas_l1) / min(sigmas_l1) if len(sigmas_l1) >= 2 else 1.0
 
@@ -209,8 +228,11 @@ def find_adaptive_group_boundaries(
             else:
                 pair_ratio = 1.0
 
-            # Merge if correlation criterion met
+            # Merge if correlation criterion met AND (optionally) the
+            # candidate-extended group keeps σ-heterogeneity bounded.
             merged = rho >= rho_min
+            if sigma_ratio_max is not None:
+                merged = merged and (ratio <= sigma_ratio_max)
 
             if diag_fh is not None:
                 diag_fh.write(
@@ -431,7 +453,7 @@ def try_merge_adjacent_multigroups(
     mean_grouped = collapse_mean(mean_fine, A)
 
     # Variance scaling
-    cov_grouped = apply_percentile_variance_scaling(
+    cov_grouped, scale_factors = apply_percentile_variance_scaling(
         cov_grouped=cov_grouped,
         cov_fine=cov_fine,
         groups=merged_groups,
@@ -487,6 +509,7 @@ def try_merge_adjacent_multigroups(
         groups=merged_groups,
         group_info=group_info,
         valid_mask_grouped=_vmg,
+        scale_factors=scale_factors,
     )
 
 
@@ -568,6 +591,39 @@ def build_aggregation_matrix(
                 A[row_idx, col_idx] = weights[fine_i]
 
     return A
+
+
+def build_l0_row_aggregator(
+    groups: List[List[int]],
+    fine_bin_widths_mev: np.ndarray,
+    n_fine: int,
+) -> np.ndarray:
+    """Width-weighted row aggregator for the v3 L=0 cross block.
+
+    Returns A_0 of shape ``(n_groups, n_fine)`` such that
+    ``A_0[g, i] = w_i / sum_{j in group_g} w_j`` for ``i in group_g``, else 0.
+
+    This is the scalar (one-row-per-bin) analogue of the per-order pattern in
+    ``build_aggregation_matrix``. Use it to collapse the v3 (a_0, a_l) cross
+    block: ``cov_c0_al_grouped = A_0 @ cov_c0_al_fine @ A.T`` with shape
+    ``(n_groups, n_groups * max_order)``. Width-weighting matches MF33's own
+    piecewise-constant projection onto the fine bins (xs_cov.project_to_grid),
+    so this is the linear extension of that projection onto the coarse grid.
+    """
+    n_groups = len(groups)
+    A_0 = np.zeros((n_groups, n_fine))
+    for g_idx, fine_indices in enumerate(groups):
+        if not fine_indices:
+            continue
+        widths = np.array([fine_bin_widths_mev[i] for i in fine_indices], dtype=float)
+        total = widths.sum()
+        if total <= 0:
+            weights = np.ones_like(widths) / len(fine_indices)
+        else:
+            weights = widths / total
+        for i, fine_i in enumerate(fine_indices):
+            A_0[g_idx, fine_i] = weights[i]
+    return A_0
 
 
 # =============================================================================
@@ -724,7 +780,7 @@ def apply_percentile_variance_scaling(
     fine_bin_widths_mev: Optional[np.ndarray] = None,
     valid_mask: Optional[np.ndarray] = None,
     logger=None,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Apply PSD-safe diagonal scaling to compensate averaging-induced variance loss.
 
@@ -772,8 +828,12 @@ def apply_percentile_variance_scaling(
 
     Returns
     -------
-    np.ndarray
-        Scaled covariance matrix (PSD-safe)
+    Tuple[np.ndarray, np.ndarray]
+        ``(cov_scaled, scale_factors)`` where ``cov_scaled = S @ cov_grouped @ S``
+        and ``scale_factors`` is the length-``n_groups·max_order`` diagonal of S.
+        Callers that propagate the same compensation to a coupled block (e.g.
+        the v3 σ–a_l cross block) need ``scale_factors`` to apply S on the a_l
+        axis of that block.
     """
     n_groups = len(groups)
     n_params = n_groups * max_order
@@ -877,7 +937,7 @@ def apply_percentile_variance_scaling(
             logger.info(f"    Variance retention after:  {np.mean(retention_after):.0f}% (mean), "
                         f"{np.min(retention_after):.0f}%-{np.max(retention_after):.0f}% (range)")
 
-    return cov_scaled
+    return cov_scaled, scale_factors
 
 
 def collapse_mean(
@@ -1101,6 +1161,7 @@ def perform_adaptive_multigroup_collapse(
     energy_bins: List,      # List[EnergyBinInfo]
     max_order: int,
     rho_min: float = 0.90,
+    sigma_ratio_max: Optional[float] = None,
     variance_percentile_min: float = 67.0,
     variance_percentile_max: float = 85.0,
     variance_ratio_ref: float = 5.0,
@@ -1135,6 +1196,12 @@ def perform_adaptive_multigroup_collapse(
         Maximum Legendre order
     rho_min : float
         Minimum l=1 adjacent correlation to merge (default 0.90)
+    sigma_ratio_max : float, optional
+        Optional cap on the running max(σ_l1)/min(σ_l1) within a group.
+        ``None`` (default) disables the cap.  When set, prevents merging
+        bins whose l=1 std differ by more than this factor — keeps groups
+        physically homogeneous and avoids over-inflation by the percentile
+        variance compensation downstream.
     variance_percentile_min : float
         Base percentile for groups with homogeneous variance (default 67).
     variance_percentile_max : float
@@ -1269,6 +1336,7 @@ def perform_adaptive_multigroup_collapse(
                 fine_bin_widths_mev=fine_bin_widths_mev,
                 max_order=max_order,
                 rho_min=rho_min,
+                sigma_ratio_max=sigma_ratio_max,
                 logger=logger,
                 diagnostics_file=_diag_below,
             )
@@ -1307,6 +1375,7 @@ def perform_adaptive_multigroup_collapse(
                 fine_bin_widths_mev=fine_bin_widths_mev,
                 max_order=max_order,
                 rho_min=rho_min,
+                sigma_ratio_max=sigma_ratio_max,
                 logger=logger,
                 diagnostics_file=_diag_above,
             )
@@ -1334,6 +1403,7 @@ def perform_adaptive_multigroup_collapse(
             fine_bin_widths_mev=fine_bin_widths_mev,
             max_order=max_order,
             rho_min=rho_min,
+            sigma_ratio_max=sigma_ratio_max,
             logger=logger,
             diagnostics_file=diagnostics_file,
         )
@@ -1357,8 +1427,12 @@ def perform_adaptive_multigroup_collapse(
     cov_grouped = collapse_covariance(cov_matrix, A)
     mean_grouped = collapse_mean(mean_fine, A)
 
-    # Apply percentile-based variance scaling to preserve uncertainty magnitudes
-    cov_grouped = apply_percentile_variance_scaling(
+    # Apply percentile-based variance scaling to preserve uncertainty magnitudes.
+    # ``scale_factors`` (the diagonal of S) is exposed via MultigroupResult so
+    # callers can apply the same compensation to coupled blocks (e.g. v3's
+    # σ–a_l cross block, which is collapsed with the unscaled A and otherwise
+    # ends up under-scaled relative to the variance-compensated a_l block).
+    cov_grouped, scale_factors = apply_percentile_variance_scaling(
         cov_grouped=cov_grouped,
         cov_fine=cov_matrix,
         groups=groups,
@@ -1432,4 +1506,5 @@ def perform_adaptive_multigroup_collapse(
         groups=groups,
         group_info=group_info,
         valid_mask_grouped=_vmg,
+        scale_factors=scale_factors,
     )

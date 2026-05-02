@@ -375,6 +375,97 @@ class CrossSection:
         )
 
     # ------------------------------------------------------------------
+    # Evaluation
+    # ------------------------------------------------------------------
+
+    def get_cross_section(
+        self,
+        energy: Union[float, "ArrayLike"],
+        out_of_range: str = "zero",
+    ) -> Union[float, np.ndarray]:
+        """Interpolate σ(E) at one or more energies.
+
+        Symmetric with :meth:`MF3MT.get_cross_section`. When the underlying
+        ENDF interpolation regions are preserved in
+        ``metadata['interpolation_regions']`` (set by :meth:`from_endf`),
+        the full ENDF interpolation law is honoured. Otherwise the
+        ``interpolation`` attribute is used as a single-region scheme.
+
+        Parameters
+        ----------
+        energy : float or array-like
+            Query energy / energies in eV.
+        out_of_range : str
+            ``'zero'`` (default) or ``'hold'``.
+
+        Returns
+        -------
+        float or np.ndarray
+            Cross section(s) in barns.
+        """
+        from kika.endf.utils import interpolate_1d_endf  # local import: avoid cycle
+
+        target = np.asarray(energy, dtype=float)
+        scalar_input = np.ndim(target) == 0
+
+        regions = self.metadata.get("interpolation_regions") if self.metadata else None
+        if regions:
+            result = interpolate_1d_endf(
+                list(self.energies),
+                list(self.values),
+                list(regions),
+                target,
+                out_of_range=out_of_range,
+            )
+        else:
+            # Fallback: single-region scheme from self.interpolation
+            scheme = self.interpolation or "linlin"
+            result = self._interp_single_scheme(target, scheme, out_of_range)
+
+        return float(result) if scalar_input and np.ndim(result) == 0 else np.asarray(result, dtype=float)
+
+    def _interp_single_scheme(
+        self,
+        target: np.ndarray,
+        scheme: str,
+        out_of_range: str,
+    ) -> np.ndarray:
+        """Interpolate using a single global scheme (no per-region INT codes)."""
+        e = np.asarray(self.energies, dtype=float)
+        v = np.asarray(self.values, dtype=float)
+        out = np.zeros_like(np.atleast_1d(target), dtype=float)
+
+        if scheme == "loglog":
+            positive = (e > 0) & (v > 0)
+            if np.all(positive):
+                log_e = np.log(e)
+                log_v = np.log(v)
+                out = np.exp(np.interp(np.log(np.maximum(target, 1e-30)), log_e, log_v))
+            else:
+                out = np.interp(target, e, v)
+        elif scheme == "linlog":  # σ linear in log E
+            out = np.interp(np.log(np.maximum(target, 1e-30)), np.log(np.maximum(e, 1e-30)), v)
+        elif scheme == "loglin":  # log σ linear in E
+            positive = v > 0
+            if np.all(positive):
+                out = np.exp(np.interp(target, e, np.log(v)))
+            else:
+                out = np.interp(target, e, v)
+        elif scheme == "histogram":
+            idx = np.searchsorted(e, target, side='right') - 1
+            idx = np.clip(idx, 0, len(v) - 1)
+            out = v[idx]
+        else:  # linlin or unknown → linear
+            out = np.interp(target, e, v)
+
+        # out_of_range handling for linear interp (np.interp clamps by default)
+        if out_of_range == "zero":
+            below = np.asarray(target) < e[0]
+            above = np.asarray(target) > e[-1]
+            out = np.where(below | above, 0.0, out)
+        return out
+
+    # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------
 

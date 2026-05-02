@@ -768,34 +768,68 @@ def build_exfor_cache_from_objects(
     # Parse exclusion patterns
     exclusion_patterns = _parse_exclusion_list(exclude_experiments)
 
+    # Apply the uncertainty manifest at the pipeline boundary. The kika
+    # library returns raw ExforAngularDistribution objects; here we layer the
+    # manifest-derived per-point σ_stat (with optional decomposition from a
+    # total) and the per-experiment σ_sys (split into indep and dep parts).
+    try:
+        from scripts.uncertainty_manifest import apply_manifest_to_exfor
+    except ImportError:
+        try:
+            from uncertainty_manifest import apply_manifest_to_exfor  # in-tree fallback
+        except ImportError:
+            apply_manifest_to_exfor = None  # manifest is best-effort
+
     for exfor in exfor_objects:
         # Check if experiment is excluded
         if _is_experiment_excluded(exfor.entry, exfor.subentry, exclusion_patterns):
             continue
 
+        if apply_manifest_to_exfor is not None:
+            try:
+                apply_manifest_to_exfor(
+                    exfor,
+                    uncertainty_components=getattr(exfor, '_raw_uncertainty_components', None),
+                )
+            except Exception:
+                pass
+
         # Get all available energies in MeV
         energies_mev = exfor.energies(unit='MeV')
 
+        # Per-experiment manifest-derived sys components (relative fractions):
+        #   sigma_sys_indep_relative : energy-independent scalar (one per experiment)
+        #   sigma_sys_scalar_relative: representative total (for diagnostics)
+        # The energy-dependent portion is recovered per-row from the per-point
+        # error_sys vs the indep scalar — see cache_df construction below.
+        sigma_sys_relative = float(getattr(exfor, 'sigma_sys_scalar_relative', 0.0) or 0.0)
+        sigma_sys_indep   = float(getattr(exfor, 'sigma_sys_indep_relative',   0.0) or 0.0)
+        manifest_flag = getattr(exfor, 'uncertainty_manifest_flag', 'default')
+
         for energy_mev in energies_mev:
-            # Get data at this energy using to_dataframe
-            # Use small tolerance (0.1 keV) to avoid mixing data from different energies
-            # while allowing for floating point precision issues
+            # Get data at this energy using to_dataframe with decomposed uncertainties
+            # so that error_stat carries only the per-point uncorrelated noise
+            # (sigma_sys is tracked per-experiment in meta below).
             df = exfor.to_dataframe(
                 energy=energy_mev,
                 energy_unit='MeV',
                 cross_section_unit='b/sr',
                 angle_unit='deg',
                 tolerance=1e-4,  # 0.1 keV tolerance
+                decompose_uncertainty=True,
             )
 
             if df.empty:
                 continue
 
-            # Convert DataFrame to expected column names
+            # Convert DataFrame to expected column names. error_stat is the
+            # per-point uncorrelated noise (used for GLS weights / chi^2).
+            # error_sys is per-point correlated systematic (kept for diagnostics).
             cache_df = pd.DataFrame({
                 'angle': df['angle'].values,
                 'dsig': df['value'].values,
-                'error_stat': df['error'].values,
+                'error_stat': df['error_stat'].values,
+                'error_sys':  df['error_sys'].values,
             })
 
             # Build metadata dict
@@ -805,6 +839,9 @@ def build_exfor_cache_from_objects(
                 'angle_frame': exfor.angle_frame,
                 'reaction': exfor.reaction.get('notation', ''),
                 'citation': exfor.citation,
+                'sigma_sys_relative':       sigma_sys_relative,    # representative total
+                'sigma_sys_indep_relative': sigma_sys_indep,       # energy-independent
+                'uncertainty_manifest_flag': manifest_flag,
             }
 
             # Add energy resolution inputs if available
@@ -918,6 +955,26 @@ def _is_experiment_excluded(
     return False
 
 
+def check_angular_quality(exfor_df, min_points: int, min_bands: int):
+    """Check whether per-bin angular data meets the F/M/B coverage gate.
+
+    Returns ``(passes: bool, reason: str)``. ``reason`` is empty when the
+    check passes; otherwise it briefly describes why the gate failed.
+    """
+    n_pts = len(exfor_df)
+    if n_pts < min_points:
+        return False, f"n_pts={n_pts} < {min_points}"
+    mu = exfor_df['mu'].to_numpy()
+    has_F = bool(np.any(mu > 0.5))
+    has_M = bool(np.any((mu >= -0.5) & (mu <= 0.5)))
+    has_B = bool(np.any(mu < -0.5))
+    n_bands = int(has_F) + int(has_M) + int(has_B)
+    if n_bands < min_bands:
+        bands_str = "/".join(b for b, h in [("F", has_F), ("M", has_M), ("B", has_B)] if h)
+        return False, f"bands={bands_str} ({n_bands}/{min_bands})"
+    return True, ""
+
+
 def filter_exfor_with_energy_bin(
     exfor_cache: Dict[float, List[Tuple[pd.DataFrame, Dict]]],
     sorted_energies: List[float],
@@ -933,6 +990,7 @@ def filter_exfor_with_energy_bin(
     # Per-experiment weighting options
     normalize_by_n_points: bool = False,
     sigma_norm: float = 0.05,                     # Normalization uncertainty for GLS-ESS weighting
+    band_aware_ess: bool = False,                 # Split Kish budget by F/M/B bands
     max_experiment_weight_fraction: float = 1.0,  # 1.0 = disabled
     logger=None,
 ) -> Tuple[pd.DataFrame, List[Dict], np.ndarray, KernelDiagnostics, Dict]:
@@ -1072,6 +1130,32 @@ def filter_exfor_with_energy_bin(
         author = authors[0] if authors else 'unknown'
         year = citation.get('year', 'unknown')
 
+        # Per-row systematic uncertainty (relative fraction). Derived from the
+        # manifest's per-point sigma_sys (in cache_df['error_sys']) so that
+        # energy-dependent sys (e.g. Kinney's gain_shift) is preserved point-
+        # by-point. Constant-per-experiment systematics (e.g. Tomita's 5%) end
+        # up as a constant column. Falls back to the per-experiment scalar
+        # from meta when the cache_df doesn't carry error_sys (legacy paths).
+        if 'error_sys' in df.columns:
+            err_sys_arr = df['error_sys'].to_numpy(dtype=float)
+            sigma_sys_relative_per_row = err_sys_arr / np.maximum(
+                np.abs(df['dsig'].to_numpy(dtype=float)), 1e-30
+            )
+        else:
+            scalar = float(meta.get('sigma_sys_relative', 0.0) or 0.0)
+            sigma_sys_relative_per_row = np.full(len(df), scalar, dtype=float)
+
+        # Energy-independent vs energy-dependent split. indep is a per-experiment
+        # scalar (constant across points); dep is per-row, derived from total
+        # minus indep in quadrature. For Kinney, indep = sqrt(7² + 4²) ≈ 8.06%
+        # and dep varies with energy via gain_shift. For experiments with only
+        # scalar sys (e.g. Tomita 5%), indep = total and dep = 0.
+        sigma_sys_indep_scalar = float(meta.get('sigma_sys_indep_relative', 0.0) or 0.0)
+        sigma_sys_indep_per_row = np.full(len(df), sigma_sys_indep_scalar, dtype=float)
+        sigma_sys_dep_per_row = np.sqrt(
+            np.maximum(sigma_sys_relative_per_row ** 2 - sigma_sys_indep_scalar ** 2, 0.0)
+        )
+
         # Extract columns
         angles_deg = df['angle'].to_numpy(dtype=float)
         dsig = df['dsig'].to_numpy(dtype=float)
@@ -1102,6 +1186,9 @@ def filter_exfor_with_energy_bin(
                 'reaction': reaction,
                 'exfor_energy_mev': available_energy,
                 'kernel_weight': kernel_weight,
+                'sigma_sys_relative':       sigma_sys_relative_per_row,
+                'sigma_sys_indep_relative': sigma_sys_indep_per_row,
+                'sigma_sys_dep_relative':   sigma_sys_dep_per_row,
             })
         else:
             mu_cm = np.cos(np.deg2rad(angles_deg))
@@ -1119,6 +1206,9 @@ def filter_exfor_with_energy_bin(
                 'reaction': reaction,
                 'exfor_energy_mev': available_energy,
                 'kernel_weight': kernel_weight,
+                'sigma_sys_relative':       sigma_sys_relative_per_row,
+                'sigma_sys_indep_relative': sigma_sys_indep_per_row,
+                'sigma_sys_dep_relative':   sigma_sys_dep_per_row,
             })
 
         all_frames.append(transformed_df)
@@ -1155,14 +1245,20 @@ def filter_exfor_with_energy_bin(
             strategy=unc_floor_strategy, logger=logger,
         )
 
-    # Compute GLS-ESS per-point weights using post-floor uncertainties
-    # Group by (entry, subentry): each subentry is a distinct measurement for weighting,
-    # even though normalization perturbations are drawn per entry (shared calibration bias)
+    # Compute GLS-ESS per-point weights using post-floor uncertainties.
+    # Group by (entry, subentry, exfor_energy_mev): each (experiment, energy)
+    # cell is a distinct correlated unit because the manifest's sigma_sys may
+    # vary with energy (e.g. Kinney gain_shift, Cierjacks piecewise). Within
+    # a cell sigma_sys is constant; ρ is computed once per cell.
     if normalize_by_n_points and sigma_norm > 0 and len(result) > 0:
-        unique_pairs = result[['entry', 'subentry']].drop_duplicates()
-        for _, row in unique_pairs.iterrows():
-            entry_val, sub_val = row['entry'], row['subentry']
-            mask = ((result['entry'] == entry_val) & (result['subentry'] == sub_val)).values
+        group_cols = ['entry', 'subentry']
+        if 'exfor_energy_mev' in result.columns:
+            group_cols.append('exfor_energy_mev')
+        unique_groups = result[group_cols].drop_duplicates()
+        for _, row in unique_groups.iterrows():
+            mask = np.ones(len(result), dtype=bool)
+            for c in group_cols:
+                mask &= (result[c] == row[c]).values
             vals = result.loc[mask, 'value'].to_numpy()
             uncs = result.loc[mask, 'unc'].to_numpy()
             rel_arr = uncs / np.maximum(np.abs(vals), 1e-30)
@@ -1170,11 +1266,38 @@ def filter_exfor_with_energy_bin(
             rel_unc = np.sqrt(np.nanmean(rel_arr[finite]**2)) if finite.any() else 0.0
             if not np.isfinite(rel_unc) or rel_unc <= 0:
                 rel_unc = min_relative_uncertainty if min_relative_uncertainty > 0 else sigma_norm
-            rho = sigma_norm**2 / (sigma_norm**2 + rel_unc**2)
-            n_j = int(mask.sum())
-            g = 1.0 / (1.0 + max(n_j - 1, 0) * rho)
-            kernel_weights[mask] = g
-            result.loc[mask, 'kernel_weight'] = g
+            # Per-cell sigma_sys (constant within (entry, subentry, energy);
+            # may vary across energies of the same experiment).
+            ex_sigma_sys = 0.0
+            if 'sigma_sys_relative' in result.columns:
+                vals_sys = result.loc[mask, 'sigma_sys_relative'].to_numpy()
+                if vals_sys.size > 0:
+                    ex_sigma_sys = float(vals_sys[0])
+            sigma_eff = ex_sigma_sys if ex_sigma_sys > 0 else sigma_norm
+            rho = sigma_eff**2 / (sigma_eff**2 + rel_unc**2)
+            if band_aware_ess:
+                # Per-band ESS: a forward-only fragment shouldn't be collapsed
+                # against forward+mid+backward points it doesn't constrain.
+                mu_arr = result.loc[mask, 'mu'].to_numpy()
+                band_masks = {
+                    'F': mu_arr > 0.5,
+                    'M': (mu_arr >= -0.5) & (mu_arr <= 0.5),
+                    'B': mu_arr < -0.5,
+                }
+                g_per_point = np.empty(int(mask.sum()), dtype=float)
+                for bmask in band_masks.values():
+                    n_band = int(bmask.sum())
+                    if n_band == 0:
+                        continue
+                    g_band = 1.0 / (1.0 + max(n_band - 1, 0) * rho)
+                    g_per_point[bmask] = g_band
+                kernel_weights[mask] = g_per_point
+                result.loc[mask, 'kernel_weight'] = g_per_point
+            else:
+                n_j = int(mask.sum())
+                g = 1.0 / (1.0 + max(n_j - 1, 0) * rho)
+                kernel_weights[mask] = g
+                result.loc[mask, 'kernel_weight'] = g
         # Update experiments_info with new weights (match by entry AND subentry)
         for exp in experiments_info:
             emask = (result['entry'] == exp['entry']) & (result['subentry'] == exp['subentry'])
@@ -1282,15 +1405,20 @@ def apply_uncertainty_floor(
     Apply minimum relative uncertainty floor to prevent experiments with
     unrealistically small uncertainties from dominating fits.
 
-    Two strategies:
+    Three strategies:
     - 'fixed': enforces unc >= min_relative_uncertainty * |value| (simple floor)
     - 'bin_median': replaces unreliable uncertainties with the median relative
       uncertainty of trustworthy points in the bin (data-driven)
+    - 'band_median': per-angular-band median (F: μ>0.5, M: |μ|≤0.5, B: μ<-0.5)
+      with fallback to bin-median when fewer than 3 trustworthy in-band points,
+      and to the fixed floor when bin-median has fewer than 3 trustworthy points
+      either. Honors the angle dependence of relative uncertainties in AD data.
 
     Parameters
     ----------
     exfor_df : pd.DataFrame
-        EXFOR data with uncertainty, value, entry, and author columns
+        EXFOR data with uncertainty, value, entry, and author columns. Requires
+        a 'mu' column when strategy='band_median'.
     min_relative_uncertainty : float
         Threshold below which uncertainties are considered unreliable.
     unc_column : str
@@ -1298,7 +1426,7 @@ def apply_uncertainty_floor(
     value_column : str
         Column name for cross section values (default: 'value')
     strategy : str
-        'fixed' or 'bin_median' (default: 'bin_median')
+        'fixed', 'bin_median', or 'band_median' (default: 'bin_median')
     logger : optional
         Logger for diagnostic output
 
@@ -1306,7 +1434,9 @@ def apply_uncertainty_floor(
     -------
     (pd.DataFrame, dict)
         Copy of DataFrame with updated uncertainties, and stats dict with
-        keys: n_floored, n_total, replacement_rel_unc, per_experiment (list)
+        keys: n_floored, n_total, replacement_rel_unc, per_experiment (list).
+        For strategy='band_median' the dict also includes per-band replacements
+        in 'replacement_rel_unc_band' (dict with 'F'/'M'/'B' keys).
     """
     empty_stats = {'n_floored': 0, 'n_total': 0, 'replacement_rel_unc': 0.0, 'per_experiment': []}
 
@@ -1330,30 +1460,77 @@ def apply_uncertainty_floor(
         return df, {'n_floored': 0, 'n_total': n_total,
                      'replacement_rel_unc': 0.0, 'per_experiment': []}
 
-    # Determine replacement value
-    if strategy == 'bin_median':
-        trustworthy = ~below
-        n_trustworthy = int(np.sum(trustworthy))
+    trustworthy = ~below
+    n_trustworthy = int(np.sum(trustworthy))
+
+    def _bin_median_replacement() -> float:
         if n_trustworthy >= 3:
-            replacement_rel = float(np.nanmedian(rel_unc[trustworthy]))
-            if np.isnan(replacement_rel):
-                replacement_rel = min_relative_uncertainty
-                if logger:
-                    logger.debug(f"    [Unc floor] nanmedian still NaN (all trustworthy are NaN), "
-                                 f"falling back to fixed floor {min_relative_uncertainty*100:.1f}%")
-        else:
-            # Fallback: not enough trustworthy points
-            replacement_rel = min_relative_uncertainty
+            r = float(np.nanmedian(rel_unc[trustworthy]))
+            if np.isfinite(r) and r > 0:
+                return r
+        return float(min_relative_uncertainty)
+
+    # Determine replacement value(s)
+    replacement_rel_band: Dict[str, float] = {}
+    if strategy == 'band_median':
+        if 'mu' not in df.columns:
             if logger:
-                logger.debug(f"    [Unc floor] <3 trustworthy pts ({n_trustworthy}), "
-                             f"falling back to fixed floor {min_relative_uncertainty*100:.1f}%")
+                logger.warning("    [Unc floor] strategy='band_median' but no 'mu' column; "
+                               "falling back to bin_median")
+            strategy = 'bin_median'
+
+    if strategy == 'band_median':
+        mu_arr = df['mu'].to_numpy(dtype=float)
+        bin_replacement = _bin_median_replacement()
+        band_masks_local = {
+            'F': mu_arr > 0.5,
+            'M': (mu_arr >= -0.5) & (mu_arr <= 0.5),
+            'B': mu_arr < -0.5,
+        }
+        for bn, bm in band_masks_local.items():
+            in_band_trust = bm & trustworthy
+            n_in_band = int(np.sum(in_band_trust))
+            if n_in_band >= 3:
+                r_band = float(np.nanmedian(rel_unc[in_band_trust]))
+                if not np.isfinite(r_band) or r_band <= 0:
+                    r_band = bin_replacement
+            else:
+                r_band = bin_replacement
+                if logger:
+                    logger.debug(f"    [Unc floor] band {bn}: <3 trustworthy pts "
+                                 f"({n_in_band}); falling back to bin median "
+                                 f"{bin_replacement*100:.1f}%")
+            replacement_rel_band[bn] = r_band
+        # For the summary scalar, report the weighted average over floored points
+        n_floored_per_band = {
+            bn: int(np.sum(below & bm)) for bn, bm in band_masks_local.items()
+        }
+        weighted_sum = sum(replacement_rel_band[bn] * n_floored_per_band[bn]
+                           for bn in 'FMB')
+        replacement_rel = weighted_sum / max(n_floored, 1)
+    elif strategy == 'bin_median':
+        replacement_rel = _bin_median_replacement()
+        if replacement_rel == min_relative_uncertainty and n_trustworthy < 3 and logger:
+            logger.debug(f"    [Unc floor] <3 trustworthy pts ({n_trustworthy}), "
+                         f"falling back to fixed floor {min_relative_uncertainty*100:.1f}%")
     else:
-        replacement_rel = min_relative_uncertainty
+        replacement_rel = float(min_relative_uncertainty)
 
     # Apply replacement
-    replacement_abs = replacement_rel * abs_val
     new_unc = df[unc_column].values.astype(float).copy()
-    new_unc[below] = replacement_abs[below]
+    if strategy == 'band_median':
+        mu_arr = df['mu'].to_numpy(dtype=float)
+        for bn, r_band in replacement_rel_band.items():
+            bm = {
+                'F': mu_arr > 0.5,
+                'M': (mu_arr >= -0.5) & (mu_arr <= 0.5),
+                'B': mu_arr < -0.5,
+            }[bn]
+            apply_mask = below & bm
+            new_unc[apply_mask] = (r_band * abs_val)[apply_mask]
+    else:
+        replacement_abs = replacement_rel * abs_val
+        new_unc[below] = replacement_abs[below]
     df[unc_column] = new_unc
 
     # Per-experiment diagnostics
@@ -1381,6 +1558,8 @@ def apply_uncertainty_floor(
         'replacement_rel_unc': replacement_rel,
         'per_experiment': per_exp_stats,
     }
+    if replacement_rel_band:
+        stats['replacement_rel_unc_band'] = replacement_rel_band
 
     # Log per-bin detail
     if logger and n_floored > 0:
@@ -1723,6 +1902,7 @@ def _run_one_kw_sample(args_tuple):
         overlap_weights = sh['overlap_weights']
         energy_bins_data = sh['energy_bins_data']
         sigma_norm = sh['sigma_norm']
+        sigma_norm_elastic = sh.get('sigma_norm_elastic', 0.0)
         norm_dist = sh['norm_dist']
         max_degree = sh['max_degree']
         ridge_lambda = sh['ridge_lambda']
@@ -1731,6 +1911,8 @@ def _run_one_kw_sample(args_tuple):
         min_points_per_band = sh['min_points_per_band']
         max_band_scale = sh['max_band_scale']
         freeze_c0 = sh['freeze_c0']
+        fix_c0_at_nominal = sh.get('fix_c0_at_nominal', False)
+        sys_aware_mc_fit = sh.get('sys_aware_mc_fit', False)
         max_sample_order = sh['max_sample_order']
         apply_positivity_projection = sh['apply_positivity_projection']
         positivity_check_points = sh['positivity_check_points']
@@ -1740,6 +1922,7 @@ def _run_one_kw_sample(args_tuple):
         min_relative_uncertainty = sh['min_relative_uncertainty']
         tau_info_by_bin = sh['tau_info_by_bin']
         mc_order_cap_by_bin = sh['mc_order_cap_by_bin']
+        band_aware_ess = sh.get('band_aware_ess', False)
     else:
         # Legacy path: full args tuple (sequential mode or old callers)
         (
@@ -1765,25 +1948,85 @@ def _run_one_kw_sample(args_tuple):
             tau_info_by_bin,
             mc_order_cap_by_bin,
         ) = args_tuple
+        sigma_norm_elastic = 0.0
+        band_aware_ess = False
+        fix_c0_at_nominal = False
+        sys_aware_mc_fit = False
 
     rng = np.random.default_rng(base_seed + s_idx)
 
-    # Step 1: Draw shared normalization factors per EXFOR entry
-    # All subentries from the same entry share one normalization factor
-    # (same lab/setup => same systematic calibration bias)
-    entry_norms = {}
+    # Step 0: Draw one global elastic-XS factor per MC sample.
+    # Models uncertainty in the shared elastic reference / monitor that all
+    # experiments rely on. Applied to every data point regardless of which
+    # experiment produced it; introduces a common-mode correlation across
+    # all bins and all entries for this sample.
+    if sigma_norm_elastic > 0:
+        if norm_dist == "lognormal":
+            elastic_factor = float(rng.lognormal(
+                mean=-0.5 * sigma_norm_elastic ** 2, sigma=sigma_norm_elastic
+            ))
+        else:
+            elastic_factor = float(rng.normal(1.0, sigma_norm_elastic))
+    else:
+        elastic_factor = 1.0
+
+    # Step 1: Draw two normalization factors per data point:
+    #
+    #   (a) entry_indep_norms[entry_id]
+    #       — one factor per EXFOR entry (correlated across ALL its data,
+    #         including all energies and subentries). Magnitude is the
+    #         manifest's energy-INDEPENDENT sys component (e.g. Kinney's
+    #         monitor 7% + geometry 4% → 8.06%; Tomita's 5%; Cox's 10%).
+    #
+    #   (b) entry_energy_dep_norms[(entry_id, exfor_energy)]
+    #       — one factor per (entry, exfor_energy). Independent across
+    #         energies of the same experiment. Magnitude is the
+    #         energy-DEPENDENT sys at that energy (e.g. Kinney's gain_shift
+    #         at the cell's E; Cierjacks's piecewise total at the cell's E;
+    #         Tsukada's piecewise ERR-1). Zero for experiments without
+    #         energy-dependent components.
+    #
+    # The composite per-point factor = entry_indep × entry_energy_dep.
+    # When manifest doesn't specify either component, fall back to global
+    # `sigma_norm` for the indep factor (per-experiment) only.
+    entry_indep_norms: Dict[str, float] = {}
+    entry_energy_dep_norms: Dict[Tuple[str, float], float] = {}
+
+    def _draw_factor(sigma_eff: float) -> float:
+        if sigma_eff <= 0:
+            return 1.0
+        if norm_dist == "lognormal":
+            return float(rng.lognormal(mean=-0.5 * sigma_eff**2, sigma=sigma_eff))
+        return float(rng.normal(1.0, sigma_eff))
+
     for bin_idx, datasets_and_weights in overlap_weights.items():
         for ds, w in datasets_and_weights:
             entry_id = ds['experiment_id'].split('.')[0]
-            if entry_id not in entry_norms:
-                if norm_dist == "lognormal" and sigma_norm > 0:
-                    entry_norms[entry_id] = rng.lognormal(
-                        mean=-0.5 * sigma_norm**2, sigma=sigma_norm
-                    )
-                elif sigma_norm > 0:
-                    entry_norms[entry_id] = rng.normal(1.0, sigma_norm)
-                else:
-                    entry_norms[entry_id] = 1.0
+            ds_energy = ds['exfor_energy_mev']
+            df_ds = ds.get('exfor_df')
+
+            if entry_id not in entry_indep_norms:
+                # Per-experiment energy-INDEPENDENT factor
+                indep = 0.0
+                if df_ds is not None and 'sigma_sys_indep_relative' in df_ds.columns and len(df_ds) > 0:
+                    indep = float(df_ds['sigma_sys_indep_relative'].iloc[0])
+                # Fallback: when manifest didn't supply an indep component
+                # (uncurated entries) use the global sigma_norm so that some
+                # per-experiment correlated noise is still applied.
+                if indep <= 0:
+                    indep = sigma_norm
+                entry_indep_norms[entry_id] = _draw_factor(indep)
+
+            key = (entry_id, ds_energy)
+            if key not in entry_energy_dep_norms:
+                # Per-(experiment, energy) energy-DEPENDENT factor
+                dep = 0.0
+                if df_ds is not None and 'sigma_sys_dep_relative' in df_ds.columns and len(df_ds) > 0:
+                    dep = float(df_ds['sigma_sys_dep_relative'].iloc[0])
+                entry_energy_dep_norms[key] = _draw_factor(dep) if dep > 0 else 1.0
+    # Aliases for any code path still reading the older names
+    entry_energy_norms = entry_energy_dep_norms
+    entry_norms = entry_indep_norms
 
     # Step 2: Perturb all datasets (shared across bins)
     # Build per-dataset tau from the bin with highest overlap weight so that
@@ -1812,8 +2055,28 @@ def _run_one_kw_sample(args_tuple):
             if df.empty:
                 continue
             entry_id = exp_id.split('.')[0]
-            norm_factor = entry_norms.get(entry_id, 1.0)
-            values = df['value'].to_numpy() * norm_factor
+            ds_energy = ds['exfor_energy_mev']
+            norm_indep_factor = entry_indep_norms.get(entry_id, 1.0)
+            norm_dep_factor   = entry_energy_dep_norms.get((entry_id, ds_energy), 1.0)
+            # Compose elastic (global), per-experiment systematic, and
+            # per-(experiment, energy) systematic factors. The latter two are
+            # independent draws so the total per-point shift has variance
+            # (sigma_indep² + sigma_dep_at_E²) at first order.
+            values = df['value'].to_numpy() * (elastic_factor * norm_indep_factor * norm_dep_factor)
+            # Optional MF33 multiplicative factor (v3 hook). When the caller
+            # passes mf33_dsigma_per_sample + mf33_c0_per_bin + a home-bin map,
+            # apply (1 + δσ/c0_home) to this dataset on top of the per-experiment
+            # systematic shifts. The δσ vector is shared across all datasets
+            # within a sample (drawn once from MF33's full covariance), so
+            # bins inherit MF33-driven cross-bin correlation through the
+            # per-dataset home-bin lookup. Default-off → exact v2 behavior.
+            mf33_dsigma_per_sample = sh.get('mf33_dsigma_per_sample') if isinstance(args_tuple, int) else None
+            if mf33_dsigma_per_sample is not None:
+                home_map = sh['mf33_home_bin_by_e_key']
+                c0_per_bin = sh['mf33_c0_per_bin']
+                home_bin = home_map.get(e_key)
+                if home_bin is not None and c0_per_bin[home_bin] > 0:
+                    values = values * (1.0 + mf33_dsigma_per_sample[s_idx, home_bin] / c0_per_bin[home_bin])
             unc = df['unc'].to_numpy()
             # Inflate noise amplitude with band scale factors (consistent
             # with Pass 1 which draws noise from sigma_eff, not raw unc)
@@ -1825,14 +2088,27 @@ def _run_one_kw_sample(args_tuple):
             else:
                 noise_sigma = unc
             noise = rng.normal(0, noise_sigma)
+            # σ_sys in absolute units, scaled to the perturbed value so the
+            # downstream fit sees σ_total² = (τ·σ_stat)² + σ_sys² as marginal
+            # point variance. Matches Pass 2 / nominal fit weights.
+            if 'sigma_sys_relative' in df.columns:
+                sys_rel = df['sigma_sys_relative'].to_numpy(dtype=float)
+                sigma_sys_abs = sys_rel * np.abs(values + noise)
+            else:
+                sigma_sys_abs = np.zeros_like(unc)
             perturbed_datasets[e_key] = {
                 'mu': df['mu'].to_numpy(),
                 'value': values + noise,
                 'unc': unc,
+                'sigma_sys_abs': sigma_sys_abs,
             }
 
     # Step 3-4: For each bin, collect perturbed data, fit
     sample_coeffs = {}
+    # Phase D audit follow-up: count bins where the per-bin coeffs needed a
+    # positivity projection (only when projection is enabled). Surfaced via the
+    # worker's return tuple so the orchestrator can aggregate across samples.
+    n_pos_violations = 0
     for bin_info_data in energy_bins_data:
         bin_idx = bin_info_data['index']
         datasets_and_weights = overlap_weights.get(bin_idx, [])
@@ -1850,6 +2126,9 @@ def _run_one_kw_sample(args_tuple):
         # path's dedup-to-one-energy behavior.
         study_core_n: Dict[str, int] = {}
         study_core_w: Dict[str, float] = {}
+        # When band-aware ESS is on, also remember the core's per-band point counts
+        # so each evaluation point's Kish collapse uses only the in-band count.
+        study_core_n_by_band: Dict[str, Dict[str, int]] = {}
         for ds, w in datasets_and_weights:
             study_id = ds['experiment_id']  # full entry.subentry
             e_key = f"{ds['experiment_id']}_{ds['exfor_energy_mev']:.6f}"
@@ -1858,10 +2137,18 @@ def _run_one_kw_sample(args_tuple):
                 if study_id not in study_core_w or w > study_core_w[study_id]:
                     study_core_n[study_id] = len(pert['mu'])
                     study_core_w[study_id] = w
+                    if band_aware_ess:
+                        mu_core = pert['mu']
+                        study_core_n_by_band[study_id] = {
+                            'F': int(np.sum(mu_core > 0.5)),
+                            'M': int(np.sum((mu_core >= -0.5) & (mu_core <= 0.5))),
+                            'B': int(np.sum(mu_core < -0.5)),
+                        }
 
         all_mu = []
         all_values = []
         all_unc = []
+        all_sigma_sys_abs = []
         all_weights = []
 
         for ds, w in datasets_and_weights:
@@ -1875,7 +2162,16 @@ def _run_one_kw_sample(args_tuple):
             all_mu.append(pert['mu'])
             all_values.append(pert['value'])
             all_unc.append(pert['unc'])
-            # GLS-ESS per-point weight using core dataset's post-floor uncertainties
+            all_sigma_sys_abs.append(
+                pert.get('sigma_sys_abs', np.zeros_like(pert['unc']))
+            )
+            # GLS-ESS per-point weight using core dataset's post-floor uncertainties.
+            # Kish ρ uses the per-(entry, energy) sigma_sys from the manifest;
+            # constant within a (entry, energy) cell but allowed to vary across
+            # energies of the same experiment (Kinney gain_shift case). Falls
+            # back to the global sigma_norm if absent. The elastic factor is
+            # common to all data and doesn't differentiate within- from
+            # between-experiment redundancy, so it doesn't enter ρ.
             n_study = study_core_n.get(study_id, n_pts)
             unc_arr = pert['unc']
             val_arr = np.maximum(np.abs(pert['value']), 1e-30)
@@ -1885,10 +2181,33 @@ def _run_one_kw_sample(args_tuple):
             if not np.isfinite(rel_unc) or rel_unc <= 0:
                 rel_unc = min_relative_uncertainty if min_relative_uncertainty > 0 else sigma_norm
             rel_unc = max(rel_unc, min_relative_uncertainty)  # floor for ρ consistency
-            rho = sigma_norm**2 / (sigma_norm**2 + rel_unc**2)
-            g = 1.0 / (1.0 + max(n_study - 1, 0) * rho)
-            per_point_w = w * g
-            all_weights.append(np.full(n_pts, per_point_w))
+            ex_sigma_sys = 0.0
+            df_ds_ex = ds.get('exfor_df')
+            if df_ds_ex is not None and 'sigma_sys_relative' in df_ds_ex.columns and len(df_ds_ex) > 0:
+                # Per-row sigma_sys is constant within a single (entry, energy)
+                # cell (`ds` corresponds to one experiment at one energy).
+                ex_sigma_sys = float(df_ds_ex['sigma_sys_relative'].iloc[0])
+            sigma_eff = ex_sigma_sys if ex_sigma_sys > 0 else sigma_norm
+            rho = sigma_eff**2 / (sigma_eff**2 + rel_unc**2)
+            if band_aware_ess and study_id in study_core_n_by_band:
+                # Per-band Kish: the core's per-band point count drives collapse
+                # for each evaluation point in the same band.
+                mu_pts = pert['mu']
+                core_by_band = study_core_n_by_band[study_id]
+                n_band_arr = np.where(
+                    mu_pts > 0.5, core_by_band['F'],
+                    np.where(mu_pts < -0.5, core_by_band['B'], core_by_band['M']),
+                )
+                # Fall back to total core count if a band has zero core points
+                # (shouldn't normally happen given the angular-quality gate).
+                n_band_arr = np.where(n_band_arr > 0, n_band_arr, n_study)
+                g_arr = 1.0 / (1.0 + np.maximum(n_band_arr - 1, 0) * rho)
+                per_point_w_arr = w * g_arr
+                all_weights.append(per_point_w_arr.astype(float))
+            else:
+                g = 1.0 / (1.0 + max(n_study - 1, 0) * rho)
+                per_point_w = w * g
+                all_weights.append(np.full(n_pts, per_point_w))
 
         # Apply per-study weight capping (group by entry.subentry)
         if all_mu and max_experiment_weight_fraction < 1.0:
@@ -1939,6 +2258,7 @@ def _run_one_kw_sample(args_tuple):
         mu = np.concatenate(all_mu)
         values = np.concatenate(all_values)
         unc = np.concatenate(all_unc)
+        sigma_sys_abs = np.concatenate(all_sigma_sys_abs) if all_sigma_sys_abs else None
         weights = np.concatenate(all_weights)
 
         if len(mu) < 3:
@@ -1948,7 +2268,42 @@ def _run_one_kw_sample(args_tuple):
             continue
 
         fit_df = pd.DataFrame({'mu': mu, 'value': values, 'unc': unc})
-        degree = frozen_degrees_by_bin.get(bin_idx, max_degree)
+        # Sys-aware fit weights: σ_total² = (τ·σ_stat)² + σ_sys². Mirrors the
+        # nominal fit and Pass 2 — without this, Pass 1 over-weights points
+        # with small σ_stat but large σ_sys, distorting cross-bin correlations.
+        # Gated on sys_aware_mc_fit so v2 callers stay bit-identical.
+        sys_unc_col_name: Optional[str] = None
+        if (sys_aware_mc_fit and sigma_sys_abs is not None
+                and np.any(sigma_sys_abs > 0)):
+            fit_df['sigma_sys_abs'] = sigma_sys_abs
+            sys_unc_col_name = 'sigma_sys_abs'
+
+        # Per-sample AICc-weighted degree drawing (v3 hook). When the caller
+        # passes ``sampled_degrees_per_bin_sample`` (full-grid bin_idx →
+        # length-n_samples int array) plus ``nominal_coeffs_by_bin_by_degree``
+        # (bin_idx → {degree: padded_nominal_coeffs}), each sample uses its
+        # drawn degree and the freeze-high step pulls from THAT drawn-degree's
+        # nominal. Defaults to None → exact v2 behavior (every sample fits at
+        # the AICc winner).
+        sampled_degrees_per_bin_sample = (
+            sh.get('sampled_degrees_per_bin_sample')
+            if isinstance(args_tuple, int) else None
+        )
+        nominal_coeffs_by_bin_by_degree = (
+            sh.get('nominal_coeffs_by_bin_by_degree')
+            if isinstance(args_tuple, int) else None
+        )
+        if (sampled_degrees_per_bin_sample is not None
+                and bin_idx in sampled_degrees_per_bin_sample):
+            degree = int(sampled_degrees_per_bin_sample[bin_idx][s_idx])
+        else:
+            degree = frozen_degrees_by_bin.get(bin_idx, max_degree)
+        if (nominal_coeffs_by_bin_by_degree is not None
+                and bin_idx in nominal_coeffs_by_bin_by_degree
+                and degree in nominal_coeffs_by_bin_by_degree[bin_idx]):
+            nom_for_freeze_high = nominal_coeffs_by_bin_by_degree[bin_idx][degree]
+        else:
+            nom_for_freeze_high = nominal_coeffs_by_bin.get(bin_idx)
 
         # Apply per-bin MC order cap (from angular support diagnostics)
         bin_mc_cap = mc_order_cap_by_bin.get(bin_idx) if mc_order_cap_by_bin else None
@@ -1969,11 +2324,20 @@ def _run_one_kw_sample(args_tuple):
             fit_df['unc'] = inflated
             fit_use_band_discrepancy = False  # already applied
 
+        # When fix_c0_at_nominal=True, pin c0 at the per-degree nominal so MF33
+        # multiplicative perturbations propagate to a_l = c_l/c_0 instead of
+        # cancelling out (with c0 floating, c0 absorbs the uniform scale and
+        # a_l ≈ a_l_nom — the cross block sees no MF33→a_l correlation).
+        c0_fix_arg: Optional[float] = None
+        if fix_c0_at_nominal and freeze_c0 and nom_for_freeze_high is not None:
+            c0_fix_arg = float(nom_for_freeze_high[0])
+
         try:
             coef_df, _ = sample_legendre_coefficients(
                 fit_df,
                 value_col="value",
                 unc_col="unc",
+                sys_unc_col=sys_unc_col_name,
                 degree=degree,
                 max_degree=max_degree,
                 select_degree=None,
@@ -1985,20 +2349,23 @@ def _run_one_kw_sample(args_tuple):
                 min_points_per_band=min_points_per_band,
                 max_band_scale=max_band_scale,
                 freeze_c0=freeze_c0,
+                fixed_c0_value=c0_fix_arg,
             )
             coeffs = coef_df.iloc[0].to_numpy()
             if len(coeffs) < max_degree + 1:
                 coeffs = np.pad(coeffs, (0, max_degree + 1 - len(coeffs)))
 
-            # Freeze higher-order coefficients at nominal values
-            if effective_sample_order is not None:
-                nom = nominal_coeffs_by_bin.get(bin_idx)
-                if nom is not None:
-                    for l in range(effective_sample_order + 1, len(coeffs)):
-                        if l < len(nom):
-                            coeffs[l] = nom[l]
+            # Freeze higher-order coefficients at nominal values. Source is
+            # the drawn-degree's nominal when per-sample AICc sampling is
+            # active; otherwise the bin's AICc winner. Orders that the source
+            # nominal didn't fit (e.g. drawn deg=2 → no L≥3 in nom) stay zero,
+            # which is correct: a sample that 'chose' L=2 has no L≥3 content.
+            if effective_sample_order is not None and nom_for_freeze_high is not None:
+                for l in range(effective_sample_order + 1, len(coeffs)):
+                    if l < len(nom_for_freeze_high):
+                        coeffs[l] = nom_for_freeze_high[l]
 
-            if apply_positivity_projection:
+            if apply_positivity_projection and positivity_check_points > 0:
                 from .resample_AD import (
                     check_angular_distribution_positivity,
                     project_to_positive_distribution,
@@ -2012,6 +2379,7 @@ def _run_one_kw_sample(args_tuple):
                     coeffs = project_to_positive_distribution(
                         coeffs, positivity_check_points, frozen_indices=frozen or None
                     )
+                    n_pos_violations += 1
 
             sample_coeffs[bin_idx] = endf_normalize_legendre_coeffs(coeffs, include_a0=False)
 
@@ -2020,7 +2388,7 @@ def _run_one_kw_sample(args_tuple):
             if nom is not None:
                 sample_coeffs[bin_idx] = endf_normalize_legendre_coeffs(nom, include_a0=False)
 
-    return s_idx, sample_coeffs
+    return s_idx, sample_coeffs, n_pos_violations
 
 
 def run_mc_with_kernel_weights(
@@ -2030,6 +2398,7 @@ def run_mc_with_kernel_weights(
     n_samples: int,
     n_workers: int,
     sigma_norm: float,
+    sigma_norm_elastic: float,
     norm_dist: str,
     max_degree: int,
     ridge_lambda: float,
@@ -2038,11 +2407,19 @@ def run_mc_with_kernel_weights(
     min_points_per_band: int = 3,
     max_band_scale: float = 3.0,
     freeze_c0: bool = True,
+    fix_c0_at_nominal: bool = False,
+    sys_aware_mc_fit: bool = False,
     max_sample_order: Optional[int] = None,
     apply_positivity_projection: bool = False,
     positivity_check_points: int = 101,
     max_experiment_weight_fraction: float = 1.0,
     min_relative_uncertainty: float = 0.05,
+    band_aware_ess: bool = False,
+    mf33_dsigma_per_sample: Optional[np.ndarray] = None,
+    mf33_c0_per_bin: Optional[np.ndarray] = None,
+    mf33_home_bin_by_e_key: Optional[Dict[str, int]] = None,
+    sampled_degrees_per_bin_sample: Optional[Dict[int, np.ndarray]] = None,
+    nominal_coeffs_by_bin_by_degree: Optional[Dict[int, Dict[int, np.ndarray]]] = None,
     logger=None,
 ) -> Dict[int, Dict[int, np.ndarray]]:
     """Orchestrate kernel-weighted multi-bin MC sampling.
@@ -2060,7 +2437,14 @@ def run_mc_with_kernel_weights(
     n_workers : int
         Number of parallel workers.
     sigma_norm : float
-        Per-experiment normalization uncertainty.
+        Per-experiment systematic normalization uncertainty. Drives the MC
+        perturbation amplitude per experiment AND the Kish ρ for ESS collapse
+        (same physical parameter in both roles).
+    sigma_norm_elastic : float
+        Global normalization uncertainty applied as a single multiplicative
+        factor per MC sample to ALL data points across ALL experiments
+        (e.g. uncertainty in a shared elastic XS reference / monitor).
+        Set to 0.0 to disable.
     norm_dist : str
         "lognormal" or "normal".
     max_degree : int
@@ -2109,6 +2493,7 @@ def run_mc_with_kernel_weights(
         'overlap_weights': overlap_weights,
         'energy_bins_data': energy_bins_data,
         'sigma_norm': sigma_norm,
+        'sigma_norm_elastic': sigma_norm_elastic,
         'norm_dist': norm_dist,
         'max_degree': max_degree,
         'ridge_lambda': ridge_lambda,
@@ -2117,6 +2502,17 @@ def run_mc_with_kernel_weights(
         'min_points_per_band': min_points_per_band,
         'max_band_scale': max_band_scale,
         'freeze_c0': freeze_c0,
+        # When True (and freeze_c0=True), the worker pins c0 at the bin's
+        # *nominal* value (per-degree-aware when degree sampling is on),
+        # rather than the c0 fitted on the perturbed data. v3 needs this so
+        # MF33 perturbations propagate to a_l = c_l/c_0 — with c0 floating,
+        # a uniform multiplicative MF33 factor cancels out of a_l. Default
+        # False preserves v2 behavior bit-for-bit.
+        'fix_c0_at_nominal': fix_c0_at_nominal,
+        # When True, MC fit weights use σ_total² = (τ·σ_stat)² + σ_sys² (with
+        # σ_sys propagated through perturbed_datasets and rescaled per sample).
+        # Default False keeps v2's stat-only WLS fit weights bit-identical.
+        'sys_aware_mc_fit': sys_aware_mc_fit,
         'max_sample_order': max_sample_order,
         'apply_positivity_projection': apply_positivity_projection,
         'positivity_check_points': positivity_check_points,
@@ -2126,6 +2522,19 @@ def run_mc_with_kernel_weights(
         'min_relative_uncertainty': min_relative_uncertainty,
         'tau_info_by_bin': tau_info_by_bin,
         'mc_order_cap_by_bin': mc_order_cap_by_bin,
+        'band_aware_ess': band_aware_ess,
+        # Optional MF33 hooks (default None → no behavior change for v2 callers).
+        # Used by v3's two-pass orchestrator to inject a shared MF33 multiplicative
+        # factor into the data perturbation step. Worker reads via sh.get(...).
+        'mf33_dsigma_per_sample': mf33_dsigma_per_sample,
+        'mf33_c0_per_bin': mf33_c0_per_bin,
+        'mf33_home_bin_by_e_key': mf33_home_bin_by_e_key,
+        # Optional per-sample AICc-weighted degree drawing (v3 hook). When both
+        # are provided, every (bin, sample) draws its degree from the bin's
+        # AICc weights and freezes high orders against THAT degree's nominal.
+        # Default-off → exact v2 behavior.
+        'sampled_degrees_per_bin_sample': sampled_degrees_per_bin_sample,
+        'nominal_coeffs_by_bin_by_degree': nominal_coeffs_by_bin_by_degree,
     }
 
     if n_workers > 1:
@@ -2142,14 +2551,88 @@ def run_mc_with_kernel_weights(
 
     # Assemble into expected format
     all_samples: Dict[int, Dict[int, np.ndarray]] = {s_idx: {} for s_idx in range(n_samples)}
-    for s_idx, sample_coeffs in results:
+    total_pos_violations = 0
+    for s_idx, sample_coeffs, n_pos_violations in results:
         all_samples[s_idx] = sample_coeffs
+        total_pos_violations += n_pos_violations
 
     if logger:
         n_bins_with_data = sum(1 for b in energy_bins if overlap_weights.get(b.index))
         logger.info(f"  Kernel-weight MC complete: {n_samples} samples, {n_bins_with_data} bins with data")
+        if apply_positivity_projection and positivity_check_points > 0:
+            denom = n_samples * max(n_bins_with_data, 1)
+            pct = 100.0 * total_pos_violations / max(denom, 1)
+            logger.info(
+                f"  Positivity: {total_pos_violations}/{denom} (bin, sample) "
+                f"distributions projected ({pct:.2f}%)"
+            )
 
     return all_samples
+
+
+def save_legendre_matrix_to_parquet(
+    nominal_results: List,
+    sample_matrix: np.ndarray,
+    energy_indices: List[int],
+    output_dir: str,
+    max_degree: int,
+    filename: str,
+) -> str:
+    """Wrapper around ``save_all_legendre_coefficients`` for callers (v3) that
+    already hold the samples as a flat ``(n_samples, n_bins * max_degree)``
+    ndarray and don't want to materialize a ``Dict[int, Dict[int, np.ndarray]]``
+    just to feed it to the parquet writer.
+
+    The dict is built lazily, consumed by the writer, and dropped — so the
+    1M-entry dict overhead at 10k samples × 100 bins is transient.
+    """
+    n_samples = sample_matrix.shape[0]
+    samples_dict = {
+        s: {
+            int(e_idx): sample_matrix[s, k * max_degree:(k + 1) * max_degree].copy()
+            for k, e_idx in enumerate(energy_indices)
+        }
+        for s in range(n_samples)
+    }
+    return save_all_legendre_coefficients(
+        nominal_results=nominal_results,
+        all_samples=samples_dict,
+        output_dir=output_dir,
+        max_degree=max_degree,
+        filename=filename,
+    )
+
+
+def stack_samples_to_matrix(
+    samples_by_idx: Dict[int, Dict[int, np.ndarray]],
+    energy_indices: List[int],
+    n_samples: int,
+    max_degree: int,
+) -> np.ndarray:
+    """Flatten ``{sample_idx -> {energy_idx -> coeffs}}`` into a contiguous
+    ``(n_samples, len(energy_indices) * max_degree)`` ndarray.
+
+    Missing entries (None or absent keys) leave zero blocks. Replaces the
+    nested ``for s in range(n_samples): for k in ...`` loops that v2 and v3
+    used to build their TMC / KW matrices; lifting the row pointer outside
+    the inner loop and de-duplicating the call sites also lets each caller
+    ``del samples_by_idx`` immediately afterwards to free the dict-of-dicts
+    overhead (~hundreds of MB at 10k samples × 100 bins).
+    """
+    n_bins = len(energy_indices)
+    out = np.zeros((n_samples, n_bins * max_degree), dtype=float)
+    for s in range(n_samples):
+        sd = samples_by_idx.get(s)
+        if not sd:
+            continue
+        row = out[s]
+        for k, e_idx in enumerate(energy_indices):
+            arr = sd.get(int(e_idx))
+            if arr is None:
+                continue
+            n = min(arr.shape[0], max_degree)
+            row[k * max_degree:k * max_degree + n] = arr[:n]
+    return out
 
 
 # =============================================================================
@@ -4129,10 +4612,23 @@ def save_all_legendre_coefficients(
     all_samples: Dict[int, Dict[int, np.ndarray]],
     output_dir: str,
     max_degree: int,
-    filename: str = 'legendre_coefficients_all_samples.parquet',
+    filename: str = 'legendre_samples.parquet',
 ) -> str:
     """
     Save all Legendre coefficients (nominal + all MC samples) to Parquet.
+
+    Schema
+    ------
+    Each row carries ``is_nominal`` (bool):
+      - ``is_nominal == True``  → deterministic nominal fit (also ``sample_idx == 0``)
+      - ``is_nominal == False`` → MC draw (``sample_idx == 1 … N``)
+
+    Consumers computing sample statistics (mean, std, Pearson correlations)
+    MUST filter on ``df[~df.is_nominal]``. The nominal row is appended
+    as-is and is **not** transformed by downstream calibration steps, so
+    including it in correlation calculations breaks the per-column affine
+    invariance that preserves Pearson between the raw KW and the
+    calibrated parquets.
 
     Parameters
     ----------
@@ -4155,16 +4651,16 @@ def save_all_legendre_coefficients(
     # Collect all data
     data_rows = []
 
-    # Add nominal coefficients (sample_idx = 0)
+    # Nominal coefficients: sample_idx=0, is_nominal=True
     for nr in nominal_results:
         if nr.has_data:
             endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
-            # Pad to max_degree if needed
             padded_coeffs = np.zeros(max_degree)
             padded_coeffs[:len(endf_coeffs)] = endf_coeffs
 
             row = {
-                'sample_idx': 0,  # 0 = nominal
+                'sample_idx': 0,
+                'is_nominal': True,
                 'energy_index': nr.energy_index,
                 'energy_mev': nr.energy_mev,
             }
@@ -4172,24 +4668,23 @@ def save_all_legendre_coefficients(
                 row[f'a_{l+1}'] = padded_coeffs[l]
             data_rows.append(row)
 
-    # Add MC sample coefficients (sample_idx = 1 to N)
+    # MC samples: sample_idx=1..N, is_nominal=False
     n_samples = len(all_samples)
     for sample_idx in range(n_samples):
         sample_coeffs = all_samples[sample_idx]
         for energy_idx, endf_coeffs in sample_coeffs.items():
-            # Find corresponding energy in MeV
             energy_mev = None
             for nr in nominal_results:
                 if nr.energy_index == energy_idx:
                     energy_mev = nr.energy_mev
                     break
 
-            # Pad to max_degree if needed
             padded_coeffs = np.zeros(max_degree)
             padded_coeffs[:len(endf_coeffs)] = endf_coeffs
 
             row = {
-                'sample_idx': sample_idx + 1,  # 1-based for MC samples
+                'sample_idx': sample_idx + 1,
+                'is_nominal': False,
                 'energy_index': energy_idx,
                 'energy_mev': energy_mev if energy_mev is not None else 0.0,
             }
@@ -4896,3 +5391,305 @@ from kika.endf.writers import (
     write_mf34_to_file as write_mf34_to_endf,  # Alias for backward compatibility
     remove_mf34_from_file,
 )
+
+
+# =============================================================================
+# PIPELINE DIAGNOSTICS (sigma-coverage, outlier bins, chi2/N) — DEPRECATED
+# -----------------------------------------------------------------------------
+# This block previously emitted a post-pipeline chi²/N summary against EXFOR
+# data using the nominal coefficients. After the manifest refactor (per-dataset
+# σ_stat / σ_sys decomposition), the in-pipeline chi² statistic was no longer
+# a faithful goodness-of-fit measure: it would combine post-floor σ_stat and
+# manifest-derived σ_sys in a way that didn't reflect how the MC variance and
+# covariance are constructed. The functions below are KEPT FOR REFERENCE but
+# are no longer called from the pipeline. External chi² analysis lives in
+# `scripts/precompute_chi2_data.ipynb` + `scripts/chi2_analysis.ipynb`, which
+# pulls per-point σ_stat ⊕ σ_sys from the manifest and adds the integral
+# cross-section uncertainty from the JEFF / JENDL GENDF (MF33) covariance
+# files.
+# =============================================================================
+
+import traceback as _traceback
+from numpy.polynomial.legendre import legvander as _legvander, legval as _legval
+
+
+def _legendre_jacobian(mu: float, max_degree: int) -> np.ndarray:
+    """Row vector J_l = (2l+1) P_l(mu) for l = 1..max_degree."""
+    pl = _legvander(np.asarray(mu, dtype=float), max_degree)[0, 1:]
+    weights = 2.0 * np.arange(1, max_degree + 1) + 1.0
+    return pl * weights
+
+
+def _eval_xs_at_mu(c0: float, a_l_endf: np.ndarray, mu: float) -> float:
+    """sigma(E,mu) = c0 * (1 + sum_{l>=1} a_l (2l+1) P_l(mu)) for ENDF-normalized a_l."""
+    L = len(a_l_endf)
+    weights = 2.0 * np.arange(1, L + 1) + 1.0
+    raw_c = np.concatenate(([c0], c0 * a_l_endf * weights))
+    return float(_legval(float(mu), raw_c))
+
+
+def build_residuals_dataframe(
+    nominal_results: List[Any],
+    cov_abs: Optional[np.ndarray],
+    energy_indices: List[int],
+    max_degree: int,
+) -> Tuple[pd.DataFrame, int]:
+    """Build per-EXFOR-point residuals DataFrame for end-of-pipeline diagnostics.
+
+    Returns (df, n_bins_skipped). cov_abs may be None: sigma_eval/sigma_total/
+    n_sigma_total columns will be NaN in that case.
+    """
+    has_cov = cov_abs is not None
+    n_idx_to_pos = {e_idx: i for i, e_idx in enumerate(energy_indices)}
+
+    rows = []
+    n_skipped = 0
+    for nr in nominal_results:
+        if not getattr(nr, 'has_data', False):
+            continue
+        if nr.exfor_df is None or len(nr.exfor_df) == 0:
+            n_skipped += 1
+            continue
+
+        c0 = float(nr.nominal_coeffs[0])
+        a_l_endf = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
+        a_l_endf = np.asarray(a_l_endf, dtype=float)
+        L_eff = min(max_degree, len(a_l_endf))
+        a_l_endf = a_l_endf[:L_eff]
+        if L_eff < max_degree:
+            a_l_endf = np.concatenate([a_l_endf, np.zeros(max_degree - L_eff)])
+
+        cov_block = None
+        if has_cov and nr.energy_index in n_idx_to_pos:
+            i = n_idx_to_pos[nr.energy_index]
+            s, e = i * max_degree, (i + 1) * max_degree
+            if e <= cov_abs.shape[0]:
+                cov_block = cov_abs[s:e, s:e]
+
+        for _, ex in nr.exfor_df.iterrows():
+            mu = float(ex['mu'])
+            y_exp = float(ex['value'])
+            sigma_exp = float(ex['unc'])
+
+            y_eval = _eval_xs_at_mu(c0, a_l_endf, mu)
+
+            if cov_block is not None and sigma_exp > 0:
+                J = _legendre_jacobian(mu, max_degree)
+                var_shape = float(c0 * c0 * (J @ cov_block @ J))
+                sigma_eval = float(np.sqrt(max(var_shape, 0.0)))
+                sigma_total = float(np.sqrt(sigma_exp ** 2 + sigma_eval ** 2))
+                n_sigma_total = abs(y_exp - y_eval) / sigma_total if sigma_total > 0 else np.nan
+            else:
+                sigma_eval = np.nan
+                sigma_total = np.nan
+                n_sigma_total = np.nan
+
+            n_sigma_exp = abs(y_exp - y_eval) / sigma_exp if sigma_exp > 0 else np.nan
+
+            rows.append({
+                'energy_mev': float(nr.energy_mev),
+                'energy_index': int(nr.energy_index),
+                'mu': mu,
+                'y_exp': y_exp,
+                'y_eval': y_eval,
+                'sigma_exp': sigma_exp,
+                'sigma_eval': sigma_eval,
+                'sigma_total': sigma_total,
+                'n_sigma_exp': n_sigma_exp,
+                'n_sigma_total': n_sigma_total,
+            })
+
+    df = pd.DataFrame(rows)
+    return df, n_skipped
+
+
+def compute_sigma_coverage(df: pd.DataFrame, sigma_col: str) -> Optional[Dict[str, float]]:
+    """Fractions of points in each n_sigma band. Returns None if column all NaN."""
+    if sigma_col not in df.columns:
+        return None
+    s = df[sigma_col].dropna()
+    n = len(s)
+    if n == 0:
+        return None
+    le1 = (s <= 1).sum()
+    b12 = ((s > 1) & (s <= 2)).sum()
+    b23 = ((s > 2) & (s <= 3)).sum()
+    gt3 = (s > 3).sum()
+    return {
+        'N': int(n),
+        'frac_le_1': 100.0 * le1 / n,
+        'frac_1_2': 100.0 * b12 / n,
+        'frac_2_3': 100.0 * b23 / n,
+        'frac_gt_3': 100.0 * gt3 / n,
+    }
+
+
+def compute_outlier_bins(df: pd.DataFrame, threshold: float = 2.0) -> pd.DataFrame:
+    """Per-bin outlier counts using n_sigma_total (falls back to n_sigma_exp)."""
+    col = 'n_sigma_total' if 'n_sigma_total' in df.columns and df['n_sigma_total'].notna().any() else 'n_sigma_exp'
+    grouped = df.groupby(['energy_index', 'energy_mev'], dropna=False)
+    rows = []
+    for (e_idx, e_mev), grp in grouped:
+        n_total = len(grp)
+        n_outlier = int((grp[col].dropna() > threshold).sum())
+        frac = 100.0 * n_outlier / n_total if n_total > 0 else 0.0
+        rows.append({
+            'energy_index': int(e_idx),
+            'energy_mev': float(e_mev),
+            'n_total': int(n_total),
+            'n_outlier': int(n_outlier),
+            'frac_outlier': frac,
+        })
+    return pd.DataFrame(rows)
+
+
+def compute_chi2_summary(df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
+    """Scenarios A (sigma_exp only) and B (sigma_total). chi2/N is sum of n_sigma**2 / N."""
+    out: Dict[str, Dict[str, Any]] = {}
+
+    sa = df['n_sigma_exp'].dropna() if 'n_sigma_exp' in df.columns else pd.Series([], dtype=float)
+    if len(sa) > 0:
+        out['A'] = {'N': int(len(sa)), 'chi2_red': float((sa ** 2).sum() / len(sa))}
+    else:
+        out['A'] = {'N': 0, 'chi2_red': float('nan')}
+
+    sb = df['n_sigma_total'].dropna() if 'n_sigma_total' in df.columns else pd.Series([], dtype=float)
+    if len(sb) > 0:
+        out['B'] = {'N': int(len(sb)), 'chi2_red': float((sb ** 2).sum() / len(sb))}
+    else:
+        out['B'] = {'N': 0, 'chi2_red': float('nan')}
+
+    return out
+
+
+def log_diagnostics_block(
+    nominal_results: List[Any],
+    cov_abs: Optional[np.ndarray],
+    energy_indices: List[int],
+    max_degree: int,
+    logger: Any,
+    outlier_threshold: float = 2.0,
+    top_n_worst: int = 5,
+) -> None:
+    """Emit sigma-coverage, outlier-bin, and chi2/N summary to the run log.
+
+    Never raises. On any failure, logs a single skip line.
+    """
+    try:
+        if not nominal_results or not any(getattr(nr, 'has_data', False) for nr in nominal_results):
+            logger.info("")
+            logger.info(">> diagnostics skipped: no EXFOR-fitted bins")
+            return
+
+        cov_for_calc = cov_abs
+        cov_reason = None
+        if cov_abs is None:
+            cov_reason = "cov_abs is None"
+        else:
+            expected = len(energy_indices) * max_degree
+            if cov_abs.shape[0] != expected:
+                cov_reason = f"cov shape {cov_abs.shape[0]} != {expected}"
+                cov_for_calc = None
+
+        df, n_skipped = build_residuals_dataframe(
+            nominal_results=nominal_results,
+            cov_abs=cov_for_calc,
+            energy_indices=energy_indices,
+            max_degree=max_degree,
+        )
+
+        if len(df) == 0:
+            logger.info("")
+            logger.info(">> diagnostics skipped: no EXFOR points after filtering")
+            return
+
+        n_bins_with_data = int(df['energy_index'].nunique())
+        n_total = int(len(df))
+
+        # ── SIGMA COVERAGE ─────────────────────────────────────────────────
+        cov_total = compute_sigma_coverage(df, 'n_sigma_total')
+        cov_exp = compute_sigma_coverage(df, 'n_sigma_exp')
+
+        logger.info("")
+        logger.info("#== SIGMA COVERAGE =========================================================")
+        logger.info(">> note: sigma_eval is angular-shape only (MF34-equivalent); MF33/c0 not folded")
+        if cov_reason:
+            logger.info(f">> sigma_total unavailable: {cov_reason}")
+        logger.info(f">> N points = {n_total}   bins with data = {n_bins_with_data}")
+        if n_skipped:
+            logger.info(f">> bins skipped (no exfor data) = {n_skipped}")
+        logger.info("                       <=1s    1-2s    2-3s     >3s")
+        if cov_total is not None:
+            logger.info(
+                f"   sigma_total      :  {cov_total['frac_le_1']:5.1f}%  "
+                f"{cov_total['frac_1_2']:5.1f}%   {cov_total['frac_2_3']:5.1f}%   {cov_total['frac_gt_3']:5.1f}%"
+            )
+        else:
+            logger.info("   sigma_total      :    n/a     n/a     n/a     n/a")
+        if cov_exp is not None:
+            logger.info(
+                f"   sigma_exp only   :  {cov_exp['frac_le_1']:5.1f}%  "
+                f"{cov_exp['frac_1_2']:5.1f}%   {cov_exp['frac_2_3']:5.1f}%   {cov_exp['frac_gt_3']:5.1f}%"
+            )
+        else:
+            logger.info("   sigma_exp only   :    n/a     n/a     n/a     n/a")
+        logger.info("   Gaussian ref     :  68.27%  27.18%   4.28%   0.27%")
+        logger.info("#== END SIGMA COVERAGE =====================================================")
+
+        # ── OUTLIER BINS ───────────────────────────────────────────────────
+        bin_df = compute_outlier_bins(df, threshold=outlier_threshold)
+        ref_col = 'n_sigma_total' if cov_for_calc is not None else 'n_sigma_exp'
+
+        logger.info("")
+        logger.info("#== OUTLIER BINS ===========================================================")
+        logger.info(
+            f">> per-bin fraction of EXFOR points with {ref_col} > {outlier_threshold} (top {top_n_worst} worst)"
+        )
+        logger.info("   E [MeV]     n_total   n_outlier    frac")
+        worst = bin_df.sort_values('frac_outlier', ascending=False).head(top_n_worst)
+        for _, r in worst.iterrows():
+            logger.info(
+                f"   {r['energy_mev']:7.3f}    {int(r['n_total']):6d}     {int(r['n_outlier']):6d}    {r['frac_outlier']:5.1f}%"
+            )
+        logger.info(">> all bins (ascending energy):")
+        for _, r in bin_df.sort_values('energy_mev').iterrows():
+            logger.info(
+                f"   {r['energy_mev']:7.3f}    {int(r['n_total']):6d}     {int(r['n_outlier']):6d}    {r['frac_outlier']:5.1f}%"
+            )
+        logger.info("#== END OUTLIER BINS =======================================================")
+
+        # ── CHI2 SUMMARY ───────────────────────────────────────────────────
+        chi2 = compute_chi2_summary(df)
+        a_n, a_v = chi2['A']['N'], chi2['A']['chi2_red']
+        b_n, b_v = chi2['B']['N'], chi2['B']['chi2_red']
+
+        logger.info("")
+        logger.info("#== CHI2 SUMMARY ===========================================================")
+        if a_n > 0:
+            logger.info(f">> Scenario A (sigma_exp only) :  chi2/N = {a_v:.3f}   (N={a_n})")
+        else:
+            logger.info(">> Scenario A (sigma_exp only) :  n/a")
+        if b_n > 0 and np.isfinite(b_v):
+            logger.info(f">> Scenario B (sigma_total)    :  chi2/N = {b_v:.3f}   (N={b_n})")
+        else:
+            logger.info(">> Scenario B (sigma_total)    :  n/a (covariance unavailable)")
+        logger.info("#== END CHI2 SUMMARY =======================================================")
+
+        # Console echo (single line)
+        if b_n > 0 and np.isfinite(b_v):
+            logger.info(
+                f"  [INFO] chi2/N: A(exp)={a_v:.3f}  B(total)={b_v:.3f}  (N={a_n})",
+                console=True,
+            )
+        elif a_n > 0:
+            logger.info(
+                f"  [INFO] chi2/N: A(exp)={a_v:.3f}  (B unavailable)  (N={a_n})",
+                console=True,
+            )
+
+    except Exception as e:
+        try:
+            logger.info(f">> diagnostics skipped: internal error ({type(e).__name__})")
+            logger.debug(_traceback.format_exc())
+        except Exception:
+            pass

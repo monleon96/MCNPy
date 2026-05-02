@@ -49,7 +49,16 @@ def read_exfor(filepath: str) -> "ExforAngularDistribution":
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"EXFOR file not found: {filepath}")
 
-    return ExforAngularDistribution.from_json(filepath)
+    ad = ExforAngularDistribution.from_json(filepath)
+    # Manifest application is pipeline-specific and lives in
+    # scripts/uncertainty_manifest.py. The kika library returns the raw
+    # ExforAngularDistribution; the pipeline (e.g. build_exfor_cache_from_objects)
+    # calls apply_manifest_to_exfor() before building the cache.
+    ad._raw_uncertainty_components = []  # JSON path: no raw columns; resolver synthesizes
+    ad.sigma_sys_scalar_relative = 0.0
+    ad.sigma_sys_indep_relative = 0.0
+    ad.uncertainty_manifest_flag = "default"
+    return ad
 
 
 def read_all_exfor(

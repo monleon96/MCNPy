@@ -170,31 +170,27 @@ def create_xsdir_files_for_ace(
 
         with open(master_xs_path, 'w') as f:
             i = 0
+            # Continuation is signaled by a trailing '+' on the previous physical
+            # line; leading whitespace on entry lines is allowed (and standard in
+            # JENDL-style xsdirs) and must NOT be treated as a continuation marker.
+            prev_continues = False
             while i < len(xs_lines):
                 line = xs_lines[i]
-                is_continuation = line[:1] in (" ", "\t")
                 stripped = line.strip()
-                if (
-                    not is_continuation
-                    and stripped
-                    and stripped.startswith(zaid_prefix)
-                ):
+                first_token = stripped.split(None, 1)[0] if stripped else ""
+                if first_token == zaid_prefix and not prev_continues:
                     f.write(xsdir_line + "\n")
                     line_found = True
-                    prev = line
+                    this_continues = stripped.endswith("+")
                     i += 1
-                    # swallow continuation lines of the replaced entry: either
-                    # indented lines (old style) or lines whose predecessor
-                    # ended with a '+' continuation marker.
-                    while i < len(xs_lines):
-                        prev_end = prev.rstrip("\n").rstrip()
-                        if prev_end.endswith("+") or xs_lines[i][:1] in (" ", "\t"):
-                            prev = xs_lines[i]
-                            i += 1
-                        else:
-                            break
+                    while i < len(xs_lines) and this_continues:
+                        this_continues = xs_lines[i].rstrip("\n").rstrip().endswith("+")
+                        i += 1
+                    prev_continues = False
                 else:
                     f.write(line)
+                    if stripped:
+                        prev_continues = stripped.endswith("+")
                     i += 1
 
             if not line_found:
@@ -265,30 +261,28 @@ def _write_master_with_replacements(
     out: list[str] = []
     i = 0
     n = len(base_lines)
+    # Continuation is signaled by a trailing '+' on the previous physical line;
+    # leading whitespace on entry lines is allowed (and standard in JENDL-style
+    # xsdirs) and must NOT be treated as a continuation marker.
+    prev_continues = False
     while i < n:
         line = base_lines[i]
-        is_continuation = line[:1] in (" ", "\t")
         stripped = line.strip()
-        matched_prefix = None
-        if not is_continuation and stripped:
-            for prefix in replacements:
-                if stripped.startswith(prefix):
-                    matched_prefix = prefix
-                    break
+        first_token = stripped.split(None, 1)[0] if stripped else ""
+        matched_prefix = first_token if (first_token in replacements and not prev_continues) else None
         if matched_prefix is not None:
             out.append(replacements[matched_prefix] + "\n")
             used.add(matched_prefix)
-            prev = line
+            this_continues = stripped.endswith("+")
             i += 1
-            while i < n:
-                prev_end = prev.rstrip("\n").rstrip()
-                if prev_end.endswith("+") or base_lines[i][:1] in (" ", "\t"):
-                    prev = base_lines[i]
-                    i += 1
-                else:
-                    break
+            while i < n and this_continues:
+                this_continues = base_lines[i].rstrip("\n").rstrip().endswith("+")
+                i += 1
+            prev_continues = False
         else:
             out.append(line)
+            if stripped:
+                prev_continues = stripped.endswith("+")
             i += 1
 
     # Append any replacements whose zaid wasn't present in the baseline.

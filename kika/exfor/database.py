@@ -163,6 +163,10 @@ class X4ProDataset:
     # Raw JSON for debugging/verification
     raw_json: Optional[Dict[str, Any]] = None
 
+    # All x4data dy columns surfaced (DATA-ERR, ERR-1, ERR-S, ERR-T, ...) — used by
+    # the uncertainty manifest resolver to derive sigma_stat and sigma_sys.
+    uncertainty_components: List[Dict[str, Any]] = field(default_factory=list)
+
 
 def _zaid_to_target_pattern(zaid: int) -> str:
     """
@@ -245,6 +249,7 @@ def _parse_x4data_json(jx5z: Dict[str, Any]) -> Dict[str, Any]:
         "xs_unit": "B/SR",
         "uncertainty_unit": "",  # Track uncertainty unit for PER-CENT detection
         "angle_type": "ANG",  # 'ANG' or 'COS'
+        "uncertainty_components": [],  # All dy columns surfaced (DATA-ERR, ERR-1, ERR-S, ERR-T, ...)
     }
 
     for var in x4data:
@@ -272,9 +277,35 @@ def _parse_x4data_json(jx5z: Dict[str, Any]) -> Dict[str, Any]:
             result["angle_unit"] = units
             result["angle_type"] = "COS"
         elif cvar == "dy" or fam in ("dData", "DATA-ERR"):
-            # Uncertainty values
-            result["uncertainties"] = dat0
-            result["uncertainty_unit"] = units  # Capture unit for PER-CENT detection
+            header = var.get("header", "")
+            if_comm = bool(var.get("ifComm", False))
+
+            if if_comm:
+                # Common (scalar) uncertainty column: value lives in com0,
+                # not dat0. Surface it as a scalar component without
+                # touching the legacy per-point fields (which would
+                # otherwise be silently overwritten with []).
+                scalar_value = var.get("com0")
+                if scalar_value is not None:
+                    result["uncertainty_components"].append({
+                        "header": header,
+                        "kind": "scalar",
+                        "value": scalar_value,
+                        "unit": units,
+                    })
+            else:
+                # Per-point uncertainty column.
+                if dat0:
+                    result["uncertainty_components"].append({
+                        "header": header,
+                        "kind": "per_point",
+                        "values": dat0,
+                        "unit": units,
+                    })
+                # Preserve legacy "last per-point dy wins" semantics so
+                # downstream code (PER-CENT override branch) is unchanged.
+                result["uncertainties"] = dat0
+                result["uncertainty_unit"] = units
 
     return result
 
@@ -829,6 +860,7 @@ class X4ProDatabase:
             is_corrected=is_corrected,
             correction_notes=correction_notes,
             raw_json=jx5z,
+            uncertainty_components=x4_parsed.get("uncertainty_components", []),
         )
 
     def query_angular_distributions(
@@ -1011,7 +1043,11 @@ class X4ProDatabase:
             "cross_section",
         )
 
-        # Group data by energy
+        # Group data by energy. Per-point sigma_stat / sigma_sys are populated
+        # below by apply_manifest_to_exfor() after the ExforAngularDistribution
+        # is constructed; for now we seed uncertainty_stat with the legacy
+        # per-point unc_bsr so that fallback behavior is preserved if manifest
+        # resolution fails.
         unique_energies = np.unique(energies_mev)
         data_blocks = []
 
@@ -1033,6 +1069,7 @@ class X4ProDatabase:
                     "angle": float(block_angles[i]),
                     "cross_section": float(block_xs[i]),
                     "uncertainty_stat": float(block_unc[i]),
+                    "uncertainty_sys": 0.0,
                 })
 
             data_blocks.append({
@@ -1079,7 +1116,7 @@ class X4ProDatabase:
             },
         }
 
-        return ExforAngularDistribution(
+        ad = ExforAngularDistribution(
             entry=entry,
             subentry=subentry,
             quantity="DA",
@@ -1091,6 +1128,16 @@ class X4ProDatabase:
             units={"energy": "MeV", "angle": "deg", "cross_section": "b/sr"},
             _data_blocks=data_blocks,
         )
+        # Stash raw uncertainty_components on the object so the pipeline-side
+        # manifest resolver (scripts/uncertainty_manifest.py) can reference
+        # named EXFOR columns when applying ERR-ANALYS-derived overrides.
+        # The kika library itself does not apply the manifest — this is
+        # pipeline-specific behavior, called from scripts/exfor_utils.py.
+        ad._raw_uncertainty_components = list(dataset.uncertainty_components)
+        ad.sigma_sys_scalar_relative = 0.0
+        ad.sigma_sys_indep_relative = 0.0
+        ad.uncertainty_manifest_flag = "default"
+        return ad
 
     def _convert_to_cross_section(
         self, dataset: X4ProDataset

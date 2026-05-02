@@ -571,7 +571,7 @@ def enforce_matrix_quality(matrix: np.ndarray,
                           symmetrize: bool = True,
                           project_to_psd: bool = False,
                           psd_floor: float = 0.0,
-                          psd_method: str = "higham") -> np.ndarray:
+                          psd_method: str = "auto") -> np.ndarray:
     """
     Apply quality checks and corrections to covariance matrices.
 
@@ -590,14 +590,17 @@ def enforce_matrix_quality(matrix: np.ndarray,
     psd_floor : float, optional
         Minimum eigenvalue for PSD projection (default 0.0)
     psd_method : str, optional
-        PSD projection method: "higham" (diagonal-preserving, default) or
-        "clip" (naive eigenvalue clipping)
+        PSD projection method: "auto" (default; clip when negatives are tiny,
+        else Higham), "higham" (diagonal-preserving), "clip" (eigenvalue
+        clipping), or "none" (no projection — falls through to clip).
 
     Returns
     -------
     np.ndarray
         Quality-corrected matrix
     """
+    from kika.cov.decomposition import _validate_psd_method, _resolve_psd_auto, nearest_psd_higham
+
     result = matrix.copy()
 
     # Enforce symmetry
@@ -614,14 +617,25 @@ def enforce_matrix_quality(matrix: np.ndarray,
 
     # Optional PSD projection
     if project_to_psd:
+        _validate_psd_method(psd_method)
+
+        eigvals_auto = eigvecs_auto = None
+        if psd_method == "auto":
+            psd_method, eigvals_auto, eigvecs_auto = _resolve_psd_auto(
+                result, verbose=False, logger=None,
+            )
+
         if psd_method == "higham":
-            from kika.cov.decomposition import nearest_psd_higham
             result, _info = nearest_psd_higham(
                 result, preserve_diagonal=True, eigval_floor=psd_floor,
                 verbose=False,
             )
         else:
-            w, v = np.linalg.eigh(result)
+            # "clip" or "none" — both fall through to eigenvalue floor projection
+            if eigvals_auto is None:
+                w, v = np.linalg.eigh(result)
+            else:
+                w, v = eigvals_auto, eigvecs_auto
             w_clipped = np.maximum(w, psd_floor)
             result = (v @ np.diag(w_clipped) @ v.T)
             result = (result + result.T) / 2.0

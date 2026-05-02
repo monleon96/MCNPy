@@ -168,6 +168,78 @@ def _robust_eigvalsh(
         return np.sort(w)
 
 
+# Threshold for psd_method="auto" mode: if |λ_min|/λ_max < this, use clip
+# (single eigendecomp, fast); otherwise fall through to Higham (iterative,
+# preserves diagonal). At 1e-2, NJOY/multigroup covariances with shallow
+# negatives (typical: ratio 1e-4..5e-3) take the fast path; only genuinely
+# indefinite matrices (ratio ≳ few %) pay for Higham.
+_PSD_AUTO_THRESHOLD: float = 1e-2
+
+# When Higham hits max_iter with relative_frobenius_error above this, the
+# Cholesky path swaps in clip on the original matrix instead of accepting
+# the unconverged projection.
+_HIGHAM_FALLBACK_FROB_THRESHOLD: float = 1e-2
+
+_VALID_PSD_METHODS = frozenset({"auto", "higham", "clip", "none"})
+
+
+def _validate_psd_method(psd_method: str) -> None:
+    """Raise ValueError if psd_method is not a recognized option."""
+    if psd_method not in _VALID_PSD_METHODS:
+        raise ValueError(
+            f"psd_method must be one of {sorted(_VALID_PSD_METHODS)}, "
+            f"got {psd_method!r}"
+        )
+
+
+def _resolve_psd_auto(
+    M: np.ndarray,
+    *,
+    verbose: bool = True,
+    logger=None,
+) -> Tuple[str, np.ndarray, np.ndarray]:
+    """Decide between clip and Higham based on |λ_min|/λ_max ratio.
+
+    Computes one eigendecomposition on a NaN/Inf-cleaned copy of *M*
+    (mirroring Higham's internal pre-pass), so the ratio is meaningful
+    even for the sparse multigroup covariances that have non-finite
+    rows for below-threshold reactions. The eigvals/eigvecs returned
+    are from this cleaned matrix, so callers reusing them on the clip
+    path produce a finite, PSD result by construction.
+
+    Returns
+    -------
+    resolved_method : {"clip", "higham"}
+    eigvals, eigvecs : eigendecomposition of the cleaned matrix (the
+        caller reuses these on the clip path; Higham recomputes its
+        own internally).
+    """
+    if not np.isfinite(M).all():
+        n_nonfinite = int(np.sum(~np.isfinite(M)))
+        if verbose:
+            _log_message(
+                f"[PSD] [AUTO] Replacing {n_nonfinite} non-finite entries with 0 "
+                "(matches Higham's internal repair)",
+                logger, verbose,
+            )
+        M_clean = np.where(np.isfinite(M), M, 0.0)
+    else:
+        M_clean = M
+
+    eigvals, eigvecs = _robust_eigh(M_clean, label="auto", verbose=verbose, logger=logger)
+    lam_max = max(float(eigvals.max()), 1e-300)
+    lam_min_neg = max(-float(eigvals.min()), 0.0)
+    ratio = lam_min_neg / lam_max
+    resolved = "clip" if ratio < _PSD_AUTO_THRESHOLD else "higham"
+    if verbose:
+        _log_message(
+            f"[PSD] [AUTO] ratio={ratio:.3e} (thresh={_PSD_AUTO_THRESHOLD:.0e}) "
+            f"-> {resolved}",
+            logger, verbose,
+        )
+    return resolved, eigvals, eigvecs
+
+
 def cap_variance_congruence(
     cov_mat: np.ndarray,
     max_variance: float,
@@ -353,6 +425,20 @@ def flag_threshold_bins(
     detection_log: List[Dict] = []
     skipped_too_few: List[Dict] = []
 
+    # Pre-compute per-isotope finite-positive diagonal pool, used as the
+    # tier-3 fallback when an MT has 0 same-MT neighbors with usable data
+    # (e.g., a reaction with covariance only above its own threshold and
+    # the threshold lies in the highest-defined group).
+    isotope_diag_pool: Dict[int, np.ndarray] = {}
+    for p_idx, (z2, _mt2) in enumerate(param_pairs):
+        block = diag[p_idx * num_groups:(p_idx + 1) * num_groups]
+        good = block[np.isfinite(block) & (block > 0)]
+        if good.size:
+            isotope_diag_pool.setdefault(int(z2), []).append(good)
+    isotope_diag_pool = {
+        z: np.concatenate(arrs) for z, arrs in isotope_diag_pool.items()
+    }
+
     for pair_idx, (zaid, mt) in enumerate(param_pairs):
         E_thresh = mt_thresholds.get(int(mt))
         if E_thresh is None:
@@ -376,15 +462,28 @@ def flag_threshold_bins(
         other_vals = block_diag[other_mask]
         finite_pos = other_vals[np.isfinite(other_vals) & (other_vals > 0)]
 
-        if finite_pos.size < min_groups_for_median:
-            skipped_too_few.append({
-                "zaid": int(zaid), "mt": int(mt), "group": g,
-                "n_usable": int(finite_pos.size),
-            })
-            continue
-
-        target = float(np.median(finite_pos))
-        n_used = int(finite_pos.size)
+        # Tiered fallback: same-MT median when we have ≥ min_groups, else
+        # whatever same-MT we have, else the isotope-wide median. Each tier
+        # is logged so the source of "target" is auditable.
+        if finite_pos.size >= min_groups_for_median:
+            target = float(np.median(finite_pos))
+            n_used = int(finite_pos.size)
+            target_source = "same_mt_median"
+        elif finite_pos.size >= 1:
+            target = float(np.median(finite_pos))
+            n_used = int(finite_pos.size)
+            target_source = "same_mt_few"
+        else:
+            iso_pool = isotope_diag_pool.get(int(zaid))
+            if iso_pool is None or iso_pool.size == 0:
+                skipped_too_few.append({
+                    "zaid": int(zaid), "mt": int(mt), "group": g,
+                    "n_usable": 0,
+                })
+                continue
+            target = float(np.median(iso_pool))
+            n_used = int(iso_pool.size)
+            target_source = "isotope_median"
 
         e_lo = float(bins_arr[g]) if g < len(bins_arr) - 1 else float("nan")
         e_hi = float(bins_arr[g + 1]) if g < len(bins_arr) - 1 else float("nan")
@@ -402,6 +501,7 @@ def flag_threshold_bins(
             "current_variance": current_var,
             "target_variance": target,
             "n_groups_used": n_used,
+            "target_source": target_source,
         })
 
     if verbose or logger is not None:
@@ -415,13 +515,19 @@ def flag_threshold_bins(
                 logger, verbose,
             )
             for d in detection_log:
+                src = d.get("target_source", "same_mt_median")
+                src_label = {
+                    "same_mt_median": f"median of {d['n_groups_used']} same-MT groups",
+                    "same_mt_few": f"median of {d['n_groups_used']} same-MT group(s) [fallback]",
+                    "isotope_median": f"isotope-wide median of {d['n_groups_used']} groups [fallback]",
+                }.get(src, f"median of {d['n_groups_used']} groups")
                 _log_message(
                     f"    MT={d['mt']}, G={d['group']} "
                     f"[{d['energy_lo']:.2e},{d['energy_hi']:.2e}] MeV: "
                     f"E_thresh={d['E_thresh']:.3e}, "
                     f"σ²={d['current_variance']:.3e}, "
                     f"target={d['target_variance']:.3e} "
-                    f"(median of {d['n_groups_used']} groups)",
+                    f"({src_label})",
                     logger, verbose,
                 )
             if skipped_too_few:
@@ -584,11 +690,12 @@ def nearest_psd_higham(
     A: np.ndarray,
     *,
     preserve_diagonal: bool = True,
-    max_iter: int = 1000,
-    tol: float = 1e-10,
+    max_iter: Optional[int] = None,
+    tol: Optional[float] = None,
     eigval_floor: float = 0.0,
     verbose: bool = True,
     logger=None,
+    log_every: int = 50,
 ) -> Tuple[np.ndarray, Dict]:
     """
     Find the nearest positive semi-definite matrix using Higham's alternating
@@ -608,10 +715,19 @@ def nearest_psd_higham(
     preserve_diagonal : bool
         If True, run the full Dykstra iteration that preserves the diagonal.
         If False, perform a single eigenvalue-clipping projection.
-    max_iter : int
-        Maximum number of alternating-projection iterations.
-    tol : float
+    max_iter : int, optional
+        Maximum number of alternating-projection iterations. ``None``
+        (default) auto-selects: 1000 for n ≤ 2000, 200 for n > 2000.
+        Sparse multigroup covariances (n > 2000, ~95 % non-finite from
+        below-threshold reactions) plateau by iter ~100 and the cholesky
+        path then falls back to clip — running 1000 iterations just burns
+        wall-time without improving the projection.
+    tol : float, optional
         Convergence tolerance on relative Frobenius change between iterations.
+        ``None`` (default) auto-selects: 1e-10 for matrices ≤ 1000×1000,
+        1e-8 for larger ones — at n ≳ 1000, rel_change ≲ 1e-8 is already
+        at float-precision noise from the O(n³) eigendecomposition, so
+        a stricter tol just guarantees no convergence.
     eigval_floor : float
         Floor for eigenvalues in the PSD projection step (0.0 for exact PSD,
         small positive for strict PD).
@@ -619,6 +735,10 @@ def nearest_psd_higham(
         Whether to print diagnostic information.
     logger : optional
         Logger instance for file output.
+    log_every : int
+        Emit a progress line every N iterations (set to 0 to disable).
+        Used to track convergence on long runs where each iteration is
+        an O(n³) eigendecomposition.
 
     Returns
     -------
@@ -629,6 +749,10 @@ def nearest_psd_higham(
           n_negative_eigenvalues_before
     """
     n = A.shape[0]
+    if tol is None:
+        tol = 1e-10 if n <= 1000 else 1e-8
+    if max_iter is None:
+        max_iter = 1000 if n <= 2000 else 200
     A_sym = (A + A.T) / 2.0
 
     # Sanitise: replace NaN/Inf with zero so eigen-solvers don't choke
@@ -745,6 +869,18 @@ def nearest_psd_higham(
 
         Y = X_psd
 
+        # Progress logging — rel_change is the actionable convergence
+        # signal (algorithm stops when it drops below tol). We don't log
+        # an eigenvalue here because the cheap option (w from R) reflects
+        # the projection target R = Y - D_S, not the iterate Y, and can
+        # stay indefinite even as Y converges to PSD.
+        if verbose and log_every and (k + 1) % log_every == 0:
+            _log_message(
+                f"[PSD] [HIGHAM] iter {k+1}/{max_iter}: "
+                f"rel_change={rel_change:.2e} (tol={tol:.0e})",
+                logger, verbose,
+            )
+
         if rel_change < tol:
             converged = True
             break
@@ -804,7 +940,7 @@ def cholesky_decomposition(
     cov_obj: CovarianceMatrixProtocol = None,
     *,
     space: str = "log",
-    psd_method: str = "higham",
+    psd_method: str = "auto",
     jitter_scale: float = 1e-10,
     max_jitter_ratio: float = 1e-3,
     verbose: bool = True,
@@ -821,7 +957,12 @@ def cholesky_decomposition(
     space : str
         "linear" or "log" space for decomposition
     psd_method : str
-        PSD enforcement method ("higham" or "jitter")
+        PSD enforcement method when the matrix is not already PD:
+        - "auto" (default): one eigendecomposition; if |λ_min|/λ_max is
+          below the module threshold use clip, otherwise Higham.
+        - "higham": iterative diagonal-preserving projection.
+        - "clip":  zero negative eigenvalues, reconstruct, then Cholesky.
+        - "none":  add diagonal jitter until Cholesky succeeds.
     jitter_scale : float
         Base jitter scale for PSD correction
     max_jitter_ratio : float
@@ -846,6 +987,8 @@ def cholesky_decomposition(
         M = (cov_obj.covariance_matrix if space == "linear" else cov_obj.log_covariance_matrix)
     n = M.shape[0]
 
+    _validate_psd_method(psd_method)
+
     if verbose:
         diag_range = f"diag ∈ [{np.min(np.diag(M)):.3e}, {np.max(np.diag(M)):.3e}]"
         _log_message(
@@ -859,6 +1002,13 @@ def cholesky_decomposition(
             _log_message("[DECOMPOSITION] Cholesky successful (matrix was already PD)", logger, verbose)
         return L
     except np.linalg.LinAlgError:
+        # Resolve "auto" -> clip or higham; reuse the eigendecomp on the clip path
+        eigvals_auto = eigvecs_auto = None
+        if psd_method == "auto":
+            psd_method, eigvals_auto, eigvecs_auto = _resolve_psd_auto(
+                M, verbose=verbose, logger=logger,
+            )
+
         if psd_method == "higham":
             if verbose:
                 _log_message("[DECOMPOSITION] Matrix not PD → applying Higham projection", logger, verbose)
@@ -866,6 +1016,43 @@ def cholesky_decomposition(
                 M, preserve_diagonal=True, eigval_floor=1e-14,
                 verbose=verbose, logger=logger,
             )
+
+            # Fallback: if Higham hit max_iter with a sizeable Frobenius gap,
+            # clip is strictly better — its Frobenius distance is the sum of
+            # the squared negative eigenvalues only (typically ≪ 1 %), versus
+            # 7–17 % we have seen on large multigroup NJOY covariances when
+            # Dykstra plateaus. Diagonal preservation is the price; for
+            # sampling that's preferable to a heavily distorted covariance.
+            higham_fallback_used = False
+            if (not psd_info.get("converged", True) and
+                    psd_info.get("relative_frobenius_error", 0.0) > _HIGHAM_FALLBACK_FROB_THRESHOLD):
+                higham_fallback_used = True
+                if verbose:
+                    _log_message(
+                        f"[DECOMPOSITION] [FALLBACK] Higham did not converge "
+                        f"(Frobenius error="
+                        f"{psd_info['relative_frobenius_error']*100:.2f}%"
+                        f" > {_HIGHAM_FALLBACK_FROB_THRESHOLD*100:.1f}%)"
+                        " → falling back to eigenvalue clip on original matrix",
+                        logger, verbose,
+                    )
+                if eigvals_auto is None:
+                    M_clean = np.where(np.isfinite(M), M, 0.0)
+                    eigvals_auto, eigvecs_auto = _robust_eigh(
+                        M_clean, label="higham fallback clip",
+                        verbose=verbose, logger=logger,
+                    )
+                n_neg_fb = int(np.sum(eigvals_auto < 0))
+                eigvals_clipped = np.maximum(eigvals_auto, 1e-14)
+                M_psd = eigvecs_auto @ np.diag(eigvals_clipped) @ eigvecs_auto.T
+                M_psd = (M_psd + M_psd.T) * 0.5
+                if verbose:
+                    _log_message(
+                        f"[DECOMPOSITION] [FALLBACK] Clipped {n_neg_fb} negative "
+                        "eigenvalues on original matrix",
+                        logger, verbose,
+                    )
+
             try:
                 L = np.linalg.cholesky(M_psd)
             except np.linalg.LinAlgError:
@@ -891,13 +1078,76 @@ def cholesky_decomposition(
                     )
                 return L
             if verbose:
-                _log_message(
-                    f"[DECOMPOSITION] Cholesky successful after Higham "
-                    f"({psd_info['iterations']} iter, "
-                    f"Frobenius error={psd_info['relative_frobenius_error']*100:.4f}%)",
-                    logger, verbose,
+                if higham_fallback_used:
+                    _log_message(
+                        "[DECOMPOSITION] Cholesky successful after fallback clip "
+                        "(Higham unconverged result was discarded)",
+                        logger, verbose,
+                    )
+                else:
+                    _log_message(
+                        f"[DECOMPOSITION] Cholesky successful after Higham "
+                        f"({psd_info['iterations']} iter, "
+                        f"Frobenius error={psd_info['relative_frobenius_error']*100:.4f}%)",
+                        logger, verbose,
+                    )
+
+        elif psd_method == "clip":
+            if eigvals_auto is None:
+                eigvals_auto, eigvecs_auto = _robust_eigh(
+                    M, label="cholesky clip", verbose=verbose, logger=logger,
                 )
-        else:
+            n_negative = int(np.sum(eigvals_auto < 0))
+            if n_negative > 0 or float(np.min(eigvals_auto)) < 1e-14:
+                min_eigval = float(np.min(eigvals_auto))
+                if verbose:
+                    _log_message(
+                        f"[COV] [CHOLESKY] Clipped {n_negative} negative eigenvalues "
+                        f"(min={min_eigval:.3e}) before Cholesky (floor=1e-14)",
+                        logger, verbose,
+                    )
+                # Floor to a tiny positive value so Cholesky sees a strictly
+                # PD matrix. Pure-zero eigenvalues are mathematically PSD but
+                # break the LL^T factorization; mirror Higham's eigval_floor=1e-14.
+                eigvals_clipped = np.maximum(eigvals_auto, 1e-14)
+                M_psd = eigvecs_auto @ np.diag(eigvals_clipped) @ eigvecs_auto.T
+                # Force symmetry — V·diag(λ)·Vᵀ is symmetric in exact arithmetic
+                # but accumulates float round-off otherwise.
+                M_psd = (M_psd + M_psd.T) * 0.5
+            else:
+                if verbose:
+                    _log_message(
+                        "[COV] [CHOLESKY] No negative eigenvalues — Cholesky on input matrix",
+                        logger, verbose,
+                    )
+                M_psd = M
+            try:
+                L = np.linalg.cholesky(M_psd)
+            except np.linalg.LinAlgError:
+                if verbose:
+                    _log_message(
+                        "[DECOMPOSITION] [WARNING] Cholesky failed after clip — "
+                        "applying small jitter on projected matrix",
+                        logger, verbose,
+                    )
+                M_psd2, jitter = _make_psd(
+                    M_psd,
+                    jitter_scale=jitter_scale,
+                    max_jitter_ratio=max_jitter_ratio,
+                    verbose=verbose,
+                    logger=logger,
+                )
+                L = np.linalg.cholesky(M_psd2)
+                if verbose:
+                    _log_message(
+                        f"[DECOMPOSITION] Cholesky successful after clip + jitter ({jitter:.3e})",
+                        logger, verbose,
+                    )
+                return L
+            if verbose:
+                _log_message("[DECOMPOSITION] Cholesky successful after clip", logger, verbose)
+
+        else:  # psd_method == "none"
             if verbose:
                 _log_message("[DECOMPOSITION] Matrix not PD → applying jitter", logger, verbose)
             M_psd, jitter = _make_psd(
@@ -935,8 +1185,10 @@ def eigen_decomposition(
     clip_negatives : bool
         Deprecated. Use *psd_method* instead. Kept for backward compatibility.
     psd_method : str or None
-        PSD correction method: "higham" (default), "clip", or "none".
-        If None, resolved from *clip_negatives*: True → "higham", False → "none".
+        PSD correction method: "auto" (default), "higham", "clip", or "none".
+        If None, resolved from *clip_negatives*: True → "auto", False → "none".
+        "auto" picks clip when |λ_min|/λ_max is below the module threshold,
+        otherwise Higham.
     verbose : bool
         Whether to log progress
     logger : optional
@@ -951,26 +1203,35 @@ def eigen_decomposition(
         Eigenvalues and eigenvectors
     """
     if psd_method is None:
-        psd_method = "higham" if clip_negatives else "none"
+        psd_method = "auto" if clip_negatives else "none"
+
+    _validate_psd_method(psd_method)
 
     if matrix is not None:
         M = matrix
     else:
         M = (cov_obj.covariance_matrix if space == "linear" else cov_obj.log_covariance_matrix)
 
-    if psd_method == "higham":
-        M, _info = nearest_psd_higham(M, preserve_diagonal=True, verbose=verbose, logger=logger)
-
     n = M.shape[0]
     if verbose:
         _log_message(f"[DECOMPOSITION] Eigendecomposition in {space} space ({n}×{n})", logger, verbose)
 
-    eigvals, eigvecs = _robust_eigh(M, label="eigen decomposition", verbose=verbose, logger=logger)
+    # Resolve "auto" with one eigendecomposition that we can reuse on the clip path
+    eigvals = eigvecs = None
+    if psd_method == "auto":
+        psd_method, eigvals, eigvecs = _resolve_psd_auto(M, verbose=verbose, logger=logger)
+
+    if psd_method == "higham":
+        M, _info = nearest_psd_higham(M, preserve_diagonal=True, verbose=verbose, logger=logger)
+        eigvals = eigvecs = None  # M changed — force recompute
+
+    if eigvals is None:
+        eigvals, eigvecs = _robust_eigh(M, label="eigen decomposition", verbose=verbose, logger=logger)
 
     if psd_method == "clip":
-        n_negative = np.sum(eigvals < 0)
+        n_negative = int(np.sum(eigvals < 0))
         if n_negative > 0:
-            min_eigval = np.min(eigvals)
+            min_eigval = float(np.min(eigvals))
             if verbose:
                 _log_message(f"[COV] [EIGEN] Clipped {n_negative} negative eigenvalues (min={min_eigval:.3e})", logger, verbose)
             eigvals = np.clip(eigvals, 0.0, None)
@@ -1002,8 +1263,10 @@ def svd_decomposition(
     clip_negatives : bool
         Deprecated. Use *psd_method* instead. Kept for backward compatibility.
     psd_method : str or None
-        PSD correction method: "higham" (default), "clip", or "none".
-        If None, resolved from *clip_negatives*: True → "higham", False → "none".
+        PSD correction method: "auto" (default), "higham", "clip", or "none".
+        If None, resolved from *clip_negatives*: True → "auto", False → "none".
+        "auto" picks clip when |λ_min|/λ_max is below the module threshold,
+        otherwise Higham.
     verbose : bool
         Whether to log progress
     full_matrices : bool
@@ -1020,7 +1283,9 @@ def svd_decomposition(
         U, singular values, V^T matrices
     """
     if psd_method is None:
-        psd_method = "higham" if clip_negatives else "none"
+        psd_method = "auto" if clip_negatives else "none"
+
+    _validate_psd_method(psd_method)
 
     if matrix is not None:
         M = matrix
@@ -1031,18 +1296,24 @@ def svd_decomposition(
     if verbose:
         _log_message(f"[DECOMPOSITION] SVD in {space} space ({n}×{n})", logger, verbose)
 
+    # Resolve "auto" with one eigendecomposition that we reuse on the clip path
+    eigvals_auto = eigvecs_auto = None
+    if psd_method == "auto":
+        psd_method, eigvals_auto, eigvecs_auto = _resolve_psd_auto(M, verbose=verbose, logger=logger)
+
     if psd_method == "higham":
         M, _info = nearest_psd_higham(M, preserve_diagonal=True, verbose=verbose, logger=logger)
     elif psd_method == "clip":
-        eigvals, eigvecs = _robust_eigh(M, label="SVD clip", verbose=verbose, logger=logger)
-        n_negative = np.sum(eigvals < 0)
+        if eigvals_auto is None:
+            eigvals_auto, eigvecs_auto = _robust_eigh(M, label="SVD clip", verbose=verbose, logger=logger)
+        n_negative = int(np.sum(eigvals_auto < 0))
 
         if n_negative > 0:
-            min_eigval = np.min(eigvals)
+            min_eigval = float(np.min(eigvals_auto))
             if verbose:
                 _log_message(f"[COV] [SVD] Clipped {n_negative} negative eigenvalues before SVD (min={min_eigval:.3e})", logger, verbose)
-            eigvals_clipped = np.clip(eigvals, 0.0, None)
-            M = eigvecs @ np.diag(eigvals_clipped) @ eigvecs.T
+            eigvals_clipped = np.clip(eigvals_auto, 0.0, None)
+            M = eigvecs_auto @ np.diag(eigvals_clipped) @ eigvecs_auto.T
         elif verbose:
             _log_message("[COV] [SVD] No negative eigenvalues - applying SVD directly", logger, verbose)
 
@@ -1151,10 +1422,13 @@ def _verify_decomposition_quality(
     diag_recon = np.diag(reconstructed_matrix)
     diag_errors = np.abs(np.nan_to_num(diag_recon, nan=0.0) - np.nan_to_num(diag_orig, nan=0.0))
 
-    # Relative diagonal errors (avoid division by zero)
+    # Relative diagonal errors. Floor at 1e-12 (rather than just != 0) so
+    # below-threshold reactions with σ²≈machine-noise don't dominate the
+    # max — those bins are non-perturbative anyway.
+    _DIAG_VAR_FLOOR = 1e-12
     with np.errstate(divide='ignore', invalid='ignore'):
         diag_rel_errors = np.where(
-            np.isfinite(diag_orig) & (diag_orig != 0),
+            np.isfinite(diag_orig) & (np.abs(diag_orig) >= _DIAG_VAR_FLOOR),
             (diag_errors / np.abs(diag_orig)) * 100.0,
             0.0
         )

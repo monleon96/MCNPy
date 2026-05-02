@@ -1607,7 +1607,7 @@ class LegendreCovariance:
         self,
         *,
         space: str = "log",
-        psd_method: str = "higham",
+        psd_method: str = "auto",
         jitter_scale: float = 1e-10,
         max_jitter_ratio: float = 1e-3,
         verbose: bool = True,
@@ -1621,7 +1621,8 @@ class LegendreCovariance:
         space : str
             "linear" or "log" space for decomposition
         psd_method : str
-            PSD correction: "higham" (default) or "jitter".
+            PSD correction: "auto" (default; clip when negatives are tiny,
+            else Higham), "higham", "clip", or "none" (jitter on Cholesky failure).
         jitter_scale : float
             Base jitter scale (only used when *psd_method="jitter"*).
         max_jitter_ratio : float
@@ -1666,7 +1667,7 @@ class LegendreCovariance:
         clip_negatives : bool
             Deprecated. Use *psd_method* instead.
         psd_method : str or None
-            "higham" (default), "clip", or "none".
+            "auto" (default), "higham", "clip", or "none".
         verbose : bool
             Whether to log progress
         logger : optional
@@ -1707,7 +1708,7 @@ class LegendreCovariance:
         clip_negatives : bool
             Deprecated. Use *psd_method* instead.
         psd_method : str or None
-            "higham" (default), "clip", or "none".
+            "auto" (default), "higham", "clip", or "none".
         verbose : bool
             Whether to log progress
         full_matrices : bool

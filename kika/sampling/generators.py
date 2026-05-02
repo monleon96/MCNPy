@@ -41,6 +41,10 @@ def _verify_sample_covariance(
     verbose: bool = True,
     logger = None,
     label: str = "",
+    param_pairs: Optional[List[Tuple[int, int]]] = None,
+    num_groups: int = 0,
+    bins: Optional[Sequence[float]] = None,
+    top_n_diag: int = 5,
 ) -> Dict[str, float]:
     """
     Verify that the empirical covariance from samples matches the original covariance matrix.
@@ -95,31 +99,52 @@ def _verify_sample_covariance(
     max_diagonal_error = np.max(abs_errors[np.eye(n_params, dtype=bool)])
     max_offdiag_error = np.max(abs_errors[~np.eye(n_params, dtype=bool)]) if n_params > 1 else 0.0
 
-    # Calculate relative diagonal errors
+    # Calculate relative diagonal errors. Mask diagonals whose theoretical
+    # variance is below a numeric floor: those bins typically correspond to
+    # below-threshold reactions where σ²≈0 in the input covariance, the
+    # sampler correctly produces factor≈1 every draw, and the (mean-1)/std
+    # or σ²/σ²_orig ratios blow up to 1e+12% just from float noise — drowning
+    # out the meaningful diagonal errors elsewhere.
+    _DIAG_VAR_FLOOR = 1e-12
     diagonal_original = np.diag(original_cov)
     diagonal_empirical = np.diag(empirical_cov)
+    diag_used_mask = np.isfinite(diagonal_original) & (np.abs(diagonal_original) >= _DIAG_VAR_FLOOR)
+    n_diag_floored = int(np.sum(np.isfinite(diagonal_original)) - np.sum(diag_used_mask))
     with np.errstate(divide='ignore', invalid='ignore'):
-        relative_diagonal_errors = np.abs(diagonal_original - diagonal_empirical) / np.abs(diagonal_original)
-        relative_diagonal_errors = relative_diagonal_errors[np.isfinite(relative_diagonal_errors)]
+        rel_diag_full = np.abs(diagonal_original - diagonal_empirical) / np.abs(diagonal_original)
+    # Mask out floored / non-finite for the summary stats; keep the full-length
+    # array around so we can map indices back to (zaid, mt, group) for the
+    # top-N worst-bin report below.
+    finite_used = diag_used_mask & np.isfinite(rel_diag_full)
+    relative_diagonal_errors = rel_diag_full[finite_used]
     max_relative_diagonal_error = np.max(relative_diagonal_errors) if len(relative_diagonal_errors) > 0 else 0.0
-    
+    # 95th-percentile diagonal error: robust to a single near-zero-variance
+    # bin (subthreshold or sampling-noise floor) inflating the verdict.
+    p95_relative_diagonal_error = (
+        float(np.percentile(relative_diagonal_errors, 95))
+        if len(relative_diagonal_errors) > 0 else 0.0
+    )
+
     metrics = {
         'relative_frobenius_error': relative_frobenius_error,
         'max_diagonal_error': max_diagonal_error,
         'max_offdiag_error': max_offdiag_error,
         'max_relative_diagonal_error': max_relative_diagonal_error,
+        'p95_relative_diagonal_error': p95_relative_diagonal_error,
         'n_samples': n_samples,
         'n_parameters': n_params
     }
-    
-    # Quality assessment: combine Frobenius and diagonal error
+
+    # Quality assessment: Frobenius (global fit) + p95 diagonal (robust to a
+    # single tiny-σ² outlier). The max diagonal error is still surfaced in
+    # the printout but not load-bearing for the verdict.
     frob_pct = relative_frobenius_error * 100.0
-    diag_pct = max_relative_diagonal_error * 100.0
-    if frob_pct < 1.0 and diag_pct < 20.0:
+    p95_pct = p95_relative_diagonal_error * 100.0
+    if frob_pct < 1.0 and p95_pct < 20.0:
         quality = "EXCELLENT"
-    elif frob_pct < 5.0 and diag_pct < 50.0:
+    elif frob_pct < 5.0 and p95_pct < 50.0:
         quality = "GOOD"
-    elif frob_pct < 15.0 and diag_pct < 100.0:
+    elif frob_pct < 15.0 and p95_pct < 100.0:
         quality = "FAIR"
     else:
         quality = "POOR"
@@ -140,8 +165,50 @@ def _verify_sample_covariance(
         if n_nonfinite > 0:
             _out(f"  Non-finite entries masked: {n_nonfinite}")
         _out(f"  Relative Frobenius error: {frob_pct:.4f}%")
-        _out(f"  Max relative diagonal error: {diag_pct:.4f}%")
+        max_diag_pct = max_relative_diagonal_error * 100.0
+        if n_diag_floored > 0:
+            _out(
+                f"  Max relative diagonal error: {max_diag_pct:.4f}% (95th pct: {p95_pct:.4f}%) "
+                f"({n_diag_floored} bin(s) with σ² < {_DIAG_VAR_FLOOR:.0e} excluded)"
+            )
+        else:
+            _out(f"  Max relative diagonal error: {max_diag_pct:.4f}% (95th pct: {p95_pct:.4f}%)")
         _out(f"  Max absolute off-diagonal error: {max_offdiag_error:.6e}")
+
+        # Top-N worst-diagonal-error bins. Report σ²_orig, σ²_emp, and the
+        # (zaid, mt, group, energy range) when param_pairs/bins are provided.
+        # Helps tell apart real sampling defects from metric artifacts where
+        # σ²_orig is just above the 1e-12 floor.
+        if top_n_diag > 0 and finite_used.any():
+            worst_idx_in_full = np.flatnonzero(finite_used)
+            worst_errs = rel_diag_full[worst_idx_in_full]
+            order = np.argsort(worst_errs)[::-1][:top_n_diag]
+            top_indices = worst_idx_in_full[order]
+            _out(f"  Top {len(top_indices)} worst diagonal-error bin(s):")
+            for idx in top_indices:
+                so = float(diagonal_original[idx])
+                se = float(diagonal_empirical[idx])
+                pct = float(rel_diag_full[idx]) * 100.0
+                tag = f"index={idx}"
+                if param_pairs is not None and num_groups > 0:
+                    pair_idx, grp_idx = divmod(int(idx), int(num_groups))
+                    if pair_idx < len(param_pairs):
+                        zaid, mt = param_pairs[pair_idx]
+                        e_range = ""
+                        if bins is not None and grp_idx + 1 < len(bins):
+                            lo = float(bins[grp_idx]); hi = float(bins[grp_idx + 1])
+                            e_range = f" [{lo:.2e},{hi:.2e}]"
+                        tag = f"(ZAID={zaid}, MT={mt}), G={grp_idx}{e_range}"
+                # Tag bins whose σ²_orig is in the noise band (1e-8 .. 1e-4):
+                # the relative-error metric is dominated by float / sampling
+                # noise rather than a real reproduction failure.
+                marginal = " [marginal: σ² near sampling-noise floor]" \
+                    if 1e-8 <= so < 1e-4 else ""
+                _out(
+                    f"    {tag}: "
+                    f"σ²_orig={so:.3e}, σ²_emp={se:.3e}, rel_err={pct:.2f}%{marginal}"
+                )
+
         _out(f"  Sample quality assessment: {quality}")
         if n_samples < 1000:
             _out(f"  Note: Quality improves with more samples (current: {n_samples})")
@@ -285,7 +352,7 @@ def generate_samples(
     autofix: Optional[str] = None,    # can be None/"soft"/"medium"/"hard"
     high_val_thresh: float = 5.0,
     accept_tol: float = -1.0e-4,
-    psd_method: str = "higham",
+    psd_method: str = "auto",
     max_relative_std: Optional[float] = 3.0,
     mt_thresholds: Optional[Dict[int, float]] = None,
     verbose: bool = True,
@@ -484,8 +551,55 @@ def generate_samples(
         )
 
     # ------------------------------------------------------------------
+    # 2c. Inert-bin mask. Drop (zaid, mt, g) entries with σ² effectively
+    # zero or non-finite — those bins are physically inert (reaction
+    # below threshold or NJOY did not compute) and always sample to
+    # factor=1.0. Sampling them buys nothing and a zero diagonal causes
+    # np.linalg.cholesky to silently return NaN-laden L on otherwise-PD
+    # matrices. We use the σ²-floor as the true criterion: an
+    # ACE-derived energy threshold is a proxy for "σ² should be ≈ 0
+    # here," but ACE and the GENDF cov can disagree (e.g. MT=5 in
+    # 26056 has E_thresh=20 MeV from ACE but the cov has σ² up to 0.68
+    # down to 1.85 MeV — those bins must be sampled, not masked).
+    _DIAG_FLOOR = 1e-12
+    diag_full = np.diag(cov_mat)
+    var_inert_mask = ~(np.isfinite(diag_full) & (np.abs(diag_full) >= _DIAG_FLOOR))
+    keep_mask = ~var_inert_mask
+    n_var_inert = int(var_inert_mask.sum())
+    n_dropped = n_var_inert
+
+    cov_mat_full = cov_mat  # retain for post-sample diagnostics in full coords
+    if n_dropped > 0:
+        if verbose:
+            ctx = f" [{label}]" if label else ""
+            msg = (
+                f"  [INFO] [INERT-BIN MASK]{ctx} Dropped {n_dropped}/{p} bin(s) "
+                f"with σ² < {_DIAG_FLOOR:.0e} or non-finite; "
+                f"decomposition runs on {int(keep_mask.sum())}-dim reduced matrix"
+            )
+            if logger is not None:
+                logger.info(msg)
+                logger.info(f">> inert_bins_dropped{ctx} = {n_dropped}")
+            else:
+                print(msg)
+        cov_mat = cov_mat[np.ix_(keep_mask, keep_mask)]
+
+    # Replace non-finite entries (NJOY-uncomputed cross-MT couplings) with 0
+    # before decomposition. Existing PSD-repair paths do this on the
+    # LinAlgError branch, but np.linalg.cholesky can silently return a
+    # NaN-laden L on NaN-input without raising — that NaN propagates into
+    # the samples. Explicit cleanup here ensures Cholesky sees a finite
+    # matrix regardless of which decomposition branch fires later.
+    non_finite_red = ~np.isfinite(cov_mat)
+    n_nonfinite_red = int(non_finite_red.sum())
+    if n_nonfinite_red > 0:
+        cov_mat = np.where(non_finite_red, 0.0, cov_mat)
+
+    p_reduced = cov_mat.shape[0]
+
+    # ------------------------------------------------------------------
     # 3. Draw uncorrelated N(0,1)
-    Z = _uncorrelated(dim=p, n=n_samples,
+    Z = _uncorrelated(dim=p_reduced, n=n_samples,
                       method=sampling_method, seed=seed)
 
     # ------------------------------------------------------------------
@@ -532,11 +646,21 @@ def generate_samples(
     # ------------------------------------------------------------------
     # 5. Convert to multiplicative factors
     if space == "linear":
-        factors = Y + 1.0
+        factors_reduced = Y + 1.0
 
     else:  # log (moment-matched)
         m = -0.5 * np.diag(cov_mat)        # shift so mean → 1
-        factors = np.exp(Y + m)            # strictly positive
+        factors_reduced = np.exp(Y + m)    # strictly positive
+
+    # Re-expand to full size: masked (subthreshold or zero-variance) bins
+    # are pinned to 1.0 (identity perturbation) every draw, which matches
+    # what they would produce under direct sampling with σ²≈0.
+    if n_dropped > 0:
+        factors = np.ones((n_samples, p), dtype=factors_reduced.dtype)
+        factors[:, keep_mask] = factors_reduced
+        cov_mat = cov_mat_full  # restore full coords for downstream diagnostics
+    else:
+        factors = factors_reduced
     
     # ------------------------------------------------------------------
     # 6. Diagnostics of the *samples* (run before float32 cast to avoid
@@ -567,16 +691,19 @@ def generate_samples(
             verbose=verbose,
             logger=logger,
             label=label,
+            param_pairs=param_pairs,
+            num_groups=num_groups,
+            bins=bins,
         )
 
     # Convert perturbation factors to float32 for memory efficiency
     factors = factors.astype(np.float32)
-    
+
     # Update fix_info to include soft autofix status
     if soft_autofix_failed and fix_info:
         fix_info["soft_autofix_failed"] = True
         fix_info["decomposition_succeeded"] = True
-        
+
     return factors, mt_numbers, fix_info  # Return fix_info as third value
 
 
@@ -594,7 +721,7 @@ def generate_endf_samples(
     seed: Optional[int] = None,
     mt_numbers: Optional[Sequence[int]] = None,
     energy_grid: Optional[Sequence[float]] = None,
-    psd_method: str = "higham",
+    psd_method: str = "auto",
     verbose: bool = True,
 ) -> Tuple[np.ndarray, Optional[List[int]]]: 
     """

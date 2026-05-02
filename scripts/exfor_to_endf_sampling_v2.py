@@ -26,6 +26,22 @@ from __future__ import annotations
 
 import os
 import sys
+
+# Pin BLAS / threadpool libraries to a single thread per worker process BEFORE
+# numpy/scipy/pandas are imported. With Pool(N_PROCS=40), each worker would
+# otherwise spawn its own multi-threaded BLAS, oversubscribing the CPUs by
+# 4–8× and cratering throughput. Use setdefault so users can still override
+# from the environment (e.g. OMP_NUM_THREADS=2 python … for hybrid runs).
+for _var in (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "BLIS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ.setdefault(_var, "1")
+
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -99,6 +115,7 @@ from scripts.exfor_utils import (
     # Kernel-weight MC (new)
     precompute_overlap_weights,
     run_mc_with_kernel_weights,
+    stack_samples_to_matrix,
     # ENDF writing
     write_nominal_endf,
     write_average_endf,
@@ -152,7 +169,7 @@ ENDF_FILE = "/share_snc/snc/JuanMonleon/jeff40_with_MF4_from_jeff33/26-Fe-56g.tx
 MF34_SOURCE_FILE = None                          # Separate MF34 source (None = use ENDF_FILE)
 EXFOR_DIRECTORY = "/share_snc/snc/JuanMonleon/EXFOR/data_v1/"
 EXFOR_DB_PATH = '/share_snc/snc/JuanMonleon/EXFOR/x4_iron_angular.db'
-OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_40/"
+OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_54/"
 TOF_PARAMETERS_FILE = "/share_snc/snc/JuanMonleon/EXFOR/exfor_tof_parameters.json"
 
 # --- DATA SOURCE ----------------------------------------------------------- #
@@ -186,15 +203,52 @@ TAU_SMOOTHING_WINDOW = 1                         # Moving median window for s_b(
 TAU_PRIOR_FLOOR = False                          # Apply tau prior floor from well-supported bins
 TAU_PRIOR_NEFF_THRESHOLD = 5.0                   # Min N_eff to count as "well-supported"
 TAU_PRIOR_PERCENTILE = 50                        # Percentile of well-supported tau for baseline
+TAU_IRLS_MAX_ITERS = 20                           # Max (τ, refit) iterations for band discrepancy
+TAU_IRLS_TOL = 1e-2                              # Converge when max |Δτ_b| < tol
+TAU_IRLS_DAMPING = 0.5                           # Geometric-mean damping α∈[0,1) on τ updates;
+                                                  #  0 = no damping (legacy), 0.5 = half-step in
+                                                  #  log-τ (breaks MAD limit cycles on bimodal bands).
+BAND_SCALE_METHOD = "mad"                        # 'mad' (default) | 'rms' | 'hybrid' = max(MAD, RMS).
+                                                  #  'rms' and 'hybrid' are research options.
+SIGMA_SYS_AWARE_FIT = True                       # Fit weights = 1/σ_total² with σ_total² = σ_stat² +
+                                                  #  σ_sys² (per-row, point-wise quadrature). τ is
+                                                  #  computed against σ_total too, so it only absorbs
+                                                  #  scatter beyond what stat *and* sys predict.
+                                                  #  σ_eff returned is still τ·σ_stat (downstream
+                                                  #  semantics unchanged). Set False for legacy
+                                                  #  σ_stat-only behaviour.
 RESCALE_UNC_BY_CHI2 = True                       # Apply Birge scaling when band discrepancy disabled
 ALLOW_SHRINK_UNC = True                          # Allow uncertainties to shrink (chi2_red < 1)
-# Per-experiment normalization
-NORMALIZATION_SIGMA = 0.05                       # Per-experiment normalization uncertainty (5%)
+# Normalization model (two physically distinct sources of multiplicative noise):
+#   ELASTIC:     uncertainty in the elastic XS reference / monitor that ALL
+#                experiments rely on. One factor per MC sample, applied globally
+#                to every data point across every experiment.
+#   SYSTEMATIC:  per-experiment calibration / setup uncertainty. One factor per
+#                experiment per MC sample. Also drives the Kish ρ for ESS
+#                collapse in the nominal fit (same physical parameter as the
+#                per-experiment MC perturbation, so one knob).
+NORM_ELASTIC_SIGMA = 0.0                         # Global elastic XS reference uncertainty (0 = disabled, matches test_50)
+NORM_SYSTEMATIC_SIGMA = 0.05                     # Per-experiment systematic uncertainty (5%)
 NORM_DIST = "lognormal"                          # "lognormal" (always positive) or "normal"
 # Experiment exclusion & uncertainty floor
 EXCLUDE_EXPERIMENTS = ["32246002"]                # Experiments to exclude (e.g. "32246002" = Tostkii)
-MIN_RELATIVE_UNCERTAINTY = 0.01                  # Minimum relative uncertainty floor (0 = disabled)
-UNCERTAINTY_FLOOR_STRATEGY = 'bin_median'        # 'fixed' or 'bin_median'
+MIN_STAT_RELATIVE_UNCERTAINTY = 0.01             # Minimum *statistical* σ_stat relative
+                                                  # uncertainty floor. After the manifest split,
+                                                  # this is the per-point uncorrelated noise
+                                                  # baseline; applied where σ_stat would
+                                                  # otherwise be implausibly small or zero
+                                                  # (Cierjacks ERR-S ~0.05%, Cox by-design 0%,
+                                                  # Kinney/Barnard residual decomposition floor).
+                                                  # 1% is the empirical lower edge of σ_stat
+                                                  # across curated manifest entries and a
+                                                  # conservative minimum for per-point counting/
+                                                  # digitization noise in MeV-range differential
+                                                  # XS measurements. Set to 0 to disable.
+MIN_RELATIVE_UNCERTAINTY = MIN_STAT_RELATIVE_UNCERTAINTY  # backwards-compat alias
+UNCERTAINTY_FLOOR_STRATEGY = 'bin_median'        # 'fixed' | 'bin_median' | 'band_median'
+                                                  #  'band_median' uses per-F/M/B median with
+                                                  #  fallback to bin median when <3 trustworthy
+                                                  #  in-band points (research option).
 
 # --- MODEL AVERAGING ------------------------------------------------------- #
 USE_MODEL_AVERAGING = True                       # Enable model averaging over Legendre orders
@@ -204,7 +258,8 @@ USE_DEGREE_SAMPLING_IN_MC = True                 # Sample degree from degree_wei
 # --- ENERGY BINNING & CORRELATION ------------------------------------------ #
 # Weighting and constraints
 NORMALIZE_BY_N_POINTS = True                     # Enable study-level GLS-ESS weighting
-MAX_EXP_WEIGHT_FRAC_BIN = 0.80                  # Safety cap per experiment weight fraction
+BAND_AWARE_ESS = False                           # Kish ESS uses per-band counts (F/M/B)
+MAX_EXP_WEIGHT_FRAC_BIN = 0.8                    # Safety cap per experiment weight fraction
 FREEZE_C0 = True                                 # Fix c0 for shape-only refits
 MAX_SAMPLE_ORDER = 3                             # Publish covariance for l=1..MAX_SAMPLE_ORDER only
 # Angular quality gate
@@ -224,6 +279,11 @@ UNION_GRID_SUBENTRIES = [                        # (subentry, min_MeV, max_MeV)
 # "hybrid"           - KW two-pass + Gaussian blend weighted by per-bin reliability
 CORRELATION_METHOD = "kernel_weight_mc"
 KW_MC_TWO_PASS = True                            # True: per-bin variance + KW correlations
+KW_MC_INJECT = False                             # False (default): congruence transform Cov = D*Corr_pass1*D
+                                                  #   - PSD by construction; consistent with calibrated parquet.
+                                                  # True: legacy splice (Pass-1 cross-bin + Pass-2 within-bin)
+                                                  #   followed by Higham nearest-PSD repair. Kept for research
+                                                  #   comparison; not PSD-preserving by construction.
 KW_MC_MIN_WEIGHT = 1e-3                          # Overlap weight threshold
 KW_MIN_POINTS_REF = None                         # Quality penalty threshold (set to max_order+1 at runtime)
 # TOF energy resolution
@@ -258,12 +318,17 @@ POSITIVITY_CHECK_POINTS = 101                    # Number of mu points in [-1, 1
 # --- MULTIGROUP COVARIANCE ------------------------------------------------- #
 GENERATE_MULTIGROUP_COVARIANCE = True            # Enable adaptive multigroup collapse
 MULTIGROUP_RHO_MIN = 0.85                        # Min l=1 adjacent correlation to merge groups
+MULTIGROUP_SIGMA_RATIO_MAX = 5.0                 # Max running max(σ_l1)/min(σ_l1) within a group.
+                                                  # Prevents merging strongly correlated bins whose l=1
+                                                  # std differ by more than this factor (heterogeneity
+                                                  # would force the percentile compensation to over-
+                                                  # inflate group variance). Set to None to disable.
 MULTIGROUP_USE_RAW_MC_CORR = True                # Feed multigroup collapse with raw KW correlations + Pass-2 std,
                                                   # bypassing the inject + Higham-smear path. No effect when
                                                   # KW_MC_TWO_PASS=False. See plan: ok-i-watn-you-floofy-hickey.md
-MULTIGROUP_CORRELATION_THRESHOLD = 0.0           # Hard-zero |rho| < threshold in the multigroup correlation matrix.
-                                                  # Set to 0.0 to disable. ENDF-6 has wide dynamic range; the natural
-                                                  # floor is sampling noise (~ 1/sqrt(N) for N samples).
+MULTIGROUP_CORRELATION_THRESHOLD = "auto"         # Hard-zero |rho| < threshold in the multigroup correlation matrix.
+                                                  # Set to 0.0 to disable, "auto" to use 1/sqrt(N_SAMPLES) (sampling-
+                                                  # noise floor), or a positive float for an explicit threshold.
 MF34_COVARIANCE_TYPE = "both"              # "fine", "multigroup", or "both"
 USE_ORIGINAL_MF34_GRID = False                   # Force grid from original MF34
 MERGE_ORIGINAL_MF34 = True                       # Merge pipeline MF34 with original (full range)
@@ -273,15 +338,30 @@ MULTIGROUP_VARIANCE_RATIO_REF = 5.0              # Sigma ratio at which percenti
 MULTIGROUP_REGROUP_AFTER_SMOOTH = False          # Second-pass regrouping after smoothing
 
 # --- OUTPUT: Pipeline A (fitting) ------------------------------------------ #
-N_SAMPLES = 1000                                  # Number of MC samples
+N_SAMPLES = 10000                                # Number of MC samples
 BASE_SEED = 42                                   # Random seed for reproducibility
 GENERATE_NOMINAL_ENDF = True                     # Best-fit coefficients ENDF
 GENERATE_MC_MEAN_ENDF = False                    # MC mean coefficients ENDF
 GENERATE_FITTING_SAMPLES = False                 # Individual MC sample ENDFs -> endf_direct/
 GENERATE_FITTING_ACE = False                     # Generate ACE files for fitting samples
-SAVE_COVARIANCE_FILES = False                    # Save covariance/correlation .npy files
+SAVE_COVARIANCE_FILES = False                    # Save fine + multigroup .npy files
+                                                  # (cov, mean, boundaries). Redundant with MF34
+                                                  # but convenient for analysis notebooks.
 SAVE_CORRELATION_MATRICES = False                # Save correlation alongside covariance
-SAVE_FULL_CORRELATION_SAMPLES = True             # Persist raw multi-bin MC samples (KW_MC_TWO_PASS only)
+                                                  # (only honored if SAVE_COVARIANCE_FILES=True).
+# --- TMC sample parquets (Pipeline A outputs) ----
+# Three independent representations of the MC samples can be emitted; only
+# enable what your downstream consumer actually needs.
+SAVE_TMC_PARQUET = True                          # legendre_samples_tmc.parquet
+                                                  # — Pass-1 Pearson correlations × Pass-2 marginals
+                                                  # (preserves non-Gaussian dependence). Recommended
+                                                  # TMC input; consistent with the published MF34.
+SAVE_RAW_KW_PARQUET = False                      # legendre_samples_raw_kw.parquet
+                                                  # — raw KW Pass-1 samples (Pass-1 marginals).
+                                                  # Research/diagnostic only.
+SAVE_MULTIGROUP_DIAGNOSTICS_CSV = True           # multigroup_boundary_decisions.csv — small
+                                                  # diagnostic with per-pair merge decisions;
+                                                  # useful for tuning rho_min / sigma_ratio_max.
 
 # --- OUTPUT: Pipeline B (MF34 sampling) ------------------------------------ #
 GENERATE_MF34_SAMPLES = False                    # Perturbed ENDF samples from MF34 -> endf/
@@ -492,6 +572,7 @@ def _mc_one_bin(args):
         allow_shrink_unc,
         freeze_c0,
         normalization_sigma,
+        sigma_norm_elastic,
         norm_dist,
         max_sample_order,
         _apply_positivity_projection,
@@ -536,6 +617,12 @@ def _mc_one_bin(args):
         else:
             effective_sample_order = mc_order_cap
 
+    # Pass through Level-2 sys-aware fitting if the column survived the
+    # nominal-stage data flow (perform_nominal_fits adds '_sigma_sys_abs').
+    sys_unc_col_arg = (
+        '_sigma_sys_abs' if '_sigma_sys_abs' in nr_mc_df.columns else None
+    )
+
     results = {}
     try:
         if use_degree_sampling:
@@ -560,6 +647,7 @@ def _mc_one_bin(args):
                     nr_mc_df,
                     value_col="value",
                     unc_col="unc",
+                    sys_unc_col=sys_unc_col_arg,
                     degree=deg,
                     max_degree=max_degree,
                     select_degree=None,
@@ -577,6 +665,7 @@ def _mc_one_bin(args):
                     max_band_scale=max_band_scale,
                     freeze_c0=freeze_c0,
                     sigma_norm=normalization_sigma,
+                    sigma_norm_elastic=sigma_norm_elastic,
                     norm_dist=norm_dist,
                     max_sample_order=effective_sample_order,
                 )
@@ -609,6 +698,7 @@ def _mc_one_bin(args):
                 nr_mc_df,
                 value_col="value",
                 unc_col="unc",
+                sys_unc_col=sys_unc_col_arg,
                 degree=nr_frozen_degree,
                 max_degree=max_degree,
                 select_degree=None,
@@ -625,6 +715,7 @@ def _mc_one_bin(args):
                 max_band_scale=max_band_scale,
                 freeze_c0=freeze_c0,
                 sigma_norm=normalization_sigma,
+                sigma_norm_elastic=sigma_norm_elastic,
                 norm_dist=norm_dist,
                 max_sample_order=effective_sample_order,
             )
@@ -937,26 +1028,7 @@ def log_experiments_summary(
     logger.info("")
 
 
-def _check_angular_quality(exfor_df, min_points, min_bands):
-    """Check if angular data meets quality criteria.
-
-    Returns (passes: bool, reason: str).
-    """
-    n_pts = len(exfor_df)
-    if n_pts < min_points:
-        return False, f"n_pts={n_pts} < {min_points}"
-
-    mu = exfor_df['mu'].to_numpy()
-    has_F = np.any(mu > 0.5)
-    has_M = np.any((mu >= -0.5) & (mu <= 0.5))
-    has_B = np.any(mu < -0.5)
-    n_bands = int(has_F) + int(has_M) + int(has_B)
-
-    if n_bands < min_bands:
-        bands_str = "/".join(b for b, h in [("F", has_F), ("M", has_M), ("B", has_B)] if h)
-        return False, f"bands={bands_str} ({n_bands}/{min_bands})"
-
-    return True, ""
+from scripts.exfor_utils import check_angular_quality as _check_angular_quality  # noqa: E402
 
 
 def perform_nominal_fits(
@@ -1018,7 +1090,8 @@ def perform_nominal_fits(
             min_relative_uncertainty=min_relative_uncertainty,
             unc_floor_strategy=UNCERTAINTY_FLOOR_STRATEGY,
             normalize_by_n_points=NORMALIZE_BY_N_POINTS,
-            sigma_norm=NORMALIZATION_SIGMA,
+            sigma_norm=NORM_SYSTEMATIC_SIGMA,
+            band_aware_ess=BAND_AWARE_ESS,
             max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
             logger=_logger,
         )
@@ -1076,7 +1149,8 @@ def perform_nominal_fits(
                         min_relative_uncertainty=min_relative_uncertainty,
                         unc_floor_strategy=UNCERTAINTY_FLOOR_STRATEGY,
                         normalize_by_n_points=NORMALIZE_BY_N_POINTS,
-                        sigma_norm=NORMALIZATION_SIGMA,
+                        sigma_norm=NORM_SYSTEMATIC_SIGMA,
+                        band_aware_ess=BAND_AWARE_ESS,
                         max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
                         logger=_logger,
                     )
@@ -1139,10 +1213,23 @@ def perform_nominal_fits(
         y = exfor_df['value'].to_numpy()
         sigma = exfor_df['unc'].to_numpy()
 
+        # Build absolute σ_sys per row from the relative manifest column.
+        # Used only for fit weights and τ residual normalization; σ_eff
+        # stored downstream stays τ·σ_stat (semantics unchanged).
+        sys_unc_col_arg: Optional[str] = None
+        if SIGMA_SYS_AWARE_FIT and 'sigma_sys_relative' in exfor_df.columns:
+            exfor_df = exfor_df.copy()
+            exfor_df['_sigma_sys_abs'] = (
+                exfor_df['sigma_sys_relative'].to_numpy(dtype=float)
+                * np.abs(exfor_df['value'].to_numpy(dtype=float))
+            )
+            sys_unc_col_arg = '_sigma_sys_abs'
+
         coef_df, fit_info = sample_legendre_coefficients(
             exfor_df,
             value_col="value",
             unc_col="unc",
+            sys_unc_col=sys_unc_col_arg,
             degree=None,
             max_degree=max_degree,
             select_degree=select_degree,
@@ -1156,6 +1243,10 @@ def perform_nominal_fits(
             use_band_discrepancy=use_band_discrepancy,
             min_points_per_band=min_points_per_band,
             max_band_scale=max_band_scale,
+            tau_irls_max_iters=TAU_IRLS_MAX_ITERS,
+            tau_irls_tol=TAU_IRLS_TOL,
+            tau_irls_damping=TAU_IRLS_DAMPING,
+            band_scale_method=BAND_SCALE_METHOD,
         )
 
         frozen_degree = fit_info['degree']
@@ -1184,11 +1275,16 @@ def perform_nominal_fits(
         if use_band_discrepancy and tau_info:
             # Pass experiment IDs for per-experiment diagnostics on capped bands
             _exp_ids = exfor_df['entry'].values if 'entry' in exfor_df.columns else None
+            _sigma_sys_arg = (
+                exfor_df[sys_unc_col_arg].to_numpy(dtype=float)
+                if sys_unc_col_arg is not None else None
+            )
             sigma_eff, tau_info = compute_angular_band_discrepancy(
                 mu=mu, y=y, sigma=sigma, y_fit=y_fit,
                 min_points_per_band=min_points_per_band,
                 max_band_scale=max_band_scale,
                 experiment_ids=_exp_ids,
+                sigma_sys=_sigma_sys_arg,
             )
             tau_F = tau_info.get('tau_F', 1.0)
             tau_M = tau_info.get('tau_M', 1.0)
@@ -1735,7 +1831,8 @@ def run_exfor_to_endf_sampling_v2(
     tau_prior_floor: bool = True,
     tau_prior_neff_threshold: float = 5.0,
     tau_prior_percentile: float = 50.0,
-    sigma_norm: float = 0.05,
+    sigma_norm_systematic: float = 0.05,
+    sigma_norm_elastic: float = 0.05,
     use_model_averaging: bool = True,
     min_degree_for_averaging: int = 3,
     n_eff_warning_threshold: float = 5.0,
@@ -1749,6 +1846,7 @@ def run_exfor_to_endf_sampling_v2(
     # Multigroup covariance options
     generate_multigroup_covariance: bool = False,
     multigroup_rho_min: float = 0.90,
+    multigroup_sigma_ratio_max: Optional[float] = None,
     multigroup_variance_pct_min: float = 67.0,
     multigroup_variance_pct_max: float = 85.0,
     multigroup_variance_ratio_ref: float = 5.0,
@@ -1779,7 +1877,9 @@ def run_exfor_to_endf_sampling_v2(
     positivity_check_points: int = 50,
     # File output options
     save_correlation_matrices: bool = False,
-    save_full_correlation_samples: bool = False,
+    save_tmc_parquet: bool = True,
+    save_raw_kw_parquet: bool = False,
+    save_multigroup_diagnostics_csv: bool = True,
     # ACE common options (shared NJOY config)
     ace_temperatures: Optional[List[float]] = None,
     ace_njoy_exe: Optional[str] = None,
@@ -1900,10 +2000,14 @@ def run_exfor_to_endf_sampling_v2(
     if tau_prior_floor:
         _logger.info(f"  TAU_PRIOR_NEFF_THRESHOLD = {tau_prior_neff_threshold}")
         _logger.info(f"  TAU_PRIOR_PERCENTILE = {tau_prior_percentile}")
+    _logger.info(f"  TAU_IRLS_MAX_ITERS = {TAU_IRLS_MAX_ITERS}")
+    _logger.info(f"  TAU_IRLS_TOL = {TAU_IRLS_TOL}")
+    _logger.info(f"  TAU_IRLS_DAMPING = {TAU_IRLS_DAMPING}")
+    _logger.info(f"  BAND_SCALE_METHOD = {BAND_SCALE_METHOD}")
     _logger.info(f"  RESCALE_UNC_BY_CHI2 = {RESCALE_UNC_BY_CHI2}")
     _logger.info(f"  ALLOW_SHRINK_UNC = {ALLOW_SHRINK_UNC}")
-    _logger.info(f"  NORMALIZATION_SIGMA = {sigma_norm}")
-    _logger.info(f"  NORM_DIST = {NORM_DIST}")
+    _logger.info(f"  NORM_ELASTIC_SIGMA = {sigma_norm_elastic}  (global, all experiments)")
+    _logger.info(f"  NORM_SYSTEMATIC_SIGMA = {sigma_norm_systematic}  (per-experiment, dist={NORM_DIST})")
     _logger.info(f"  EXCLUDE_EXPERIMENTS = {exclude_experiments if exclude_experiments else 'None'}")
     _logger.info(f"  MIN_RELATIVE_UNCERTAINTY = {min_relative_uncertainty} ({min_relative_uncertainty*100:.1f}%)")
     _logger.info(f"  UNCERTAINTY_FLOOR_STRATEGY = {UNCERTAINTY_FLOOR_STRATEGY}")
@@ -1921,6 +2025,7 @@ def run_exfor_to_endf_sampling_v2(
         union_grid_subentries = UNION_GRID_SUBENTRIES
     _logger.info("  # Energy Binning & Correlation")
     _logger.info(f"  NORMALIZE_BY_N_POINTS = {NORMALIZE_BY_N_POINTS}")
+    _logger.info(f"  BAND_AWARE_ESS = {BAND_AWARE_ESS}")
     _logger.info(f"  MAX_EXP_WEIGHT_FRAC_BIN = {MAX_EXP_WEIGHT_FRAC_BIN}")
     _logger.info(f"  FREEZE_C0 = {FREEZE_C0}")
     _logger.info(f"  MAX_SAMPLE_ORDER = {MAX_SAMPLE_ORDER}")
@@ -1935,6 +2040,8 @@ def run_exfor_to_endf_sampling_v2(
     _logger.info(f"  CORRELATION_METHOD = {CORRELATION_METHOD}")
     if CORRELATION_METHOD in ("kernel_weight_mc", "hybrid"):
         _logger.info(f"  KW_MC_TWO_PASS = {KW_MC_TWO_PASS}")
+        if KW_MC_TWO_PASS:
+            _logger.info(f"  KW_MC_INJECT = {KW_MC_INJECT}")
         _logger.info(f"  KW_MC_MIN_WEIGHT = {KW_MC_MIN_WEIGHT}")
         _logger.info(f"  KW_MIN_POINTS_REF = {KW_MIN_POINTS_REF}")
     _logger.info(f"  DELTA_T_NS = {DELTA_T_NS}")
@@ -1978,6 +2085,7 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info("  # Multigroup Covariance")
         _logger.info(f"  GENERATE_MULTIGROUP_COVARIANCE = {generate_multigroup_covariance}")
         _logger.info(f"  MULTIGROUP_RHO_MIN = {multigroup_rho_min}")
+        _logger.info(f"  MULTIGROUP_SIGMA_RATIO_MAX = {multigroup_sigma_ratio_max}")
         _logger.info(f"  MF34_COVARIANCE_TYPE = {mf34_covariance_type}")
         _logger.info(f"  MULTIGROUP_VARIANCE_PCT_MIN = {multigroup_variance_pct_min}")
         _logger.info(f"  MULTIGROUP_VARIANCE_PCT_MAX = {multigroup_variance_pct_max}")
@@ -1995,7 +2103,9 @@ def run_exfor_to_endf_sampling_v2(
     _logger.info(f"  GENERATE_FITTING_ACE = {generate_fitting_ace}")
     _logger.info(f"  SAVE_COVARIANCE_FILES = {save_covariance_files}")
     _logger.info(f"  SAVE_CORRELATION_MATRICES = {save_correlation_matrices}")
-    _logger.info(f"  SAVE_FULL_CORRELATION_SAMPLES = {save_full_correlation_samples}")
+    _logger.info(f"  SAVE_TMC_PARQUET = {save_tmc_parquet}")
+    _logger.info(f"  SAVE_RAW_KW_PARQUET = {save_raw_kw_parquet}")
+    _logger.info(f"  SAVE_MULTIGROUP_DIAGNOSTICS_CSV = {save_multigroup_diagnostics_csv}")
     _logger.info("")
 
     # -- Output: Pipeline B (MF34 sampling) --
@@ -2280,7 +2390,8 @@ def run_exfor_to_endf_sampling_v2(
                 RESCALE_UNC_BY_CHI2,
                 ALLOW_SHRINK_UNC,
                 FREEZE_C0,
-                NORMALIZATION_SIGMA,
+                NORM_SYSTEMATIC_SIGMA,
+                NORM_ELASTIC_SIGMA,
                 NORM_DIST,
                 MAX_SAMPLE_ORDER,
                 apply_positivity_projection,
@@ -2364,6 +2475,9 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info("  " + "=" * 60)
         _logger.info(f"  Method: {'Hybrid KW+Gaussian blend' if _is_hybrid else 'Kernel-weight MC correlations'}")
         _logger.info(f"  Two-pass mode: {KW_MC_TWO_PASS}")
+        if KW_MC_TWO_PASS:
+            _mode = "inject + Higham repair (legacy)" if KW_MC_INJECT else "congruence transform (PSD by construction)"
+            _logger.info(f"  Pass-2 combine: {_mode}")
         _logger.info(f"  Min overlap weight: {KW_MC_MIN_WEIGHT}")
         _logger.info("  " + "=" * 60)
 
@@ -2396,7 +2510,8 @@ def run_exfor_to_endf_sampling_v2(
             overlap_weights=overlap_weights,
             n_samples=n_samples,
             n_workers=N_PROCS,
-            sigma_norm=NORMALIZATION_SIGMA,
+            sigma_norm=NORM_SYSTEMATIC_SIGMA,
+            sigma_norm_elastic=NORM_ELASTIC_SIGMA,
             norm_dist=NORM_DIST,
             max_degree=max_degree,
             ridge_lambda=ridge_lambda,
@@ -2405,11 +2520,25 @@ def run_exfor_to_endf_sampling_v2(
             min_points_per_band=min_points_per_band,
             max_band_scale=max_band_scale,
             freeze_c0=FREEZE_C0,
+            # Pin c0 at the per-bin nominal across all KW samples — matches
+            # _mc_one_bin (Pass 2), which gets the same effect implicitly because
+            # SLC fits c0 from the unperturbed df before drawing MC samples. With
+            # c0 floating per sample in Pass 1 and pinned in Pass 2, the
+            # congruence-merge in the combine mixed correlations and stds taken
+            # under different noise models. Aligns the two passes.
+            fix_c0_at_nominal=True,
+            # Use σ_total² = (τ·σ_stat)² + σ_sys² for MC fit weights — matches
+            # _mc_one_bin (Pass 2), which already passes sys_unc_col='_sigma_sys_abs'
+            # to SLC. Without this, Pass 1 fit weights were stat-only and points
+            # with small σ_stat but large σ_sys were over-weighted in the
+            # cross-bin correlations.
+            sys_aware_mc_fit=True,
             max_sample_order=MAX_SAMPLE_ORDER,
             apply_positivity_projection=apply_positivity_projection,
             positivity_check_points=positivity_check_points,
             max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
             min_relative_uncertainty=MIN_RELATIVE_UNCERTAINTY,
+            band_aware_ess=BAND_AWARE_ESS,
             logger=_logger,
         )
 
@@ -2442,7 +2571,8 @@ def run_exfor_to_endf_sampling_v2(
                     RESCALE_UNC_BY_CHI2,
                     ALLOW_SHRINK_UNC,
                     FREEZE_C0,
-                    NORMALIZATION_SIGMA,
+                    NORM_SYSTEMATIC_SIGMA,
+                    NORM_ELASTIC_SIGMA,
                     NORM_DIST,
                     MAX_SAMPLE_ORDER,
                     apply_positivity_projection,
@@ -2464,21 +2594,22 @@ def run_exfor_to_endf_sampling_v2(
 
             _logger.info(f"  Per-bin stochastic pass completed: {len(bin_args_list)} bins")
 
-            # Persist raw multi-bin MC samples (full non-Gaussian joint distribution)
-            # before they are collapsed to a covariance and replaced by Cholesky draws.
-            if save_full_correlation_samples:
+            # Persist raw KW multi-bin MC samples (Pass-1 marginals + full
+            # non-Gaussian joint distribution).  Research/diagnostic only —
+            # downstream TMC consumers should prefer the TMC parquet.
+            if save_raw_kw_parquet:
                 try:
-                    full_corr_path = save_all_legendre_coefficients(
+                    raw_kw_path = save_all_legendre_coefficients(
                         nominal_results=nominal_results,
                         all_samples=kw_samples,
                         output_dir=str(output_path),
                         max_degree=max_degree,
-                        filename='legendre_coefficients_full_correlations.parquet',
+                        filename='legendre_samples_raw_kw.parquet',
                     )
-                    _logger.info(f"  [INFO] [MC] Full-correlation samples saved to: {full_corr_path}")
+                    _logger.info(f"  [INFO] [MC] Raw KW samples saved to: {raw_kw_path}")
                 except Exception as e:
                     _logger.error(
-                        f"[ERROR] [MC] Failed to save full-correlation samples: {str(e)}",
+                        f"[ERROR] [MC] Failed to save raw KW samples: {str(e)}",
                         console=True,
                     )
 
@@ -2517,59 +2648,71 @@ def run_exfor_to_endf_sampling_v2(
             # (e.g. a_1 > 0 and a_2 < 0), corrupting cross-order correlations.
             std_perbin = np.sqrt(np.maximum(np.diag(cov_perbin), 0.0))
 
-            # Phase 2: TMC-ready calibrated parquet — Pass-1 correlation
-            # structure (raw, non-Gaussian) with Pass-2 calibrated marginals.
-            # Per-parameter affine rescaling preserves Pearson and rank
-            # correlations exactly.
-            if save_full_correlation_samples:
+            # Sign-aware outer product of mean signs.  cov_combined will be
+            # multiplied by outer(mean, mean) inside generate_cholesky_samples
+            # to produce absolute covariance.  Without this factor the round
+            # trip would flip the sign of off-diagonal entries for parameter
+            # pairs whose means have opposite signs (corr_kw is the sign-
+            # correct *absolute* correlation; std_perbin is *relative* std,
+            # always positive).  Treat zero means as +1 to preserve diagonals;
+            # those entries are zeroed downstream by the outer(mean, mean) step.
+            _mean_signs = np.sign(mc_mean_perbin)
+            _mean_signs[_mean_signs == 0] = 1.0
+            _sign_outer = np.outer(_mean_signs, _mean_signs)
+
+            # TMC parquet — Pass-1 correlation structure (raw, non-Gaussian)
+            # with Pass-2 calibrated marginals.  Per-parameter affine rescaling
+            # preserves Pearson and rank correlations exactly.  Recommended
+            # TMC input for downstream consumers.
+            if save_tmc_parquet:
                 try:
-                    _n_p = len(energy_indices_kw) * max_degree
-                    _sm_kw = np.zeros((n_samples, _n_p))
-                    _sm_pb = np.zeros((n_samples, _n_p))
-                    for _s in range(n_samples):
-                        for _k, _e in enumerate(energy_indices_kw):
-                            _kw_c = kw_samples[_s].get(_e, np.zeros(max_degree))
-                            _pb_c = all_samples_perbin[_s].get(_e, np.zeros(max_degree))
-                            _st = _k * max_degree
-                            _sm_kw[_s, _st:_st + min(len(_kw_c), max_degree)] = _kw_c[:max_degree]
-                            _sm_pb[_s, _st:_st + min(len(_pb_c), max_degree)] = _pb_c[:max_degree]
-                    _abs_mean_kw = _sm_kw.mean(axis=0)
-                    _abs_std_kw = _sm_kw.std(axis=0, ddof=0)
-                    _abs_mean_pb = _sm_pb.mean(axis=0)
-                    _abs_std_pb = _sm_pb.std(axis=0, ddof=0)
-                    _eps = 1e-30
-                    _n_zero = int(np.sum(_abs_std_kw < _eps))
-                    if _n_zero > 0:
+                    n_params = len(energy_indices_kw) * max_degree
+                    mat_kw_pass1 = stack_samples_to_matrix(
+                        kw_samples, energy_indices_kw, n_samples, max_degree,
+                    )
+                    mat_perbin_pass2 = stack_samples_to_matrix(
+                        all_samples_perbin, energy_indices_kw, n_samples, max_degree,
+                    )
+                    mean_kw_pass1 = mat_kw_pass1.mean(axis=0)
+                    std_kw_pass1 = mat_kw_pass1.std(axis=0, ddof=0)
+                    mean_perbin_pass2 = mat_perbin_pass2.mean(axis=0)
+                    std_perbin_pass2 = mat_perbin_pass2.std(axis=0, ddof=0)
+                    eps = 1e-30
+                    n_zero_std = int(np.sum(std_kw_pass1 < eps))
+                    if n_zero_std > 0:
                         _logger.info(
-                            f"  [Phase 2] {_n_zero}/{_n_p} parameters had std_kw < {_eps:.0e}; "
-                            f"calibrated values set deterministically to Pass-2 mean"
+                            f"  [TMC] {n_zero_std}/{n_params} parameters had std_kw < {eps:.0e}; "
+                            f"TMC values set deterministically to Pass-2 mean"
                         )
-                    _scale = np.where(
-                        _abs_std_kw >= _eps,
-                        _abs_std_pb / np.maximum(_abs_std_kw, _eps),
+                    scale_factors = np.where(
+                        std_kw_pass1 >= eps,
+                        std_perbin_pass2 / np.maximum(std_kw_pass1, eps),
                         0.0,
                     )
-                    _sm_cal = _abs_mean_pb[None, :] + (_sm_kw - _abs_mean_kw[None, :]) * _scale[None, :]
-                    _kw_cal = {_s: {} for _s in range(n_samples)}
-                    for _s in range(n_samples):
-                        for _k, _e in enumerate(energy_indices_kw):
-                            _st = _k * max_degree
-                            _kw_cal[_s][_e] = _sm_cal[_s, _st:_st + max_degree].copy()
-                    _cal_path = save_all_legendre_coefficients(
+                    mat_tmc = mean_perbin_pass2[None, :] + (mat_kw_pass1 - mean_kw_pass1[None, :]) * scale_factors[None, :]
+                    tmc_samples_dict = {s: {} for s in range(n_samples)}
+                    for s in range(n_samples):
+                        for k, e_idx in enumerate(energy_indices_kw):
+                            start = k * max_degree
+                            tmc_samples_dict[s][e_idx] = mat_tmc[s, start:start + max_degree].copy()
+                    tmc_path = save_all_legendre_coefficients(
                         nominal_results=nominal_results,
-                        all_samples=_kw_cal,
+                        all_samples=tmc_samples_dict,
                         output_dir=str(output_path),
                         max_degree=max_degree,
-                        filename='legendre_coefficients_full_correlations_calibrated.parquet',
+                        filename='legendre_samples_tmc.parquet',
                     )
-                    _logger.info(f"  [INFO] [Phase 2] Calibrated TMC parquet: {_cal_path}")
+                    _logger.info(f"  [INFO] [TMC] TMC parquet: {tmc_path}")
                     _logger.info(
-                        "  [INFO] [Phase 2] Pearson correlations preserved exactly; "
-                        "marginals match Pass-2 mean/std (recommended TMC input)"
+                        "  [INFO] [TMC] Pearson correlations preserved exactly "
+                        "across MC rows (filter df[~df.is_nominal] before computing "
+                        "sample statistics — the nominal row is the deterministic "
+                        "fit, not an affine-mapped sample); marginals match Pass-2 "
+                        "mean/std (recommended TMC input)"
                     )
-                except Exception as _exc:
+                except Exception as exc:
                     _logger.error(
-                        f"[ERROR] [Phase 2] Failed to save calibrated parquet: {_exc}",
+                        f"[ERROR] [TMC] Failed to save TMC parquet: {exc}",
                         console=True,
                     )
 
@@ -2702,31 +2845,39 @@ def run_exfor_to_endf_sampling_v2(
                 np.fill_diagonal(corr_hyb, 1.0)
                 corr_hyb = np.clip(corr_hyb, -1.0, 1.0)
 
-                log_psd_diagnostics(corr_hyb, "corr_hyb (post-blend, pre-inject)", _logger)
+                log_psd_diagnostics(corr_hyb, "corr_hyb (post-blend)", _logger)
 
-                # Within-bin cross-order correlations from Pass 1
-                corr_hyb = inject_within_bin_correlations(
-                    corr_hyb, corr_perbin, len(energy_indices_kw), max_degree,
-                )
-                log_psd_diagnostics(corr_hyb, "corr_hyb (post-inject)", _logger)
+                if KW_MC_INJECT:
+                    # Legacy path: splice Pass-2 within-bin blocks into Pass-1
+                    # cross-bin scaffold, then snap to nearest PSD via Higham.
+                    # Not PSD-preserving by construction.
+                    corr_hyb = inject_within_bin_correlations(
+                        corr_hyb, corr_perbin, len(energy_indices_kw), max_degree,
+                    )
+                    log_psd_diagnostics(corr_hyb, "corr_hyb (post-inject)", _logger)
 
-                # Phase 3 (Fix 1 + Fix 2): repair PSD on correlation space
-                # (scale-free) and exclude dead parameters via Schur complement.
-                # Dead = unfitted, zero-variance, or low-SNR (|mean| < snr_thr * std_abs).
-                _abs_std_perbin = std_perbin * np.abs(mc_mean_perbin)
-                _dead_mask = (
-                    (~_valid_mask_kw)
-                    | (_abs_std_perbin <= 0)
-                    | (np.abs(mc_mean_perbin) < near_zero_snr_threshold * _abs_std_perbin)
-                )
-                corr_hyb = psd_repair_correlation_active(
-                    corr_hyb, _dead_mask,
-                    label="corr_hyb (hybrid)", logger=_logger,
-                )
-                log_psd_diagnostics(corr_hyb, "corr_hyb (post-PSD-repair)", _logger)
+                    _abs_std_perbin = std_perbin * np.abs(mc_mean_perbin)
+                    _dead_mask = (
+                        (~_valid_mask_kw)
+                        | (_abs_std_perbin <= 0)
+                        | (np.abs(mc_mean_perbin) < near_zero_snr_threshold * _abs_std_perbin)
+                    )
+                    corr_hyb = psd_repair_correlation_active(
+                        corr_hyb, _dead_mask,
+                        label="corr_hyb (hybrid)", logger=_logger,
+                    )
+                    log_psd_diagnostics(corr_hyb, "corr_hyb (post-PSD-repair)", _logger)
 
-                cov_combined = corr_hyb * np.outer(std_perbin, std_perbin)
-                log_psd_diagnostics(cov_combined, "cov_combined (post-rescale, hybrid)", _logger)
+                    cov_combined = corr_hyb * np.outer(std_perbin, std_perbin) * _sign_outer
+                    log_psd_diagnostics(cov_combined, "cov_combined (post-rescale, hybrid)", _logger)
+                else:
+                    # Default: congruence transform Cov = D * Corr * D with
+                    # D = diag(std_perbin). Corr is the convex blend of two PSD
+                    # matrices with unit diagonal, so the result is PSD.
+                    cov_combined = corr_hyb * np.outer(std_perbin, std_perbin) * _sign_outer
+                    log_psd_diagnostics(cov_combined, "cov_combined (congruence, hybrid)", _logger)
+                    _diag_diff = float(np.max(np.abs(np.diag(cov_combined) - std_perbin**2)))
+                    _logger.info(f"  [Congruence check, hybrid] max |diag(cov) - std_perbin^2| = {_diag_diff:.3e}")
 
                 # Log alpha and range-aware blend statistics
                 n_interp = int(np.sum(alpha_per_energy == 0.0))
@@ -2748,28 +2899,41 @@ def run_exfor_to_endf_sampling_v2(
                 else:
                     _logger.info(f"  Hybrid blend: all {n_interp} bins interpolated (pure Gaussian)")
             else:  # pure kernel_weight_mc
-                # Within-bin cross-order correlations from Pass 1
-                corr_kw = inject_within_bin_correlations(
-                    corr_kw, corr_perbin, len(energy_indices_kw), max_degree,
-                )
-                log_psd_diagnostics(corr_kw, "corr_kw (post-inject, pure-KW)", _logger)
+                if KW_MC_INJECT:
+                    # Legacy path: splice Pass-2 within-bin blocks into Pass-1
+                    # cross-bin scaffold, then snap to nearest PSD via Higham.
+                    # Not PSD-preserving by construction.
+                    corr_kw = inject_within_bin_correlations(
+                        corr_kw, corr_perbin, len(energy_indices_kw), max_degree,
+                    )
+                    log_psd_diagnostics(corr_kw, "corr_kw (post-inject, pure-KW)", _logger)
 
-                # Phase 3 (Fix 1 + Fix 2): same correlation-space PSD repair
-                # as the hybrid branch (was missing entirely in pure-KW mode).
-                _abs_std_perbin_pk = std_perbin * np.abs(mc_mean_perbin)
-                _dead_mask_pk = (
-                    (~_valid_mask_kw)
-                    | (_abs_std_perbin_pk <= 0)
-                    | (np.abs(mc_mean_perbin) < near_zero_snr_threshold * _abs_std_perbin_pk)
-                )
-                corr_kw = psd_repair_correlation_active(
-                    corr_kw, _dead_mask_pk,
-                    label="corr_kw (pure-KW)", logger=_logger,
-                )
-                log_psd_diagnostics(corr_kw, "corr_kw (post-PSD-repair, pure-KW)", _logger)
+                    _abs_std_perbin_pk = std_perbin * np.abs(mc_mean_perbin)
+                    _dead_mask_pk = (
+                        (~_valid_mask_kw)
+                        | (_abs_std_perbin_pk <= 0)
+                        | (np.abs(mc_mean_perbin) < near_zero_snr_threshold * _abs_std_perbin_pk)
+                    )
+                    corr_kw = psd_repair_correlation_active(
+                        corr_kw, _dead_mask_pk,
+                        label="corr_kw (pure-KW)", logger=_logger,
+                    )
+                    log_psd_diagnostics(corr_kw, "corr_kw (post-PSD-repair, pure-KW)", _logger)
 
-                cov_combined = corr_kw * np.outer(std_perbin, std_perbin)
-                log_psd_diagnostics(cov_combined, "cov_combined (post-rescale, pure-KW)", _logger)
+                    cov_combined = corr_kw * np.outer(std_perbin, std_perbin) * _sign_outer
+                    log_psd_diagnostics(cov_combined, "cov_combined (post-rescale, pure-KW)", _logger)
+                else:
+                    # Default: congruence transform Cov = D * Corr_pass1 * D with
+                    # D = diag(std_perbin). compute_covariance_from_samples sets
+                    # corr diagonals to 0 for zero-variance slots (exfor_utils.py
+                    # ~line 2350); restore unit diagonal so Pass-2 variances are
+                    # not silently zeroed for those slots.
+                    np.fill_diagonal(corr_kw, 1.0)
+                    corr_kw = np.clip(corr_kw, -1.0, 1.0)
+                    cov_combined = corr_kw * np.outer(std_perbin, std_perbin) * _sign_outer
+                    log_psd_diagnostics(cov_combined, "cov_combined (congruence, pure-KW)", _logger)
+                    _diag_diff = float(np.max(np.abs(np.diag(cov_combined) - std_perbin**2)))
+                    _logger.info(f"  [Congruence check, pure-KW] max |diag(cov) - std_perbin^2| = {_diag_diff:.3e}")
 
             # Generate Cholesky samples from combined covariance
             _logger.info(f"  Generating {n_samples} Cholesky samples from combined covariance")
@@ -2798,24 +2962,6 @@ def run_exfor_to_endf_sampling_v2(
     _logger.info(f"#-- END STEP 5 (elapsed: {time.time() - t_step:.2f}s) -------------------------------------")
 
     # Step 6: Save coefficients
-    t_step = time.time()
-    _logger.info("")
-    _logger.info("#-- STEP 6: Save Legendre coefficients -------------------------------------")
-
-    try:
-        parquet_file = save_all_legendre_coefficients(
-            nominal_results=nominal_results,
-            all_samples=all_samples,
-            output_dir=str(output_path),
-            max_degree=max_degree,
-        )
-        _logger.info(f"  [INFO] [ENDF] Saved to: {parquet_file}")
-    except Exception as e:
-        _logger.error(f"[ERROR] [ENDF] Failed to save coefficients: {str(e)}", console=True)
-        parquet_file = None
-
-    _logger.info(f"#-- END STEP 6 (elapsed: {time.time() - t_step:.2f}s) -------------------------------------")
-
     # Step 7: Covariance
     cov_matrix = None
     energy_indices = [nr.energy_index for nr in nominal_results if nr.has_data]
@@ -2878,7 +3024,7 @@ def run_exfor_to_endf_sampling_v2(
                     "Pass-2 std (bypassing inject + Higham smear)"
                 )
 
-                cov_matrix = corr_kw * np.outer(std_perbin, std_perbin)
+                cov_matrix = corr_kw * np.outer(std_perbin, std_perbin) * _sign_outer
                 corr_matrix = corr_kw.copy()
                 mc_mean_params = mc_mean_perbin.copy()
                 param_labels = [
@@ -3092,6 +3238,7 @@ def run_exfor_to_endf_sampling_v2(
                     energy_bins=energy_bins,
                     max_order=max_degree,
                     rho_min=multigroup_rho_min,
+                    sigma_ratio_max=multigroup_sigma_ratio_max,
                     variance_percentile_min=multigroup_variance_pct_min,
                     variance_percentile_max=multigroup_variance_pct_max,
                     variance_ratio_ref=multigroup_variance_ratio_ref,
@@ -3099,7 +3246,8 @@ def run_exfor_to_endf_sampling_v2(
                     apply_covariance_cap=apply_covariance_cap,
                     max_relative_std_cap=max_relative_std_cap,
                     forced_group_boundaries_mev=forced_grid,
-                    diagnostics_file=output_path / "multigroup_boundary_decisions.csv",
+                    diagnostics_file=(output_path / "multigroup_boundary_decisions.csv"
+                                      if save_multigroup_diagnostics_csv else None),
                 )
 
                 # Log and save results
@@ -3108,16 +3256,19 @@ def run_exfor_to_endf_sampling_v2(
                 _logger.info(f"  Fine bins: {n_fine} -> Multigroups: {n_groups}")
                 _logger.info(f"  Compression: {n_fine/n_groups:.1f}x")
 
-                np.save(output_path / "legendre_covariance_multigroup.npy",
-                        multigroup_result.cov_grouped)
-                if save_correlation_matrices:
-                    np.save(output_path / "legendre_correlation_multigroup.npy",
-                            multigroup_result.corr_grouped)
-                np.save(output_path / "multigroup_boundaries_ev.npy",
-                        multigroup_result.group_boundaries_ev)
-                np.save(output_path / "multigroup_mean_coeffs.npy",
-                        multigroup_result.mean_grouped)
-                _logger.info(f"  Saved multigroup covariance and boundaries")
+                if save_covariance_files:
+                    np.save(output_path / "legendre_covariance_multigroup.npy",
+                            multigroup_result.cov_grouped)
+                    if save_correlation_matrices:
+                        np.save(output_path / "legendre_correlation_multigroup.npy",
+                                multigroup_result.corr_grouped)
+                    np.save(output_path / "multigroup_boundaries_ev.npy",
+                            multigroup_result.group_boundaries_ev)
+                    np.save(output_path / "multigroup_mean_coeffs.npy",
+                            multigroup_result.mean_grouped)
+                    _logger.info(f"  Saved multigroup .npy artifacts (cov, mean, boundaries)")
+                else:
+                    _logger.info(f"  SAVE_COVARIANCE_FILES=False -- skipping multigroup .npy artifacts")
 
             except Exception as e:
                 multigroup_failure_reason = f"{str(e)}\n{traceback.format_exc()}"
@@ -3369,14 +3520,18 @@ def run_exfor_to_endf_sampling_v2(
                 logger=_logger,
                 apply=apply_between_exp_floor,
             )
-            cov_matrix, _bexp_avg = apply_between_experiment_floor(
-                cov_rel=cov_matrix,
-                nominal_results=nominal_results,
-                energy_indices=energy_indices,
-                max_order=max_degree,
-                logger=_logger,
-                apply=apply_between_exp_floor,
-            )
+            # avg branch only consumed when average_file is set; the
+            # diagnostic also runs on cov_matrix_nominal, so skipping here
+            # only loses a duplicate log line.
+            if average_file:
+                cov_matrix, _bexp_avg = apply_between_experiment_floor(
+                    cov_rel=cov_matrix,
+                    nominal_results=nominal_results,
+                    energy_indices=energy_indices,
+                    max_order=max_degree,
+                    logger=_logger,
+                    apply=apply_between_exp_floor,
+                )
             if verbose_diagnostics:
                 log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-between-exp", _logger, verbose=True)
 
@@ -3393,17 +3548,18 @@ def run_exfor_to_endf_sampling_v2(
                     median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
                     logger=_logger,
                 )
-                cov_matrix, _smooth_avg = smooth_absent_order_uncertainties(
-                    cov_rel=cov_matrix,
-                    valid_mask=valid_mask_s7,
-                    max_order=max_degree,
-                    min_rel_std=SMOOTH_MIN_REL_STD,
-                    dip_fraction=SMOOTH_DIP_FRACTION,
-                    spike_factor=SMOOTH_SPIKE_FACTOR,
-                    dip_n_neighbors=SMOOTH_DIP_N_NEIGHBORS,
-                    median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
-                    logger=_logger,
-                )
+                if average_file:
+                    cov_matrix, _smooth_avg = smooth_absent_order_uncertainties(
+                        cov_rel=cov_matrix,
+                        valid_mask=valid_mask_s7,
+                        max_order=max_degree,
+                        min_rel_std=SMOOTH_MIN_REL_STD,
+                        dip_fraction=SMOOTH_DIP_FRACTION,
+                        spike_factor=SMOOTH_SPIKE_FACTOR,
+                        dip_n_neighbors=SMOOTH_DIP_N_NEIGHBORS,
+                        median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
+                        logger=_logger,
+                    )
                 if verbose_diagnostics:
                     log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-smooth", _logger, verbose=True)
 
@@ -3415,12 +3571,13 @@ def run_exfor_to_endf_sampling_v2(
                         window=SMOOTH_DIAGONAL_WINDOW,
                         logger=_logger,
                     )
-                    cov_matrix = smooth_diagonal_median(
-                        cov_rel=cov_matrix,
-                        max_order=max_degree,
-                        window=SMOOTH_DIAGONAL_WINDOW,
-                        logger=_logger,
-                    )
+                    if average_file:
+                        cov_matrix = smooth_diagonal_median(
+                            cov_rel=cov_matrix,
+                            max_order=max_degree,
+                            window=SMOOTH_DIAGONAL_WINDOW,
+                            logger=_logger,
+                        )
                     if verbose_diagnostics:
                         log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-median", _logger, verbose=True)
 
@@ -3432,12 +3589,13 @@ def run_exfor_to_endf_sampling_v2(
                         order_caps=ORDER_REL_STD_CAPS,
                         logger=_logger,
                     )
-                    cov_matrix, _cap_avg = cap_order_relative_uncertainty(
-                        cov_rel=cov_matrix,
-                        max_order=max_degree,
-                        order_caps=ORDER_REL_STD_CAPS,
-                        logger=_logger,
-                    )
+                    if average_file:
+                        cov_matrix, _cap_avg = cap_order_relative_uncertainty(
+                            cov_rel=cov_matrix,
+                            max_order=max_degree,
+                            order_caps=ORDER_REL_STD_CAPS,
+                            logger=_logger,
+                        )
                 if verbose_diagnostics:
                     log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-cap", _logger, verbose=True)
 
@@ -3445,7 +3603,8 @@ def run_exfor_to_endf_sampling_v2(
                 if FORWARD_FILL_REL_STD_ENABLED:
                     _logger.info("  Applying forward-fill to FG rel_std for absent orders...")
                     cov_matrix_nominal = forward_fill_rel_std(cov_matrix_nominal, max_degree, logger=_logger)
-                    cov_matrix = forward_fill_rel_std(cov_matrix, max_degree, logger=_logger)
+                    if average_file:
+                        cov_matrix = forward_fill_rel_std(cov_matrix, max_degree, logger=_logger)
                 else:
                     _logger.info("  Forward-fill DISABLED (FORWARD_FILL_REL_STD_ENABLED=False)")
                 if verbose_diagnostics:
@@ -3458,7 +3617,13 @@ def run_exfor_to_endf_sampling_v2(
             mf34_ref = mf34_source_file if mf34_source_file else endf_file
             original_mf34_mt = None
             try:
-                endf_for_mf34 = read_endf(mf34_ref, mf_numbers=34)
+                # Reuse endf_orig (already loaded at start of Step 10 from
+                # endf_file) when mf34_ref points to the same file — the
+                # source ENDF read takes ~30s for typical evaluations.
+                if mf34_ref == endf_file:
+                    endf_for_mf34 = endf_orig
+                else:
+                    endf_for_mf34 = read_endf(mf34_ref, mf_numbers=34)
                 mf34_file = endf_for_mf34.get_file(34)
                 if mf34_file is not None:
                     original_mf34_mt = mf34_file.sections.get(mt_number)
@@ -3646,17 +3811,18 @@ def run_exfor_to_endf_sampling_v2(
                         median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
                         logger=_logger,
                     )
-                    multigroup_result.cov_grouped, _mg_smooth_avg = smooth_absent_order_uncertainties(
-                        cov_rel=multigroup_result.cov_grouped,
-                        valid_mask=_mg_valid,
-                        max_order=max_degree,
-                        min_rel_std=SMOOTH_MIN_REL_STD,
-                        dip_fraction=SMOOTH_DIP_FRACTION,
-                        spike_factor=MG_SMOOTH_SPIKE_FACTOR,
-                        dip_n_neighbors=MG_SMOOTH_DIP_N_NEIGHBORS,
-                        median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
-                        logger=_logger,
-                    )
+                    if average_file:
+                        multigroup_result.cov_grouped, _mg_smooth_avg = smooth_absent_order_uncertainties(
+                            cov_rel=multigroup_result.cov_grouped,
+                            valid_mask=_mg_valid,
+                            max_order=max_degree,
+                            min_rel_std=SMOOTH_MIN_REL_STD,
+                            dip_fraction=SMOOTH_DIP_FRACTION,
+                            spike_factor=MG_SMOOTH_SPIKE_FACTOR,
+                            dip_n_neighbors=MG_SMOOTH_DIP_N_NEIGHBORS,
+                            median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
+                            logger=_logger,
+                        )
                     if verbose_diagnostics:
                         log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-smooth", _logger, verbose=True)
 
@@ -3668,12 +3834,13 @@ def run_exfor_to_endf_sampling_v2(
                             window=SMOOTH_DIAGONAL_WINDOW,
                             logger=_logger,
                         )
-                        multigroup_result.cov_grouped = smooth_diagonal_median(
-                            cov_rel=multigroup_result.cov_grouped,
-                            max_order=max_degree,
-                            window=SMOOTH_DIAGONAL_WINDOW,
-                            logger=_logger,
-                        )
+                        if average_file:
+                            multigroup_result.cov_grouped = smooth_diagonal_median(
+                                cov_rel=multigroup_result.cov_grouped,
+                                max_order=max_degree,
+                                window=SMOOTH_DIAGONAL_WINDOW,
+                                logger=_logger,
+                            )
                         if verbose_diagnostics:
                             log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-median", _logger, verbose=True)
 
@@ -3685,12 +3852,13 @@ def run_exfor_to_endf_sampling_v2(
                             order_caps=ORDER_REL_STD_CAPS,
                             logger=_logger,
                         )
-                        multigroup_result.cov_grouped, _mg_cap_avg = cap_order_relative_uncertainty(
-                            cov_rel=multigroup_result.cov_grouped,
-                            max_order=max_degree,
-                            order_caps=ORDER_REL_STD_CAPS,
-                            logger=_logger,
-                        )
+                        if average_file:
+                            multigroup_result.cov_grouped, _mg_cap_avg = cap_order_relative_uncertainty(
+                                cov_rel=multigroup_result.cov_grouped,
+                                max_order=max_degree,
+                                order_caps=ORDER_REL_STD_CAPS,
+                                logger=_logger,
+                            )
                     if verbose_diagnostics:
                         log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-cap", _logger, verbose=True)
 
@@ -3698,7 +3866,8 @@ def run_exfor_to_endf_sampling_v2(
                     if FORWARD_FILL_REL_STD_ENABLED:
                         _logger.info("  Applying forward-fill to MG rel_std for absent orders...")
                         cov_grouped_nominal = forward_fill_rel_std(cov_grouped_nominal, max_degree, logger=_logger)
-                        multigroup_result.cov_grouped = forward_fill_rel_std(multigroup_result.cov_grouped, max_degree, logger=_logger)
+                        if average_file:
+                            multigroup_result.cov_grouped = forward_fill_rel_std(multigroup_result.cov_grouped, max_degree, logger=_logger)
                     else:
                         _logger.info("  Forward-fill DISABLED at MG level")
                     if verbose_diagnostics:
@@ -3802,17 +3971,18 @@ def run_exfor_to_endf_sampling_v2(
                             median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
                             logger=_logger,
                         )
-                        multigroup_result.cov_grouped, _ = smooth_absent_order_uncertainties(
-                            cov_rel=multigroup_result.cov_grouped,
-                            valid_mask=_mg_valid,
-                            max_order=max_degree,
-                            min_rel_std=SMOOTH_MIN_REL_STD,
-                            dip_fraction=SMOOTH_DIP_FRACTION,
-                            spike_factor=MG_SMOOTH_SPIKE_FACTOR,
-                            dip_n_neighbors=MG_SMOOTH_DIP_N_NEIGHBORS,
-                            median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
-                            logger=_logger,
-                        )
+                        if average_file:
+                            multigroup_result.cov_grouped, _ = smooth_absent_order_uncertainties(
+                                cov_rel=multigroup_result.cov_grouped,
+                                valid_mask=_mg_valid,
+                                max_order=max_degree,
+                                min_rel_std=SMOOTH_MIN_REL_STD,
+                                dip_fraction=SMOOTH_DIP_FRACTION,
+                                spike_factor=MG_SMOOTH_SPIKE_FACTOR,
+                                dip_n_neighbors=MG_SMOOTH_DIP_N_NEIGHBORS,
+                                median_fill_threshold=SMOOTH_MEDIAN_FILL_THRESHOLD,
+                                logger=_logger,
+                            )
                         if verbose_diagnostics:
                             log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-smooth", _logger, verbose=True)
 
@@ -3824,12 +3994,13 @@ def run_exfor_to_endf_sampling_v2(
                                 window=SMOOTH_DIAGONAL_WINDOW,
                                 logger=_logger,
                             )
-                            multigroup_result.cov_grouped = smooth_diagonal_median(
-                                cov_rel=multigroup_result.cov_grouped,
-                                max_order=max_degree,
-                                window=SMOOTH_DIAGONAL_WINDOW,
-                                logger=_logger,
-                            )
+                            if average_file:
+                                multigroup_result.cov_grouped = smooth_diagonal_median(
+                                    cov_rel=multigroup_result.cov_grouped,
+                                    max_order=max_degree,
+                                    window=SMOOTH_DIAGONAL_WINDOW,
+                                    logger=_logger,
+                                )
                             if verbose_diagnostics:
                                 log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-median", _logger, verbose=True)
 
@@ -3841,12 +4012,13 @@ def run_exfor_to_endf_sampling_v2(
                                 order_caps=ORDER_REL_STD_CAPS,
                                 logger=_logger,
                             )
-                            multigroup_result.cov_grouped, _ = cap_order_relative_uncertainty(
-                                cov_rel=multigroup_result.cov_grouped,
-                                max_order=max_degree,
-                                order_caps=ORDER_REL_STD_CAPS,
-                                logger=_logger,
-                            )
+                            if average_file:
+                                multigroup_result.cov_grouped, _ = cap_order_relative_uncertainty(
+                                    cov_rel=multigroup_result.cov_grouped,
+                                    max_order=max_degree,
+                                    order_caps=ORDER_REL_STD_CAPS,
+                                    logger=_logger,
+                                )
                         if verbose_diagnostics:
                             log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-cap", _logger, verbose=True)
 
@@ -3854,7 +4026,8 @@ def run_exfor_to_endf_sampling_v2(
                         if FORWARD_FILL_REL_STD_ENABLED:
                             _logger.info("  Applying forward-fill to RG rel_std for absent orders...")
                             cov_grouped_nominal = forward_fill_rel_std(cov_grouped_nominal, max_degree, logger=_logger)
-                            multigroup_result.cov_grouped = forward_fill_rel_std(multigroup_result.cov_grouped, max_degree, logger=_logger)
+                            if average_file:
+                                multigroup_result.cov_grouped = forward_fill_rel_std(multigroup_result.cov_grouped, max_degree, logger=_logger)
                         else:
                             _logger.info("  Forward-fill DISABLED at RG level")
                         if verbose_diagnostics:
@@ -3866,20 +4039,36 @@ def run_exfor_to_endf_sampling_v2(
             # Applied to both avg and nominal multigroup matrices before MF34
             # write. ENDF-6 MF34 LB=5 is dense, so this does not save file
             # size; it removes sub-noise correlations from the published file.
-            if (
-                MULTIGROUP_CORRELATION_THRESHOLD > 0
-                and multigroup_result is not None
-            ):
-                multigroup_result.cov_grouped, _ = threshold_small_correlations(
-                    multigroup_result.cov_grouped,
-                    threshold=MULTIGROUP_CORRELATION_THRESHOLD,
-                    label="MG cov_grouped (avg)",
-                    logger=_logger,
-                )
+            if isinstance(MULTIGROUP_CORRELATION_THRESHOLD, str):
+                if MULTIGROUP_CORRELATION_THRESHOLD.lower() == "auto":
+                    _mg_thr = 1.0 / np.sqrt(max(n_samples, 1))
+                    _logger.info(
+                        f"  MULTIGROUP_CORRELATION_THRESHOLD='auto' -> "
+                        f"1/sqrt({n_samples}) = {_mg_thr:.4f}"
+                    )
+                else:
+                    raise ValueError(
+                        f"MULTIGROUP_CORRELATION_THRESHOLD={MULTIGROUP_CORRELATION_THRESHOLD!r} "
+                        f"is not a recognized string (use 'auto' or a numeric value)."
+                    )
+            else:
+                _mg_thr = float(MULTIGROUP_CORRELATION_THRESHOLD)
+
+            if _mg_thr > 0 and multigroup_result is not None:
+                # avg branch only consumed when average_file is set; the
+                # post-threshold Higham PSD repair is the dominant cost in
+                # Step 10 (~10 min on a 2946² MG matrix), so skip when unused.
+                if average_file:
+                    multigroup_result.cov_grouped, _ = threshold_small_correlations(
+                        multigroup_result.cov_grouped,
+                        threshold=_mg_thr,
+                        label="MG cov_grouped (avg)",
+                        logger=_logger,
+                    )
                 if cov_grouped_nominal is not None:
                     cov_grouped_nominal, _ = threshold_small_correlations(
                         cov_grouped_nominal,
-                        threshold=MULTIGROUP_CORRELATION_THRESHOLD,
+                        threshold=_mg_thr,
                         label="MG cov_grouped (nominal)",
                         logger=_logger,
                     )
@@ -4098,6 +4287,14 @@ def run_exfor_to_endf_sampling_v2(
             _logger.info(f"  {wkey} -- {wcount}")
         _logger.info("#== END WARNINGS ===========================================================")
 
+    # NOTE: the post-pipeline chi²/N diagnostics block has been removed.
+    # The chi² statistic computed against EXFOR data inside the pipeline was
+    # misleading: it relied on the fitted (nominal) coefficients evaluated at
+    # the same data used to fit them, and combined per-point and per-experiment
+    # uncertainties in a way that did not match how the manifest now decomposes
+    # σ_stat / σ_sys. External chi² analysis (see scripts/chi2_analysis.ipynb)
+    # is the right place for goodness-of-fit comparisons across libraries.
+
     _logger.info(f"  [INFO] Completed! Output: {output_path}", console=True)
     _logger.info(f"  [INFO] Total time: {total_time:.1f}s", console=True)
 
@@ -4126,7 +4323,8 @@ if __name__ == "__main__":
         min_points_per_band=MIN_POINTS_PER_BAND,
         max_band_scale=MAX_BAND_SCALE_FACTOR,
         tau_smoothing_window=TAU_SMOOTHING_WINDOW,
-        sigma_norm=NORMALIZATION_SIGMA,
+        sigma_norm_systematic=NORM_SYSTEMATIC_SIGMA,
+        sigma_norm_elastic=NORM_ELASTIC_SIGMA,
         use_model_averaging=USE_MODEL_AVERAGING,
         min_degree_for_averaging=MIN_DEGREE_FOR_AVERAGING,
         n_eff_warning_threshold=N_EFF_WARNING_THRESHOLD,
@@ -4140,6 +4338,7 @@ if __name__ == "__main__":
         # Multigroup covariance options
         generate_multigroup_covariance=GENERATE_MULTIGROUP_COVARIANCE,
         multigroup_rho_min=MULTIGROUP_RHO_MIN,
+        multigroup_sigma_ratio_max=MULTIGROUP_SIGMA_RATIO_MAX,
         multigroup_variance_pct_min=MULTIGROUP_VARIANCE_PCT_MIN,
         multigroup_variance_pct_max=MULTIGROUP_VARIANCE_PCT_MAX,
         multigroup_variance_ratio_ref=MULTIGROUP_VARIANCE_RATIO_REF,
@@ -4170,7 +4369,9 @@ if __name__ == "__main__":
         positivity_check_points=POSITIVITY_CHECK_POINTS,
         # File output options
         save_correlation_matrices=SAVE_CORRELATION_MATRICES,
-        save_full_correlation_samples=SAVE_FULL_CORRELATION_SAMPLES,
+        save_tmc_parquet=SAVE_TMC_PARQUET,
+        save_raw_kw_parquet=SAVE_RAW_KW_PARQUET,
+        save_multigroup_diagnostics_csv=SAVE_MULTIGROUP_DIAGNOSTICS_CSV,
         # ACE common options
         ace_temperatures=ACE_TEMPERATURES,
         ace_njoy_exe=ACE_NJOY_EXE,

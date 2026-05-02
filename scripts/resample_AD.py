@@ -85,6 +85,8 @@ def compute_angular_band_discrepancy(
     min_points_per_band: int = 3,
     max_band_scale: float = 3.0,
     experiment_ids: Optional[np.ndarray] = None,
+    method: str = "mad",
+    sigma_sys: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, Dict]:
     """
     Estimate per-band multiplicative scale factor s_b and return effective
@@ -98,7 +100,10 @@ def compute_angular_band_discrepancy(
 
     For each band b:
       1. Compute normalized residuals: r_i = (y_i - y_fit_i) / σ_i
-      2. Compute robust scale: s_b = MAD-based estimate
+      2. Compute robust scale: s_b according to ``method``:
+         - 'mad' (default): MAD-based estimate, robust to outliers
+         - 'rms': sqrt(mean(r²)), responds to all dispersion (research)
+         - 'hybrid': max(MAD, RMS), MAD floor + RMS sensitivity (research)
       3. If s_b > 1: uncertainties are under-estimated; apply s_b as a
          multiplicative scale factor.
       4. Apply ceiling: s_b = min(s_b, max_band_scale).
@@ -128,6 +133,16 @@ def compute_angular_band_discrepancy(
         Per-point experiment identifiers (e.g. EXFOR entry numbers).
         When provided and a band scale is capped, per-experiment
         diagnostics are computed and returned in ``tau_info['exp_diag']``.
+    method : str
+        Scale estimator: 'mad' (default, pipeline behavior), 'rms', or
+        'hybrid' (= max(MAD, RMS)). 'rms' and 'hybrid' are research options.
+    sigma_sys : np.ndarray, optional
+        Per-point systematic uncertainty (absolute, same units as ``sigma``).
+        When provided, normalised residuals are r_i = (y_i - y_fit_i) / σ_total
+        with σ_total² = σ_stat² + σ_sys², so τ measures discrepancy beyond
+        what stat *and* sys together predict. The returned ``sigma_eff`` is
+        still τ·σ_stat — sys is *not* folded into σ_eff so callers can
+        compose σ_total_eff = sqrt(σ_eff² + σ_sys²) themselves when needed.
 
     Returns
     -------
@@ -136,9 +151,13 @@ def compute_angular_band_discrepancy(
     tau_info : Dict
         Dictionary with per-band scale factors (s_F, s_M, s_B ≥ 1.0).
         Keys are 'tau_F', 'tau_M', 'tau_B' for backward compatibility.
+        Always includes 'mad_F/M/B' and 'rms_F/M/B' for diagnostics.
         When ``experiment_ids`` is given and a band is capped,
         ``tau_info['exp_diag']`` contains per-experiment band diagnostics.
     """
+    if method not in ("mad", "rms", "hybrid"):
+        raise ValueError(f"Unknown method={method!r}; expected 'mad', 'rms', or 'hybrid'")
+
     n = len(mu)
     sigma_eff = sigma.copy()
 
@@ -153,15 +172,30 @@ def compute_angular_band_discrepancy(
         'B': backward_mask,
     }
 
-    # Normalized residuals (full array, for per-experiment diagnostics)
-    r_all = (y - y_fit) / sigma
+    # Normalize residuals by σ_total = sqrt(σ_stat² + σ_sys²) when σ_sys is
+    # provided. This stops τ from absorbing variance that's already accounted
+    # for by the per-experiment systematic — without it, two experiments that
+    # disagree at a few × σ_total but ~10 × σ_stat would force τ to the cap.
+    sys_aware = sigma_sys is not None
+    if sys_aware:
+        sigma_for_resid = np.sqrt(sigma ** 2 + np.asarray(sigma_sys, dtype=float) ** 2)
+    else:
+        sigma_for_resid = sigma
+    r_all = (y - y_fit) / sigma_for_resid
 
     # Values are multiplicative scale factors (1.0 = no inflation)
     tau_values = {'tau_F': 1.0, 'tau_M': 1.0, 'tau_B': 1.0}
-    # Raw (uncapped) MAD-based scale estimates for diagnostics
+    # Raw (uncapped) scale estimates for diagnostics
     tau_values['raw_F'] = 1.0
     tau_values['raw_M'] = 1.0
     tau_values['raw_B'] = 1.0
+    # Per-band MAD and RMS, always populated when the band has enough points
+    tau_values['mad_F'] = 1.0
+    tau_values['mad_M'] = 1.0
+    tau_values['mad_B'] = 1.0
+    tau_values['rms_F'] = 1.0
+    tau_values['rms_M'] = 1.0
+    tau_values['rms_B'] = 1.0
 
     # Per-experiment diagnostics for capped bands
     exp_diag = {}
@@ -176,14 +210,24 @@ def compute_angular_band_discrepancy(
         # Normalized residuals in this band
         r_band = r_all[mask]
 
-        # Robust scale estimate (MAD-based)
-        s_band = robust_residual_scale(r_band)
+        # Robust (MAD) and non-robust (RMS) estimators, both reported.
+        mad_band = float(robust_residual_scale(r_band))
+        rms_band = float(np.sqrt(np.mean(r_band ** 2)))
+        tau_values[f'mad_{band_name}'] = max(1.0, mad_band)
+        tau_values[f'rms_{band_name}'] = max(1.0, rms_band)
+
+        if method == "mad":
+            s_band = mad_band
+        elif method == "rms":
+            s_band = rms_band
+        else:  # hybrid
+            s_band = max(mad_band, rms_band)
 
         # Store raw value before capping (floored at 1.0 but not capped)
         raw_val = max(1.0, s_band)
         tau_values[f'raw_{band_name}'] = raw_val
 
-        # Apply: s_b = max(1, s_MAD), capped at max_band_scale
+        # Apply: s_b = max(1, s_method), capped at max_band_scale
         s_b = min(raw_val, max_band_scale)
 
         tau_values[f'tau_{band_name}'] = s_b
@@ -207,6 +251,8 @@ def compute_angular_band_discrepancy(
 
     if exp_diag:
         tau_values['exp_diag'] = exp_diag
+
+    tau_values['sys_aware'] = bool(sys_aware)
 
     # Second pass: for bands with too few points, use mid-band scale
     s_mid = tau_values['tau_M']
@@ -934,7 +980,7 @@ def _weighted_ridge_fit(
             # All coefficients are fixed — nothing to fit
             coeffs = np.array([fixed_values.get(l, 0.0) for l in all_indices])
             yhat = A_full @ coeffs
-            chi2 = float(np.sum(((y - yhat) / sigma) ** 2))
+            chi2 = float(np.sum(w * (y - yhat) ** 2))
             return coeffs, chi2, float(max(1, n)), 0.0
 
         # Subtract fixed contributions from y
@@ -981,7 +1027,7 @@ def _weighted_ridge_fit(
 
         # Compute chi2 on original scale
         yhat = A_full @ coeffs
-        chi2 = float(np.sum(((y - yhat) / sigma) ** 2))
+        chi2 = float(np.sum(w * (y - yhat) ** 2))
 
         # Degrees of freedom (only free parameters count)
         if df_method == "naive" or ridge_lambda <= 0.0 or not compute_dof:
@@ -1030,9 +1076,10 @@ def _weighted_ridge_fit(
             stacklevel=2
         )
 
-    # Compute chi2 on original scale
+    # Compute chi2 on original scale, weighted by the same w used in the fit
+    # (so AICc/degree selection sees the WLS objective, not an unweighted form)
     yhat = A @ coeffs
-    chi2 = float(np.sum(((y - yhat) / sigma) ** 2))
+    chi2 = float(np.sum(w * (y - yhat) ** 2))
 
     # Degrees of freedom
     if df_method == "naive" or ridge_lambda <= 0.0 or not compute_dof:
@@ -1211,6 +1258,8 @@ def sample_legendre_coefficients(
     df_method: Literal["naive", "hat"] = "hat",
     # external weights (for Gaussian kernel)
     external_weights: Optional[np.ndarray] = None,
+    # systematic-uncertainty column for sys-aware fitting
+    sys_unc_col: Optional[str] = None,
     # sampling
     n_samples: int = 1,
     stochastic: bool = False,
@@ -1221,15 +1270,28 @@ def sample_legendre_coefficients(
     use_band_discrepancy: bool = False,
     min_points_per_band: int = 3,
     max_band_scale: float = 3.0,
+    tau_irls_max_iters: int = 1,
+    tau_irls_tol: float = 1e-3,
+    tau_irls_damping: float = 0.0,
+    band_scale_method: Literal["mad", "rms", "hybrid"] = "mad",
     # fixed-c0 mode (Improvement 1.2)
     freeze_c0: bool = False,
     fixed_c0_value: Optional[float] = None,
     # correlated normalization uncertainty (Improvement 1.3)
     sigma_norm: float = 0.0,
+    sigma_norm_elastic: float = 0.0,
     norm_group_cols: Tuple[str, ...] = ("entry",),
     norm_dist: Literal["lognormal", "normal"] = "lognormal",
     # freeze higher-order coefficients during MC sampling
     max_sample_order: Optional[int] = None,
+    # Post-τ AICc re-scan: rebuild model-degree weights using the τ-refined
+    # σ_eff so per-sample degree draws sample a model-degree distribution
+    # consistent with the band-discrepancy uncertainty model. When the
+    # post-τ winner differs from the pre-τ winner, the fit is also refit
+    # at the new degree under τ-IRLS to keep coeffs and τ mutually
+    # consistent. No-op unless ``select_degree`` is set and
+    # ``use_band_discrepancy`` is True.
+    rerun_aicc_post_tau: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Fit Legendre coefficients c_l for y(mu) = sum c_l P_l(mu) and return samples.
@@ -1317,9 +1379,35 @@ def sample_legendre_coefficients(
     y = work[value_col].to_numpy(dtype=float)
     sigma = work[unc_col].to_numpy(dtype=float)
 
+    # Per-point systematic uncertainty (absolute units, same as ``sigma``).
+    # When provided, fit weights use σ_total² = σ_stat² + σ_sys² so the WLS
+    # doesn't pretend per-experiment normalization scatter is zero, and τ is
+    # computed against the same σ_total — keeping the residual interpretation
+    # consistent across initial fit, IRLS refit, and τ estimation.
+    sigma_sys: Optional[np.ndarray] = None
+    if sys_unc_col is not None and sys_unc_col in work.columns:
+        sigma_sys = work[sys_unc_col].to_numpy(dtype=float)
+        sigma_sys = np.where(np.isfinite(sigma_sys) & (sigma_sys > 0), sigma_sys, 0.0)
+    sigma_for_fit = (
+        np.sqrt(sigma ** 2 + sigma_sys ** 2) if sigma_sys is not None else sigma
+    )
+
     n = len(y)
     if n < 2:
         raise ValueError("Need at least 2 points to fit anything meaningful.")
+
+    # AICc sample size: with non-uniform external (kernel) weights, the raw
+    # point count overstates information content. Use the WLS effective sample
+    # size n_eff = (Σ w)^2 / Σ w^2 with w = g/σ^2. When external_weights is
+    # None this branch is skipped and AICc keeps the raw n (no behavior change).
+    if external_weights is not None:
+        _w_neff = external_weights / (sigma_for_fit ** 2)
+        _sum_w = float(np.sum(_w_neff))
+        _sum_w2 = float(np.sum(_w_neff ** 2))
+        n_eff_aicc = (_sum_w ** 2) / max(_sum_w2, 1e-30)
+        n_aicc = max(n_eff_aicc, 1.0)
+    else:
+        n_aicc = float(n)
 
     # Choose degree based on number of UNIQUE mu values, not total points.
     # The Legendre Vandermonde matrix has rank = n_unique_mu, so we need at least
@@ -1341,13 +1429,13 @@ def sample_legendre_coefficients(
             best_res = None
             for d in range(0, max_feasible + 1):
                 coeffs_d, chi2_d, dof_d, k_d = _weighted_ridge_fit(
-                    mu, y, sigma, d,
+                    mu, y, sigma_for_fit, d,
                     ridge_lambda=ridge_lambda,
                     ridge_power=ridge_power,
                     df_method=df_method,
                     external_weights=external_weights,
                 )
-                score = _criterion_score(chi2_d, n=n, k=k_d, criterion=select_degree)
+                score = _criterion_score(chi2_d, n=n_aicc, k=k_d, criterion=select_degree)
 
                 # Store info for all viable degrees (for model averaging)
                 all_degrees_info[d] = {
@@ -1377,7 +1465,7 @@ def sample_legendre_coefficients(
     # Nominal fit (if not already computed by selection step)
     if not (degree is None and select_degree is not None):
         coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
-            mu, y, sigma, degree_use,
+            mu, y, sigma_for_fit, degree_use,
             ridge_lambda=ridge_lambda,
             ridge_power=ridge_power,
             df_method=df_method,
@@ -1389,33 +1477,209 @@ def sample_legendre_coefficients(
     # Compute effective uncertainties
     tau_info = {'tau_F': 1.0, 'tau_M': 1.0, 'tau_B': 1.0}
 
+    # Phase B audit follow-up: defaults so they exist on every code path.
+    all_degrees_info_pre_tau: Optional[Dict[int, Dict[str, Any]]] = None
+    post_tau_winner_changed: bool = False
+
     if use_band_discrepancy:
-        # Angular-band discrepancy model: compute per-band scale factors
-        # Pass 1: estimate scale from nominal fit residuals
+        # IRLS: alternate (estimate τ from residuals) ↔ (refit with σ_eff = τ·σ)
+        # until τ stabilizes, so the returned coeffs and τ are mutually
+        # consistent. With max_iters=1 this reproduces the legacy single-step
+        # refit (one refit, then a final τ recompute against those coeffs).
+        #
+        # Geometric-mean damping (tau_irls_damping=α∈[0,1)) blends the new
+        # τ_target with the previous iteration's used τ:
+        #   τ_used = τ_target^(1-α) · τ_used_prev^α
+        # This breaks limit cycles caused by MAD's non-monotonicity on
+        # bimodal-residual bands. α=0 reproduces the un-damped pipeline.
+        damping = float(max(0.0, min(0.999, tau_irls_damping)))
+        forward_mask = mu > 0.5
+        backward_mask = mu < -0.5
+        mid_mask = ~forward_mask & ~backward_mask
+        band_masks_irls = {'F': forward_mask, 'M': mid_mask, 'B': backward_mask}
+
+        tau_used_prev: Optional[Dict[str, float]] = None
+        tau_target_prev: Optional[Dict[str, float]] = None
+        for _ in range(max(1, int(tau_irls_max_iters))):
+            y_fit = legval(mu, coeffs0)
+            sigma_eff, tau_info = compute_angular_band_discrepancy(
+                mu=mu, y=y, sigma=sigma, y_fit=y_fit,
+                min_points_per_band=min_points_per_band,
+                max_band_scale=max_band_scale,
+                method=band_scale_method,
+                sigma_sys=sigma_sys,
+            )
+            # Apply damping (if any) to the τ values used for the refit.
+            if damping > 0 and tau_used_prev is not None:
+                for b in ('tau_F', 'tau_M', 'tau_B'):
+                    t_target = float(tau_info[b])
+                    t_old = tau_used_prev[b]
+                    t_damped = (t_target ** (1.0 - damping)) * (t_old ** damping)
+                    t_damped = max(1.0, min(t_damped, max_band_scale))
+                    tau_info[b] = t_damped
+                # Rebuild sigma_eff from the damped τ values.
+                sigma_eff = sigma.copy()
+                for bn, bm in band_masks_irls.items():
+                    s_b = float(tau_info[f'tau_{bn}'])
+                    if s_b > 1.0:
+                        sigma_eff[bm] = sigma[bm] * s_b
+            # Compose total uncertainty for refit weights: σ_total_eff² =
+            # (τ·σ_stat)² + σ_sys². σ_eff itself stays τ·σ_stat (preserved
+            # for downstream MC and sigma_eff_from_tau).
+            sigma_refit = (
+                np.sqrt(sigma_eff ** 2 + sigma_sys ** 2)
+                if sigma_sys is not None else sigma_eff
+            )
+            coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
+                mu, y, sigma_refit, degree_use,
+                ridge_lambda=ridge_lambda,
+                ridge_power=ridge_power,
+                df_method=df_method,
+                external_weights=external_weights,
+            )
+            # Convergence: compare *raw* targets between consecutive iterations
+            # (damping smooths the trajectory but we still want to see whether
+            # the underlying estimator has settled).
+            tau_target_curr = {
+                b: float(tau_info.get(f'raw_{b[-1]}', tau_info[b]))
+                for b in ('tau_F', 'tau_M', 'tau_B')
+            }
+            if tau_target_prev is not None:
+                dtau = max(
+                    abs(tau_target_curr[b] - tau_target_prev[b])
+                    for b in ('tau_F', 'tau_M', 'tau_B')
+                )
+                if dtau < tau_irls_tol:
+                    break
+            tau_used_prev = {b: float(tau_info[b]) for b in ('tau_F', 'tau_M', 'tau_B')}
+            tau_target_prev = tau_target_curr
+        # Final τ on the final coefficients — guarantees mutual consistency.
         y_fit = legval(mu, coeffs0)
         sigma_eff, tau_info = compute_angular_band_discrepancy(
             mu=mu, y=y, sigma=sigma, y_fit=y_fit,
             min_points_per_band=min_points_per_band,
             max_band_scale=max_band_scale,
-        )
-        # IRLS step: refit nominal with inflated uncertainties so the central
-        # fit adapts to problematic angular sectors (improves low-order coverage)
-        coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
-            mu, y, sigma_eff, degree_use,
-            ridge_lambda=ridge_lambda,
-            ridge_power=ridge_power,
-            df_method=df_method,
-            external_weights=external_weights,
+            method=band_scale_method,
+            sigma_sys=sigma_sys,
         )
         chi2_red = float(chi2_0 / max(1e-12, dof_0))
-        # Pass 2: recompute scale factors with updated fit
-        y_fit = legval(mu, coeffs0)
-        sigma_eff, tau_info = compute_angular_band_discrepancy(
-            mu=mu, y=y, sigma=sigma, y_fit=y_fit,
-            min_points_per_band=min_points_per_band,
-            max_band_scale=max_band_scale,
-        )
         scale = 1.0  # No global scaling when using band model
+
+        # Post-τ AICc re-scan. The original AICc loop (lines ~1415-1444) used
+        # the pre-τ ``sigma_for_fit``, so the resulting model-degree weights
+        # reflect a stat-only uncertainty model. When per-sample degree
+        # draws use those weights downstream (v3's USE_DEGREE_SAMPLING_IN_MC),
+        # the model-degree distribution is inconsistent with the τ-refined
+        # nominal. Re-running the AICc body with σ_total_eff = √(σ_eff² +
+        # σ_sys²) rebuilds the weights against the same noise model the
+        # τ-IRLS converged under. If the post-τ winner differs from the
+        # pre-τ winner, refit at the new degree under τ-IRLS once so coeffs
+        # and τ remain mutually consistent. Stops after one re-scan to avoid
+        # the AICc↔τ feedback loop (the new τ would in turn shift AICc).
+        if (rerun_aicc_post_tau
+                and degree is None
+                and select_degree is not None
+                and all_degrees_info):
+            all_degrees_info_pre_tau = {
+                d: dict(rec) for d, rec in all_degrees_info.items()
+            }
+            sigma_for_fit_post_tau = (
+                np.sqrt(sigma_eff ** 2 + sigma_sys ** 2)
+                if sigma_sys is not None else sigma_eff
+            )
+            new_all: Dict[int, Dict[str, Any]] = {}
+            new_best: Optional[float] = None
+            new_best_res: Optional[Tuple[int, np.ndarray, float, float, float]] = None
+            for d in range(0, max_feasible + 1):
+                coeffs_d, chi2_d, dof_d, k_d = _weighted_ridge_fit(
+                    mu, y, sigma_for_fit_post_tau, d,
+                    ridge_lambda=ridge_lambda,
+                    ridge_power=ridge_power,
+                    df_method=df_method,
+                    external_weights=external_weights,
+                )
+                score = _criterion_score(
+                    chi2_d, n=n_aicc, k=k_d, criterion=select_degree,
+                )
+                new_all[d] = {
+                    'coeffs': coeffs_d.copy(),
+                    'chi2': chi2_d,
+                    'dof': dof_d,
+                    'eff_params': k_d,
+                    'aicc': score,
+                }
+                if new_best is None or score < new_best:
+                    new_best = score
+                    new_best_res = (d, coeffs_d, chi2_d, dof_d, k_d)
+            assert new_best_res is not None
+            all_degrees_info = new_all  # post-τ becomes the canonical record
+            new_winner = new_best_res[0]
+            if new_winner != degree_use:
+                # Refit at the new winner under τ-IRLS so coeffs and τ stay
+                # mutually consistent. Reuse the same iteration limits.
+                post_tau_winner_changed = True
+                degree_use, coeffs0, chi2_0, dof_0, k_0 = new_best_res
+                tau_used_prev = None
+                tau_target_prev = None
+                for _ in range(max(1, int(tau_irls_max_iters))):
+                    y_fit = legval(mu, coeffs0)
+                    sigma_eff, tau_info = compute_angular_band_discrepancy(
+                        mu=mu, y=y, sigma=sigma, y_fit=y_fit,
+                        min_points_per_band=min_points_per_band,
+                        max_band_scale=max_band_scale,
+                        method=band_scale_method,
+                        sigma_sys=sigma_sys,
+                    )
+                    if damping > 0 and tau_used_prev is not None:
+                        for b in ('tau_F', 'tau_M', 'tau_B'):
+                            t_target = float(tau_info[b])
+                            t_old = tau_used_prev[b]
+                            t_damped = (
+                                (t_target ** (1.0 - damping)) * (t_old ** damping)
+                            )
+                            t_damped = max(1.0, min(t_damped, max_band_scale))
+                            tau_info[b] = t_damped
+                        sigma_eff = sigma.copy()
+                        for bn, bm in band_masks_irls.items():
+                            s_b = float(tau_info[f'tau_{bn}'])
+                            if s_b > 1.0:
+                                sigma_eff[bm] = sigma[bm] * s_b
+                    sigma_refit = (
+                        np.sqrt(sigma_eff ** 2 + sigma_sys ** 2)
+                        if sigma_sys is not None else sigma_eff
+                    )
+                    coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
+                        mu, y, sigma_refit, degree_use,
+                        ridge_lambda=ridge_lambda,
+                        ridge_power=ridge_power,
+                        df_method=df_method,
+                        external_weights=external_weights,
+                    )
+                    tau_target_curr = {
+                        b: float(tau_info.get(f'raw_{b[-1]}', tau_info[b]))
+                        for b in ('tau_F', 'tau_M', 'tau_B')
+                    }
+                    if tau_target_prev is not None:
+                        dtau = max(
+                            abs(tau_target_curr[b] - tau_target_prev[b])
+                            for b in ('tau_F', 'tau_M', 'tau_B')
+                        )
+                        if dtau < tau_irls_tol:
+                            break
+                    tau_used_prev = {
+                        b: float(tau_info[b]) for b in ('tau_F', 'tau_M', 'tau_B')
+                    }
+                    tau_target_prev = tau_target_curr
+                # Final τ on the new-winner coeffs.
+                y_fit = legval(mu, coeffs0)
+                sigma_eff, tau_info = compute_angular_band_discrepancy(
+                    mu=mu, y=y, sigma=sigma, y_fit=y_fit,
+                    min_points_per_band=min_points_per_band,
+                    max_band_scale=max_band_scale,
+                    method=band_scale_method,
+                    sigma_sys=sigma_sys,
+                )
+                chi2_red = float(chi2_0 / max(1e-12, dof_0))
     elif rescale_unc_by_chi2:
         # Global Birge scaling
         scale = float(np.sqrt(chi2_red))
@@ -1434,7 +1698,7 @@ def sample_legendre_coefficients(
         c0_fix = fixed_c0_value if fixed_c0_value is not None else float(coeffs0[0])
         # Refit nominal with fixed_c0 to get consistent c1..cL
         coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
-            mu, y, sigma, degree_use,
+            mu, y, sigma_for_fit, degree_use,
             ridge_lambda=ridge_lambda,
             ridge_power=ridge_power,
             df_method=df_method,
@@ -1474,26 +1738,63 @@ def sample_legendre_coefficients(
         # Generate all perturbed y vectors at once
         Y_perturbed = np.tile(y, (n_draws, 1))  # (n_draws, n)
 
-        # Apply correlated normalization uncertainty per experiment (Improvement 1.3)
+        # Global elastic-XS factor: one draw per sample, applied to all points
+        # (models the shared monitor / reference XS uncertainty).
+        if sigma_norm_elastic > 0.0:
+            if norm_dist == "lognormal":
+                N_elastic = rng.lognormal(
+                    mean=-0.5 * sigma_norm_elastic ** 2,
+                    sigma=sigma_norm_elastic,
+                    size=n_draws,
+                )
+            else:
+                N_elastic = 1.0 + rng.normal(0.0, sigma_norm_elastic, size=n_draws)
+            Y_perturbed *= N_elastic[:, np.newaxis]
+
+        # Apply correlated normalization uncertainty per experiment (Improvement 1.3).
+        # Each group's sigma is taken from the manifest-derived
+        # 'sigma_sys_relative' column on the data, falling back to the global
+        # sigma_norm when the column is absent or zero.
         if sigma_norm > 0.0 and group_keys:
+            has_sys_col = 'sigma_sys_relative' in work.columns
             for key in group_keys:
                 indices = group_indices[key]
+                if has_sys_col and indices:
+                    ex_sigma_sys = float(work['sigma_sys_relative'].iloc[indices[0]])
+                else:
+                    ex_sigma_sys = 0.0
+                # Per-experiment scalar normalization sigma — kept as a local
+                # variable name to avoid shadowing the per-point ``sigma_eff``
+                # array that is used for additive noise + fit weights below.
+                ex_norm_sigma = ex_sigma_sys if ex_sigma_sys > 0 else sigma_norm
                 if norm_dist == "lognormal":
                     N_g = rng.lognormal(
-                        mean=-0.5 * sigma_norm**2,
-                        sigma=sigma_norm,
+                        mean=-0.5 * ex_norm_sigma ** 2,
+                        sigma=ex_norm_sigma,
                         size=n_draws,
                     )
                 else:  # "normal"
-                    N_g = 1.0 + rng.normal(0.0, sigma_norm, size=n_draws)
+                    N_g = 1.0 + rng.normal(0.0, ex_norm_sigma, size=n_draws)
                 Y_perturbed[:, indices] *= N_g[:, np.newaxis]
 
-        # Add pointwise noise
+        # Add pointwise noise. Stat-only by design: σ_sys is already in the
+        # per-experiment N_g multiplicative factor above; using σ_total_eff
+        # here would double-count sys.
         Y_perturbed += rng.normal(loc=0.0, scale=sigma_eff, size=(n_draws, n))
+
+        # MC fit weights match Level-2 nominal: 1/σ_total_eff² with
+        # σ_total_eff² = (τ·σ_stat)² + σ_sys². The marginal point variance
+        # of Y_perturbed is σ_total_eff² (additive contributes σ_eff²;
+        # multiplicative N_g contributes ≈ y²·σ_indep² ≈ σ_sys²), so this
+        # weighting matches the noise model the fit is observing.
+        sigma_for_mc_fit = (
+            np.sqrt(sigma_eff ** 2 + sigma_sys ** 2)
+            if sigma_sys is not None else sigma_eff
+        )
 
         # Batch solve: factorize M once, solve all RHS simultaneously
         coef_mat = _batch_mc_ridge_solve(
-            mu, Y_perturbed, sigma_eff, degree_use,
+            mu, Y_perturbed, sigma_for_mc_fit, degree_use,
             ridge_lambda=ridge_lambda,
             ridge_power=ridge_power,
             external_weights=external_weights,
@@ -1526,6 +1827,12 @@ def sample_legendre_coefficients(
         n_experiments_for_norm=len(group_keys) if sigma_norm > 0.0 else 0,
         max_sample_order=max_sample_order,
         n_frozen_high=len(fixed_high) if fixed_high else 0,
+        # Phase B audit follow-up: keep the pre-τ AICc snapshot (when the
+        # post-τ rescan ran) so callers can log how much the model-degree
+        # weights moved after τ. ``post_tau_winner_changed`` is True iff
+        # the rescan picked a different degree and triggered a refit.
+        all_degrees_info_pre_tau=all_degrees_info_pre_tau,
+        post_tau_winner_changed=post_tau_winner_changed,
     )
     return coef_df, info
 

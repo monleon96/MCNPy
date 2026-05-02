@@ -121,7 +121,7 @@ class TestNoOpWhenBaseline50:
         A = build_aggregation_matrix(groups, widths, n, max_order)
         cov_grouped = collapse_covariance(cov_fine, A)
 
-        result = apply_percentile_variance_scaling(
+        result, _scale = apply_percentile_variance_scaling(
             cov_grouped=cov_grouped.copy(),
             cov_fine=cov_fine,
             groups=groups,
@@ -150,7 +150,7 @@ class TestNoDeflation:
         A = build_aggregation_matrix(groups, widths, n, max_order)
         cov_grouped = collapse_covariance(cov_fine, A)
 
-        result = apply_percentile_variance_scaling(
+        result, _scale = apply_percentile_variance_scaling(
             cov_grouped=cov_grouped.copy(),
             cov_fine=cov_fine,
             groups=groups,
@@ -183,7 +183,7 @@ class TestPSDPreservation:
         A = build_aggregation_matrix(groups, widths, n, max_order)
         cov_grouped = collapse_covariance(cov_fine, A)
 
-        result = apply_percentile_variance_scaling(
+        result, _scale = apply_percentile_variance_scaling(
             cov_grouped=cov_grouped.copy(),
             cov_fine=cov_fine,
             groups=groups,
@@ -213,7 +213,7 @@ class TestBackwardCompatibility:
         cov_grouped = collapse_covariance(cov_fine, A)
 
         # With None -> uniform percentile (no adaptive, but with no-deflation guard)
-        result = apply_percentile_variance_scaling(
+        result, _scale = apply_percentile_variance_scaling(
             cov_grouped=cov_grouped.copy(),
             cov_fine=cov_fine,
             groups=groups,

@@ -130,13 +130,27 @@ def parse_mf34_mt(lines: List[str], mt: int) -> MF34MT:
             mat1=mat1
         )
         
-        # Calculate number of sub-subsections
+        # Calculate number of sub-subsections (standard ENDF-6 convention)
         if mt1 == mt:
             # Only upper triangle is given when MT1=MT to avoid redundancy
             nss = (nl * (nl + 1)) // 2
         else:
             nss = nl * nl1
-        
+
+        # v3 extension: detect L=0 cross-correlation rows. The v3 writer
+        # emits L=0 sub-subsections first when present (encoding
+        # Cov(δσ, a_l1) — non-standard ENDF-6, see mf34_writer.py docstring).
+        # Peek the first sub-subsection header: if L=0, expect NL extra
+        # sub-subsections beyond the standard upper-triangle count.
+        if current_line < len(lines):
+            _peek = parse_line(lines[current_line])
+            if _peek.get("C3") == 0 and _peek.get("C4") and _peek.get("C4") >= 1:
+                nss += int(nl)
+                logger.debug(
+                    f"Detected L=0 cross-correlation rows; expecting {nss} total "
+                    f"sub-subsections (standard + {nl} L=0 entries)"
+                )
+
         logger.debug(f"Processing {nss} sub-subsections for this subsection")
         
         # Parse sub-subsections

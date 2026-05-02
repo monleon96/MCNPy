@@ -9,7 +9,7 @@ import logging
 import os
 import numpy as np
 import pandas as pd
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 
 from kika.cov.parse_covmat import read_coverx, read_covfil, read_boxer, read_scale_covmat, read_njoy_covmat
 from kika._utils import zaid_to_symbol
@@ -196,6 +196,111 @@ def _initialize_master_perturbation_matrix(output_dir: str, timestamp: str, num_
     return matrix_dir
 
 
+def _write_isotope_parquet(
+    matrix_dir: str,
+    zaid: int,
+    factors: np.ndarray,
+    mt_numbers: List[int],
+    energy_grid: List[float],
+    verbose: bool = True,
+    logger=None,
+) -> Optional[Dict]:
+    """
+    Write per-isotope perturbation factors to a parquet file.
+
+    Parquet writes are atomic and use a unique filename per zaid, so this
+    is safe to call concurrently from multiple worker processes. Metadata
+    updates are deferred — this function returns a fragment dict that the
+    caller passes to ``_merge_isotope_metadata`` after all workers finish.
+
+    Parameters
+    ----------
+    matrix_dir : str
+        Directory for matrix parts.
+    zaid : int
+        ZAID number.
+    factors : np.ndarray
+        Perturbation factors array, shape (n_samples, n_params).
+    mt_numbers : List[int]
+        MT reaction numbers (column ordering).
+    energy_grid : List[float]
+        Energy grid boundaries.
+    verbose : bool
+        Enable verbose output.
+    logger : optional
+        Logger to use; if None, falls back to ``_get_logger()``. Workers
+        should pass their own ``BufferedLogger`` to avoid touching the
+        shared module-level logger.
+
+    Returns
+    -------
+    fragment : dict or None
+        ``{"zaid": int}`` on success, or ``None`` if no columns were
+        produced (caller should not append to metadata in that case).
+    """
+    symbol = zaid_to_symbol(zaid)
+
+    n_groups = len(energy_grid) - 1
+    columns_data = {'Sample_ID': np.arange(1, factors.shape[0] + 1, dtype='int32')}
+
+    for mt_idx, mt in enumerate(mt_numbers):
+        for grp in range(n_groups):
+            energy_group_name = _format_energy_group_name(energy_grid, grp)
+            col_name = f"{symbol}_MT{mt}_{energy_group_name}"
+            start_idx = mt_idx * n_groups + grp
+            columns_data[col_name] = factors[:, start_idx]
+
+    log = logger if logger is not None else _get_logger()
+
+    if len(columns_data) == 1:  # Only Sample_ID
+        if verbose and log is not None:
+            log.warning(f"[MATRIX] No valid columns generated for ZAID {zaid}")
+        return None
+
+    df = pd.DataFrame(columns_data)
+    isotope_file = os.path.join(matrix_dir, f"isotope_{zaid}.parquet")
+    df.to_parquet(isotope_file, index=False, engine='pyarrow')
+
+    if verbose and log is not None:
+        n_cols = len(columns_data) - 1
+        log.info(f"[MATRIX] Saved {n_cols} columns for ZAID {zaid}")
+
+    return {"zaid": zaid}
+
+
+def _merge_isotope_metadata(matrix_dir: str, fragments: List[Dict]) -> None:
+    """
+    Apply per-isotope metadata fragments to ``metadata.json``.
+
+    Must be called from the parent process after all workers complete —
+    serializes the JSON read-modify-write so concurrent worker writes
+    cannot race.
+
+    Parameters
+    ----------
+    matrix_dir : str
+        Directory holding ``metadata.json``.
+    fragments : list of dict
+        Each fragment must have a ``"zaid"`` key; appended in input order.
+    """
+    if not fragments:
+        return
+
+    metadata_file = os.path.join(matrix_dir, "metadata.json")
+    import json
+    try:
+        with open(metadata_file, 'r') as f:
+            metadata = json.load(f)
+        for frag in fragments:
+            zaid = frag.get("zaid")
+            if zaid is not None and zaid not in metadata["isotopes_processed"]:
+                metadata["isotopes_processed"].append(zaid)
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+    except Exception:
+        pass
+
+
 def _update_master_perturbation_matrix(
     matrix_dir: str,
     zaid: int,
@@ -205,8 +310,13 @@ def _update_master_perturbation_matrix(
     verbose: bool = True
 ) -> None:
     """
-    Update master perturbation matrix with data from one isotope.
-    
+    Sequential-path wrapper: write one isotope's parquet AND update metadata.
+
+    Equivalent to ``_write_isotope_parquet`` followed immediately by
+    ``_merge_isotope_metadata`` for the single fragment. The parallel
+    dry-run path uses the split helpers directly so workers never touch
+    ``metadata.json``.
+
     Parameters
     ----------
     matrix_dir : str
@@ -222,52 +332,11 @@ def _update_master_perturbation_matrix(
     verbose : bool
         Enable verbose output
     """
-    symbol = zaid_to_symbol(zaid)
-    
-    # Create columns data for this isotope
-    n_groups = len(energy_grid) - 1
-    columns_data = {'Sample_ID': np.arange(1, factors.shape[0] + 1, dtype='int32')}
-    
-    for mt_idx, mt in enumerate(mt_numbers):
-        for grp in range(n_groups):
-            # Format: H1_MT2_1.000e-05_1.234e-02 (actual energy boundaries)
-            energy_group_name = _format_energy_group_name(energy_grid, grp)
-            col_name = f"{symbol}_MT{mt}_{energy_group_name}"
-            
-            # Extract the data for this parameter across all samples
-            start_idx = mt_idx * n_groups + grp
-            column_data = factors[:, start_idx]
-            columns_data[col_name] = column_data
-    
-    if len(columns_data) == 1:  # Only Sample_ID
-        if verbose:
-            logger = _get_logger()
-            if logger:
-                logger.warning(f"[MATRIX] No valid columns generated for ZAID {zaid}")
-        return
-    
-    # Convert to DataFrame and save as parquet
-    df = pd.DataFrame(columns_data)
-    isotope_file = os.path.join(matrix_dir, f"isotope_{zaid}.parquet")
-    df.to_parquet(isotope_file, index=False, engine='pyarrow')
-    
-    # Update metadata
-    metadata_file = os.path.join(matrix_dir, "metadata.json")
-    import json
-    try:
-        with open(metadata_file, 'r') as f:
-            metadata = json.load(f)
-        metadata["isotopes_processed"].append(zaid)
-        with open(metadata_file, 'w') as f:
-            json.dump(metadata, f, indent=2)
-    except Exception:
-        pass
-    
-    if verbose:
-        logger = _get_logger()
-        if logger:
-            n_cols = len(columns_data) - 1  # Exclude Sample_ID
-            logger.info(f"[MATRIX] Saved {n_cols} columns for ZAID {zaid}")
+    fragment = _write_isotope_parquet(
+        matrix_dir, zaid, factors, mt_numbers, energy_grid, verbose=verbose,
+    )
+    if fragment is not None:
+        _merge_isotope_metadata(matrix_dir, [fragment])
 
 
 def _finalize_master_perturbation_matrix(matrix_dir: str, verbose: bool = True) -> str:

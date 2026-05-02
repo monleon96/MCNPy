@@ -412,6 +412,7 @@ class ExforAngularDistribution(ExforEntry):
         energy_unit: str = "MeV",
         cross_section_unit: str = "b/sr",
         angle_unit: str = "deg",
+        decompose_uncertainty: bool = False,
     ) -> pd.DataFrame:
         """
         Convert EXFOR data to DataFrame with optional filtering.
@@ -434,11 +435,16 @@ class ExforAngularDistribution(ExforEntry):
             Output cross-section unit (default: 'b/sr')
         angle_unit : str
             Output angle unit (default: 'deg')
+        decompose_uncertainty : bool, default False
+            If True, return ``error_stat`` and ``error_sys`` columns separately
+            (per-point uncorrelated noise vs per-point correlated systematic)
+            instead of the combined ``error`` column.
 
         Returns
         -------
         pd.DataFrame
-            Columns: [energy, angle, value, error]
+            Columns: [energy, angle, value, error] (default) or
+            [energy, angle, value, error_stat, error_sys] when ``decompose_uncertainty=True``.
 
         Examples
         --------
@@ -514,14 +520,25 @@ class ExforAngularDistribution(ExforEntry):
                 xs_out = xs_raw * xs_factor
                 error_out = total_error * xs_factor
 
-                rows.append({
-                    "energy": energy_out,
-                    "angle": angle_out,
-                    "value": xs_out,
-                    "error": error_out,
-                })
+                if decompose_uncertainty:
+                    rows.append({
+                        "energy": energy_out,
+                        "angle": angle_out,
+                        "value": xs_out,
+                        "error_stat": error_stat * xs_factor,
+                        "error_sys":  error_sys * xs_factor,
+                    })
+                else:
+                    rows.append({
+                        "energy": energy_out,
+                        "angle": angle_out,
+                        "value": xs_out,
+                        "error": error_out,
+                    })
 
-        return pd.DataFrame(rows, columns=["energy", "angle", "value", "error"])
+        cols = ["energy", "angle", "value", "error_stat", "error_sys"] if decompose_uncertainty \
+               else ["energy", "angle", "value", "error"]
+        return pd.DataFrame(rows, columns=cols)
 
     # =========================================================================
     # Frame Conversion Methods
