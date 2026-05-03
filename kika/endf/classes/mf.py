@@ -221,6 +221,8 @@ class MF:
                 combined_ang_covmat.legendre_coefficients.update(
                     mt_ang_covmat.legendre_coefficients
                 )
+                # Propagate MF34 provenance
+                combined_ang_covmat.mt_metadata.update(mt_ang_covmat.mt_metadata)
             except (AttributeError, ValueError) as e:
                 # Catch potential errors if a section isn't a valid MF34MT or conversion fails
                 print(f"Warning: Could not convert MT{mt_number} to LegendreCovariance: {e}")

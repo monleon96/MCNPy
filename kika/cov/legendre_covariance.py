@@ -10,43 +10,62 @@ from kika._utils import create_repr_section
 if TYPE_CHECKING:
     from pathlib import Path
     from kika.plotting.plot_data import LegendreCoeffPlotData, LegendreHeatmapData, LegendreUncertaintyPlotData
+    from kika.endf.classes.mf34.mf34 import MF34MT
 
 
 @dataclass
 class LegendreCovariance:
     """
-    Covariance of Legendre expansion coefficients.
-    
-    Attributes
-    ----------
-    isotope_rows : List[int]
-        List of row isotope IDs
-    reaction_rows : List[int]
-        List of row reaction MT numbers
-    l_rows : List[int]
-        List of row Legendre coefficient indices
-    isotope_cols : List[int]
-        List of column isotope IDs
-    reaction_cols : List[int]
-        List of column reaction MT numbers
-    l_cols : List[int]
-        List of column Legendre coefficient indices
+    Format-agnostic covariance of Legendre expansion coefficients.
+
+    The canonical fields (matrices, energy grids, isotope/reaction/L tags,
+    frame, is_relative) hold the data in a representation that is shared
+    across source formats.  Format-specific extras travel in two metadata
+    dictionaries so that round-trips back to the same format produce
+    a compatible (and where possible identical) section.
+
+    Canonical fields
+    ----------------
+    isotope_rows, reaction_rows, l_rows : List[int]
+        Row tags (ZA, MT, Legendre order) per matrix.
+    isotope_cols, reaction_cols, l_cols : List[int]
+        Column tags per matrix.
     energy_grids : List[List[float]]
-        List of energy grids for each covariance matrix
+        Energy boundaries for each matrix (NE points → matrix is (NE-1)x(NE-1)
+        or rectangular for cross-L blocks).
     matrices : List[np.ndarray]
-        List of covariance matrices
+        Covariance matrix per (isotope, reaction, L) row/col tuple.
     is_relative : List[bool]
-        List of flags indicating if matrix values are relative (True) or absolute (False).
-        False only when LB=0 is present. For ENDF-normalized Legendre coefficients
-        a_l = (c_l/c0)/(2l+1), the covariance values are inherently relative since
-        the coefficients are already normalized by the total cross section.
+        ``True`` when the matrix stores relative covariance, ``False`` for
+        absolute (LB=0).
     frame : List[str]
-        List of reference frames for each matrix:
-        - "same-as-MF4" when LCT=0
-        - "LAB" when LCT=1  
-        - "CM" when LCT=2
+        Reference frame: ``"same-as-MF4"`` (LCT=0), ``"LAB"`` (LCT=1),
+        ``"CM"`` (LCT=2), or ``"unknown LCT=…"``.
     energy_unit : str
-        Energy unit for energy_grids: 'eV' (default) or 'MeV'
+        ``"eV"`` (default) or ``"MeV"``.
+    legendre_coefficients : Dict[(isotope, mt, l), np.ndarray]
+        Optional cell-averaged nominal coefficients on the matrix grids.
+
+    Format-specific metadata
+    ------------------------
+    metadata : Dict[str, Any]
+        Whole-object extras.  Conventional keys:
+
+        - ``"source_format"``: ``"endf"``, ``"covfil"``, ``"gendf"``, …
+        - ``"source_path"``: original file path (string)
+        - any other format-specific defaults the user wants to round-trip.
+
+    mt_metadata : Dict[(isotope, mt), Dict[str, Any]]
+        Per-section header data.  ENDF MF34 keys:
+
+        - ``"za"``: ZA = 1000*Z + A (float)
+        - ``"awr"``: atomic-weight ratio
+        - ``"mat"``: ENDF MAT number
+        - ``"ltt"``: Legendre representation flag (1 = a_1…, 2 = a_0…).
+
+        Populated by :meth:`from_endf` / :meth:`MF34MT.to_ang_covmat` and
+        consulted by :meth:`to_mf34` to fill the MF34 header.  Caller
+        overrides on :meth:`to_mf34` always win.
     """
     isotope_rows: List[int] = field(default_factory=list)
     reaction_rows: List[int] = field(default_factory=list)
@@ -64,6 +83,14 @@ class LegendreCovariance:
 
     # Nominal Legendre coefficients keyed by (isotope, reaction_mt, l_order)
     legendre_coefficients: Dict[Tuple[int, int, int], np.ndarray] = field(default_factory=dict)
+
+    # Whole-object format-specific extras (e.g. ``source_format``,
+    # ``source_path``).  See class docstring for conventional keys.
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    # Per-(isotope, reaction_mt) MF34 header data so a LegendreCovariance
+    # loaded from ENDF can be written back via :meth:`to_mf34`.
+    mt_metadata: Dict[Tuple[int, int], Dict[str, Any]] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # Basic methods
@@ -180,9 +207,12 @@ class LegendreCovariance:
         
         if mf34 is None:
             raise ValueError(f"No MF34 (angular distribution covariance) data found in file: {file_path}")
-        
+
         # Convert MF34 to LegendreCovariance
-        return mf34.to_ang_covmat(energy_unit=energy_unit)
+        lc = mf34.to_ang_covmat(energy_unit=energy_unit)
+        lc.metadata.setdefault("source_format", "endf")
+        lc.metadata.setdefault("source_path", str(file_path))
+        return lc
 
     @classmethod
     def from_covfil(cls, file_path: Union[str, 'Path'], energy_unit: str = 'eV') -> "LegendreCovariance":
@@ -215,6 +245,8 @@ class LegendreCovariance:
             raise TypeError(
                 "File contains MF33 data. Use CrossSectionCovariance.from_covfil() instead."
             )
+        result.metadata.setdefault("source_format", "covfil")
+        result.metadata.setdefault("source_path", str(file_path))
         return result
 
     def to_covfil(self, file_path: Union[str, 'Path'], tape_label: str = '', temperature: float = 0.0) -> None:
@@ -232,6 +264,163 @@ class LegendreCovariance:
         """
         from kika.cov.parse_covmat import write_covfil
         write_covfil(self, str(file_path), tape_label=tape_label, temperature=temperature)
+
+    def to_mf34(
+        self,
+        isotope: int,
+        mt: int,
+        *,
+        za: Optional[float] = None,
+        awr: Optional[float] = None,
+        mat: Optional[int] = None,
+        ltt: Optional[int] = None,
+        frame: Optional[str] = None,
+    ) -> "MF34MT":
+        """Build an MF34MT from the entries tagged ``(isotope, mt)``.
+
+        Matrices with ``isotope_row == isotope`` and ``reaction_row == mt`` are
+        grouped by ``reaction_col`` (MT1) into one subsection each, and within
+        a subsection by ``(L, L1)`` into one sub-subsection per pair.  For
+        symmetric self-correlation (MT1 == MT) only the upper triangle
+        ``L <= L1`` is emitted.  Diagonal blocks (L == L1) are written as LB=5
+        and off-diagonal blocks as LB=6.
+
+        Parameters
+        ----------
+        isotope, mt : int
+            Selector keys; matrices with matching row tags are included.
+        za, awr, mat, ltt : optional
+            Override the corresponding MF34 header fields.  When omitted,
+            values are taken from ``self.mt_metadata[(isotope, mt)]`` if
+            available, then from sensible defaults (``za=isotope``,
+            ``awr=1.0``, ``mat=0``, ``ltt`` inferred — 2 if any L=0 pair is
+            present, else 1).
+        frame : optional
+            Override the per-matrix frame (LCT) for every emitted
+            sub-subsection.  Accepts ``"same-as-MF4"``, ``"LAB"``, or ``"CM"``.
+
+        Returns
+        -------
+        MF34MT
+
+        Notes
+        -----
+        Multiple LIST records (NI > 1) per sub-subsection in the original
+        file are collapsed to a single LB=5/LB=6 record on the matrix's
+        stored grid; the numeric content is preserved but the original
+        per-record split is not.
+        """
+        from kika.endf.classes.mf34.mf34 import MF34MT, Subsection, SubSubsection
+        from kika.endf.writers.mf34_writer import _make_lb5_record, _make_lb6_record
+
+        indices = [
+            i for i in range(self.num_matrices)
+            if self.isotope_rows[i] == isotope and self.reaction_rows[i] == mt
+        ]
+        if not indices:
+            raise ValueError(
+                f"No matrices found for isotope={isotope}, MT={mt}"
+            )
+
+        md = self.mt_metadata.get((isotope, mt), {})
+
+        resolved_za = float(za if za is not None else md.get('za', float(isotope)))
+        resolved_awr = float(awr if awr is not None else md.get('awr', 1.0))
+        resolved_mat = int(mat if mat is not None else md.get('mat', 0) or 0)
+
+        has_l0 = any(self.l_rows[i] == 0 or self.l_cols[i] == 0 for i in indices)
+        if ltt is not None:
+            resolved_ltt = int(ltt)
+        elif md.get('ltt') is not None:
+            resolved_ltt = int(md['ltt'])
+        else:
+            resolved_ltt = 2 if has_l0 else 1
+
+        mf34 = MF34MT(number=mt)
+        mf34._za = resolved_za
+        mf34._awr = resolved_awr
+        mf34._mat = resolved_mat
+        mf34._ltt = resolved_ltt
+        mf34._mf = 34
+
+        # Group by MT1 (reaction_col)
+        by_mt1: Dict[int, List[int]] = {}
+        for i in indices:
+            by_mt1.setdefault(int(self.reaction_cols[i]), []).append(i)
+
+        frame_to_lct = {"same-as-MF4": 0, "LAB": 1, "CM": 2}
+
+        for mt1 in sorted(by_mt1.keys()):
+            mt1_indices = by_mt1[mt1]
+            is_self = (mt1 == mt)
+
+            ls = [self.l_rows[i] for i in mt1_indices]
+            l1s = [self.l_cols[i] for i in mt1_indices]
+            nl = max(ls) if ls else 1
+            nl1 = max(l1s) if l1s else 1
+
+            if is_self:
+                mt1_indices = [
+                    i for i in mt1_indices
+                    if self.l_rows[i] <= self.l_cols[i]
+                ]
+
+            subsection = Subsection(mt1=mt1, nl=nl, nl1=nl1, mat1=0.0)
+
+            sorted_indices = sorted(
+                mt1_indices, key=lambda i: (self.l_rows[i], self.l_cols[i])
+            )
+            for i in sorted_indices:
+                l = int(self.l_rows[i])
+                l1 = int(self.l_cols[i])
+                matrix = np.asarray(self.matrices[i], dtype=float)
+                grid = [float(e) for e in self.energy_grids[i]]
+
+                f = frame if frame is not None else self.frame[i]
+                lct = frame_to_lct.get(f, 0)
+
+                if l == l1:
+                    matrix = 0.5 * (matrix + matrix.T)
+                    rec = _make_lb5_record(matrix, grid)
+                else:
+                    rec = _make_lb6_record(matrix, grid, grid)
+
+                ss = SubSubsection(l=l, l1=l1, lct=lct, ni=1, records=[rec])
+                subsection.sub_subsections.append(ss)
+
+            mf34.add_subsection(subsection)
+
+        mf34._nmt1 = len(mf34._subsections)
+        return mf34
+
+    def to_endf(
+        self,
+        source_endf: Union[str, 'Path'],
+        output_path: Union[str, 'Path'],
+        isotope: int,
+        mt: int,
+        *,
+        replace_existing: bool = True,
+        update_directory: bool = True,
+        **mf34_overrides,
+    ) -> str:
+        """Write a single (isotope, MT) MF34 section into an ENDF file.
+
+        Convenience wrapper that calls :meth:`to_mf34` to build the section
+        and :func:`kika.endf.writers.write_mf34_to_file` to splice it into
+        a template file.  Extra keyword arguments are forwarded to
+        :meth:`to_mf34` (``za``, ``awr``, ``mat``, ``ltt``, ``frame``).
+        """
+        from kika.endf.writers.mf34_writer import write_mf34_to_file
+
+        mf34 = self.to_mf34(isotope, mt, **mf34_overrides)
+        return write_mf34_to_file(
+            source_endf=str(source_endf),
+            mf34=mf34,
+            output_path=str(output_path),
+            replace_existing=replace_existing,
+            update_directory=update_directory,
+        )
 
     # ------------------------------------------------------------------
     # User-friendly methods

@@ -2,30 +2,16 @@
 MF34 (Angular Distribution Covariance) creation and writing utilities.
 
 This module provides functions to:
-1. Create MF34MT objects from Legendre coefficient covariance matrices
-2. Write MF34 sections to ENDF files
-3. Support for LB=5 format (full symmetric matrix storage)
+1. Build MF34MT objects from Legendre coefficient covariance matrices
+2. Write MF34 sections into ENDF files (insert or replace)
+3. Merge two MF34 sections by energy range
+4. Remove an MF34 section from an ENDF file
 
-The covariance matrix is expected to be organized with:
-- Rows/columns representing (energy, Legendre order) pairs
-- Layout: [a_1(E_1), a_2(E_1), ..., a_L(E_1), a_1(E_2), ..., a_L(E_N)]
-
-Example:
-    >>> from kika.endf.writers import create_mf34_from_covariance, write_mf34_to_file
-    >>>
-    >>> # Create MF34 from covariance matrix
-    >>> mf34 = create_mf34_from_covariance(
-    ...     cov_matrix=cov,
-    ...     energy_grid_ev=energy_boundaries,
-    ...     max_order=8,
-    ...     za=26056.0,
-    ...     awr=55.47,
-    ...     mat=2631,
-    ...     mt=2,
-    ... )
-    >>>
-    >>> # Write to ENDF file
-    >>> write_mf34_to_file('base.endf', mf34, 'output.endf')
+Diagonal blocks (L == L1) are stored with LB=5 (symmetric upper triangle);
+off-diagonal blocks (L != L1) are stored with LB=6 (rectangular).  Both the
+``ltt=1`` representation (orders start at a_1) and the ``ltt=2``
+representation (orders start at a_0) are supported; the latter naturally
+includes the L=0 sub-subsections of the upper triangle.
 """
 from __future__ import annotations
 
@@ -43,27 +29,29 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+# ---- helpers ---------------------------------------------------------------
+
+
+def _l_min_for_ltt(ltt) -> int:
+    """Lowest Legendre index L allowed by the given LTT representation."""
+    return 0 if int(ltt or 1) == 2 else 1
+
+
 def _make_lb5_record(
     matrix: np.ndarray,
     energy_grid: List[float],
 ) -> SubSubsectionRecord:
-    """Create an LB=5 symmetric upper-triangle SubSubsectionRecord.
+    """Build an LB=5 (LS=1, symmetric upper triangle) LIST record.
 
-    Only appropriate for symmetric matrices (diagonal L=L' blocks).
-    For asymmetric cross-correlation matrices (L≠L'), use
-    :func:`_make_lb6_record` instead.
+    Use for diagonal blocks (L == L1) where the covariance is symmetric.
 
     Parameters
     ----------
     matrix : np.ndarray
-        Square **symmetric** covariance matrix of shape (m, m)
-        where m = len(energy_grid) - 1.
-    energy_grid : List[float]
-        Energy boundary points (m + 1 values).
-
-    Returns
-    -------
-    SubSubsectionRecord
+        Square symmetric covariance matrix of shape (m, m), where
+        m = len(energy_grid) - 1.
+    energy_grid : list of float
+        Energy boundaries (m + 1 values).
     """
     m = len(energy_grid) - 1
     if matrix.shape != (m, m):
@@ -72,7 +60,7 @@ def _make_lb5_record(
             f"with {m} intervals ({len(energy_grid)} boundaries)"
         )
     record = SubSubsectionRecord()
-    record.ls = 1  # symmetric upper triangle
+    record.ls = 1
     record.lb = 5
     record.ne = len(energy_grid)
     record.energies = list(energy_grid)
@@ -87,25 +75,17 @@ def _make_lb6_record(
     row_energy_grid: List[float],
     col_energy_grid: List[float],
 ) -> SubSubsectionRecord:
-    """Create an LB=6 rectangular-matrix SubSubsectionRecord.
+    """Build an LB=6 (rectangular matrix) LIST record.
 
-    Use this for asymmetric cross-correlation matrices such as
-    off-diagonal (L≠L') Legendre covariance blocks where
-    ``Cov(a_L(E_i), a_L'(E_j)) ≠ Cov(a_L(E_j), a_L'(E_i))``.
+    Use for off-diagonal blocks (L != L1) where the matrix is asymmetric.
 
     Parameters
     ----------
     matrix : np.ndarray
         Matrix of shape (r, c) where r = len(row_energy_grid) - 1
         and c = len(col_energy_grid) - 1.
-    row_energy_grid : List[float]
-        Row energy boundary points (r + 1 values).
-    col_energy_grid : List[float]
-        Column energy boundary points (c + 1 values).
-
-    Returns
-    -------
-    SubSubsectionRecord
+    row_energy_grid, col_energy_grid : list of float
+        Row and column energy boundaries.
     """
     r = len(row_energy_grid) - 1
     c = len(col_energy_grid) - 1
@@ -120,9 +100,8 @@ def _make_lb6_record(
     record.row_energies = list(row_energy_grid)
     record.col_energies = list(col_energy_grid)
     record.rect_matrix = matrix.ravel().tolist()
-    # NT = NER + NEC + NER_intervals * NEC_intervals
     record.nt = len(row_energy_grid) + len(col_energy_grid) + r * c
-    record.ne = len(row_energy_grid)  # NE field stores NER for LB=6
+    record.ne = len(row_energy_grid)
     return record
 
 
@@ -135,22 +114,8 @@ def _split_matrix_excluding_range(
     """Split a covariance matrix to exclude an energy range.
 
     Computes interval midpoints and removes intervals whose midpoint falls
-    within [exclude_min_ev, exclude_max_ev].  Returns 0, 1, or 2 contiguous
-    sub-matrices (below and/or above the excluded range).
-
-    Parameters
-    ----------
-    matrix : np.ndarray
-        Square covariance matrix (m, m).
-    energy_grid : List[float]
-        Energy boundaries (m + 1 values).
-    exclude_min_ev, exclude_max_ev : float
-        Energy range to exclude (inclusive on midpoints).
-
-    Returns
-    -------
-    List[Tuple[np.ndarray, List[float]]]
-        List of (sub_matrix, sub_energy_grid) for each contiguous kept region.
+    within ``[exclude_min_ev, exclude_max_ev]``.  Returns 0, 1, or 2
+    contiguous sub-matrices for the surviving regions.
     """
     grid = np.asarray(energy_grid, dtype=float)
     midpoints = 0.5 * (grid[:-1] + grid[1:])
@@ -161,7 +126,6 @@ def _split_matrix_excluding_range(
     if not keep.any():
         return []
 
-    # Find contiguous runs of True in keep
     results: List[Tuple[np.ndarray, List[float]]] = []
     m = len(midpoints)
     i = 0
@@ -169,19 +133,19 @@ def _split_matrix_excluding_range(
         if not keep[i]:
             i += 1
             continue
-        # Start of a kept run
         j = i
         while j < m and keep[j]:
             j += 1
-        # Indices i..j-1 are kept
         idx = np.arange(i, j)
         sub_matrix = matrix[np.ix_(idx, idx)]
-        # Energy grid: boundaries i through j (inclusive)
         sub_grid = list(grid[i:j + 1])
         results.append((sub_matrix, sub_grid))
         i = j
 
     return results
+
+
+# ---- MF34 builder ----------------------------------------------------------
 
 
 def create_mf34_from_covariance(
@@ -195,139 +159,76 @@ def create_mf34_from_covariance(
     ltt: int = 1,
     mt1: Optional[int] = None,
     frame: str = "same-as-MF4",
-    *,
-    cov_c0_cl: Optional[np.ndarray] = None,
 ) -> MF34MT:
-    """
-    Create MF34MT object from Legendre coefficient covariance matrix.
+    """Build an MF34MT object from a Legendre-coefficient covariance matrix.
 
-    This function constructs an MF34 (Angular Distribution Covariance) section
-    from a pre-computed covariance matrix of Legendre polynomial coefficients.
-    The output uses LB=5 format with symmetric upper-triangle storage.
+    The covariance matrix is laid out with energies as the slow index and
+    Legendre orders as the fast index::
+
+        idx = i_energy * n_orders + (l - l_min)
+
+    where ``l_min`` is 0 for ``ltt=2`` (a_0 included) and 1 otherwise, and
+    ``n_orders = max_order - l_min + 1``.
 
     Parameters
     ----------
     cov_matrix : np.ndarray
-        Covariance matrix with shape (N_energies * L_max, N_energies * L_max).
-        The matrix should be organized with Legendre orders as the fast index:
-        index = i_energy * max_order + (l - 1)
-
-        Layout: [a_1(E_1), a_2(E_1), ..., a_L(E_1), a_1(E_2), ..., a_L(E_N)]
-
+        Square covariance matrix of shape
+        (N_energies * n_orders, N_energies * n_orders).  Must be **relative**
+        covariance: ``Cov_rel(i, j) = Cov_abs(i, j) / (mean_i * mean_j)``.
+        ENDF-6 LB=5/LB=6 entries are interpreted as relative.
     energy_grid_ev : np.ndarray
-        Energy boundary points in eV. For N_energies energy intervals,
-        provide N_energies + 1 boundary points.
-
+        Energy boundaries in eV (``N_energies + 1`` values).
     max_order : int
-        Maximum Legendre order (L_max). The covariance includes orders 1 to L_max
-        (following ENDF convention where a_0 is implicit from normalization).
-
+        Highest Legendre order included.  With ``ltt=1`` orders span
+        1..max_order; with ``ltt=2`` they span 0..max_order.
     za : float
-        ZA identifier (1000*Z + A). For example, 26056.0 for Fe-56.
-
+        ZA identifier (1000*Z + A).
     awr : float
-        Atomic weight ratio (mass of target in neutron mass units).
-
+        Atomic weight ratio of the target.
     mat : int
-        MAT number for the material in the ENDF file.
-
+        MAT number of the material.
     mt : int
-        MT reaction number. Common values:
-        - MT=2: Elastic scattering
-        - MT=18: Total fission
-
+        MT reaction number for this section.
     ltt : int, default 1
-        LTT flag indicating Legendre representation:
-        - LTT=1: Coefficients start with a_1 (standard ENDF convention)
-        - LTT=2: Coefficients start with a_0
-
+        LTT representation flag.  1: orders start at a_1.  2: orders start
+        at a_0 (L=0 sub-subsections are included in the upper triangle).
     mt1 : int, optional
-        MT1 for cross-correlation between different reactions.
-        If None, defaults to mt (self-correlation of the same reaction).
-
+        Cross-correlation MT.  Defaults to ``mt`` (self-correlation).
     frame : str, default "same-as-MF4"
-        Reference frame for angular distributions:
-        - "same-as-MF4": Use same frame as MF4 section (LCT=0)
-        - "LAB": Laboratory frame (LCT=1)
-        - "CM": Center-of-mass frame (LCT=2)
+        Reference frame: "same-as-MF4" (LCT=0), "LAB" (LCT=1), or "CM" (LCT=2).
 
     Returns
     -------
     MF34MT
-        MF34MT object ready for serialization to ENDF format using str(mf34).
-
-    Raises
-    ------
-    ValueError
-        If covariance matrix dimensions don't match expected size.
-
-    Notes
-    -----
-    The output uses LB=5 format (full matrix storage) with LS=1 (symmetric,
-    upper-triangle only). For each (L, L1) Legendre pair, a sub-subsection
-    is created containing the energy-energy covariance block.
-
-    Only the upper triangle of (L, L1) pairs is stored since the covariance
-    is symmetric: Cov(a_L, a_{L1}) = Cov(a_{L1}, a_L).
-
-    Covariance Interpretation
-    -------------------------
-    The input covariance matrix must contain RELATIVE (fractional) covariance:
-        Cov_rel(i, j) = Cov_abs(i, j) / (mean_i * mean_j)
-
-    This is written to MF34 with LB=5 format, which ENDF-6 defines as
-    relative covariance. The MF34 resampling model is multiplicative:
-        a_new = a_nominal * (1 + Y),  Y ~ N(0, Cov_rel)
-
-    Use ``compute_covariance_from_samples()`` in ``exfor_utils.py`` to
-    obtain the relative covariance matrix from MC samples.
-
-    Examples
-    --------
-    Create MF34 for Fe-56 elastic scattering with 8 Legendre orders:
-
-    >>> import numpy as np
-    >>> # Suppose we have 10 energy intervals and 8 Legendre orders
-    >>> n_energies = 10
-    >>> max_order = 8
-    >>> cov = np.eye(n_energies * max_order) * 0.01  # Example diagonal covariance
-    >>> energy_grid = np.linspace(1e6, 20e6, n_energies + 1)  # eV
-    >>>
-    >>> mf34 = create_mf34_from_covariance(
-    ...     cov_matrix=cov,
-    ...     energy_grid_ev=energy_grid,
-    ...     max_order=8,
-    ...     za=26056.0,
-    ...     awr=55.47,
-    ...     mat=2631,
-    ...     mt=2,
-    ... )
-    >>>
-    >>> # Get ENDF-formatted string
-    >>> endf_text = str(mf34)
     """
     if mt1 is None:
         mt1 = mt
 
-    n_energies = len(energy_grid_ev) - 1  # Number of energy intervals
+    l_min = _l_min_for_ltt(ltt)
+    if max_order < l_min:
+        raise ValueError(
+            f"max_order={max_order} must be >= l_min={l_min} (LTT={ltt})"
+        )
+    n_orders = max_order - l_min + 1
+    n_energies = len(energy_grid_ev) - 1
+    expected_size = n_energies * n_orders
 
-    # Validate covariance matrix dimensions
-    expected_size = n_energies * max_order
     if cov_matrix.shape != (expected_size, expected_size):
         raise ValueError(
             f"Covariance matrix shape {cov_matrix.shape} doesn't match "
             f"expected ({expected_size}, {expected_size}) for "
-            f"{n_energies} energy intervals and {max_order} Legendre orders"
+            f"{n_energies} energy intervals and {n_orders} Legendre orders "
+            f"(LTT={ltt}, l_min={l_min}, max_order={max_order})"
         )
 
-    # Validate finite values in inputs
     if not np.all(np.isfinite(cov_matrix)):
         n_inf = int(np.sum(np.isinf(cov_matrix)))
         n_nan = int(np.sum(np.isnan(cov_matrix)))
-        inf_indices = np.argwhere(~np.isfinite(cov_matrix))
+        bad = np.argwhere(~np.isfinite(cov_matrix))
         raise ValueError(
             f"Covariance matrix contains {n_inf} inf and {n_nan} NaN values. "
-            f"First 5 non-finite positions (row, col): {inf_indices[:5].tolist()}"
+            f"First 5 non-finite positions (row, col): {bad[:5].tolist()}"
         )
     if not np.all(np.isfinite(energy_grid_ev)):
         raise ValueError(
@@ -335,7 +236,6 @@ def create_mf34_from_covariance(
             f"{energy_grid_ev[~np.isfinite(energy_grid_ev)]}"
         )
 
-    # Create MF34MT structure
     mf34 = MF34MT(number=mt)
     mf34._za = za
     mf34._awr = awr
@@ -343,258 +243,67 @@ def create_mf34_from_covariance(
     mf34._ltt = ltt
     mf34._mf = 34
 
-    # Create subsection for MT1 correlation
     subsection = Subsection()
     subsection.mt1 = mt1
-    subsection.nl = max_order   # Number of Legendre coefficients for MT
-    subsection.nl1 = max_order  # Number of Legendre coefficients for MT1
+    subsection.nl = max_order
+    subsection.nl1 = max_order
     subsection.mat1 = 0.0
 
-    # LCT value based on frame
     lct_map = {"same-as-MF4": 0, "LAB": 1, "CM": 2}
     lct = lct_map.get(frame, 0)
 
-    # Optional l=0 cross-correlation rows: Cov(δσ, a_l1) for l1 ∈ [1, max_order].
-    # These are a v3 extension — non-standard ENDF-6 because spec says a_0 = 1
-    # has no uncertainty. We repurpose L=0 sub-subsections to encode the
-    # MF3↔MF34 cross-correlation. Caveats:
-    #   - kika's MF34 parser uses ``NL*(NL+1)/2`` for the sub-subsection count
-    #     when MAT1=0, so a strict round-trip will miss the l=0 entries unless
-    #     the parser is also extended.
-    #   - External processing codes (NJOY ERRORR, etc.) may warn or ignore
-    #     these entries.
-    # Document this clearly upstream when enabling the feature.
-    if cov_c0_cl is not None:
-        expected_shape = (n_energies, n_energies * max_order)
-        if cov_c0_cl.shape != expected_shape:
-            raise ValueError(
-                f"cov_c0_cl shape {cov_c0_cl.shape} != expected {expected_shape} "
-                f"(N_energies, N_energies * max_order)"
-            )
-        for l1 in range(1, max_order + 1):
-            sub_subsec = SubSubsection()
-            sub_subsec.l = 0
-            sub_subsec.l1 = l1
-            sub_subsec.lct = lct
-            sub_subsec.ni = 1
-            col_indices = [j * max_order + (l1 - 1) for j in range(n_energies)]
-            sub_matrix = cov_c0_cl[:, col_indices]  # (N_energies, N_energies)
-            # L=0 ↔ L1 is asymmetric (rows = δσ, cols = a_l1) → LB=6
-            sub_subsec.records = [_make_lb6_record(
-                sub_matrix, list(energy_grid_ev), list(energy_grid_ev)
-            )]
-            subsection.sub_subsections.append(sub_subsec)
-
-    # Create sub-subsections for each (L, L1) pair with L, L1 ≥ 1.
-    # Only upper triangle: L <= L1 (symmetric covariance)
-    for l in range(1, max_order + 1):
+    grid = list(energy_grid_ev)
+    for l in range(l_min, max_order + 1):
         for l1 in range(l, max_order + 1):
-            sub_subsec = SubSubsection()
-            sub_subsec.l = l
-            sub_subsec.l1 = l1
-            sub_subsec.lct = lct
-            sub_subsec.ni = 1  # One LIST record
-
-            # Extract sub-matrix for this (L, L1) block
-            # Indices: for each energy E_i, coeff a_l is at index: i * max_order + (l-1)
-            row_indices = [i * max_order + (l - 1) for i in range(n_energies)]
-            col_indices = [i * max_order + (l1 - 1) for i in range(n_energies)]
-
+            row_indices = [i * n_orders + (l - l_min) for i in range(n_energies)]
+            col_indices = [i * n_orders + (l1 - l_min) for i in range(n_energies)]
             sub_matrix = cov_matrix[np.ix_(row_indices, col_indices)]
 
             if l == l1:
-                # Diagonal block: symmetric → LB=5 LS=1
-                sub_subsec.records = [_make_lb5_record(sub_matrix, list(energy_grid_ev))]
+                records = [_make_lb5_record(sub_matrix, grid)]
             else:
-                # Off-diagonal block: asymmetric → LB=6
-                sub_subsec.records = [_make_lb6_record(
-                    sub_matrix, list(energy_grid_ev), list(energy_grid_ev)
-                )]
+                records = [_make_lb6_record(sub_matrix, grid, grid)]
+
+            sub_subsec = SubSubsection(l=l, l1=l1, lct=lct, ni=1, records=records)
             subsection.sub_subsections.append(sub_subsec)
 
-    mf34._nmt1 = 1  # One subsection
+    mf34._nmt1 = 1
     mf34._subsections = [subsection]
-
     return mf34
 
 
-def write_mf34_to_file(
-    source_endf: str,
-    mf34: MF34MT,
-    output_path: str,
-    replace_existing: bool = True,
-    update_directory: bool = True,
-) -> str:
-    """
-    Write MF34 section to an ENDF file.
-
-    This function takes a source ENDF file as a template and either replaces
-    an existing MF34 section or inserts a new one before the MEND marker.
-
-    Parameters
-    ----------
-    source_endf : str or Path
-        Path to source ENDF file that serves as the template.
-        All content except MF34 will be preserved.
-
-    mf34 : MF34MT
-        MF34MT object to write. Use create_mf34_from_covariance() to create this.
-
-    output_path : str or Path
-        Path for the output ENDF file.
-
-    replace_existing : bool, default True
-        If True and MF34 already exists in source, replace it.
-        If False and MF34 exists, raise FileExistsError.
-
-    Returns
-    -------
-    str
-        Path to the output file.
-
-    Raises
-    ------
-    FileNotFoundError
-        If source_endf file doesn't exist.
-    FileExistsError
-        If MF34 exists in source and replace_existing=False.
-
-    Examples
-    --------
-    Add MF34 to an ENDF file:
-
-    >>> mf34 = create_mf34_from_covariance(...)
-    >>> write_mf34_to_file('evaluation.endf', mf34, 'evaluation_with_cov.endf')
-    'evaluation_with_cov.endf'
-    """
-    # Read source file
-    with open(source_endf, 'r') as f:
-        lines = f.readlines()
-
-    # Find MF34 boundaries if it exists
-    mf34_start, mf34_end = _find_mf34_boundaries(lines)
-    has_mf34 = mf34_start is not None
-
-    if has_mf34 and not replace_existing:
-        raise FileExistsError(
-            f"MF34 already exists in {source_endf}. "
-            f"Set replace_existing=True to replace it."
-        )
-
-    # Convert MF34MT to string
-    mf34_content = str(mf34)
-    mf34_lines = [line + '\n' for line in mf34_content.split('\n') if line.strip()]
-
-    # Add FEND line after MF34 content (MAT=mat, MF=0, MT=0)
-    from ..utils import format_endf_data_line, ENDF_FORMAT_INT
-    mat_num = mf34._mat or 0
-    fend_line = format_endf_data_line(
-        [0, 0, 0, 0, 0, 0], mat_num, 0, 0, 0,
-        formats=[ENDF_FORMAT_INT] * 6
-    ) + '\n'
-    mf34_lines.append(fend_line)
-
-    if has_mf34:
-        # Replace existing MF34
-        # Skip past the old FEND line (MF=0, MT=0) that follows the MF34 SEND
-        skip_end = mf34_end
-        if skip_end < len(lines) and len(lines[skip_end]) >= 75:
-            try:
-                old_mf = int(lines[skip_end][70:72].strip() or '0')
-                old_mt = int(lines[skip_end][72:75].strip() or '0')
-                if old_mf == 0 and old_mt == 0:
-                    skip_end += 1  # Skip the old FEND line
-            except ValueError:
-                pass
-        new_lines = lines[:mf34_start] + mf34_lines + lines[skip_end:]
-    else:
-        # Insert MF34 before MEND marker
-        insert_idx = _find_mend_marker(lines)
-        new_lines = lines[:insert_idx] + mf34_lines + lines[insert_idx:]
-
-    # Write output
-    with open(output_path, 'w') as f:
-        f.writelines(new_lines)
-
-    if update_directory:
-        from .update_directory import update_mf1_directory
-        update_mf1_directory(output_path, added_sections={(34, mf34.number)})
-
-    return output_path
-
-
-def _find_mf34_boundaries(lines: List[str]) -> tuple:
-    """
-    Find start and end line indices of MF34 section.
-
-    Parameters
-    ----------
-    lines : List[str]
-        Lines from ENDF file.
-
-    Returns
-    -------
-    tuple
-        (start_index, end_index) or (None, None) if MF34 not found.
-    """
-    mf34_start = None
-    mf34_end = None
-
-    for i, line in enumerate(lines):
-        if len(line) >= 75:
-            try:
-                mf = int(line[70:72].strip() or '0')
-                if mf == 34:
-                    if mf34_start is None:
-                        mf34_start = i
-                    mf34_end = i + 1
-            except ValueError:
-                continue
-
-    return mf34_start, mf34_end
+# ---- merge ----------------------------------------------------------------
 
 
 def merge_mf34(
-    original_mf34: MF34MT,
-    pipeline_mf34: MF34MT,
-    pipeline_energy_min_ev: float,
-    pipeline_energy_max_ev: float,
+    base_mf34: MF34MT,
+    overlay_mf34: MF34MT,
+    overlay_energy_min_ev: float,
+    overlay_energy_max_ev: float,
 ) -> MF34MT:
-    """
-    Merge original and pipeline MF34 covariance data.
+    """Merge two MF34 sections, with the overlay taking precedence in a window.
 
-    For each (L, L1) pair present in either source, builds a union energy grid
-    and selects data from the pipeline where interval midpoints fall within the
-    pipeline energy range, and from the original otherwise.  Cross-source
-    covariance cells are set to zero (independent analyses).
+    For each (L, L1) pair present in either source, the result is built on the
+    union energy grid.  Inside ``[overlay_energy_min_ev, overlay_energy_max_ev]``
+    the overlay's data is used; outside, the base's data is used.  Cells where
+    rows and columns straddle the overlay/base boundary are set to zero (the
+    two sources are treated as independent analyses).
 
-    Parameters
-    ----------
-    original_mf34 : MF34MT
-        MF34 section parsed from the original ENDF evaluation.
-    pipeline_mf34 : MF34MT
-        MF34 section produced by the EXFOR sampling pipeline.
-    pipeline_energy_min_ev : float
-        Lower bound of the pipeline energy range in eV.
-    pipeline_energy_max_ev : float
-        Upper bound of the pipeline energy range in eV.
+    Pairs that exist only in the base have the overlay window excised; pairs
+    that exist only in the overlay are kept on their native grid.
 
     Returns
     -------
     MF34MT
-        Merged MF34MT object.  Sub-subsections that exist only in the
-        original evaluation have their pipeline energy range excised,
-        potentially yielding multiple NI records (one per contiguous
-        sub-range outside the pipeline window).
+        New MF34MT whose LTT is set to 2 if any L=0 pair appears in the
+        merged data, otherwise to the overlay's LTT (or 1 by default).
     """
-    from kika.cov.legendre_covariance import LegendreCovariance  # noqa: F811 – local import
+    from kika.cov.legendre_covariance import LegendreCovariance  # noqa: F401
 
-    # --- Convert both to LegendreCovariance to get per-(L,L1) matrices ----------
-    orig_cov = original_mf34.to_ang_covmat()
-    pipe_cov = pipeline_mf34.to_ang_covmat()
+    base_cov = base_mf34.to_ang_covmat()
+    overlay_cov = overlay_mf34.to_ang_covmat()
 
-    # Validate finite values from both sources
-    for label, covmat in [("original", orig_cov), ("pipeline", pipe_cov)]:
+    for label, covmat in [("base", base_cov), ("overlay", overlay_cov)]:
         for i in range(covmat.num_matrices):
             mat = covmat.matrices[i]
             if not np.all(np.isfinite(mat)):
@@ -605,119 +314,115 @@ def merge_mf34(
                     f"{int(np.sum(np.isnan(mat)))} NaN"
                 )
 
-    # Build lookup: (l_row, l_col) -> (matrix, energy_grid) for each source
     def _build_ll_map(covmat):
-        ll_map = {}
+        out = {}
         for i in range(covmat.num_matrices):
             key = (covmat.l_rows[i], covmat.l_cols[i])
-            ll_map[key] = (covmat.matrices[i], list(covmat.energy_grids[i]))
-        return ll_map
+            out[key] = (covmat.matrices[i], list(covmat.energy_grids[i]))
+        return out
 
-    orig_map = _build_ll_map(orig_cov)
-    pipe_map = _build_ll_map(pipe_cov)
+    base_map = _build_ll_map(base_cov)
+    overlay_map = _build_ll_map(overlay_cov)
 
-    all_ll_pairs = sorted(set(orig_map.keys()) | set(pipe_map.keys()))
+    all_ll_pairs = sorted(set(base_map.keys()) | set(overlay_map.keys()))
 
-    # --- Reconstruct MF34MT with merged data -----------------------------
-    merged = MF34MT(number=pipeline_mf34.number)
-    merged._za = pipeline_mf34._za
-    merged._awr = pipeline_mf34._awr
-    merged._mat = pipeline_mf34._mat
-    merged._ltt = pipeline_mf34._ltt
+    merged = MF34MT(number=overlay_mf34.number)
+    merged._za = overlay_mf34._za
+    merged._awr = overlay_mf34._awr
+    merged._mat = overlay_mf34._mat
     merged._mf = 34
 
-    # Determine max Legendre order from both sources
-    all_l_values = set()
-    for l, l1 in all_ll_pairs:
-        all_l_values.add(l)
-        all_l_values.add(l1)
+    all_l_values = {l for pair in all_ll_pairs for l in pair}
     max_order = max(all_l_values) if all_l_values else 1
+    has_l0 = 0 in all_l_values
+    merged._ltt = 2 if has_l0 else (overlay_mf34._ltt or 1)
 
     subsection = Subsection()
-    subsection.mt1 = pipeline_mf34.number
+    subsection.mt1 = overlay_mf34.number
     subsection.nl = max_order
     subsection.nl1 = max_order
     subsection.mat1 = 0.0
 
     for l, l1 in all_ll_pairs:
-        orig_data = orig_map.get((l, l1))
-        pipe_data = pipe_map.get((l, l1))
+        base_data = base_map.get((l, l1))
+        overlay_data = overlay_map.get((l, l1))
         is_offdiag = (l != l1)
 
-        if orig_data is None and pipe_data is not None:
-            # Pipeline-only pair: single record
-            mat, egrid = pipe_data
+        if base_data is None and overlay_data is not None:
+            mat, egrid = overlay_data
             egrid_f = [float(e) for e in egrid]
-            if is_offdiag:
-                records = [_make_lb6_record(mat, egrid_f, egrid_f)]
-            else:
-                records = [_make_lb5_record(mat, egrid_f)]
+            records = (
+                [_make_lb6_record(mat, egrid_f, egrid_f)]
+                if is_offdiag else
+                [_make_lb5_record(mat, egrid_f)]
+            )
 
-        elif pipe_data is None and orig_data is not None:
-            # Original-only pair: exclude the pipeline energy range.
-            # The original and pipeline are independent analyses — the
-            # original's data in the pipeline range is stale.
-            mat, egrid = orig_data
+        elif overlay_data is None and base_data is not None:
+            mat, egrid = base_data
             splits = _split_matrix_excluding_range(
-                mat, egrid, pipeline_energy_min_ev, pipeline_energy_max_ev,
+                mat, egrid, overlay_energy_min_ev, overlay_energy_max_ev,
             )
             if not splits:
-                continue  # pipeline covers entire original range → skip pair
+                continue
             if is_offdiag:
-                records = [_make_lb6_record(s_mat, [float(e) for e in s_grid],
-                                            [float(e) for e in s_grid])
-                           for s_mat, s_grid in splits]
+                records = [
+                    _make_lb6_record(s_mat, [float(e) for e in s_grid],
+                                     [float(e) for e in s_grid])
+                    for s_mat, s_grid in splits
+                ]
             else:
-                records = [_make_lb5_record(s_mat, [float(e) for e in s_grid])
-                           for s_mat, s_grid in splits]
+                records = [
+                    _make_lb5_record(s_mat, [float(e) for e in s_grid])
+                    for s_mat, s_grid in splits
+                ]
 
         else:
-            # Both sources have data – merge on union grid
-            orig_mat, orig_grid = orig_data
-            pipe_mat, pipe_grid = pipe_data
+            base_mat, base_grid = base_data
+            overlay_mat, overlay_grid = overlay_data
 
-            # Build union energy grid
-            union_grid = sorted(set(orig_grid) | set(pipe_grid))
+            union_grid = sorted(set(base_grid) | set(overlay_grid))
             n_intervals = len(union_grid) - 1
-
             merged_matrix = np.zeros((n_intervals, n_intervals))
 
-            # Classify each interval by midpoint (vectorized)
             union_arr = np.asarray(union_grid)
             midpoints = 0.5 * (union_arr[:-1] + union_arr[1:])
-            is_pipe = (midpoints >= pipeline_energy_min_ev) & (midpoints <= pipeline_energy_max_ev)
+            in_overlay = (
+                (midpoints >= overlay_energy_min_ev)
+                & (midpoints <= overlay_energy_max_ev)
+            )
 
-            # Map union intervals to native bins via searchsorted
-            pipe_arr = np.asarray(pipe_grid, dtype=float)
-            orig_arr = np.asarray(orig_grid, dtype=float)
-            pipe_bins = np.searchsorted(pipe_arr, midpoints, side='right') - 1
-            orig_bins = np.searchsorted(orig_arr, midpoints, side='right') - 1
-            np.clip(pipe_bins, 0, len(pipe_grid) - 2, out=pipe_bins)
-            np.clip(orig_bins, 0, len(orig_grid) - 2, out=orig_bins)
+            overlay_arr = np.asarray(overlay_grid, dtype=float)
+            base_arr = np.asarray(base_grid, dtype=float)
+            overlay_bins = np.searchsorted(overlay_arr, midpoints, side='right') - 1
+            base_bins = np.searchsorted(base_arr, midpoints, side='right') - 1
+            np.clip(overlay_bins, 0, len(overlay_grid) - 2, out=overlay_bins)
+            np.clip(base_bins, 0, len(base_grid) - 2, out=base_bins)
 
-            # Fill same-source blocks with fancy indexing
-            pipe_idx = np.where(is_pipe)[0]
-            orig_idx = np.where(~is_pipe)[0]
+            overlay_idx = np.where(in_overlay)[0]
+            base_idx = np.where(~in_overlay)[0]
 
-            if pipe_idx.size > 0:
-                pb = pipe_bins[pipe_idx]
-                merged_matrix[np.ix_(pipe_idx, pipe_idx)] = pipe_mat[np.ix_(pb, pb)]
+            if overlay_idx.size > 0:
+                ob = overlay_bins[overlay_idx]
+                merged_matrix[np.ix_(overlay_idx, overlay_idx)] = (
+                    overlay_mat[np.ix_(ob, ob)]
+                )
+            if base_idx.size > 0:
+                bb = base_bins[base_idx]
+                merged_matrix[np.ix_(base_idx, base_idx)] = (
+                    base_mat[np.ix_(bb, bb)]
+                )
 
-            if orig_idx.size > 0:
-                ob = orig_bins[orig_idx]
-                merged_matrix[np.ix_(orig_idx, orig_idx)] = orig_mat[np.ix_(ob, ob)]
-
-            # Cross-source cells remain zero (already initialized)
             union_grid_f = [float(e) for e in union_grid]
-            if is_offdiag:
-                records = [_make_lb6_record(merged_matrix, union_grid_f, union_grid_f)]
-            else:
-                records = [_make_lb5_record(merged_matrix, union_grid_f)]
+            records = (
+                [_make_lb6_record(merged_matrix, union_grid_f, union_grid_f)]
+                if is_offdiag else
+                [_make_lb5_record(merged_matrix, union_grid_f)]
+            )
 
         sub_subsec = SubSubsection()
         sub_subsec.l = l
         sub_subsec.l1 = l1
-        sub_subsec.lct = 0  # same-as-MF4
+        sub_subsec.lct = 0
         sub_subsec.ni = len(records)
         sub_subsec.records = records
         subsection.sub_subsections.append(sub_subsec)
@@ -727,21 +432,87 @@ def merge_mf34(
     return merged
 
 
-def remove_mf34_from_file(filepath: str, update_directory: bool = True) -> bool:
-    """
-    Remove MF34 section from an ENDF file if present.
+# ---- file I/O --------------------------------------------------------------
+
+
+def write_mf34_to_file(
+    source_endf: str,
+    mf34: MF34MT,
+    output_path: str,
+    replace_existing: bool = True,
+    update_directory: bool = True,
+) -> str:
+    """Write an MF34 section into an ENDF file.
+
+    Uses ``source_endf`` as a template; either replaces the existing MF34
+    section or inserts a new one immediately before the MEND marker.
 
     Parameters
     ----------
-    filepath : str or Path
-        Path to the ENDF file to modify in place.
+    source_endf : str
+        Path to source ENDF file.
+    mf34 : MF34MT
+        Section to write.
+    output_path : str
+        Destination ENDF file path.
+    replace_existing : bool, default True
+        Replace any existing MF34 in the source.  Raises ``FileExistsError``
+        if False and an MF34 is present.
     update_directory : bool, default True
-        If True, update MF1/MT451 directory after removal.
+        Refresh the MF1/MT451 directory after writing.
+    """
+    with open(source_endf, 'r') as f:
+        lines = f.readlines()
 
-    Returns
-    -------
-    bool
-        True if MF34 was found and removed, False if no MF34 was present.
+    mf34_start, mf34_end = _find_mf34_boundaries(lines)
+    has_mf34 = mf34_start is not None
+
+    if has_mf34 and not replace_existing:
+        raise FileExistsError(
+            f"MF34 already exists in {source_endf}. "
+            f"Set replace_existing=True to replace it."
+        )
+
+    mf34_content = str(mf34)
+    mf34_lines = [line + '\n' for line in mf34_content.split('\n') if line.strip()]
+
+    from ..utils import format_endf_data_line, ENDF_FORMAT_INT
+    mat_num = mf34._mat or 0
+    fend_line = format_endf_data_line(
+        [0, 0, 0, 0, 0, 0], mat_num, 0, 0, 0,
+        formats=[ENDF_FORMAT_INT] * 6
+    ) + '\n'
+    mf34_lines.append(fend_line)
+
+    if has_mf34:
+        skip_end = mf34_end
+        if skip_end < len(lines) and len(lines[skip_end]) >= 75:
+            try:
+                old_mf = int(lines[skip_end][70:72].strip() or '0')
+                old_mt = int(lines[skip_end][72:75].strip() or '0')
+                if old_mf == 0 and old_mt == 0:
+                    skip_end += 1
+            except ValueError:
+                pass
+        new_lines = lines[:mf34_start] + mf34_lines + lines[skip_end:]
+    else:
+        insert_idx = _find_mend_marker(lines)
+        new_lines = lines[:insert_idx] + mf34_lines + lines[insert_idx:]
+
+    with open(output_path, 'w') as f:
+        f.writelines(new_lines)
+
+    if update_directory:
+        from .update_directory import update_mf1_directory
+        update_mf1_directory(output_path, added_sections={(34, mf34.number)})
+
+    return output_path
+
+
+def remove_mf34_from_file(filepath: str, update_directory: bool = True) -> bool:
+    """Remove the MF34 section from an ENDF file in place.
+
+    Returns True if MF34 was found and removed, False otherwise.
     """
     with open(filepath, 'r') as f:
         lines = f.readlines()
@@ -761,22 +532,25 @@ def remove_mf34_from_file(filepath: str, update_directory: bool = True) -> bool:
     return True
 
 
+def _find_mf34_boundaries(lines: List[str]) -> Tuple[Optional[int], Optional[int]]:
+    """Locate the MF34 block; return (start_idx, end_idx) or (None, None)."""
+    mf34_start = None
+    mf34_end = None
+    for i, line in enumerate(lines):
+        if len(line) >= 75:
+            try:
+                mf = int(line[70:72].strip() or '0')
+                if mf == 34:
+                    if mf34_start is None:
+                        mf34_start = i
+                    mf34_end = i + 1
+            except ValueError:
+                continue
+    return mf34_start, mf34_end
+
+
 def _find_mend_marker(lines: List[str]) -> int:
-    """
-    Find insertion point (line index before MEND marker).
-
-    The MEND marker is identified by a line with MAT = 0, MF = 0, MT = 0.
-
-    Parameters
-    ----------
-    lines : List[str]
-        Lines from ENDF file.
-
-    Returns
-    -------
-    int
-        Line index where MF34 should be inserted.
-    """
+    """Find the line index of the MEND marker (MAT=0, MF=0, MT=0)."""
     for i in range(len(lines) - 1, -1, -1):
         line = lines[i]
         if len(line) >= 75:

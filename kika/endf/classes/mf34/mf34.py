@@ -578,6 +578,14 @@ class MF34MT(MT):
         reaction = self.number
         ang_covmat = LegendreCovariance(energy_unit=energy_unit)
 
+        # Preserve MF34 provenance so the section can be reconstructed.
+        ang_covmat.mt_metadata[(isotope, reaction)] = {
+            'za': self._za,
+            'awr': self._awr,
+            'mat': self._mat,
+            'ltt': self._ltt,
+        }
+
         # Process each subsection (MT1)
         logger.debug(f"Found {len(self._subsections)} subsections (MT1).")
         for subsec_idx, subsection in enumerate(self._subsections):
