@@ -59,17 +59,20 @@ class TestPerturbSignaturesAcceptBothShapes:
     def test_perturb_ACE_files_signature(self):
         from kika.sampling.ace_perturbation import perturb_ACE_files
         annotation = perturb_ACE_files.__annotations__["mt_list"]
-        assert "List[int]" in str(annotation)
-        assert "List[List[int]]" in str(annotation)
+        ann_str = str(annotation).replace("typing.", "")
+        assert "List[int]" in ann_str
+        assert "List[List[int]]" in ann_str
 
     def test_perturb_ENDF_files_signature(self):
         from kika.sampling.endf_perturbation import perturb_ENDF_files
         annotation = perturb_ENDF_files.__annotations__["mt_list"]
-        assert "List[int]" in str(annotation)
-        assert "List[List[int]]" in str(annotation)
+        ann_str = str(annotation).replace("typing.", "")
+        assert "List[int]" in ann_str
+        assert "List[List[int]]" in ann_str
 
     def test_perturb_seprate_ACE_files_signature(self):
         from kika.sampling.ace_perturbation_separate import perturb_seprate_ACE_files
         annotation = perturb_seprate_ACE_files.__annotations__["mt_list"]
-        assert "List[int]" in str(annotation)
-        assert "List[List[int]]" in str(annotation)
+        ann_str = str(annotation).replace("typing.", "")
+        assert "List[int]" in ann_str
+        assert "List[List[int]]" in ann_str
