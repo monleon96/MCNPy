@@ -18,6 +18,17 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 packages = [{include = "kika"}]
+exclude = [
+    "kika/**/tests",
+    "kika/**/tests/**",
+    "kika/**/test_*.py",
+    "kika/**/*.ipynb",
+    "kika/UQ/output_directory/**",
+    "kika/**/*.sdf",
+    "kika/ace/writers/test_writing.02c",
+    "kika/serpent/input_sens0.m",
+    "kika/serpent/PWRSphere.sss2_sens0.m",
+]
 
 [tool.poetry.dependencies]
 python = "^3.12"
