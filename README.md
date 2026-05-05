@@ -1,6 +1,6 @@
 # KIKA
 
-[![Version](https://img.shields.io/badge/version-0.1.2-blue.svg)](https://github.com/juanmonleon/kika)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://github.com/juanmonleon/kika)
 [![Documentation Status](https://readthedocs.org/projects/kika/badge/?version=latest)](https://kika.readthedocs.io/en/latest/?badge=latest)
 [![PyPI](https://img.shields.io/pypi/v/kika-nd)](https://pypi.org/project/kika-nd/)
 [![Python](https://img.shields.io/pypi/pyversions/kika-nd)](https://pypi.org/project/kika-nd/)

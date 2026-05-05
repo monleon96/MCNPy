@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "kika-nd"
-version = "0.1.2"
+version = "0.2.0"
 description = "A comprehensive Python toolkit for nuclear data analysis, including MCNP input/output processing, sensitivity analysis, covariance handling, ACE file parsing, and ENDF data manipulation."
 authors = ["Juan Antonio Monleon de la Lluvia <juanmonleon96@gmail.com>"]
 license = "BSD-3-Clause"
