@@ -622,7 +622,15 @@ class ComparisonBuilder:
         y_step = np.concatenate([xs, xs[-1:]])
         line_color = color or data.color
         series_label = data.label or ''
-        avg_label = f'{series_label} (avg)' if series_label else None
+        # In 'average' mode the pointwise trace's legend entry is
+        # suppressed (see _pointwise_mask_for_main), so the step trace
+        # represents the whole series and reuses the original label
+        # without an "(avg)" suffix. In 'both' mode the pointwise still
+        # appears in the legend, so the suffix distinguishes the two.
+        if self._main_display == 'average':
+            avg_label = series_label or None
+        else:
+            avg_label = f'{series_label} (avg)' if series_label else None
         ax.plot(
             edges, y_step,
             drawstyle='steps-post',
@@ -644,19 +652,37 @@ class ComparisonBuilder:
         step's leading and trailing bin values so the pointwise line
         visually meets the step trace at the boundaries instead of
         dropping out into a NaN gap.
+
+        The returned copy also has ``label = None`` so the pointwise
+        trace is excluded from the legend — the averaged step trace
+        added by :meth:`_draw_main_overlay` carries the series label
+        instead. Without this the legend lists both lines and
+        ``'average'`` looks indistinguishable from ``'both'``.
         """
         if self._main_display != 'average':
             return None
         overlay = self._overlay_from(data)
         if overlay is None:
             return None
+
+        import copy as _copy
+        masked = _copy.copy(data)
+        masked.metadata = dict(data.metadata)
+        masked.metadata.pop('group_average_overlay', None)
+        masked.label = None
+
         lo, hi = float(overlay['bounds_used'][0]), float(overlay['bounds_used'][1])
         xs = np.asarray(overlay.get('xs', []), dtype=float)
         x = np.asarray(data.x, dtype=float)
         y = np.asarray(data.y, dtype=float)
         in_range = (x >= lo) & (x <= hi)
         if not np.any(in_range):
-            return None
+            # No points to mask, but we still return the copy so the
+            # label suppression takes effect (avoids a duplicate legend
+            # entry when the step trace draws with the series label).
+            masked.x = x
+            masked.y = y
+            return masked
         idx = np.where(in_range)[0]
         first_in, last_in = int(idx[0]), int(idx[-1])
         new_y = y.copy()
@@ -667,15 +693,8 @@ class ComparisonBuilder:
         if last_in > first_in and xs.size > 0 and np.isfinite(xs[-1]):
             new_y[last_in] = float(xs[-1])
 
-        import copy as _copy
-        masked = _copy.copy(data)
         masked.x = x
         masked.y = new_y
-        # Shallow-copy metadata so callers don't accidentally mutate the
-        # original; strip the overlay entry so this clone isn't picked
-        # up for a second overlay draw pass.
-        masked.metadata = dict(data.metadata)
-        masked.metadata.pop('group_average_overlay', None)
         return masked
 
     @staticmethod
