@@ -117,12 +117,22 @@ def create_xsdir_files_for_ace(
     output_dir: str,
     master_xsdir_file: str = None,
     has_ptable: bool = False,
+    per_sample_xsdir_path: str = None,
 ) -> None:
     """
     Create xsdir files for a perturbed ACE file.
 
     Creates both per-sample xsdir files and optionally updates a master xsdir
     file. Shared between ACE and ENDF perturbation workflows.
+
+    Parameters
+    ----------
+    per_sample_xsdir_path : str, optional
+        Full path to write the per-sample xsdir snippet. When None, the
+        legacy layout `sample_dir/{base}_{sample_str}.xsdir` is used.
+        Pass the new-layout path (e.g. `output_dir/ace/<NNNN>/xsdir/<ZAID>.<ext>.xsdir`)
+        from pipelines that already provisioned a per-sample xsdir
+        directory and want their xsdir to land there.
     """
     import shutil
 
@@ -145,7 +155,11 @@ def create_xsdir_files_for_ace(
         has_ptable=has_ptable,
     )
 
-    xsdir_path = os.path.join(sample_dir, f"{base}_{sample_str}.xsdir")
+    if per_sample_xsdir_path is None:
+        xsdir_path = os.path.join(sample_dir, f"{base}_{sample_str}.xsdir")
+    else:
+        xsdir_path = per_sample_xsdir_path
+        os.makedirs(os.path.dirname(xsdir_path) or ".", exist_ok=True)
     write_xsdir_line(xsdir_path, xsdir_line, mode="w")
 
     if master_xsdir_file:

@@ -115,6 +115,21 @@ def _set_logger(logger: Optional[DualLogger]) -> None:
     _logger = logger
 
 
+# Manifest-application diagnostics for build_exfor_cache_from_objects.
+# Reset at the start of each call; exposed via get_last_manifest_stats() so
+# the caller can include the counts in the run audit log.
+_last_manifest_stats: Dict[str, Any] = {
+    'attempted': 0,
+    'failed': 0,
+    'failures': [],  # list of (entry, subentry, exception_repr)
+}
+
+
+def get_last_manifest_stats() -> Dict[str, Any]:
+    """Return diagnostics from the most recent build_exfor_cache_from_objects call."""
+    return dict(_last_manifest_stats)
+
+
 def _format_condensed_experiments(experiments_info: List[Dict]) -> List[str]:
     """
     Group experiments by (entry, subentry) and format as condensed log lines.
@@ -768,31 +783,58 @@ def build_exfor_cache_from_objects(
     # Parse exclusion patterns
     exclusion_patterns = _parse_exclusion_list(exclude_experiments)
 
+    # Reset manifest-application diagnostics for this call.
+    global _last_manifest_stats
+    _last_manifest_stats = {'attempted': 0, 'failed': 0, 'failures': []}
+
     # Apply the uncertainty manifest at the pipeline boundary. The kika
     # library returns raw ExforAngularDistribution objects; here we layer the
     # manifest-derived per-point σ_stat (with optional decomposition from a
     # total) and the per-experiment σ_sys (split into indep and dep parts).
+    # The manifest is mandatory: silently disabling it would let bad imports
+    # revert the run to raw EXFOR uncertainties, which directly affect GLS
+    # weights, AICc, τ, MC perturbations, and covariance.
+    _import_errors: List[ImportError] = []
     try:
         from scripts.uncertainty_manifest import apply_manifest_to_exfor
-    except ImportError:
+    except ImportError as e:
+        _import_errors.append(e)
         try:
             from uncertainty_manifest import apply_manifest_to_exfor  # in-tree fallback
-        except ImportError:
-            apply_manifest_to_exfor = None  # manifest is best-effort
+        except ImportError as e2:
+            _import_errors.append(e2)
+            raise ImportError(
+                "Could not import apply_manifest_to_exfor from "
+                "scripts.uncertainty_manifest or uncertainty_manifest. "
+                "The uncertainty manifest is mandatory for build_exfor_cache_from_objects. "
+                f"Underlying errors: {[str(e) for e in _import_errors]}"
+            )
 
+    logger = _get_logger()
     for exfor in exfor_objects:
         # Check if experiment is excluded
         if _is_experiment_excluded(exfor.entry, exfor.subentry, exclusion_patterns):
             continue
 
-        if apply_manifest_to_exfor is not None:
-            try:
-                apply_manifest_to_exfor(
-                    exfor,
-                    uncertainty_components=getattr(exfor, '_raw_uncertainty_components', None),
-                )
-            except Exception:
-                pass
+        _last_manifest_stats['attempted'] += 1
+        try:
+            apply_manifest_to_exfor(
+                exfor,
+                uncertainty_components=getattr(exfor, '_raw_uncertainty_components', None),
+            )
+        except Exception as e:
+            _last_manifest_stats['failed'] += 1
+            _last_manifest_stats['failures'].append(
+                (exfor.entry, exfor.subentry, repr(e))
+            )
+            msg = (
+                f"Manifest application failed for {exfor.entry}/{exfor.subentry}: "
+                f"{type(e).__name__}: {e}"
+            )
+            if logger is not None:
+                logger.warning(msg)
+            else:
+                warnings.warn(msg, RuntimeWarning)
 
         # Get all available energies in MeV
         energies_mev = exfor.energies(unit='MeV')
@@ -1970,63 +2012,33 @@ def _run_one_kw_sample(args_tuple):
     else:
         elastic_factor = 1.0
 
-    # Step 1: Draw two normalization factors per data point:
+    # Step 1: Draw ONE shared standard-normal `z` per experiment per sample.
+    # The same z is applied to every point of every dataset that experiment
+    # contributes to (across all energies, all subentries, all bins) — so the
+    # direction of the systematic shift is correlated across the experiment's
+    # full energy range, with the per-point AMPLITUDE coming from the manifest.
     #
-    #   (a) entry_indep_norms[entry_id]
-    #       — one factor per EXFOR entry (correlated across ALL its data,
-    #         including all energies and subentries). Magnitude is the
-    #         manifest's energy-INDEPENDENT sys component (e.g. Kinney's
-    #         monitor 7% + geometry 4% → 8.06%; Tomita's 5%; Cox's 10%).
+    # Per-point factor (lognormal): exp(z*sigma_i - 0.5*sigma_i^2)
+    # Per-point factor (normal):    1 + z*sigma_i
     #
-    #   (b) entry_energy_dep_norms[(entry_id, exfor_energy)]
-    #       — one factor per (entry, exfor_energy). Independent across
-    #         energies of the same experiment. Magnitude is the
-    #         energy-DEPENDENT sys at that energy (e.g. Kinney's gain_shift
-    #         at the cell's E; Cierjacks's piecewise total at the cell's E;
-    #         Tsukada's piecewise ERR-1). Zero for experiments without
-    #         energy-dependent components.
+    # Marginally each point sees a Lognormal/Normal multiplier with parameter
+    # sigma_i (so per-point variance reproduces the manifest); the shared z
+    # makes any two points of the same experiment perfectly correlated, which
+    # is what produces long-range covariance between bins fed by the same
+    # experiment. Cross-experiment shifts are independent (different z).
     #
-    # The composite per-point factor = entry_indep × entry_energy_dep.
-    # When manifest doesn't specify either component, fall back to global
-    # `sigma_norm` for the indep factor (per-experiment) only.
-    entry_indep_norms: Dict[str, float] = {}
-    entry_energy_dep_norms: Dict[Tuple[str, float], float] = {}
-
-    def _draw_factor(sigma_eff: float) -> float:
-        if sigma_eff <= 0:
-            return 1.0
-        if norm_dist == "lognormal":
-            return float(rng.lognormal(mean=-0.5 * sigma_eff**2, sigma=sigma_eff))
-        return float(rng.normal(1.0, sigma_eff))
-
+    # The per-point sigma comes from `df['sigma_sys_relative']` (manifest-
+    # derived total sys, computed as |error_sys|/|value| at DataFrame build
+    # time). For Cierjacks band B this is 0.07 at every point; for Kinney it
+    # is 0.0806 everywhere; for uncurated experiments it's the manifest
+    # default 5%. Falls back to the global `sigma_norm` for legacy callers
+    # whose DataFrame lacks the column.
+    entry_z_norms: Dict[str, float] = {}
     for bin_idx, datasets_and_weights in overlap_weights.items():
         for ds, w in datasets_and_weights:
             entry_id = ds['experiment_id'].split('.')[0]
-            ds_energy = ds['exfor_energy_mev']
-            df_ds = ds.get('exfor_df')
-
-            if entry_id not in entry_indep_norms:
-                # Per-experiment energy-INDEPENDENT factor
-                indep = 0.0
-                if df_ds is not None and 'sigma_sys_indep_relative' in df_ds.columns and len(df_ds) > 0:
-                    indep = float(df_ds['sigma_sys_indep_relative'].iloc[0])
-                # Fallback: when manifest didn't supply an indep component
-                # (uncurated entries) use the global sigma_norm so that some
-                # per-experiment correlated noise is still applied.
-                if indep <= 0:
-                    indep = sigma_norm
-                entry_indep_norms[entry_id] = _draw_factor(indep)
-
-            key = (entry_id, ds_energy)
-            if key not in entry_energy_dep_norms:
-                # Per-(experiment, energy) energy-DEPENDENT factor
-                dep = 0.0
-                if df_ds is not None and 'sigma_sys_dep_relative' in df_ds.columns and len(df_ds) > 0:
-                    dep = float(df_ds['sigma_sys_dep_relative'].iloc[0])
-                entry_energy_dep_norms[key] = _draw_factor(dep) if dep > 0 else 1.0
-    # Aliases for any code path still reading the older names
-    entry_energy_norms = entry_energy_dep_norms
-    entry_norms = entry_indep_norms
+            if entry_id not in entry_z_norms:
+                entry_z_norms[entry_id] = float(rng.standard_normal())
 
     # Step 2: Perturb all datasets (shared across bins)
     # Build per-dataset tau from the bin with highest overlap weight so that
@@ -2055,14 +2067,23 @@ def _run_one_kw_sample(args_tuple):
             if df.empty:
                 continue
             entry_id = exp_id.split('.')[0]
-            ds_energy = ds['exfor_energy_mev']
-            norm_indep_factor = entry_indep_norms.get(entry_id, 1.0)
-            norm_dep_factor   = entry_energy_dep_norms.get((entry_id, ds_energy), 1.0)
-            # Compose elastic (global), per-experiment systematic, and
-            # per-(experiment, energy) systematic factors. The latter two are
-            # independent draws so the total per-point shift has variance
-            # (sigma_indep² + sigma_dep_at_E²) at first order.
-            values = df['value'].to_numpy() * (elastic_factor * norm_indep_factor * norm_dep_factor)
+            z = entry_z_norms.get(entry_id, 0.0)
+            # Per-point sys magnitude (relative). Already aggregated across
+            # all manifest components (e.g. Kinney's monitor⊕geometry → 8.06%;
+            # Cierjacks's piecewise → 7% in band B; etc). When the column is
+            # missing (legacy DataFrames), fall back to the global `sigma_norm`.
+            if 'sigma_sys_relative' in df.columns:
+                sigma_per_pt = df['sigma_sys_relative'].to_numpy(dtype=float)
+            else:
+                sigma_per_pt = np.full(len(df), sigma_norm, dtype=float)
+            # Apply per-point shared-z factor: same direction, per-point amplitude.
+            if norm_dist == "lognormal":
+                norm_per_pt = np.exp(z * sigma_per_pt - 0.5 * sigma_per_pt ** 2)
+            else:
+                norm_per_pt = 1.0 + z * sigma_per_pt
+            # Compose elastic (global, all experiments) with per-experiment
+            # shared-direction per-point factor.
+            values = df['value'].to_numpy() * (elastic_factor * norm_per_pt)
             # Optional MF33 multiplicative factor (v3 hook). When the caller
             # passes mf33_dsigma_per_sample + mf33_c0_per_bin + a home-bin map,
             # apply (1 + δσ/c0_home) to this dataset on top of the per-experiment
@@ -3233,6 +3254,145 @@ def apply_between_experiment_floor(
                 f"  [Between-exp floor WARNING] Floor is DISABLED but would inflate "
                 f"{n_floored} entries ({frac:.0f}% of eligible, median {median_infl:.1f}x). "
                 f"Consider setting APPLY_BETWEEN_EXP_FLOOR=True."
+            )
+
+    if apply:
+        return cov_floored, diagnostics
+    return cov_rel, diagnostics
+
+
+def apply_between_experiment_floor_mg(
+    cov_rel: np.ndarray,
+    nominal_results: List,
+    valid_indices: List[int],
+    groups: List[List[int]],
+    max_order: int,
+    logger=None,
+    apply: bool = True,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Multigroup analogue of ``apply_between_experiment_floor``.
+
+    The fine-grid floor compares per-bin between-experiment scatter to the
+    fine-grid covariance diagonal.  At the multigroup level each group spans
+    several fine bins, so the floor for ``(group g, order l)`` is the *maximum*
+    scatter_rel across constituent fine bins (most conservative choice; a
+    weaker scatter floor in one bin should not undo a stronger one in
+    another).
+
+    Parameters
+    ----------
+    cov_rel : np.ndarray
+        Multigroup nominal-relative covariance matrix, shape
+        ``(n_groups * max_order, n_groups * max_order)``.
+    nominal_results : list of NominalFitResult
+        Per-fine-bin nominal fits (used for ``between_exp_scatter`` and
+        ``nominal_coeffs``).
+    valid_indices : list of int
+        Indices into ``nominal_results`` for the non-interpolated fine bins
+        that participate in the multigroup aggregation.  ``valid_indices[k]``
+        is the ``nominal_results`` index for the k-th fine bin used in the MG
+        layout.
+    groups : list of list of int
+        ``multigroup_result.groups``.  ``groups[g]`` is a list of positions
+        into ``valid_indices`` (i.e. into the non-interpolated fine subset).
+    max_order : int
+        Number of Legendre orders per bin.
+    logger : optional
+    apply : bool
+        Same semantics as the FG version: when False, diagnostics are still
+        computed and logged but the covariance is returned unchanged.
+
+    Returns
+    -------
+    cov_floored : np.ndarray
+    diagnostics : dict
+    """
+    from scripts.resample_AD import endf_normalize_legendre_coeffs
+
+    n_groups = len(groups)
+    if cov_rel.shape[0] != n_groups * max_order:
+        raise ValueError(
+            f"apply_between_experiment_floor_mg: cov_rel has {cov_rel.shape[0]} "
+            f"rows, expected n_groups*max_order = {n_groups * max_order}"
+        )
+
+    rel_std = np.sqrt(np.maximum(np.diag(cov_rel), 0.0))
+    scale = np.ones(cov_rel.shape[0])
+
+    n_floored = 0
+    n_groups_with_scatter = 0
+    per_order_stats = {l: {"n_floored": 0, "inflation_factors": []}
+                        for l in range(max_order)}
+
+    for g, fine_positions in enumerate(groups):
+        # Collect each constituent fine bin's scatter_rel per order
+        scatter_rel_per_order: List[List[float]] = [[] for _ in range(max_order)]
+        for fp in fine_positions:
+            nr_idx = valid_indices[fp]
+            nr = nominal_results[nr_idx]
+            if nr is None or nr.between_exp_scatter is None:
+                continue
+            scatter = nr.between_exp_scatter
+            L_common = nr.between_exp_L_common
+            endf_a_l = endf_normalize_legendre_coeffs(
+                nr.nominal_coeffs, include_a0=False
+            )
+            for l_idx in range(min(L_common, max_order)):
+                if l_idx < len(endf_a_l) and abs(endf_a_l[l_idx]) > 1e-15:
+                    scatter_rel_per_order[l_idx].append(
+                        float(scatter[l_idx]) / abs(float(endf_a_l[l_idx]))
+                    )
+
+        if any(scatter_rel_per_order):
+            n_groups_with_scatter += 1
+
+        for l_idx in range(max_order):
+            if not scatter_rel_per_order[l_idx]:
+                continue
+            scatter_rel_g = max(scatter_rel_per_order[l_idx])
+            param_idx = g * max_order + l_idx
+            current_rel_std = rel_std[param_idx]
+            if current_rel_std > 1e-15 and scatter_rel_g > current_rel_std:
+                s = scatter_rel_g / current_rel_std
+                scale[param_idx] = s
+                n_floored += 1
+                per_order_stats[l_idx]["n_floored"] += 1
+                per_order_stats[l_idx]["inflation_factors"].append(s)
+
+    cov_floored = cov_rel * np.outer(scale, scale)
+
+    diagnostics = {
+        "n_groups_with_scatter": int(n_groups_with_scatter),
+        "n_floored": int(n_floored),
+        "per_order": per_order_stats,
+    }
+
+    status = "APPLIED" if apply else "NOT APPLIED (diagnostic only)"
+    if logger:
+        logger.info(
+            f"  [Between-exp floor MG] {status} — "
+            f"{n_groups_with_scatter}/{n_groups} groups had scatter computed, "
+            f"{n_floored} (group,l) entries would be floored"
+        )
+        for l in range(max_order):
+            stats = per_order_stats[l]
+            if stats["n_floored"] > 0:
+                mean_infl = float(np.mean(stats["inflation_factors"]))
+                max_infl = float(np.max(stats["inflation_factors"]))
+                logger.info(
+                    f"    l={l + 1}: {stats['n_floored']} floored "
+                    f"(mean inflation {mean_infl:.1f}x, max {max_infl:.1f}x)"
+                )
+        if not apply and n_floored > 0:
+            frac = n_floored / max(1, n_groups_with_scatter * max_order) * 100
+            all_factors = []
+            for l in range(max_order):
+                all_factors.extend(per_order_stats[l]["inflation_factors"])
+            median_infl = float(np.median(all_factors)) if all_factors else 1.0
+            logger.warning(
+                f"  [Between-exp floor MG WARNING] Floor is DISABLED but would "
+                f"inflate {n_floored} entries ({frac:.0f}% of eligible, "
+                f"median {median_infl:.1f}x)."
             )
 
     if apply:

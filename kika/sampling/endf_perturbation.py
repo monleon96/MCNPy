@@ -34,8 +34,11 @@ from kika.sampling.utils import (
     DualLogger,
     _get_logger,
     _set_logger,
+    make_ace_sample_paths,
     normalize_mt_list,
+    resolve_signed_request,
 )
+from kika._constants import MT_GROUPS
 
 # Import NJOY runner for ACE generation
 from kika.njoy.run_njoy import run_njoy
@@ -55,9 +58,12 @@ def _process_sample(
     generate_ace: bool = False,
     njoy_exe: Optional[str] = None,
     temperatures: Optional[List[float]] = None,
+    extensions: Optional[List[str]] = None,
     library_name: Optional[str] = None,
     njoy_version: str = "NJOY 2016.78",
     xsdir_file: Optional[str] = None,
+    enforce_positivity: bool = False,
+    positivity_check_points: int = 101,
 ):
     """
     Process a single perturbation sample for ENDF files.
@@ -90,13 +96,15 @@ def _process_sample(
         NJOY version string
     """
     if dry_run:
-        # Parse the ENDF file to get ZAID for proper directory structure
+        # Dry-run is a fast preview: write the factor summary, do not
+        # apply factors and do not run the positivity check. For a
+        # positivity audit, do a real run with a small num_samples.
         endf = parse_endf_file(endf_file)
         base = os.path.splitext(os.path.basename(endf_file))[0]
         sample_str = f"{sample_index+1:04d}"
         sample_dir = os.path.join(output_dir, "endf", str(endf.zaid or "unknown"), sample_str)
         os.makedirs(sample_dir, exist_ok=True)
-        
+
         _write_sample_summary(
             sample=sample,
             sample_index=sample_index,
@@ -105,14 +113,23 @@ def _process_sample(
             sample_dir=sample_dir,
             base=base,
         )
-        return
+        return {
+            "success": True,
+            "temperatures_processed": [],
+            "errors": [],
+            "warnings": [],
+            "positivity_events": [],
+            "dry_run": True,
+        }
     
     # Parse the ENDF file
     endf = parse_endf_file(endf_file)
-    
+
     # Apply perturbations to MF4 data
-    perturbed_params = apply_perturbation_factors_to_endf(
-        endf, sample, sample_index, energy_grids, param_mapping, verbose=False
+    perturbed_params, positivity_events = apply_perturbation_factors_to_endf(
+        endf, sample, sample_index, energy_grids, param_mapping, verbose=False,
+        enforce_positivity=enforce_positivity,
+        positivity_check_points=positivity_check_points,
     )
     
     # Write perturbed ENDF file
@@ -129,8 +146,9 @@ def _process_sample(
         if not success:
             if _get_logger():
                 _get_logger().error(f"  [ERROR] [ENDF] Failed to write perturbed ENDF file: {out_endf}")
-            return
-    
+            return {"success": False, "positivity_events": positivity_events,
+                    "temperatures_processed": [], "errors": [], "warnings": []}
+
     # Write sample summary
     _write_sample_summary(
         sample=sample,
@@ -140,7 +158,7 @@ def _process_sample(
         sample_dir=sample_dir,
         base=base,
     )
-    
+
     # Generate ACE files using NJOY if requested
     if generate_ace and not dry_run:
         njoy_result = _process_njoy_for_sample(
@@ -148,14 +166,17 @@ def _process_sample(
             sample_index=sample_index,
             njoy_exe=njoy_exe,
             temperatures=temperatures,
+            extensions=extensions,
             library_name=library_name,
             njoy_version=njoy_version,
             output_dir=output_dir,
             xsdir_file=xsdir_file,
         )
+        njoy_result["positivity_events"] = positivity_events
         return njoy_result
-    
-    return {"success": True, "temperatures_processed": [], "errors": [], "warnings": []}
+
+    return {"success": True, "temperatures_processed": [], "errors": [],
+            "warnings": [], "positivity_events": positivity_events}
 
 
 def _process_njoy_for_sample(
@@ -167,6 +188,7 @@ def _process_njoy_for_sample(
     njoy_version: str,
     output_dir: str,
     xsdir_file: Optional[str] = None,
+    extensions: Optional[List[str]] = None,
 ):
     """
     Process a perturbed ENDF file through NJOY to generate ACE files.
@@ -207,89 +229,106 @@ def _process_njoy_for_sample(
         return {"success": False, "error": f"Failed to parse ENDF for ZAID: {e}"}
     
     results = {"success": True, "temperatures_processed": [], "errors": [], "warnings": []}
-    
-    for temp in temperatures:
+
+    # New layout: per-sample directory, all temperatures + isotopes co-located,
+    # ZAID.<ext> filenames disambiguate them. xsdir snippets land in a
+    # `xsdir/` subdirectory of the sample directory.
+    ace_sample_dir, xsdir_sample_dir, _ = make_ace_sample_paths(output_dir, sample_index)
+    njoy_sample_dir = os.path.join(output_dir, "njoy_files", sample_str)
+    os.makedirs(ace_sample_dir, exist_ok=True)
+    os.makedirs(xsdir_sample_dir, exist_ok=True)
+    os.makedirs(njoy_sample_dir, exist_ok=True)
+
+    if extensions is not None and len(extensions) != len(temperatures):
+        msg = (
+            f"extensions length ({len(extensions)}) must match temperatures length "
+            f"({len(temperatures)}); ignoring extensions."
+        )
+        if logger:
+            logger.warning(f"  [WARN] [NJOY] Sample {sample_str}: {msg}")
+        extensions = None
+
+    for t_idx, temp in enumerate(temperatures):
         try:
-            # Create custom directory structure: ace/temp/zaid/sample_num/ using exact temperature input
-            temp_str = str(temp).rstrip('0').rstrip('.') if '.' in str(temp) else str(temp)
-            ace_sample_dir = os.path.join(output_dir, "ace", temp_str, str(zaid), sample_str)
-            njoy_sample_dir = os.path.join(output_dir, "njoy_files", temp_str, str(zaid), sample_str)
-            # Create directories
-            os.makedirs(ace_sample_dir, exist_ok=True)
-            os.makedirs(njoy_sample_dir, exist_ok=True)
-            
-            # Run NJOY with a temporary directory inside output_dir (to avoid library subdirectories)
+            ext_str = extensions[t_idx] if extensions is not None else None
+
+            # Run NJOY directly into the per-sample dirs. The runner places
+            # ACE at ace_sample_dir/<zaid>.<ext> and xsdir at
+            # xsdir_sample_dir/<zaid>.<ext>.xsdir when `extension` is given.
             with tempfile.TemporaryDirectory(prefix="njoy_temp_", dir=output_dir) as temp_dir:
                 result = run_njoy(
                     njoy_exe=njoy_exe,
                     endf_path=out_endf,
                     temperature=temp,
                     library_name=library_name,
-                    output_dir=temp_dir,  # Use temporary directory
+                    output_dir=temp_dir,
                     njoy_version=njoy_version,
-                    additional_suffix=sample_str,
+                    additional_suffix=sample_str if ext_str is None else None,
+                    extension=ext_str,
+                    ace_dir=ace_sample_dir if ext_str is not None else None,
+                    xsdir_dir=xsdir_sample_dir if ext_str is not None else None,
+                    njoy_files_dir=njoy_sample_dir if ext_str is not None else None,
                 )
-                
+
                 # Always move NJOY auxiliary files (input/output logs) for debugging
-                aux_files = ["njoy_input", "njoy_output", "xsdir_file", "viewr_output"]
+                aux_files = ["njoy_input", "njoy_output", "viewr_output"]
                 for aux_file in aux_files:
-                    if result.get(aux_file) and os.path.exists(result[aux_file]):
-                        aux_filename = os.path.basename(result[aux_file])
-                        dest_aux = os.path.join(njoy_sample_dir, aux_filename)
-                        try:
-                            shutil.move(result[aux_file], dest_aux)
-                            if aux_file == "njoy_output":
-                                results["njoy_output_path"] = dest_aux
-                        except Exception as move_err:
-                            warning_msg = f"Could not move {aux_file} at {temp}K: {move_err}"
-                            results["warnings"].append(warning_msg)
-                            if logger:
-                                logger.warning(f"  [WARN] [NJOY] Sample {sample_str}: {warning_msg}")
+                    src = result.get(aux_file)
+                    if src and os.path.exists(src):
+                        if os.path.dirname(src) != njoy_sample_dir:
+                            dest_aux = os.path.join(njoy_sample_dir, os.path.basename(src))
+                            try:
+                                shutil.move(src, dest_aux)
+                                if aux_file == "njoy_output":
+                                    results["njoy_output_path"] = dest_aux
+                            except Exception as move_err:
+                                warning_msg = f"Could not move {aux_file} at {temp}K: {move_err}"
+                                results["warnings"].append(warning_msg)
+                                if logger:
+                                    logger.warning(f"  [WARN] [NJOY] Sample {sample_str}: {warning_msg}")
+                        elif aux_file == "njoy_output":
+                            results["njoy_output_path"] = src
 
                 if result["returncode"] == 0:
                     results["temperatures_processed"].append(temp)
 
-                    # Move ACE file to our custom structure
-                    if result.get("ace_file") and os.path.exists(result["ace_file"]):
+                    # When the legacy layout is in use (no extension), the
+                    # runner put the ACE/xsdir under a library/<temp>K dir
+                    # inside temp_dir — relocate to the sample dir manually.
+                    if ext_str is None and result.get("ace_file") and os.path.exists(result["ace_file"]):
                         ace_filename = os.path.basename(result["ace_file"])
                         dest_ace = os.path.join(ace_sample_dir, ace_filename)
                         shutil.move(result["ace_file"], dest_ace)
+                        result["ace_file"] = dest_ace
+                    if ext_str is None and result.get("xsdir_file") and os.path.exists(result["xsdir_file"]):
+                        xsd_dest = os.path.join(xsdir_sample_dir, os.path.basename(result["xsdir_file"]))
+                        shutil.move(result["xsdir_file"], xsd_dest)
+                        result["xsdir_file"] = xsd_dest
 
-                        # Create xsdir files for the generated ACE file
-                        if xsdir_file is not None:
-                            try:
-                                # Parse ACE file to get header information for xsdir creation
-                                from kika.ace.parsers import read_ace
-                                ace_data = read_ace(dest_ace)
-                                hdr = ace_data.header
-                                has_ptable = bool(getattr(ace_data.unresolved_resonance, 'has_data', False))
-
-                                # Determine the proper cross-section library extension
-                                # For NJOY-generated files, calculate extension based on temperature
-                                base_ace, ace_file_ext = os.path.splitext(os.path.basename(dest_ace))
-
-                                # Convert temperature from MeV to Kelvin and get proper suffix
-                                from kika._utils import MeV_to_kelvin
-                                temp_K = MeV_to_kelvin(hdr.temperature)
-                                xs_ext = temperature_to_suffix(temp_K) + "c"  # Add 'c' for continuous energy
-
-                                create_xsdir_files_for_ace(
-                                    ace_file_path=dest_ace,
-                                    zaid=hdr.zaid,
-                                    awr=hdr.atomic_weight_ratio,
-                                    xss_len=hdr.nxs_array[1],
-                                    temperature_mev=hdr.temperature,
-                                    sample_index=sample_index,
-                                    output_dir=output_dir,
-                                    master_xsdir_file=xsdir_file,
-                                    has_ptable=has_ptable,
-                                )
-
-                            except Exception as xsdir_err:
-                                warning_msg = f"Failed to create XSDIR files at {temp}K: {xsdir_err}"
-                                results["warnings"].append(warning_msg)
-                                if logger:
-                                    logger.warning(f"[NJOY] Sample {sample_str} at {temp}K: {warning_msg}")
+                    # Master-xsdir merge when requested.
+                    if xsdir_file is not None and result.get("ace_file") and os.path.exists(result["ace_file"]):
+                        try:
+                            from kika.ace.parsers import read_ace
+                            ace_data = read_ace(result["ace_file"])
+                            hdr = ace_data.header
+                            has_ptable = bool(getattr(ace_data.unresolved_resonance, 'has_data', False))
+                            create_xsdir_files_for_ace(
+                                ace_file_path=result["ace_file"],
+                                zaid=hdr.zaid,
+                                awr=hdr.atomic_weight_ratio,
+                                xss_len=hdr.nxs_array[1],
+                                temperature_mev=hdr.temperature,
+                                sample_index=sample_index,
+                                output_dir=output_dir,
+                                master_xsdir_file=xsdir_file,
+                                has_ptable=has_ptable,
+                                per_sample_xsdir_path=result.get("xsdir_file"),
+                            )
+                        except Exception as xsdir_err:
+                            warning_msg = f"Failed to update master XSDIR at {temp}K: {xsdir_err}"
+                            results["warnings"].append(warning_msg)
+                            if logger:
+                                logger.warning(f"[NJOY] Sample {sample_str} at {temp}K: {warning_msg}")
                 else:
                     error_msg = f"NJOY failed at {temp}K with return code {result['returncode']}"
                     results["errors"].append(error_msg)
@@ -307,8 +346,77 @@ def _process_njoy_for_sample(
             results["success"] = False
             if logger:
                 logger.error(f"  [ERROR] [NJOY] Sample {sample_str}: {error_msg}")
-    
+
     return results
+
+
+def _log_positivity_events(
+    events_by_sample: List[Tuple[int, List[Tuple[int, float, float, float]]]],
+    file_key: str,
+    num_samples: int,
+    verbose: bool,
+    logger,
+):
+    """
+    Log MF4 positivity projection activity.
+
+    Verbose mode: one line per projected (sample, MT, energy) tuple.
+    Both modes: per-MT summary plus a cross-MT total.
+
+    Parameters
+    ----------
+    events_by_sample : list of (sample_index, list of (mt, energy, sigma_min, max_delta))
+        Per-sample projection records emitted by _apply_factors_to_mf4_legendre.
+    file_key : str
+        Short identifier of the current ENDF file for log context.
+    num_samples : int
+        Total samples processed for this file (denominator in the summary).
+    verbose : bool
+        If True, emit per-event lines; the summary is always emitted.
+    logger : DualLogger
+    """
+    if logger is None:
+        return
+    per_mt_count: Dict[int, int] = {}
+    per_mt_max_delta: Dict[int, float] = {}
+    per_mt_max_sigma_below_zero: Dict[int, float] = {}
+    n_events_total = 0
+
+    for sample_index, events in events_by_sample:
+        sample_str = f"{sample_index + 1:04d}"
+        for mt, energy, sigma_min, max_delta in events:
+            n_events_total += 1
+            per_mt_count[mt] = per_mt_count.get(mt, 0) + 1
+            per_mt_max_delta[mt] = max(per_mt_max_delta.get(mt, 0.0), max_delta)
+            # sigma_min is negative here; track the most-negative value
+            per_mt_max_sigma_below_zero[mt] = min(
+                per_mt_max_sigma_below_zero.get(mt, 0.0), sigma_min
+            )
+            if verbose:
+                logger.info(
+                    f"  [INFO] [POSITIVITY] {file_key} sample={sample_str} "
+                    f"MT={mt} E={energy:.6e} eV: f(μ)<0 (min={sigma_min:.3e}), "
+                    f"projected (max |Δa_l|={max_delta:.3e})"
+                )
+
+    if n_events_total == 0:
+        logger.info(
+            f"  [INFO] [POSITIVITY] {file_key}: all {num_samples} samples already physical "
+            f"(no projection needed)"
+        )
+        return
+
+    for mt in sorted(per_mt_count):
+        logger.info(
+            f"  [INFO] [POSITIVITY] {file_key} MT={mt}: projected {per_mt_count[mt]} "
+            f"(sample, energy) entries / {num_samples} samples; "
+            f"max |Δa_l|={per_mt_max_delta[mt]:.3e}; "
+            f"worst pre-projection σ(μ)={per_mt_max_sigma_below_zero[mt]:.3e}"
+        )
+    logger.info(
+        f"  [INFO] [POSITIVITY] {file_key}: total {n_events_total} (sample, MT, energy) "
+        f"entries projected across {num_samples} samples"
+    )
 
 
 def _log_njoy_batch_results(njoy_results, file_key, file_index, temperatures, summary_data):
@@ -517,7 +625,10 @@ def perturb_ENDF_files(
     mf34_cov_files: Optional[Union[str, List[str]]] = None,
     space: str = "linear",
     decomposition_method: str = "svd",
-    psd_method: str = "auto",
+    psd_method: str = "none",
+    higham_projection: bool = False,
+    enforce_positivity: bool = True,
+    positivity_check_points: int = 101,
     sampling_method: str = "sobol",
     output_dir: str = '.',
     seed: Optional[int] = None,
@@ -527,11 +638,13 @@ def perturb_ENDF_files(
     generate_ace: bool = False,
     njoy_exe: Optional[str] = None,
     temperatures: Optional[Union[float, List[float]]] = None,
+    extensions: Optional[List[str]] = None,
     library_name: Optional[str] = None,
     njoy_version: str = "NJOY 2016.78",
     xsdir_file: Optional[str] = None,
     energy_ranges: Optional[List[Tuple[float, float]]] = None,
     only_xsdir: bool = False,
+    log_file: Optional[str] = None,
 ):
     """
     Perturb ENDF nuclear data files using MF34 angular covariance matrices.
@@ -560,8 +673,34 @@ def perturb_ENDF_files(
         Sampling space: "linear"/"lin" (factors = 1 + X) or "log" (factors = exp(Y))
     decomposition_method : str, default "svd"
         Matrix decomposition method: "svd", "cholesky", "eigen", or "pca"
+    psd_method : str, default "none"
+        How to handle a non-PSD covariance during decomposition:
+            "none"   — do not modify the matrix (default); SVD silently folds
+                       negative eigenvalues to their absolute value. A WARN
+                       line is logged when |λ_min|/λ_max exceeds 1e-8.
+            "auto"   — clip mild negatives, Higham for severe ones.
+            "clip"   — zero out negative eigenvalues.
+            "higham" — nearest-PSD Higham projection.
+        Use `higham_projection=True` as a shortcut for "higham".
+    higham_projection : bool, default False
+        Convenience flag — when True, force `psd_method="higham"`. Raises if
+        the user also passes a non-default `psd_method`.
+    enforce_positivity : bool, default True
+        After each MF4 sample is assembled (factor × baseline), check that
+        f(μ) = (1/2) Σ (2l+1) a_l P_l(μ) ≥ 0 on a fine μ-grid. If not,
+        project to the L²-nearest non-negative coefficient set via SLSQP.
+        Applies during the perturbed-ENDF write path. **Skipped in
+        dry_run** — dry_run only writes the factor parquet, it does not
+        apply factors or check positivity. To audit positivity, just do
+        a real run with a small `num_samples`.
+    positivity_check_points : int, default 101
+        Number of μ points used for the positivity check / projection.
     sampling_method : str, default "sobol"
         Sampling method: "sobol", "lhs", or "random"
+    extensions : Optional[List[str]], default None
+        ACE extensions to assign per temperature, e.g. ['06c'] for 600 K.
+        Must have the same length as `temperatures`. When None, NJOY's
+        internal K_TO_SUFFIX lookup is used (legacy behavior).
     output_dir : str, default "."
         Output directory for perturbed files
     seed : Optional[int], default None
@@ -595,8 +734,14 @@ def perturb_ENDF_files(
 
     Notes
     -----
-    This function does not apply any autofix to the covariance matrices,
-    using them exactly as provided in the MF34 data.
+    Default behavior samples directly from the MF34 covariance with no
+    repair (`psd_method="none"`). Mild negative eigenvalues from numerical
+    noise are silently folded to their magnitude by SVD; a WARN line is
+    logged when the negative spectrum is non-trivial
+    (|λ_min|/λ_max > 1e-8). To repair the matrix, set
+    `higham_projection=True` (Higham projection) or pass an explicit
+    `psd_method` ("auto", "clip", or "higham"). The two are mutually
+    exclusive.
     
     When generate_ace=True, the output directory structure will include:
     - output_dir/endf/zaid/sample_num/ : perturbed ENDF files
@@ -606,18 +751,33 @@ def perturb_ENDF_files(
     - output_dir/*.log and *.parquet : log and master perturbation files
     """
     global _logger
-    
+
     # Normalize space parameter: support both 'lin' and 'linear'
     if space.lower() == 'lin':
         space = 'linear'
+
+    # Resolve higham_projection shorthand into psd_method. The two are
+    # mutually exclusive — flagging both is a user error worth surfacing
+    # loudly rather than silently picking one.
+    if higham_projection:
+        if psd_method != "none":
+            raise ValueError(
+                "higham_projection=True conflicts with an explicit "
+                f"psd_method={psd_method!r}. Pass one or the other."
+            )
+        psd_method = "higham"
     
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
     
-    # Setup logging
+    # Setup logging — when ``log_file`` is provided (e.g. by the combined
+    # orchestrator), append this stage's banner+log to that shared file.
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = os.path.join(output_dir, f'endf_perturbation_{timestamp}.log')
-    _logger = DualLogger(log_file)
+    if log_file is None:
+        log_file = os.path.join(output_dir, f'endf_perturbation_{timestamp}.log')
+        _logger = DualLogger(log_file, mode='w')
+    else:
+        _logger = DualLogger(log_file, mode='a')
     _set_logger(_logger)
     
     # Console: Basic start message
@@ -791,9 +951,38 @@ def perturb_ENDF_files(
                 _logger.info(f"#-- END STEP {step_num} (elapsed: {step_elapsed:.1f}s) -------------------------------------")
                 continue
             
-            # Filter covariance data by requested MTs and Legendre coefficients
-            filtered_cov = _filter_mf34_covariance(mf34_cov, mt_list, legendre_coeffs)
-            
+            # Resolve positive/negative MT and L semantics against what's
+            # actually in the MF34 file (typically only MT2 has data).
+            available_mts_in_cov = sorted(mf34_cov.reactions)
+            available_ls_in_cov = sorted(mf34_cov.legendre_indices)
+            mt_resolved, mt_log = resolve_signed_request(
+                list(mt_list or []), available_mts_in_cov, group_map=MT_GROUPS,
+            )
+            for line in mt_log:
+                _logger.info(
+                    f"  [INFO] [ENDF] File {step_num}: "
+                    f"{line.replace('Excluding entries:', 'Excluding MTs:').replace('group expansion', 'composite expansion')}"
+                )
+            requested_mts_missing = (
+                sorted(set(mt_resolved) - set(available_mts_in_cov)) if mt_resolved else []
+            )
+            if requested_mts_missing:
+                _logger.warning(
+                    f"  [WARN] [ENDF] File {step_num}: MTs {requested_mts_missing} "
+                    f"not in MF34 (MF34 has {available_mts_in_cov}); silently dropped."
+                )
+            l_resolved, l_log = resolve_signed_request(
+                list(legendre_coeffs or []), available_ls_in_cov, group_map=None,
+            )
+            for line in l_log:
+                _logger.info(
+                    f"  [INFO] [ENDF] File {step_num}: "
+                    f"{line.replace('Excluding entries:', 'Excluding L:')}"
+                )
+
+            # Filter covariance data by resolved MTs and Legendre coefficients
+            filtered_cov = _filter_mf34_covariance(mf34_cov, mt_resolved, l_resolved)
+
             if filtered_cov.num_matrices == 0:
                 _logger.warning(f"  [WARN] [ENDF] File {step_num}: No covariance data found for requested MTs {mt_list} and L coefficients {legendre_coeffs}")
                 failed_files_details[file_key] = f"No covariance data for requested MTs {mt_list} and L coefficients {legendre_coeffs}"
@@ -864,40 +1053,52 @@ def perturb_ENDF_files(
             
             # Process samples with optional parallelization
             njoy_results = []  # Track NJOY results for batch logging
-            
+            # (sample_index, [(mt, energy, sigma_min, max_delta_a_l), ...])
+            positivity_events_by_sample: List[Tuple[int, List[Tuple[int, float, float, float]]]] = []
+
+            def _absorb_result(sample_idx, result):
+                if not isinstance(result, dict):
+                    return
+                events = result.get("positivity_events") or []
+                if events:
+                    positivity_events_by_sample.append((sample_idx, events))
+                if generate_ace and not dry_run:
+                    njoy_results.append((sample_idx, result))
+
             if nprocs > 1 and num_samples > 1:
                 if verbose:
                     _logger.info(f"  [INFO] [ENDF] File {step_num}: Using {nprocs} processes for parallel processing")
-                
+
                 try:
                     with Pool(processes=nprocs) as pool:
                         futures = []
                         for sample_idx in range(num_samples):
                             args = (
-                                endf_file, factors[sample_idx], sample_idx, energy_grids, 
-                                param_mapping, output_dir, dry_run, generate_ace, njoy_exe, 
-                                temperatures, library_name, njoy_version, xsdir_file
+                                endf_file, factors[sample_idx], sample_idx, energy_grids,
+                                param_mapping, output_dir, dry_run, generate_ace, njoy_exe,
+                                temperatures, extensions, library_name, njoy_version, xsdir_file,
+                                enforce_positivity, positivity_check_points,
                             )
                             future = pool.apply_async(_process_sample, args=args)
                             futures.append(future)
-                        
+
                         # Wait for all processes to complete
                         pool.close()
                         pool.join()
-                        
+
                         # Collect results and check for any exceptions
                         for j, future in enumerate(futures):
                             try:
                                 result = future.get()  # This will raise any exception that occurred
-                                if result and generate_ace and not dry_run:
-                                    njoy_results.append((j, result))
+                                _absorb_result(j, result)
                             except Exception as e:
                                 _logger.error(f"  [ERROR] [ENDF] File {step_num}: Sample {j+1:04d} processing failed: {e}")
-                                
+
                 except Exception as e:
                     _logger.error(f"  [ERROR] [ENDF] File {step_num}: Parallel processing failed, falling back to serial: {e}")
                     # Fall back to serial processing
                     njoy_results = []
+                    positivity_events_by_sample = []
                     for sample_idx in range(num_samples):
                         try:
                             result = _process_sample(
@@ -911,12 +1112,14 @@ def perturb_ENDF_files(
                                 generate_ace=generate_ace,
                                 njoy_exe=njoy_exe,
                                 temperatures=temperatures,
+                                extensions=extensions,
                                 library_name=library_name,
                                 njoy_version=njoy_version,
                                 xsdir_file=xsdir_file,
+                                enforce_positivity=enforce_positivity,
+                                positivity_check_points=positivity_check_points,
                             )
-                            if result and generate_ace and not dry_run:
-                                njoy_results.append((sample_idx, result))
+                            _absorb_result(sample_idx, result)
                         except Exception as sample_e:
                             _logger.error(f"  [ERROR] [ENDF] File {step_num}: Sample {sample_idx+1:04d} processing failed: {sample_e}")
                             continue
@@ -935,16 +1138,25 @@ def perturb_ENDF_files(
                             generate_ace=generate_ace,
                             njoy_exe=njoy_exe,
                             temperatures=temperatures,
+                            extensions=extensions,
                             library_name=library_name,
                             njoy_version=njoy_version,
                             xsdir_file=xsdir_file,
+                            enforce_positivity=enforce_positivity,
+                            positivity_check_points=positivity_check_points,
                         )
-                        if result and generate_ace and not dry_run:
-                            njoy_results.append((sample_idx, result))
+                        _absorb_result(sample_idx, result)
                     except Exception as e:
                         _logger.error(f"  [ERROR] [ENDF] File {step_num}: Sample {sample_idx+1:04d} processing failed: {e}")
                         continue
-            
+
+            # Positivity reporting: per-event in verbose, summary always.
+            if enforce_positivity:
+                _log_positivity_events(
+                    positivity_events_by_sample, file_key, num_samples,
+                    verbose=verbose, logger=_logger,
+                )
+
             # Batch logging for NJOY results
             if generate_ace and not dry_run and njoy_results:
                 _log_njoy_batch_results(njoy_results, file_key, i+1, temperatures, summary_data)
@@ -1090,12 +1302,14 @@ def perturb_ENDF_files(
 
 
 def apply_perturbation_factors_to_endf(
-    endf, 
-    sample: np.ndarray, 
-    sample_index: int, 
-    energy_grids: Dict[Tuple[int, int, int], List[float]], 
-    param_mapping: List[Tuple[int, int, int, int]], 
-    verbose: bool = True
+    endf,
+    sample: np.ndarray,
+    sample_index: int,
+    energy_grids: Dict[Tuple[int, int, int], List[float]],
+    param_mapping: List[Tuple[int, int, int, int]],
+    verbose: bool = True,
+    enforce_positivity: bool = False,
+    positivity_check_points: int = 101,
 ):
     """
     Apply perturbation factors to ENDF MF4 angular distribution data.
@@ -1124,28 +1338,32 @@ def apply_perturbation_factors_to_endf(
         _get_logger().info(f"  [INFO] [ENDF] Applying perturbations to sample {sample_index + 1}")
     
     perturbed_params = []
-    
+    positivity_events: List[Tuple[int, float, float, float]] = []
+
     # Get MF4 data
     mf4 = endf.get_file(4)
     if mf4 is None:
         if _get_logger():
             _get_logger().warning("  [WARN] [ENDF] No MF4 data found in ENDF file")
-        return perturbed_params
-    
+        return perturbed_params, positivity_events
+
     # Apply perturbations to each MT section
     for mt_number, mt_data in mf4.sections.items():
         # Check for both MF4MTLegendre and MF4MTMixed (both have Legendre coefficients)
         if isinstance(mt_data, (MF4MTLegendre, MF4MTMixed)):
             # Apply perturbations to Legendre coefficients
-            _apply_factors_to_mf4_legendre(
-                mt_data, sample, param_mapping, energy_grids, verbose
+            events = _apply_factors_to_mf4_legendre(
+                mt_data, sample, param_mapping, energy_grids, verbose,
+                enforce_positivity=enforce_positivity,
+                positivity_check_points=positivity_check_points,
             )
+            positivity_events.extend(events)
             # Add all perturbed parameters for this MT
             for isotope, mt, l_coeff, energy_bin in param_mapping:
                 if mt == mt_number:
                     perturbed_params.append((isotope, mt, l_coeff, energy_bin))
-    
-    return perturbed_params
+
+    return perturbed_params, positivity_events
 
 
 def _apply_factors_to_mf4_legendre(
@@ -1153,8 +1371,10 @@ def _apply_factors_to_mf4_legendre(
     factors: np.ndarray,
     param_mapping: List[Tuple[int, int, int, int]],
     energy_grids: Dict[Tuple[int, int, int], List[float]],
-    verbose: bool = True
-):
+    verbose: bool = True,
+    enforce_positivity: bool = False,
+    positivity_check_points: int = 101,
+) -> List[Tuple[int, float, float, float]]:
     """
     Apply perturbation factors to MF4 Legendre coefficient data with proper discontinuity handling.
     
@@ -1344,17 +1564,71 @@ def _apply_factors_to_mf4_legendre(
     if mt_data._ne > 0:
         mt_data._interpolation = [(mt_data._ne, 2)]  # One region, linear-linear
         mt_data._nr = 1
-    
+
     # For MF4MTMixed, also update Legendre-specific attributes
     if isinstance(mt_data, MF4MTMixed):
         mt_data._ne1 = mt_data._ne  # Number of Legendre energy points
         # Note: _ne2 and _nr_tab are for the tabulated part and should remain unchanged
-    
+
+    # Step 6: Positivity enforcement.
+    # f(mu) = (1/2) sum_l (2l+1) a_l P_l(mu), with a_0 = 1 implicit.
+    # Pin the high-l tail (outside the perturbed band) to baseline so the
+    # projection only redistributes within the perturbed orders.
+    positivity_events: List[Tuple[int, float, float, float]] = []
+    if enforce_positivity and mt_data._ne > 0:
+        from kika.sampling.mf4_positivity import (
+            check_mf4_positivity,
+            project_mf4_to_positive,
+        )
+
+        perturbed_l = {
+            l_coeff for (_iso, mt, l_coeff, _bin) in param_mapping
+            if mt == mt_data.number
+        }
+        if perturbed_l:
+            max_perturbed_l = max(perturbed_l)
+        else:
+            max_perturbed_l = 0
+
+        for energy_idx, energy in enumerate(mt_data._energies):
+            a_endf_tail = np.asarray(
+                mt_data._legendre_coeffs[energy_idx], dtype=float
+            )
+            if a_endf_tail.size == 0:
+                continue
+            a_full = np.concatenate(([1.0], a_endf_tail))
+            is_pos, sigma_min = check_mf4_positivity(
+                a_full, n_points=positivity_check_points
+            )
+            if is_pos:
+                continue
+
+            # Pin a_l beyond the perturbed band to their current (baseline) values.
+            frozen = {
+                idx: float(a_full[idx])
+                for idx in range(max_perturbed_l + 1, len(a_full))
+            }
+            a_projected = project_mf4_to_positive(
+                a_full,
+                n_points=positivity_check_points,
+                frozen_indices=frozen,
+            )
+            delta = np.abs(a_projected - a_full)
+            max_delta = float(delta.max()) if delta.size else 0.0
+            positivity_events.append(
+                (mt_data.number, float(energy), float(sigma_min), max_delta)
+            )
+
+            # Write the projected a_l back (drop a_0).
+            mt_data._legendre_coeffs[energy_idx] = list(a_projected[1:])
+
     if verbose and _get_logger():
         _get_logger().info(
             f"  [INFO] [ENDF] MT{mt_data.number}: Applied {applied_count} interior factors and "
             f"{insertions_made} boundary discontinuities. Final: {mt_data._ne} energy points"
         )
+
+    return positivity_events
 
 
 def _interpolate_legendre_coefficients(

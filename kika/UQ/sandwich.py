@@ -72,10 +72,10 @@ class UncertaintyContribution:
             self.reaction_name = f"MT{self.mt}"
 
 
-@dataclass 
+@dataclass
 class UncertaintyResult:
     """Container for uncertainty propagation results.
-    
+
     Attributes
     ----------
     total_variance : float
@@ -87,7 +87,8 @@ class UncertaintyResult:
     response_value : float
         Reference response value used for relative uncertainty
     response_error : float
-        Error in the reference response value
+        MCNP tally relative error on the unperturbed response. Reported as a
+        diagnostic only — it is *not* combined with sigma_ND in this function.
     contributions : List[UncertaintyContribution]
         Individual reaction contributions sorted by magnitude
     n_reactions : int
@@ -96,6 +97,15 @@ class UncertaintyResult:
         Number of energy groups used
     correlation_effects : float
         Contribution from cross-correlations between reactions
+    bootstrap_ci_low, bootstrap_ci_high : float, optional
+        Lower / upper bound of the bootstrap CI on sigma_ND (relative). Both None
+        when bootstrap was disabled.
+    bootstrap_mean, bootstrap_std : float, optional
+        Mean and std of the bootstrap distribution of sigma_ND (relative).
+    bootstrap_n_samples : int, optional
+        Number of bootstrap samples drawn. None when bootstrap was disabled.
+    ci_level : float
+        Confidence level used for the bootstrap CI (default 0.95).
     """
     total_variance: float
     total_uncertainty: float
@@ -106,61 +116,57 @@ class UncertaintyResult:
     n_reactions: int
     n_energy_groups: int
     correlation_effects: float = 0.0
-    
+    bootstrap_ci_low: Optional[float] = None
+    bootstrap_ci_high: Optional[float] = None
+    bootstrap_mean: Optional[float] = None
+    bootstrap_std: Optional[float] = None
+    bootstrap_n_samples: Optional[int] = None
+    ci_level: float = 0.95
+
     def __repr__(self) -> str:
         """Format uncertainty results for display."""
         lines = []
         lines.append("=" * 80)
-        lines.append("UNCERTAINTY PROPAGATION RESULTS (Sandwich Formula)")
+        lines.append("NUCLEAR DATA UNCERTAINTY PROPAGATION (Sandwich Formula)")
         lines.append("=" * 80)
-        
-        # Calculate all uncertainty components
-        nuclear_data_abs = self.relative_uncertainty * abs(self.response_value)  # Nuclear data uncertainty (absolute)
-        nuclear_data_rel_pct = self.relative_uncertainty * 100  # Nuclear data uncertainty (relative %)
-        
-        # Statistical uncertainty components (e0 is stored as relative error)
-        statistical_rel = self.response_error  # Statistical uncertainty (relative, as stored in SDF)
-        statistical_abs = statistical_rel * abs(self.response_value)  # Convert to absolute
-        statistical_rel_pct = statistical_rel * 100  # Convert to percentage
-        
-        # Total uncertainty (combination of statistical + nuclear data)
-        # For independent uncertainties: σ_total = √(σ_stat² + σ_nucl²)
-        total_abs = (statistical_abs**2 + nuclear_data_abs**2)**0.5
-        total_rel_pct = (abs(total_abs) / abs(self.response_value) * 100) if self.response_value != 0 else 0.0
-        
+
+        nuclear_data_abs = self.relative_uncertainty * abs(self.response_value)
+        nuclear_data_rel_pct = self.relative_uncertainty * 100
+
         lines.append("")
-        lines.append("RESPONSE VALUE WITH UNCERTAINTIES:")
-        lines.append("-" * 50)
         lines.append(f"Response value:                    {self.response_value:.6e}")
         lines.append("")
-        lines.append("STATISTICAL UNCERTAINTY (from Monte Carlo):")
-        lines.append(f"  • Absolute:                      ± {statistical_abs:.6e}")
-        lines.append(f"  • Relative:                      ± {statistical_rel_pct:.3f}%")
+        lines.append("NUCLEAR DATA UNCERTAINTY  (sigma_ND = sqrt(S^T C S))")
+        lines.append(f"  Nominal:                         ± {nuclear_data_rel_pct:.3f}%")
+        lines.append(f"  Absolute:                        ± {nuclear_data_abs:.6e}")
+
+        if self.bootstrap_n_samples is not None and self.bootstrap_ci_low is not None:
+            ci_pct = int(round(self.ci_level * 100))
+            lines.append(f"  Bootstrap mean:                  ± {self.bootstrap_mean * 100:.3f}%")
+            lines.append(
+                f"  {ci_pct}% CI (bootstrap, N={self.bootstrap_n_samples}):"
+                f"{'':<6}[{self.bootstrap_ci_low * 100:.3f}%, {self.bootstrap_ci_high * 100:.3f}%]"
+            )
+
         lines.append("")
-        lines.append("NUCLEAR DATA UNCERTAINTY (from covariances):")
-        lines.append(f"  • Absolute:                      ± {nuclear_data_abs:.6e}")
-        lines.append(f"  • Relative:                      ± {nuclear_data_rel_pct:.3f}%")
-        lines.append("")
-        lines.append("TOTAL UNCERTAINTY (statistical + nuclear data):")
-        lines.append(f"  • Absolute:                      ± {total_abs:.6e}")
-        lines.append(f"  • Relative:                      ± {total_rel_pct:.3f}%")
-        lines.append("")
-        lines.append("FINAL RESULT:")
-        lines.append(f"  Response = {self.response_value:.6e} ± {total_abs:.6e}")
-        lines.append(f"  Response = {self.response_value:.6e} ± {total_rel_pct:.3f}%")
-        lines.append("")
-        lines.append("PROPAGATION DETAILS:")
-        lines.append("-" * 50)
-        lines.append(f"Total variance (σ²):               {self.total_variance:.6e}")
-        lines.append(f"Reactions included:                {self.n_reactions}")
-        lines.append(f"Energy groups:                     {self.n_energy_groups}")
-        
+        lines.append("PROPAGATION DETAILS")
+        lines.append(f"  Reactions:                       {self.n_reactions}")
+        lines.append(f"  Energy groups:                   {self.n_energy_groups}")
+        lines.append(f"  Total variance:                  {self.total_variance:.6e}")
+
         # Always show correlation effects (even if zero)
         if abs(self.correlation_effects) > 1e-15:
             corr_pct = abs(self.correlation_effects) / abs(self.total_variance) * 100 if abs(self.total_variance) > 1e-15 else 0.0
-            lines.append(f"Cross-reaction correlations:       {self.correlation_effects:.6e} ({corr_pct:.1f}% of total)")
+            lines.append(f"  Cross-reaction correlations:     {self.correlation_effects:.6e} ({corr_pct:.1f}% of total)")
         else:
-            lines.append(f"Cross-reaction correlations:       None (single reaction only)")
+            lines.append(f"  Cross-reaction correlations:     None (single reaction only)")
+
+        lines.append("")
+        lines.append("DIAGNOSTIC")
+        lines.append(
+            f"  MCNP tally rel_err (response):   {self.response_error * 100:.3f}%"
+            "   -- info only; not propagated here."
+        )
         
         lines.append("\n" + "=" * 70)
         lines.append("INDIVIDUAL REACTION CONTRIBUTIONS")
@@ -229,11 +235,43 @@ def _format_nuclide(zaid: int) -> str:
     """Format a ZAID as a human-readable nuclide string."""
     z = zaid // 1000
     a = zaid % 1000
-    
+
     if z in ATOMIC_NUMBER_TO_SYMBOL:
         return f"{ATOMIC_NUMBER_TO_SYMBOL[z]}-{a}"
     else:
         return f"Z{z}-{a}"
+
+
+def _bootstrap_nd_ci(
+    sensitivity_vector: np.ndarray,
+    sigma_s_rel_vector: np.ndarray,
+    covariance_matrix: np.ndarray,
+    n_samples: int,
+    ci_level: float,
+    seed: Optional[int],
+) -> Tuple[float, float, float, float]:
+    """Bootstrap a confidence interval on sigma_ND = sqrt(S^T C S).
+
+    Draws S_b = S0 * (1 + sigma_S_rel * eps_b), eps_b ~ N(0, I), then computes
+    sigma_ND,b = sqrt(|S_b^T C S_b|) for each draw. Returns the (low, high) percentile
+    bounds, the bootstrap mean of sigma_ND, and its standard deviation.
+
+    The per-bin error sigma_S_rel is the MCNP PERT relative error on each sensitivity
+    coefficient (i.e. SDFReactionData.error). Bins with sigma_S_rel == 0 (e.g. missing
+    or perfectly converged) reduce to the nominal S0 in every draw.
+    """
+    rng = np.random.default_rng(seed)
+    # eps_b ~ N(0, I): shape (n_samples, len(S))
+    eps = rng.standard_normal((n_samples, sensitivity_vector.size))
+    # S_b = S0 * (1 + sigma_s_rel * eps) -- broadcasts row-wise
+    s_samples = sensitivity_vector[None, :] * (1.0 + sigma_s_rel_vector[None, :] * eps)
+    # sigma_ND,b = sqrt(|S_b^T C S_b|), vectorised over b
+    variances = np.einsum('bi,ij,bj->b', s_samples, covariance_matrix, s_samples)
+    sigmas = np.sqrt(np.abs(variances))
+
+    alpha = (1.0 - ci_level) / 2.0
+    low, high = np.percentile(sigmas, [100 * alpha, 100 * (1.0 - alpha)])
+    return float(low), float(high), float(np.mean(sigmas)), float(np.std(sigmas, ddof=1))
 
 
 def _merge_covariance_matrices(
@@ -428,7 +466,11 @@ def sandwich_uncertainty_propagation(
     legendre_cov_mat: Optional[Union[MultigroupLegendreCovariance, List[MultigroupLegendreCovariance]]] = None,
     reaction_filter: Optional[Dict[int, List[int]]] = None,
     energy_tolerance: float = 1e-6,
-    verbose: bool = False
+    verbose: bool = False,
+    bootstrap: bool = True,
+    n_bootstrap: int = 1000,
+    ci_level: float = 0.95,
+    bootstrap_seed: Optional[int] = None,
 ) -> UncertaintyResult:
     """
     Apply the sandwich formula σ²_R = S^T Σ S to propagate nuclear data uncertainties.
@@ -470,7 +512,18 @@ def sandwich_uncertainty_propagation(
         Tolerance for matching energy grid boundaries (default: 1e-6)
     verbose : bool, optional
         Print detailed information about the propagation process
-        
+    bootstrap : bool, optional
+        If True (default), compute a bootstrap CI on sigma_ND that propagates the
+        per-bin MC error on the sensitivity coefficients (SDFReactionData.error,
+        from MCNP PERT) into the propagated nuclear-data uncertainty.
+    n_bootstrap : int, optional
+        Number of bootstrap samples to draw (default: 1000).
+    ci_level : float, optional
+        Confidence level for the bootstrap interval (default: 0.95).
+    bootstrap_seed : int, optional
+        Seed for the bootstrap RNG. If None (default), draws are non-deterministic
+        (percentile drift across runs is sub-percent at N=1000 for typical inputs).
+
     Returns
     -------
     UncertaintyResult
@@ -666,18 +719,37 @@ def sandwich_uncertainty_propagation(
     if verbose:
         logger.info("Building combined sensitivity vector and covariance matrix...")
     
-    sensitivity_vector, covariance_matrix, reaction_indices, reaction_spans = _build_combined_matrices(
+    sensitivity_vector, covariance_matrix, sigma_s_rel_vector, reaction_indices, reaction_spans = _build_combined_matrices(
         results,
         verbose
     )
-    
+
     if verbose:
         logger.info("✓ Matrix construction complete")
         logger.info("=" * 60)
-    
+
     # Apply sandwich formula: σ²_R = S^T Σ S
     total_variance = float(sensitivity_vector.T @ covariance_matrix @ sensitivity_vector)
     total_uncertainty = np.sqrt(abs(total_variance))
+
+    # Bootstrap CI on sigma_ND: propagate per-bin MC error on sensitivities through
+    # the sandwich formula by sampling S_b ~ S0 * (1 + sigma_s_rel * eps_b).
+    if bootstrap:
+        ci_low, ci_high, boot_mean, boot_std = _bootstrap_nd_ci(
+            sensitivity_vector,
+            sigma_s_rel_vector,
+            covariance_matrix,
+            n_samples=n_bootstrap,
+            ci_level=ci_level,
+            seed=bootstrap_seed,
+        )
+        if verbose:
+            logger.info(
+                f"Bootstrap CI on sigma_ND (N={n_bootstrap}, {int(ci_level*100)}%): "
+                f"[{ci_low:.4%}, {ci_high:.4%}], mean = {boot_mean:.4%}"
+            )
+    else:
+        ci_low = ci_high = boot_mean = boot_std = None
     
     # Calculate relative uncertainty
     # Since both sensitivities and covariances are relative, the sandwich formula
@@ -732,7 +804,13 @@ def sandwich_uncertainty_propagation(
         contributions=contributions,
         n_reactions=total_reactions,
         n_energy_groups=representative_n_groups,
-        correlation_effects=correlation_effects
+        correlation_effects=correlation_effects,
+        bootstrap_ci_low=ci_low,
+        bootstrap_ci_high=ci_high,
+        bootstrap_mean=boot_mean,
+        bootstrap_std=boot_std,
+        bootstrap_n_samples=n_bootstrap if bootstrap else None,
+        ci_level=ci_level,
     )
 
 
@@ -991,39 +1069,47 @@ def _build_matrices(
     matching_reactions: List[Tuple[int, int]],
     energy_mapping: Dict[int, int],
     verbose: bool
-) -> Tuple[np.ndarray, np.ndarray, Dict[int, Tuple[int, int]]]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[int, Tuple[int, int]]]:
     """Build sensitivity vector and covariance matrix in consistent order.
-    
+
     Important: Both sensitivity coefficients and covariance matrices are in relative form.
     This means the sandwich formula σ²_R = S^T Σ S will give relative variance,
     and the uncertainty will be a relative uncertainty that can be directly
     compared to the relative uncertainties in the covariance matrix.
+
+    Also returns a per-bin relative MC error vector (sigma_S_rel) aligned with the
+    sensitivity vector, sourced from ``SDFReactionData.error``. This is used by the
+    bootstrap CI on the propagated nuclear-data uncertainty.
     """
-    
+
     n_groups = len(energy_mapping)
     n_reactions = len(matching_reactions)
     total_size = n_groups * n_reactions
-    
+
     if verbose:
         logger.info(f"Building matrices: {n_reactions} reactions × {n_groups} groups = {total_size} total elements")
-    
+
     # Create reaction index mapping
     reaction_indices = {i: reaction for i, reaction in enumerate(matching_reactions)}
-    
+
     # Build sensitivity vector using ONLY sensitivity coefficients (not errors)
     sensitivity_vector = np.zeros(total_size)
-    
+    # Per-bin relative MC error on each sensitivity coefficient (from MCNP PERT)
+    sigma_s_rel_vector = np.zeros(total_size)
+
     # Create lookup for sensitivity data
     sens_lookup = {(r.zaid, r.mt): r for r in sdf_data.data}
-    
+
     for i, (zaid, mt) in enumerate(matching_reactions):
         reaction_data = sens_lookup[(zaid, mt)]
-        
+
         for sens_group, cov_group in energy_mapping.items():
             if sens_group < len(reaction_data.sensitivity):
                 vector_idx = i * n_groups + sens_group
                 # Use ONLY the sensitivity coefficient, NOT the error
                 sensitivity_vector[vector_idx] = reaction_data.sensitivity[sens_group]
+                if reaction_data.error is not None and sens_group < len(reaction_data.error):
+                    sigma_s_rel_vector[vector_idx] = reaction_data.error[sens_group]
     
     # Build covariance matrix (in relative form)
     covariance_matrix = np.zeros((total_size, total_size))
@@ -1078,43 +1164,35 @@ def _build_matrices(
         # Important note about units
         logger.info("Using relative sensitivities with relative covariances")
         logger.info("Result will be in relative uncertainty units")
-    
-    return sensitivity_vector, covariance_matrix, reaction_indices
+
+    return sensitivity_vector, covariance_matrix, sigma_s_rel_vector, reaction_indices
 
 
 def _build_combined_matrices(
     results: List[Dict],
     verbose: bool
-) -> Tuple[np.ndarray, np.ndarray, Dict[int, Tuple], Dict[int, Tuple[int, int]]]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[int, Tuple], Dict[int, Tuple[int, int]]]:
     """Build combined sensitivity vector and covariance matrix for both cross-section and Legendre data.
-    
-    This function combines cross-section and Legendre sensitivities and covariances into unified
-    matrices. The matrices are block-diagonal with no cross-correlations between cross-sections
-    and Legendre moments.
-    
-    Parameters
-    ----------
-    results : List[Dict]
-        List of dictionaries containing processed sensitivity and covariance data for each type
-    verbose : bool
-        Whether to print detailed information
-        
+
+    Also returns a flat per-bin relative MC error vector (sigma_s_rel) aligned with the
+    sensitivity vector. The MC error on each sensitivity coefficient is read from
+    ``SDFReactionData.error`` (populated from MCNP PERT) and is used by the bootstrap
+    CI on the propagated nuclear-data uncertainty.
+
     Returns
     -------
     Tuple containing:
     - sensitivity_vector : np.ndarray
-        Combined sensitivity vector
-    - covariance_matrix : np.ndarray  
-        Combined block-diagonal covariance matrix
+    - covariance_matrix : np.ndarray
+    - sigma_s_rel : np.ndarray
+        Per-bin relative MC error aligned with sensitivity_vector.
     - reaction_indices : Dict[int, Tuple]
-        Mapping from index to reaction identifier (format depends on type)
     - reaction_spans : Dict[int, Tuple[int, int]]
-        Mapping from reaction index to (start_offset, n_groups) for that reaction
     """
-    
+
     # Build matrices for each type
     sub_matrices = []
-    
+
     for result in results:
         if result['type'] == 'cross_section':
             # Build cross-section matrices using existing function
@@ -1123,90 +1201,97 @@ def _build_combined_matrices(
                 def __init__(self, data):
                     self.data = data
             mock_sdf = MockSDFData(result['sdf_data'])
-            
-            sens_vec, cov_mat, reaction_idx = _build_matrices(
+
+            sens_vec, cov_mat, sigma_vec, reaction_idx = _build_matrices(
                 mock_sdf,
                 result['cov_mat'],
                 result['matching_reactions'],
                 result['energy_mapping'],
                 verbose
             )
-            
+
             sub_matrices.append({
                 'type': 'cross_section',
                 'sensitivity_vector': sens_vec,
                 'covariance_matrix': cov_mat,
+                'sigma_s_rel_vector': sigma_vec,
                 'reaction_indices': reaction_idx,
                 'n_groups': len(result['energy_mapping']),
                 'n_reactions': len(result['matching_reactions'])
             })
-            
+
         elif result['type'] == 'legendre':
             # Build Legendre matrices
-            sens_vec, cov_mat, reaction_idx = _build_legendre_matrices(
+            sens_vec, cov_mat, sigma_vec, reaction_idx = _build_legendre_matrices(
                 result['sdf_data'],
                 result['cov_mat'],
                 result['matching_reactions'],
                 result['energy_mapping'],
                 verbose
             )
-            
+
             sub_matrices.append({
                 'type': 'legendre',
                 'sensitivity_vector': sens_vec,
                 'covariance_matrix': cov_mat,
+                'sigma_s_rel_vector': sigma_vec,
                 'reaction_indices': reaction_idx,
                 'n_groups': len(result['energy_mapping']),
                 'n_reactions': len(result['matching_reactions'])
             })
-    
+
     total_size = sum(m['sensitivity_vector'].size for m in sub_matrices)
-    
+
     if verbose:
         logger.info(f"Combining {len(sub_matrices)} matrix blocks, total size: {total_size}")
-    
+
     # Create combined matrices
     combined_sensitivity = np.zeros(total_size)
     combined_covariance = np.zeros((total_size, total_size))
+    combined_sigma_s_rel = np.zeros(total_size)
     combined_reaction_indices: Dict[int, Tuple] = {}
     combined_reaction_spans: Dict[int, Tuple[int, int]] = {}
-    
+
     # Fill combined matrices block by block
     current_offset = 0
     global_reaction_idx = 0
-    
+
     for sub in sub_matrices:
         sub_vec = sub['sensitivity_vector']
         sub_cov = sub['covariance_matrix']
+        sub_sigma = sub['sigma_s_rel_vector']
         n_groups = sub['n_groups']
         n_reac = sub['n_reactions']
-        
+
         # Copy sensitivity vector
         combined_sensitivity[current_offset:current_offset + sub_vec.size] = sub_vec
-        
+
         # Copy covariance matrix
         combined_covariance[current_offset:current_offset + sub_vec.size,
                           current_offset:current_offset + sub_vec.size] = sub_cov
-        
+
+        # Copy per-bin relative MC error vector
+        combined_sigma_s_rel[current_offset:current_offset + sub_vec.size] = sub_sigma
+
         # Map reactions and their spans
         for local_idx, reaction_id in sub['reaction_indices'].items():
             start = current_offset + local_idx * n_groups
             combined_reaction_indices[global_reaction_idx + local_idx] = reaction_id
             combined_reaction_spans[global_reaction_idx + local_idx] = (start, n_groups)
-        
+
         current_offset += sub_vec.size
         global_reaction_idx += n_reac
-    
+
     # Enforce exact symmetry once
     combined_covariance = 0.5 * (combined_covariance + combined_covariance.T)
-    
+
     if verbose:
         logger.info(f"Combined matrix construction complete")
         logger.info(f"  Total sensitivity elements: {np.count_nonzero(combined_sensitivity)}/{total_size}")
         logger.info(f"  Total covariance elements: {np.count_nonzero(combined_covariance)}/{total_size**2}")
         logger.info(f"  Total reactions: {len(combined_reaction_indices)}")
-    
-    return combined_sensitivity, combined_covariance, combined_reaction_indices, combined_reaction_spans
+
+    return combined_sensitivity, combined_covariance, combined_sigma_s_rel, combined_reaction_indices, combined_reaction_spans
 
 
 def _build_legendre_matrices(
@@ -1215,43 +1300,33 @@ def _build_legendre_matrices(
     matching_reactions: List[Tuple[int, int, int]],
     energy_mapping: Dict[int, int],
     verbose: bool
-) -> Tuple[np.ndarray, np.ndarray, Dict[int, Tuple[int, int, int]]]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[int, Tuple[int, int, int]]]:
     """Build sensitivity vector and covariance matrix for Legendre moment data.
-    
-    Parameters
-    ----------
-    sens_data : List[SDFReactionData]
-        Legendre sensitivity data
-    cov_mat : MultigroupLegendreCovariance
-        Legendre covariance matrix
-    matching_reactions : List[Tuple[int, int, int]]
-        List of (zaid, mt_base, legendre_order) tuples
-    energy_mapping : Dict[int, int]
-        Mapping from sensitivity group to covariance group
-    verbose : bool
-        Whether to print detailed information
-        
+
     Returns
     -------
     Tuple containing:
     - sensitivity_vector : np.ndarray
     - covariance_matrix : np.ndarray
+    - sigma_s_rel_vector : np.ndarray
+        Per-bin relative MC error on each Legendre sensitivity coefficient.
     - reaction_indices : Dict[int, Tuple[int, int, int]]
     """
-    
+
     n_groups = len(energy_mapping)
     n_reactions = len(matching_reactions)
     total_size = n_groups * n_reactions
-    
+
     if verbose:
         logger.info(f"Building Legendre matrices: {n_reactions} reactions × {n_groups} groups = {total_size} total elements")
-    
+
     # Create reaction index mapping
     reaction_indices = {i: reaction for i, reaction in enumerate(matching_reactions)}
-    
+
     # Build sensitivity vector
     sensitivity_vector = np.zeros(total_size)
-    
+    sigma_s_rel_vector = np.zeros(total_size)
+
     # Create lookup for sensitivity data (convert MT back from Legendre order)
     sens_lookup = {}
     for r in sens_data:
@@ -1259,15 +1334,17 @@ def _build_legendre_matrices(
             l_order = r.mt - 4000
             mt_base = 2  # Only elastic supported for now
             sens_lookup[(r.zaid, mt_base, l_order)] = r
-    
+
     for i, (zaid, mt_base, l_order) in enumerate(matching_reactions):
         if (zaid, mt_base, l_order) in sens_lookup:
             reaction_data = sens_lookup[(zaid, mt_base, l_order)]
-            
+
             for sens_group, cov_group in energy_mapping.items():
                 if sens_group < len(reaction_data.sensitivity):
                     vector_idx = i * n_groups + sens_group
                     sensitivity_vector[vector_idx] = reaction_data.sensitivity[sens_group]
+                    if reaction_data.error is not None and sens_group < len(reaction_data.error):
+                        sigma_s_rel_vector[vector_idx] = reaction_data.error[sens_group]
     
     # Build covariance matrix from MultigroupLegendreCovariance
     covariance_matrix = np.zeros((total_size, total_size))
@@ -1321,8 +1398,8 @@ def _build_legendre_matrices(
         
         max_sens = np.max(np.abs(sensitivity_vector))
         logger.info(f"Max Legendre sensitivity coefficient: {max_sens:.6e}")
-    
-    return sensitivity_vector, covariance_matrix, reaction_indices
+
+    return sensitivity_vector, covariance_matrix, sigma_s_rel_vector, reaction_indices
 
 
 def _calculate_individual_contributions(

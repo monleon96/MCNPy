@@ -5,7 +5,7 @@ from .sensitivities.sensitivity_processing import create_sdf_data, compute_sensi
 from .sensitivities.sdf import SDFData
 from .sensitivities.sdf_parser import read_sdf
 from .ace.parsers.parse_ace import read_ace
-from .cov.parse_covmat import read_coverx, read_covfil, read_scale_covmat, read_njoy_covmat
+from .cov.parse_covmat import read_coverx, read_covfil, read_boxer, read_scale_covmat, read_njoy_covmat
 from .endf.read_endf import read_endf
 from .wwinp.read_wwinp import read_wwinp
 from . import energy_grids
@@ -26,7 +26,7 @@ __all__ = [
     'read_ace',
     'read_endf',
     'read_wwinp',
-    'read_coverx', 'read_covfil', 'read_scale_covmat', 'read_njoy_covmat',
+    'read_coverx', 'read_covfil', 'read_boxer', 'read_scale_covmat', 'read_njoy_covmat',
     'materials', 'Material', 'MaterialCollection', 'Nuclide', 'NuclideAccessor',
 ]
 

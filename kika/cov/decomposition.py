@@ -6,7 +6,7 @@ CrossSectionCovariance and LegendreCovariance classes without code duplication.
 """
 
 import numpy as np
-from typing import Dict, List, Optional, Sequence, Tuple, Protocol, runtime_checkable
+from typing import Dict, List, Optional, Sequence, Set, Tuple, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -684,6 +684,137 @@ def rescale_threshold_bins_congruence(
         _log_message(sep, logger, verbose)
 
     return cov_rescaled, info
+
+
+def flag_outlier_variance_bins(
+    cov_mat: np.ndarray,
+    param_pairs: Sequence[Tuple[int, int]],
+    num_groups: int,
+    bins: Sequence[float],
+    *,
+    outlier_factor: float = 1000.0,
+    min_groups_for_median: int = 4,
+    skip_indices: Optional[Sequence[int]] = None,
+    space: str = "log",
+    verbose: bool = True,
+    logger=None,
+    label: str = "",
+) -> Tuple[List[int], List[float], List[Dict]]:
+    """
+    Flag diagonal entries σ²_i > ``outlier_factor`` × per-MT median(σ²) as
+    statistical outliers. Target = per-MT median.
+
+    Catches evaluator-written placeholder/filler variances that aren't near
+    a reaction threshold (so ``flag_threshold_bins`` won't catch them) and
+    would otherwise saturate the global variance cap. Concrete failure mode:
+    JEFF-4.0 Mn-55 MT=856 (lumped n,α ladder) carries σ²_rel ~ 10⁹ in bins
+    above ~22 MeV where σ̄ collapses; the data is parsed as already-relative
+    so the σ̄-floor in the abs→rel conversion never sees it.
+
+    Same return signature as ``flag_threshold_bins`` so
+    ``rescale_threshold_bins_congruence`` consumes the output unchanged.
+
+    ``outlier_factor`` is intentionally large (default 1000) so only
+    physically-impossible outliers are caught — bins at 5–10× the median
+    represent legitimate heterogeneity in measurement quality and are left
+    alone.
+
+    Parameters
+    ----------
+    cov_mat : (n,n) np.ndarray
+    param_pairs : list of (zaid, mt) tuples
+    num_groups : int
+    bins : array-like, length ``num_groups + 1``
+    outlier_factor : float
+        Bins with σ² > ``outlier_factor`` × per-MT median are flagged.
+    min_groups_for_median : int
+        Minimum same-MT bins (excluding the flagged one) required to
+        compute the median target. If fewer, the bin is not flagged.
+    skip_indices : sequence of int, optional
+        Flat indices to exclude from outlier consideration entirely
+        (typically those already rescaled by ``flag_threshold_bins``).
+    space, verbose, logger, label : same as ``flag_threshold_bins``.
+    """
+    bins_arr = np.asarray(bins, dtype=float)
+    diag = np.diag(cov_mat)
+
+    skip_set: Set[int] = set(int(i) for i in (skip_indices or []))
+
+    flagged_indices: List[int] = []
+    targets: List[float] = []
+    detection_log: List[Dict] = []
+
+    for pair_idx, (zaid, mt) in enumerate(param_pairs):
+        block_start = pair_idx * num_groups
+        block_diag = diag[block_start: block_start + num_groups]
+        finite_pos = block_diag[np.isfinite(block_diag) & (block_diag > 0)]
+        if finite_pos.size < min_groups_for_median:
+            continue
+        median_var = float(np.median(finite_pos))
+        if median_var <= 0.0:
+            continue
+        threshold = outlier_factor * median_var
+
+        for g in range(num_groups):
+            flat = block_start + g
+            if flat in skip_set:
+                continue
+            cur = float(diag[flat])
+            if not np.isfinite(cur) or cur <= 0.0 or cur <= threshold:
+                continue
+
+            other_mask = np.ones(num_groups, dtype=bool)
+            other_mask[g] = False
+            other_vals = block_diag[other_mask]
+            other_pos = other_vals[np.isfinite(other_vals) & (other_vals > 0)]
+            if other_pos.size < min_groups_for_median:
+                continue
+            target = float(np.median(other_pos))
+            if target <= 0.0:
+                continue
+
+            e_lo = float(bins_arr[g]) if g < len(bins_arr) - 1 else float("nan")
+            e_hi = float(bins_arr[g + 1]) if g < len(bins_arr) - 1 else float("nan")
+
+            flagged_indices.append(flat)
+            targets.append(target)
+            detection_log.append({
+                "index": flat,
+                "zaid": int(zaid),
+                "mt": int(mt),
+                "group": g,
+                "energy_lo": e_lo,
+                "energy_hi": e_hi,
+                "current_variance": cur,
+                "target_variance": target,
+                "median_variance": median_var,
+                "ratio_to_median": cur / median_var,
+                "n_groups_used": int(other_pos.size),
+            })
+
+    if verbose or logger is not None:
+        ctx = f" [{label}]" if label else ""
+        sep = "-" * 60
+        if flagged_indices:
+            _log_message(f"\n[COVARIANCE] [VARIANCE-OUTLIER DETECTION]{ctx}\n{sep}", logger, verbose)
+            _log_message(
+                f"  Flagged {len(flagged_indices)} bin(s) with σ² > "
+                f"{outlier_factor:g} × per-MT median (space={space}):",
+                logger, verbose,
+            )
+            for d in detection_log:
+                _log_message(
+                    f"    MT={d['mt']}, G={d['group']} "
+                    f"[{d['energy_lo']:.2e},{d['energy_hi']:.2e}] MeV: "
+                    f"σ²={d['current_variance']:.3e}, "
+                    f"median={d['median_variance']:.3e}, "
+                    f"ratio={d['ratio_to_median']:.2e}, "
+                    f"target={d['target_variance']:.3e}",
+                    logger, verbose,
+                )
+            _log_message(sep, logger, verbose)
+
+    return flagged_indices, targets, detection_log
 
 
 def nearest_psd_higham(

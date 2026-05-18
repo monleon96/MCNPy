@@ -906,7 +906,7 @@ class MF34MT(MT):
 
             if l_order in coeffs_dict:
                 vals_2d = np.asarray(coeffs_dict[l_order], dtype=float).reshape(n_cells, n_sub)
-                cell_avg = np.trapz(vals_2d, sub_e_2d, axis=1) / (grid[1:] - grid[:-1])
+                cell_avg = np.trapezoid(vals_2d, sub_e_2d, axis=1) / (grid[1:] - grid[:-1])
             else:
                 cell_avg = np.zeros(n_cells, dtype=float)
 

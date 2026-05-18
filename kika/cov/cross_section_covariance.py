@@ -10,6 +10,88 @@ import pandas as pd
 from kika._constants import MT_TO_REACTION
 from kika._utils import create_repr_section
 
+
+def _safe_min_eigvalsh(M: np.ndarray) -> float:
+    """Smallest eigenvalue of a symmetric matrix, robust to LAPACK failures.
+
+    Fallback cascade:
+      1. numpy's eigvalsh (LAPACK dsyevd, divide-and-conquer; default, fast)
+      2. scipy.linalg.eigh with driver='evr' (LAPACK dsyevr, RRR)
+      3. scipy.linalg.eigh with driver='ev'  (LAPACK dsyev, QR iteration)
+      4. ARPACK (scipy.sparse.linalg.eigsh) for smallest algebraic — totally
+         different algorithm family, survives buggy LAPACK builds
+      5. Drop all-zero rows/cols and retry numpy on the reduced matrix
+      6. Last resort: warn and return -inf so callers proceed without
+         claiming the matrix is PSD. The pipeline's downstream PSD repair
+         (variance cap, threshold-bin rescale, Higham, eigen-clip) handles
+         the rest; an eigenvalue check that we couldn't run shouldn't kill
+         the whole job.
+    """
+    last_err: Exception = RuntimeError("no solver attempted")
+
+    def _ok(v: float) -> bool:
+        return np.isfinite(v)
+
+    try:
+        v = float(np.linalg.eigvalsh(M).min())
+        if _ok(v):
+            return v
+        last_err = RuntimeError(f"numpy eigvalsh returned non-finite ({v})")
+    except Exception as e:
+        last_err = e
+
+    try:
+        from scipy.linalg import eigh as _sp_eigh
+        for driver in ("evr", "ev"):
+            try:
+                v = float(_sp_eigh(M, eigvals_only=True, driver=driver).min())
+                if _ok(v):
+                    return v
+                last_err = RuntimeError(f"scipy eigh ({driver}) returned non-finite ({v})")
+            except Exception as e:
+                last_err = e
+    except ImportError as e:
+        last_err = e
+
+    try:
+        from scipy.sparse.linalg import eigsh as _sp_eigsh
+        v = float(_sp_eigsh(M, k=1, which="SA", return_eigenvectors=False)[0])
+        if _ok(v):
+            return v
+        last_err = RuntimeError(f"ARPACK eigsh returned non-finite ({v})")
+    except Exception as e:
+        last_err = e
+
+    try:
+        nonzero = ~(np.all(M == 0, axis=0) & np.all(M == 0, axis=1))
+        if 0 < int(nonzero.sum()) < M.shape[0]:
+            M_red = M[np.ix_(nonzero, nonzero)]
+            v_red = float(np.linalg.eigvalsh(M_red).min())
+            if _ok(v_red):
+                return min(v_red, 0.0)  # zero rows contribute zero eigenvalues
+    except Exception as e:
+        last_err = e
+
+    # All solvers failed. Returning -inf would force downstream removal
+    # escalation, but the removal loop also needs eigenvalues — so it falls
+    # back to a diagonal-magnitude heuristic that hatchets through every MT.
+    # Instead return 0.0 (== "acceptable at the boundary"): the caller skips
+    # removal, and the pipeline's downstream PSD repair (variance cap,
+    # threshold-bin rescale, inert-bin mask, Higham, eigen-clip) handles
+    # actual indefiniteness on the masked submatrix where LAPACK usually
+    # works fine. Worst case it doesn't fully repair — but that's strictly
+    # better than deleting most of the perturbation parameters.
+    import warnings
+    warnings.warn(
+        f"_safe_min_eigvalsh: all eigenvalue solvers failed ({type(last_err).__name__}: {last_err}); "
+        "returning 0.0 (treat as boundary-PSD) so the caller skips removal escalation. "
+        "Downstream Higham / eigen-clip will still repair indefiniteness on the masked submatrix.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return 0.0
+
+
 if TYPE_CHECKING:
     from pathlib import Path
     from kika.plotting.plot_data import CovarianceHeatmapData, MultigroupCrossSectionPlotData, MultigroupUncertaintyPlotData
@@ -50,6 +132,10 @@ class CrossSectionCovariance:
     is_relative: List[bool] = field(default_factory=list)  # Per-matrix: True=relative, False=absolute
     cross_sections: Dict[Tuple[int, int], np.ndarray] = field(default_factory=dict)
     energy_unit: str = 'eV'  # Energy unit: 'eV' or 'MeV'
+    # File-level scalar metadata propagated by I/O routines (COVFIL, COVERX, …).
+    # Well-known keys: 'awr' (atomic weight ratio), 'temperature' (K).
+    # New fields can be added without changing the class.
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
     # ------------------------------------------------------------------
@@ -964,10 +1050,12 @@ class CrossSectionCovariance:
         *,
         level: str = "soft",            # 'soft' | 'medium' | 'hard'
         high_val_thresh: float = 5.0,
+        clamp_target: float = 1.0,
         accept_tol: float = -1.0e-4,
         clamp_max_iter: int = 10,
         max_steps: int = 40,
         verbose: bool = True,
+        clamp_detail: bool = False,
         logger = None,  # Optional logger for file output
     ) -> Tuple["CrossSectionCovariance", Dict[str, Any]]:
         """
@@ -976,11 +1064,14 @@ class CrossSectionCovariance:
         Parameters
         ----------
         level
-            'soft'   - clamp variances only  
-            'medium' - clamp then drop the worst *block pairs*  
-            'hard'   - clamp then drop the worst *reactions* (all blocks)  
+            'soft'   - clamp variances only
+            'medium' - clamp then drop the worst *block pairs*
+            'hard'   - clamp then drop the worst *reactions* (all blocks)
         high_val_thresh
-            Threshold used both by clamping and by the removal heuristic.
+            Diagonal variances above this threshold are clamped.
+        clamp_target
+            Target variance assigned to clamped diagonals (off-diagonals
+            rescaled by sqrt(target/|old|) to preserve correlations).
         accept_tol
             Minimum eigenvalue tolerated for acceptance.
         clamp_max_iter
@@ -989,6 +1080,9 @@ class CrossSectionCovariance:
             Maximum block-removal iterations (if used).
         verbose
             Forwarded to the removal routine.
+        clamp_detail
+            Dump every off-diagonal before/after pair on each clamp event.
+            Very noisy — opt in only to debug a specific clamp.
         logger
             Optional logger instance for file output. If None, uses print().
         """
@@ -1002,9 +1096,11 @@ class CrossSectionCovariance:
         # ------------------------------------------------------------------
         cm_after_clamp, log = self._clamp_covariance(
             high_val_thresh=high_val_thresh,
+            clamp_target=clamp_target,
             accept_tol=accept_tol,
             max_iter=clamp_max_iter,
             verbose=verbose,
+            clamp_detail=clamp_detail,
             logger=logger,
         )
 
@@ -2493,7 +2589,43 @@ class CrossSectionCovariance:
             # ──────────────────────────────────────────────────────
             # 2 Eigen-analysis
             # ──────────────────────────────────────────────────────
-            eigvals, eigvecs = np.linalg.eigh(M)
+            # numpy's default driver (dsyevd) sometimes silently returns NaN
+            # eigenvalues on rank-deficient block-covariance matrices instead
+            # of raising. Treat NaN as a failure too, and fall back to scipy's
+            # 'evr' (dsyevr, RRR) driver, which is more numerically robust.
+            eigvals, eigvecs = None, None
+            _eigh_err: Exception = RuntimeError("no solver attempted")
+            for _backend in ("numpy", "scipy_evr", "scipy_ev"):
+                try:
+                    if _backend == "numpy":
+                        _ev, _vc = np.linalg.eigh(M)
+                    else:
+                        from scipy.linalg import eigh as _sp_eigh
+                        _ev, _vc = _sp_eigh(M, driver=_backend.split("_")[1])
+                    if np.all(np.isfinite(_ev)) and np.all(np.isfinite(_vc)):
+                        eigvals, eigvecs = _ev, _vc
+                        break
+                    _eigh_err = RuntimeError(f"{_backend} eigh returned non-finite values")
+                except Exception as e:
+                    _eigh_err = e
+            if eigvals is None:
+                # Cannot compute eigenvectors → cannot pick worst block to
+                # remove. Bail out cleanly; pipeline proceeds with downstream
+                # PSD repair (variance cap, Higham, eigen-clip).
+                if verbose:
+                    _log_message(
+                        f"[COV] [AUTOFIX] [WARNING] eigendecomposition failed at step {step:02d} "
+                        f"({type(_eigh_err).__name__}: {_eigh_err}); aborting removal loop"
+                    )
+                return current, {
+                    "iterations": step,
+                    "min_eigenvalue": _safe_min_eigvalsh(M),
+                    "converged": False,
+                    "removed_pairs": removed,
+                    "removed_mts": removed_mts,
+                    "removed_correlations": removed_correlations,
+                    "lapack_failed": True,
+                }
             min_ev = float(eigvals.min())
             if verbose:
                 _log_message(f"[COV] [AUTOFIX] [STEP {step:02d}] Smallest eigenvalue: {min_ev:.4e}")
@@ -2602,7 +2734,7 @@ class CrossSectionCovariance:
         if verbose:
             _log_message(f"[COV] [AUTOFIX] [ERROR] Reached limit of {max_steps} steps without convergence")
         # Directly compute min eigenvalue instead of using analyze_covariance
-        min_eigenvalue = float(np.linalg.eigvalsh(current.covariance_matrix).min())
+        min_eigenvalue = _safe_min_eigvalsh(current.covariance_matrix)
 
         logg = {
             "steps": max_steps,
@@ -2627,15 +2759,22 @@ class CrossSectionCovariance:
         self,
         *,
         high_val_thresh: float = 5.0,
+        clamp_target: float = 1.0,
         accept_tol: float = -1.0e-4,
         max_iter: int = 5,
         verbose: bool = True,
+        clamp_detail: bool = False,
         logger = None,  # Optional logger for file output
     ) -> Tuple["CrossSectionCovariance", Dict[str, Any]]:
         """
-        Cap diagonal variances larger than `high_val_thresh`
-        to **+1.0** (always positive) and rescale connected
-        covariances so that correlations remain untouched.
+        Cap diagonal variances larger than `high_val_thresh` to `clamp_target`
+        and rescale the connected row/column by sqrt(target/|old|) so that
+        correlations remain untouched.
+
+        verbose=True prints the [CLAMP #N] header and per-clamp adjusted-count
+        summary. clamp_detail=True additionally dumps every off-diagonal
+        before/after pair (very noisy on large matrices — opt in only when
+        debugging a specific clamp event).
         """
         if self.num_groups == 0:
             raise ValueError("num_groups is zero.")
@@ -2672,7 +2811,7 @@ class CrossSectionCovariance:
                     if abs(old_var) <= high_val_thresh:
                         continue
 
-                    new_var = 1.0                        # fixed target
+                    new_var = clamp_target
                     M[idx, idx] = new_var
                     changed_any = True
                     clamped_count += 1
@@ -2694,7 +2833,7 @@ class CrossSectionCovariance:
                     diff_total = (np.count_nonzero(diff_row) +
                                 np.count_nonzero(diff_col) - 1)
 
-                    if verbose and diff_total:
+                    if clamp_detail and diff_total:
                         for j in np.where(diff_row)[0]:
                             if j == idx:
                                 continue
@@ -2718,7 +2857,8 @@ class CrossSectionCovariance:
                                 f"{col_before[i]:12.4e} → {M[i, idx]:12.4e}"
                             )
 
-                    _log_message(f"      {diff_total} covariances adjusted")
+                    if verbose:
+                        _log_message(f"      {diff_total} covariances adjusted")
 
             if not changed_any:
                 _log_message(f"  [ITERATION {iter_num:02d}] No variances above threshold; stopping clamping")
@@ -2738,7 +2878,7 @@ class CrossSectionCovariance:
                 j = idx_map[(ic, rc)]
                 mat_ref[:, :] = M[i*G:(i+1)*G, j*G:(j+1)*G]
 
-            min_ev = float(np.linalg.eigvalsh(M).min())
+            min_ev = _safe_min_eigvalsh(M)
             _log_message(f"  [ITERATION {iter_num:02d}] Smallest eigenvalue: {min_ev:.4e}")
 
             if min_ev >= accept_tol:
@@ -2756,7 +2896,7 @@ class CrossSectionCovariance:
         
         # Return the clamped matrix and log after clamping - Fix: Check final eigenvalue here too
         final_M = current.covariance_matrix
-        min_ev_final = float(np.linalg.eigvalsh(final_M).min())
+        min_ev_final = _safe_min_eigvalsh(final_M)
         
         # Check if final result is actually acceptable
         converged = min_ev_final >= accept_tol

@@ -20,6 +20,19 @@ The workflow:
 5. Create N output ENDF files with the sampled coefficients
 6. Handle missing data by interpolating from neighboring bins
 
+Per-point uncertainty decomposition
+-----------------------------------
+Per-point σ_stat (GLS fit weights, χ²) and per-experiment σ_sys (MC factor,
+Kish ρ) come from ``scripts/uncertainty_manifest.py`` applied to each EXFOR
+dataset at the cache-build boundary (``build_exfor_cache_from_objects``).
+For datasets whose manifest stat-spec carries ``derive_stat_only: true`` —
+i.e. the prose says the named column is a TOTAL that already includes the
+correlated systematic (e.g. Barnard 30076004 DATA-ERR including the 5%
+detector-efficiency systematic) — the resolver returns
+    σ_stat = sqrt(max(σ_total² − σ_sys², 0))    per point,
+so the per-experiment MC factor layered on top reproduces σ_total² without
+double-counting. See ``uncertainty_manifest.py:resolve_for_dataset``.
+
 Author: Generated for kika project
 """
 from __future__ import annotations
@@ -42,6 +55,9 @@ for _var in (
 ):
     os.environ.setdefault(_var, "1")
 
+import hashlib
+import json
+import subprocess
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -106,6 +122,7 @@ from scripts.exfor_utils import (
     absolute_to_nominal_relative,
     regularize_near_zero_relative_covariance,
     apply_between_experiment_floor,
+    apply_between_experiment_floor_mg,
     smooth_absent_order_uncertainties,
     log_rel_std_profile,
     cap_order_relative_uncertainty,
@@ -169,7 +186,7 @@ ENDF_FILE = "/share_snc/snc/JuanMonleon/jeff40_with_MF4_from_jeff33/26-Fe-56g.tx
 MF34_SOURCE_FILE = None                          # Separate MF34 source (None = use ENDF_FILE)
 EXFOR_DIRECTORY = "/share_snc/snc/JuanMonleon/EXFOR/data_v1/"
 EXFOR_DB_PATH = '/share_snc/snc/JuanMonleon/EXFOR/x4_iron_angular.db'
-OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_54/"
+OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_67/"
 TOF_PARAMETERS_FILE = "/share_snc/snc/JuanMonleon/EXFOR/exfor_tof_parameters.json"
 
 # --- DATA SOURCE ----------------------------------------------------------- #
@@ -189,7 +206,12 @@ M_TARG_U = 55.93494                              # Target mass in u (Fe-56)
 
 # --- LEGENDRE FITTING ------------------------------------------------------ #
 MAX_LEGENDRE_DEGREE = 6                          # Maximum Legendre order (capped at 8)
-SELECT_DEGREE = "aicc"                           # "aicc", "bic", or None (use max)
+SELECT_DEGREE = "aic"                            # "aicc" | "aic" | "bic" | None (use max).
+                                                  # "aic" drops the small-sample correction
+                                                  # (penalty = 2k); use it when AICc over-
+                                                  # penalises higher orders in low-n bins
+                                                  # (e.g. single-experiment 8-pt bins where
+                                                  # AICc's 2k(k+1)/(n−k−1) term ≈ 30 at k=5).
 RIDGE_LAMBDA = 1e-4                              # Ridge regularization parameter
 RIDGE_POWER = 4                                  # Power for ridge penalty (l^ridge_power)
 DF_METHOD = "hat"                                # Degrees of freedom: "hat" or "naive"
@@ -197,11 +219,20 @@ DF_METHOD = "hat"                                # Degrees of freedom: "hat" or 
 # --- UNCERTAINTY & DISCREPANCY --------------------------------------------- #
 # Band-based discrepancy
 USE_BAND_DISCREPANCY = True                      # Use band-based uncertainty (vs global Birge)
-MIN_POINTS_PER_BAND = 5                          # Min points to estimate s_b per band
+MIN_POINTS_PER_BAND = 4                          # Min points to estimate s_b per band
+                                                  # (5 sits at the median per-bin support; 4 captures
+                                                  # the typical bin's left-edge without losing MAD's
+                                                  # statistical meaning. Threshold 6+ collapses M-band
+                                                  # derivation on this Fe-56 dataset.)
 MAX_BAND_SCALE_FACTOR = 5.0                      # Max multiplicative scale per band
 TAU_SMOOTHING_WINDOW = 1                         # Moving median window for s_b(E) (1 = disabled)
-TAU_PRIOR_FLOOR = False                          # Apply tau prior floor from well-supported bins
-TAU_PRIOR_NEFF_THRESHOLD = 5.0                   # Min N_eff to count as "well-supported"
+TAU_PRIOR_FLOOR = True                           # Apply tau prior floor from well-supported bins
+TAU_PRIOR_NEFF_THRESHOLD = 4.0                   # Min N_eff to count as "well-supported"
+                                                  # (matches MIN_POINTS_PER_BAND=4 for symmetric
+                                                  # quality criterion across band/bin filters;
+                                                  # gives ~50/50 donor/recipient split on this
+                                                  # dataset and stays above the N_eff<3 zone where
+                                                  # single-experiment residual collapse biases τ down).
 TAU_PRIOR_PERCENTILE = 50                        # Percentile of well-supported tau for baseline
 TAU_IRLS_MAX_ITERS = 20                           # Max (τ, refit) iterations for band discrepancy
 TAU_IRLS_TOL = 1e-2                              # Converge when max |Δτ_b| < tol
@@ -218,7 +249,7 @@ SIGMA_SYS_AWARE_FIT = True                       # Fit weights = 1/σ_total² wi
                                                   #  semantics unchanged). Set False for legacy
                                                   #  σ_stat-only behaviour.
 RESCALE_UNC_BY_CHI2 = True                       # Apply Birge scaling when band discrepancy disabled
-ALLOW_SHRINK_UNC = True                          # Allow uncertainties to shrink (chi2_red < 1)
+ALLOW_SHRINK_UNC = False                          # Allow uncertainties to shrink (chi2_red < 1)
 # Normalization model (two physically distinct sources of multiplicative noise):
 #   ELASTIC:     uncertainty in the elastic XS reference / monitor that ALL
 #                experiments rely on. One factor per MC sample, applied globally
@@ -231,19 +262,22 @@ NORM_ELASTIC_SIGMA = 0.0                         # Global elastic XS reference u
 NORM_SYSTEMATIC_SIGMA = 0.05                     # Per-experiment systematic uncertainty (5%)
 NORM_DIST = "lognormal"                          # "lognormal" (always positive) or "normal"
 # Experiment exclusion & uncertainty floor
-EXCLUDE_EXPERIMENTS = ["32246002"]                # Experiments to exclude (e.g. "32246002" = Tostkii)
-MIN_STAT_RELATIVE_UNCERTAINTY = 0.01             # Minimum *statistical* σ_stat relative
-                                                  # uncertainty floor. After the manifest split,
-                                                  # this is the per-point uncorrelated noise
-                                                  # baseline; applied where σ_stat would
-                                                  # otherwise be implausibly small or zero
-                                                  # (Cierjacks ERR-S ~0.05%, Cox by-design 0%,
-                                                  # Kinney/Barnard residual decomposition floor).
-                                                  # 1% is the empirical lower edge of σ_stat
-                                                  # across curated manifest entries and a
-                                                  # conservative minimum for per-point counting/
-                                                  # digitization noise in MeV-range differential
-                                                  # XS measurements. Set to 0 to disable.
+EXCLUDE_EXPERIMENTS = ["32246002", "400750022"]   # Tostkii 1957; Morozov 1972 pointer 2 (SPA-fitted sister of 400750021, double-counts raw data)
+MIN_STAT_RELATIVE_UNCERTAINTY = 1e-4             # Numerical guard against literal-zero σ_stat
+                                                  # (which would give infinite GLS weights). Set
+                                                  # well below the smallest credible reported
+                                                  # statistical uncertainty so that prose-stated
+                                                  # values pass through unchanged: Korzh 1972
+                                                  # ERR-S=0.7%, Cierjacks per-point ERR-S median
+                                                  # ~0.05%, Tomita DATA-ERR ~0.5%. The legitimate
+                                                  # "residual decomposition" floor is enforced at
+                                                  # the resolver level (SIGMA_STAT_MIN_REL=0.01 in
+                                                  # uncertainty_manifest.py) for Case B entries
+                                                  # only — that's where σ_stat = √(σ_total² −
+                                                  # σ_sys²) can saturate when the prose-named sys
+                                                  # exceeds the lab's reported total. Set to 0
+                                                  # to disable entirely (risks div-by-zero in GLS
+                                                  # if any loader produces σ_stat=0 silently).
 MIN_RELATIVE_UNCERTAINTY = MIN_STAT_RELATIVE_UNCERTAINTY  # backwards-compat alias
 UNCERTAINTY_FLOOR_STRATEGY = 'bin_median'        # 'fixed' | 'bin_median' | 'band_median'
                                                   #  'band_median' uses per-F/M/B median with
@@ -254,14 +288,27 @@ UNCERTAINTY_FLOOR_STRATEGY = 'bin_median'        # 'fixed' | 'bin_median' | 'ban
 USE_MODEL_AVERAGING = True                       # Enable model averaging over Legendre orders
 MIN_DEGREE_FOR_AVERAGING = 1                     # Min degree to consider (1 = include all)
 USE_DEGREE_SAMPLING_IN_MC = True                 # Sample degree from degree_weights in MC
+RERUN_AICC_POST_TAU = True                       # Recompute AICc weights against τ-inflated σ_eff
+                                                  # before sampling, so the degree distribution sent
+                                                  # to MC reflects the τ-converged noise model
+                                                  # (matches v3). False reverts to pre-τ stat-only
+                                                  # weights — biases degree sampling for any bin
+                                                  # where τ inflated σ noticeably.
+USE_GLS_KERNEL = True                            # GLS kernel (block-correlated, Σ = D + u uᵀ + v vᵀ) for the
+                                                  # IC model-selection scan, the initial nominal fit,
+                                                  # and the post-τ rescan. Applies regardless of
+                                                  # SELECT_DEGREE choice (aicc/aic/bic). τ-IRLS,
+                                                  # freeze_c0 refit, and MC sampler stay diagonal.
 
 # --- ENERGY BINNING & CORRELATION ------------------------------------------ #
 # Weighting and constraints
 NORMALIZE_BY_N_POINTS = True                     # Enable study-level GLS-ESS weighting
 BAND_AWARE_ESS = False                           # Kish ESS uses per-band counts (F/M/B)
 MAX_EXP_WEIGHT_FRAC_BIN = 0.8                    # Safety cap per experiment weight fraction
-FREEZE_C0 = True                                 # Fix c0 for shape-only refits
-MAX_SAMPLE_ORDER = 3                             # Publish covariance for l=1..MAX_SAMPLE_ORDER only
+FREEZE_C0 = True                                 # Freeze c0 in MC/KW shape refits (nominal AICc fit
+                                                  # must float c0 to determine it; MC then refits
+                                                  # a_l = c_l/c0 with c0 fixed at the nominal).
+MAX_SAMPLE_ORDER = 6                             # Publish covariance for l=1..MAX_SAMPLE_ORDER only
 # Angular quality gate
 ANGULAR_QUALITY_GATE = True
 MIN_ANGULAR_POINTS = 4                           # Min total angular data points
@@ -326,7 +373,7 @@ MULTIGROUP_SIGMA_RATIO_MAX = 5.0                 # Max running max(σ_l1)/min(σ
 MULTIGROUP_USE_RAW_MC_CORR = True                # Feed multigroup collapse with raw KW correlations + Pass-2 std,
                                                   # bypassing the inject + Higham-smear path. No effect when
                                                   # KW_MC_TWO_PASS=False. See plan: ok-i-watn-you-floofy-hickey.md
-MULTIGROUP_CORRELATION_THRESHOLD = "auto"         # Hard-zero |rho| < threshold in the multigroup correlation matrix.
+MULTIGROUP_CORRELATION_THRESHOLD = 0        # Hard-zero |rho| < threshold in the multigroup correlation matrix.
                                                   # Set to 0.0 to disable, "auto" to use 1/sqrt(N_SAMPLES) (sampling-
                                                   # noise floor), or a positive float for an explicit threshold.
 MF34_COVARIANCE_TYPE = "both"              # "fine", "multigroup", or "both"
@@ -362,6 +409,8 @@ SAVE_RAW_KW_PARQUET = False                      # legendre_samples_raw_kw.parqu
 SAVE_MULTIGROUP_DIAGNOSTICS_CSV = True           # multigroup_boundary_decisions.csv — small
                                                   # diagnostic with per-pair merge decisions;
                                                   # useful for tuning rho_min / sigma_ratio_max.
+SAVE_NOMINAL_FITS = True                         # nominal_fits.parquet — per-bin c_0..c_L, chi2_red,
+                                                  # frozen_degree, tau bands, AICc weights.
 
 # --- OUTPUT: Pipeline B (MF34 sampling) ------------------------------------ #
 GENERATE_MF34_SAMPLES = False                    # Perturbed ENDF samples from MF34 -> endf/
@@ -391,6 +440,118 @@ VERBOSE_DIAGNOSTICS = True                       # Per-order percentile stats at
 
 # Global logger reference (set by _set_logger from exfor_utils)
 _logger = None
+
+
+# =============================================================================
+# RUN METADATA (audit trail)
+# =============================================================================
+
+
+def _sha256_of_file(path: str) -> Optional[str]:
+    """Return hex SHA256 of a file, or None if unreadable."""
+    try:
+        h = hashlib.sha256()
+        with open(path, 'rb') as f:
+            for chunk in iter(lambda: f.read(65536), b''):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
+def _git_info(repo_dir: str) -> Dict[str, Any]:
+    """Best-effort git commit + dirty status for the repo at repo_dir."""
+    info: Dict[str, Any] = {'commit': None, 'dirty': None, 'branch': None}
+    try:
+        commit = subprocess.run(
+            ['git', '-C', repo_dir, 'rev-parse', 'HEAD'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if commit.returncode == 0:
+            info['commit'] = commit.stdout.strip()
+        branch = subprocess.run(
+            ['git', '-C', repo_dir, 'rev-parse', '--abbrev-ref', 'HEAD'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if branch.returncode == 0:
+            info['branch'] = branch.stdout.strip()
+        status = subprocess.run(
+            ['git', '-C', repo_dir, 'status', '--porcelain'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if status.returncode == 0:
+            info['dirty'] = bool(status.stdout.strip())
+    except Exception:
+        pass
+    return info
+
+
+def _collect_config_constants() -> Dict[str, Any]:
+    """Snapshot every ALL_CAPS module-level constant for the run audit."""
+    g = globals()
+    snapshot: Dict[str, Any] = {}
+    for name, val in g.items():
+        if not name.isupper():
+            continue
+        if name.startswith('_'):
+            continue
+        if callable(val):
+            continue
+        # Keep only JSON-friendly leaf values (str/int/float/bool/None/list/dict).
+        try:
+            json.dumps(val)
+        except (TypeError, ValueError):
+            snapshot[name] = repr(val)
+            continue
+        snapshot[name] = val
+    return snapshot
+
+
+def _write_run_metadata(output_dir: str) -> Dict[str, Any]:
+    """
+    Write OUTPUT_DIR/run_metadata.json capturing config + git + script/manifest hashes.
+
+    Returns the metadata dict so the caller can log a short summary.
+    """
+    script_path = os.path.abspath(__file__)
+    repo_dir = str(Path(__file__).resolve().parent.parent)
+
+    # Resolve manifest path. Importing the module here avoids hard-coding the
+    # path; if the manifest module isn't importable, build_exfor_cache_from_objects
+    # will raise loudly anyway, so a None here is safe metadata.
+    manifest_path: Optional[str] = None
+    manifest_sha256: Optional[str] = None
+    manifest_path_reachable: Optional[bool] = None
+    try:
+        from scripts.uncertainty_manifest import _DEFAULT_MANIFEST_PATH as _mp
+        manifest_path = _mp
+    except Exception:
+        try:
+            from uncertainty_manifest import _DEFAULT_MANIFEST_PATH as _mp
+            manifest_path = _mp
+        except Exception:
+            manifest_path = None
+    if manifest_path is not None:
+        manifest_path_reachable = os.path.exists(manifest_path)
+        if manifest_path_reachable:
+            manifest_sha256 = _sha256_of_file(manifest_path)
+
+    metadata: Dict[str, Any] = {
+        'started_at': datetime.now().isoformat(),
+        'script_path': script_path,
+        'script_sha256': _sha256_of_file(script_path),
+        'manifest_path': manifest_path,
+        'manifest_path_reachable': manifest_path_reachable,
+        'manifest_sha256': manifest_sha256,
+        'git': _git_info(repo_dir),
+        'config': _collect_config_constants(),
+    }
+
+    out = Path(output_dir) / 'run_metadata.json'
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, 'w') as f:
+        json.dump(metadata, f, indent=2, default=str, sort_keys=True)
+    return metadata
 
 
 # =============================================================================
@@ -1055,6 +1216,8 @@ def perform_nominal_fits(
     min_angular_points: int = 4,
     min_bands_covered: int = 3,
     max_bin_expansion: int = 2,
+    rerun_aicc_post_tau: bool = True,
+    use_gls_kernel: bool = True,
     logger = None,
 ) -> List[NominalFitResult]:
     """Phase 1: Perform nominal fits using energy_bin method.
@@ -1247,6 +1410,8 @@ def perform_nominal_fits(
             tau_irls_tol=TAU_IRLS_TOL,
             tau_irls_damping=TAU_IRLS_DAMPING,
             band_scale_method=BAND_SCALE_METHOD,
+            rerun_aicc_post_tau=rerun_aicc_post_tau,
+            use_gls_kernel=use_gls_kernel,
         )
 
         frozen_degree = fit_info['degree']
@@ -1880,6 +2045,7 @@ def run_exfor_to_endf_sampling_v2(
     save_tmc_parquet: bool = True,
     save_raw_kw_parquet: bool = False,
     save_multigroup_diagnostics_csv: bool = True,
+    save_nominal_fits: bool = True,
     # ACE common options (shared NJOY config)
     ace_temperatures: Optional[List[float]] = None,
     ace_njoy_exe: Optional[str] = None,
@@ -1946,6 +2112,32 @@ def run_exfor_to_endf_sampling_v2(
 
     print(f"[INFO] Starting EXFOR-to-ENDF sampling (v2)")
     print(f"[INFO] Log file: {log_file}")
+
+    # ── Run metadata (audit trail) ───────────────────────────────────────────
+    try:
+        _md = _write_run_metadata(output_dir)
+        _logger.info("#== RUN METADATA ==========================================================")
+        _logger.info(f"  metadata_file   = {Path(output_dir) / 'run_metadata.json'}")
+        _logger.info(f"  script_sha256   = {_md.get('script_sha256')}")
+        _logger.info(f"  manifest_path   = {_md.get('manifest_path')}")
+        _logger.info(f"  manifest_sha256 = {_md.get('manifest_sha256')} "
+                     f"(reachable={_md.get('manifest_path_reachable')})")
+        _g = _md.get('git') or {}
+        _logger.info(f"  git_branch      = {_g.get('branch')}")
+        _logger.info(f"  git_commit      = {_g.get('commit')}")
+        _logger.info(f"  git_dirty       = {_g.get('dirty')}")
+        _logger.info("")
+    except Exception as _e:
+        _logger.warning(f"Failed to write run_metadata.json: {type(_e).__name__}: {_e}")
+
+    # ── Model-order policy (deliberate; log so it is reviewer-auditable) ─────
+    _logger.info("#== MODEL-ORDER POLICY ====================================================")
+    _logger.info("  Nominal MF4 order = AICc winner per bin.")
+    _logger.info("  MC samples may draw alternate AICc-supported orders (mixture).")
+    _logger.info("  MF34 covariance is published only for orders present in nominal MF4")
+    _logger.info("    (n_valid = min(frozen_degree, MAX_SAMPLE_ORDER)).")
+    _logger.info("  Higher sampled orders affect retained-order variance but are not published.")
+    _logger.info("")
 
     # Track warnings for dynamic summary at end
     _warning_counts = {}
@@ -2018,6 +2210,8 @@ def run_exfor_to_endf_sampling_v2(
     _logger.info(f"  USE_MODEL_AVERAGING = {use_model_averaging}")
     _logger.info(f"  MIN_DEGREE_FOR_AVERAGING = {min_degree_for_averaging}")
     _logger.info(f"  USE_DEGREE_SAMPLING_IN_MC = {USE_DEGREE_SAMPLING_IN_MC}")
+    _logger.info(f"  RERUN_AICC_POST_TAU = {RERUN_AICC_POST_TAU}")
+    _logger.info(f"  USE_GLS_KERNEL = {USE_GLS_KERNEL}")
     _logger.info("")
 
     # -- Energy Binning & Correlation --
@@ -2106,6 +2300,7 @@ def run_exfor_to_endf_sampling_v2(
     _logger.info(f"  SAVE_TMC_PARQUET = {save_tmc_parquet}")
     _logger.info(f"  SAVE_RAW_KW_PARQUET = {save_raw_kw_parquet}")
     _logger.info(f"  SAVE_MULTIGROUP_DIAGNOSTICS_CSV = {save_multigroup_diagnostics_csv}")
+    _logger.info(f"  SAVE_NOMINAL_FITS = {save_nominal_fits}")
     _logger.info("")
 
     # -- Output: Pipeline B (MF34 sampling) --
@@ -2206,6 +2401,67 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info(f"  [INFO] [EXFOR] Energy range: [{min(sorted_exfor_energies):.4f}, {max(sorted_exfor_energies):.4f}] MeV")
         _logger.info(f">> exfor_experiments = {n_exfor_files}")
         _logger.info(f">> exfor_energies = {len(sorted_exfor_energies)}")
+
+        # Manifest-flag summary: how many datasets/points came from each
+        # manifest source bucket (curated/uncurated/default/excluded), plus
+        # any per-dataset manifest application failures from the cache build.
+        try:
+            from collections import Counter as _Counter
+            from scripts.exfor_utils import get_last_manifest_stats as _get_mstats
+            flag_datasets: Dict[str, set] = {}
+            flag_points: _Counter = _Counter()
+            for _e_mev, _entries in exfor_cache.items():
+                for _df, _meta in _entries:
+                    _flag = str(_meta.get('uncertainty_manifest_flag', 'default'))
+                    flag_datasets.setdefault(_flag, set()).add(
+                        f"{_meta.get('entry')}/{_meta.get('subentry')}"
+                    )
+                    flag_points[_flag] += int(len(_df))
+            _mstats = _get_mstats()
+            _logger.info("  [INFO] [EXFOR] Manifest flag summary:")
+            for _flag in sorted(set(list(flag_points.keys()) +
+                                    ['curated', 'uncurated', 'default', 'excluded'])):
+                _ndsets = len(flag_datasets.get(_flag, set()))
+                _npts = flag_points.get(_flag, 0)
+                _logger.info(f"    flag={_flag:<12s} datasets={_ndsets:>4d}  points={_npts:>6d}")
+            _logger.info(
+                f"    manifest_failed: attempted={_mstats.get('attempted', 0)}, "
+                f"failed={_mstats.get('failed', 0)}"
+            )
+            for _ent, _sub, _exc in (_mstats.get('failures', []) or [])[:10]:
+                _logger.warning(f"    manifest_failed: {_ent}/{_sub} — {_exc}")
+        except Exception as _e:
+            _logger.warning(f"Manifest flag summary failed: {type(_e).__name__}: {_e}")
+
+        # Manifest excluded-flag desync check: any dataset the manifest marks
+        # `flag: excluded` should also appear in EXCLUDE_EXPERIMENTS, otherwise
+        # the manifest and the run config are out of sync. Warn-only; do not
+        # raise (the run can still be valid if the desync is intentional).
+        try:
+            from scripts.uncertainty_manifest import load_manifest as _load_manifest
+            from scripts.exfor_utils import _parse_exclusion_list, _is_experiment_excluded
+            _m = _load_manifest()
+            _excl_patterns = _parse_exclusion_list(exclude_experiments)
+            _desync = []
+            for _dsid, _entry in (_m.get('datasets') or {}).items():
+                if _entry.get('flag') != 'excluded':
+                    continue
+                # _dsid is "ENTRYSUB" format (e.g. "32246002"); split into entry/subentry.
+                if len(_dsid) >= 8:
+                    _ent, _sub = _dsid[:5], _dsid[5:]
+                else:
+                    _ent, _sub = _dsid, ''
+                if not _is_experiment_excluded(_ent, _sub, _excl_patterns):
+                    _desync.append(_dsid)
+            if _desync:
+                _logger.warning(
+                    f"  [WARN] [EXFOR] {len(_desync)} dataset(s) flagged 'excluded' in manifest "
+                    f"but not in EXCLUDE_EXPERIMENTS: {_desync[:10]}"
+                    + (" ..." if len(_desync) > 10 else "")
+                )
+        except Exception as _e:
+            _logger.warning(f"Manifest excluded-flag desync check failed: {type(_e).__name__}: {_e}")
+
         _logger.info(f"#-- END STEP 1 (elapsed: {t_exfor_elapsed:.2f}s) -------------------------------------")
         _logger.info(f"  [INFO] [EXFOR] Loaded {n_exfor_files} experiments in {t_exfor_elapsed:.1f}s", console=True)
     except Exception as e:
@@ -2315,6 +2571,8 @@ def run_exfor_to_endf_sampling_v2(
         min_angular_points=MIN_ANGULAR_POINTS,
         min_bands_covered=MIN_BANDS_COVERED,
         max_bin_expansion=MAX_BIN_EXPANSION,
+        rerun_aicc_post_tau=RERUN_AICC_POST_TAU,
+        use_gls_kernel=USE_GLS_KERNEL,
         logger=_logger,
     )
 
@@ -2344,6 +2602,62 @@ def run_exfor_to_endf_sampling_v2(
 
     # Log experiment summary
     log_experiments_summary(nominal_results, logger=_logger)
+
+    # IC solver path: GLS for multi-experiment bins, WLS fallback for
+    # single-experiment bins (see resample_AD.py:1745-1760 for rationale).
+    # Skipped bins (has_data=False) and interpolated bins are excluded.
+    if USE_GLS_KERNEL:
+        n_gls = sum(
+            1 for nr in nominal_results
+            if nr.has_data and not nr.interpolated and len(nr.experiments_info) >= 2
+        )
+        n_wls = sum(
+            1 for nr in nominal_results
+            if nr.has_data and not nr.interpolated and len(nr.experiments_info) == 1
+        )
+        _logger.info(
+            f"  [INFO] [FIT] IC solver: GLS={n_gls} bins, "
+            f"WLS-fallback (1-experiment)={n_wls} bins"
+        )
+    else:
+        n_fitted = sum(1 for nr in nominal_results if nr.has_data and not nr.interpolated)
+        _logger.info(f"  [INFO] [FIT] IC solver: WLS={n_fitted} bins (USE_GLS_KERNEL=False)")
+
+    if save_nominal_fits:
+        rows = []
+        for r in nominal_results:
+            coeffs = np.full(max_degree + 1, np.nan)
+            if r.nominal_coeffs is not None and len(r.nominal_coeffs) > 0:
+                n_c = min(len(r.nominal_coeffs), max_degree + 1)
+                coeffs[:n_c] = r.nominal_coeffs[:n_c]
+            tau = r.tau_info or {}
+            row = {
+                'energy_mev': r.energy_mev,
+                'energy_index': r.energy_index,
+                'endf_index': r.endf_index,
+                'has_data': r.has_data,
+                'interpolated': r.interpolated,
+                'expanded_bins': r.expanded_bins,
+                'frozen_degree': r.frozen_degree,
+                'chi2_red': r.chi2_red,
+                'tau_F': tau.get('tau_F', 1.0),
+                'tau_M': tau.get('tau_M', 1.0),
+                'tau_B': tau.get('tau_B', 1.0),
+                'mc_order_cap': r.mc_order_cap,
+                'n_pts': len(r.exfor_df) if r.exfor_df is not None else 0,
+                'n_eff': (r.kernel_diagnostics.n_eff
+                          if r.kernel_diagnostics is not None else np.nan),
+                'aicc_weights_json': (
+                    json.dumps({int(k): float(v) for k, v in r.degree_weights.items()})
+                    if r.degree_weights else None
+                ),
+            }
+            row.update({f'c_{l}': float(coeffs[l]) for l in range(max_degree + 1)})
+            rows.append(row)
+        df_nom = pd.DataFrame(rows)
+        out_nom = output_path / 'nominal_fits.parquet'
+        df_nom.to_parquet(out_nom, index=False)
+        _logger.info(f"  Saved per-bin nominal fits ({len(df_nom)} rows) to {out_nom.name}")
 
     _logger.info(f"#-- END STEP 4 (elapsed: {time.time() - t_step:.2f}s) -------------------------------------")
     _logger.info(f"  [INFO] [FIT] Nominal fits: {n_with_data}/{len(nominal_results)} with data, {n_interpolated} interpolated", console=True)
@@ -3797,6 +4111,31 @@ def run_exfor_to_endf_sampling_v2(
                     if verbose_diagnostics:
                         log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-nz-nom", _logger, verbose=True)
 
+                # Between-experiment scatter floor at the multigroup level
+                # (mirror of the FG floor — without this the published MF34
+                # ignores APPLY_BETWEEN_EXP_FLOOR entirely).
+                cov_grouped_nominal, _bexp_mg_nom = apply_between_experiment_floor_mg(
+                    cov_rel=cov_grouped_nominal,
+                    nominal_results=nominal_results,
+                    valid_indices=valid_indices,
+                    groups=multigroup_result.groups,
+                    max_order=max_degree,
+                    logger=_logger,
+                    apply=apply_between_exp_floor,
+                )
+                if average_file:
+                    multigroup_result.cov_grouped, _bexp_mg_avg = apply_between_experiment_floor_mg(
+                        cov_rel=multigroup_result.cov_grouped,
+                        nominal_results=nominal_results,
+                        valid_indices=valid_indices,
+                        groups=multigroup_result.groups,
+                        max_order=max_degree,
+                        logger=_logger,
+                        apply=apply_between_exp_floor,
+                    )
+                if verbose_diagnostics:
+                    log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-between-exp", _logger, verbose=True)
+
                 if apply_cov_postprocessing:
                     # Step 2: Dip/spike smoothing & absent-order interpolation (MG)
                     _mg_valid = multigroup_result.valid_mask_grouped
@@ -3956,6 +4295,29 @@ def run_exfor_to_endf_sampling_v2(
                         )
                         if verbose_diagnostics:
                             log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-nz-nom", _logger, verbose=True)
+
+                    # Re-apply between-experiment floor on the regrouped MG cov.
+                    cov_grouped_nominal, _bexp_rg_nom = apply_between_experiment_floor_mg(
+                        cov_rel=cov_grouped_nominal,
+                        nominal_results=nominal_results,
+                        valid_indices=valid_indices,
+                        groups=multigroup_result.groups,
+                        max_order=max_degree,
+                        logger=_logger,
+                        apply=apply_between_exp_floor,
+                    )
+                    if average_file:
+                        multigroup_result.cov_grouped, _bexp_rg_avg = apply_between_experiment_floor_mg(
+                            cov_rel=multigroup_result.cov_grouped,
+                            nominal_results=nominal_results,
+                            valid_indices=valid_indices,
+                            groups=multigroup_result.groups,
+                            max_order=max_degree,
+                            logger=_logger,
+                            apply=apply_between_exp_floor,
+                        )
+                    if verbose_diagnostics:
+                        log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-between-exp", _logger, verbose=True)
 
                     if apply_cov_postprocessing:
                         # Step 2: Dip/spike smoothing & absent-order interpolation (RG)
@@ -4372,6 +4734,7 @@ if __name__ == "__main__":
         save_tmc_parquet=SAVE_TMC_PARQUET,
         save_raw_kw_parquet=SAVE_RAW_KW_PARQUET,
         save_multigroup_diagnostics_csv=SAVE_MULTIGROUP_DIAGNOSTICS_CSV,
+        save_nominal_fits=SAVE_NOMINAL_FITS,
         # ACE common options
         ace_temperatures=ACE_TEMPERATURES,
         ace_njoy_exe=ACE_NJOY_EXE,

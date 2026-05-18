@@ -84,12 +84,6 @@ def resonance_group_average(
     if weighting == "lethargy" and energies[0] <= 0.0:
         raise ValueError("lethargy weighting requires strictly positive energies")
 
-    # np.trapezoid was introduced in NumPy 1.22 and np.trapz was removed
-    # in NumPy 2.0. A `getattr(np, "trapezoid", np.trapz)` shortcut is
-    # unsafe because Python evaluates the default eagerly, raising
-    # AttributeError on 2.x where `trapz` no longer exists.
-    trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
-
     n_groups = group_boundaries.size - 1
     averages = np.full(n_groups, np.nan, dtype=float)
 
@@ -122,10 +116,10 @@ def resonance_group_average(
             # exactly u_hi - u_lo. This keeps both consistent and
             # exact for constant sigma.
             u_grid = np.log(e_grid)
-            numerator = float(trapezoid(xs_grid, u_grid))
+            numerator = float(np.trapezoid(xs_grid, u_grid))
             denominator = float(u_grid[-1] - u_grid[0])
         else:  # constant
-            numerator = float(trapezoid(xs_grid, e_grid))
+            numerator = float(np.trapezoid(xs_grid, e_grid))
             denominator = float(e_hi - e_lo)
 
         if abs(denominator) < 1e-30:

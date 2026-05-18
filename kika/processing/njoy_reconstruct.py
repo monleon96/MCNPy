@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from kika.endf.read_endf import read_endf
+from kika.njoy.launcher import build_njoy_command, is_wsl_unc_path
 from kika.nuclear_data.cross_section import CrossSection
 
 _log = logging.getLogger(__name__)
@@ -167,7 +168,11 @@ def njoy_reconstruct_stream(
         raise NjoyReconstructError(f"ENDF file not found: {endf_path}")
 
     njoy_executable = Path(str(njoy_executable)).expanduser()
-    if not njoy_executable.is_file():
+    # WSL UNC paths (\\wsl.localhost\<distro>\...) are reachable from Windows
+    # via SMB; is_file() still works there.  We only skip the check entirely
+    # for those cases where Windows can't see the share (e.g. WSL stopped) —
+    # in that case wsl.exe will fail with a clearer error than os.stat.
+    if not is_wsl_unc_path(njoy_executable) and not njoy_executable.is_file():
         raise NjoyReconstructError(
             f"NJOY executable not found: {njoy_executable}. "
             "Set the NJOY path in app Settings."
@@ -257,20 +262,26 @@ def _run_reconr_once_stream(
         (workdir / "njoy.inp").write_text(input_text, encoding="utf-8")
 
         env = os.environ.copy()
-        env["LC_ALL"] = "C"
-        env["LANG"] = "C"
-        # Force gfortran runtime to flush stdout on every write.  Without this
-        # NJOY (a gfortran/MinGW binary) block-buffers stdout whenever it is
-        # not a TTY, so the parent only sees output after ~4-64 KB accumulate
-        # — which for reconr often means nothing appears until the process
-        # exits.  GFORTRAN_UNBUFFERED_ALL is the documented knob that makes
-        # Fortran write-then-flush behaviour match that of Python's ``-u``.
-        env["GFORTRAN_UNBUFFERED_ALL"] = "y"
-        env["PYTHONUNBUFFERED"] = "1"
+        forward_env = {
+            "LC_ALL": "C",
+            "LANG": "C",
+            # Force gfortran runtime to flush stdout on every write.  Without
+            # this NJOY (a gfortran/MinGW binary) block-buffers stdout whenever
+            # it is not a TTY, so the parent only sees output after ~4-64 KB
+            # accumulate — which for reconr often means nothing appears until
+            # the process exits.  GFORTRAN_UNBUFFERED_ALL is the documented
+            # knob that makes Fortran write-then-flush behaviour match
+            # Python's ``-u``.
+            "GFORTRAN_UNBUFFERED_ALL": "y",
+            "PYTHONUNBUFFERED": "1",
+        }
+        env.update(forward_env)
+
+        cmd = build_njoy_command(njoy_executable, forward_env=forward_env)
 
         try:
             process = subprocess.Popen(
-                [str(njoy_executable)],
+                cmd,
                 cwd=str(workdir),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,

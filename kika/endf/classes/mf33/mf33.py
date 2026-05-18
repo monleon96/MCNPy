@@ -278,6 +278,12 @@ class MF33MT(MT):
         nodes, weights = np.polynomial.legendre.leggauss(n_samples)
 
         for g in range(n_bins):
+            # Log-space quadrature requires both edges > 0; bins touching 0 eV
+            # leave result[g] = 0 (the slot was pre-zeroed). This corresponds
+            # to "no σ contribution from a degenerate bin" — bin gets dropped
+            # downstream wherever a positive σ is needed.
+            if grid[g] <= 0 or grid[g + 1] <= 0:
+                continue
             ln_lo = np.log(grid[g])
             ln_hi = np.log(grid[g + 1])
             if ln_hi <= ln_lo:
@@ -878,9 +884,17 @@ class MF33MT(MT):
 
                 cov_abs = cov_abs + c_i * c_j * pair_abs
 
-        # Step 7: convert back to relative covariance when σ is available
+        # Step 7: convert back to relative covariance when σ is available.
+        # Apply an inert-bin floor on σ̄ to suppress 1/σ̄ blow-ups in
+        # threshold-spanning bins and lumped-MT filler bins (the NC LTY=0
+        # union grid frequently inherits foreign threshold edges from
+        # contributing MTs, so xs_d can collapse to ~σ̄_max·1e-7 in a few
+        # bins while the absolute variance there is just placeholder).
         if have_xs and xs_d is not None:
-            denom = np.outer(xs_d, xs_d)
+            xs_max = float(np.max(xs_d)) if xs_d.size else 0.0
+            sigma_floor = max(1.0e-3 * xs_max, 1.0e-9)
+            xs_safe = np.where(xs_d > sigma_floor, xs_d, 0.0)
+            denom = np.outer(xs_safe, xs_safe)
             with np.errstate(divide='ignore', invalid='ignore'):
                 cov_rel = np.where(denom > 0, cov_abs / np.where(denom > 0, denom, 1.0), 0.0)
             # Clip negative DIAGONAL only — variance must be ≥ 0 but
@@ -898,7 +912,7 @@ class MF33MT(MT):
         # Symmetrize to kill any round-off asymmetry from the outer products
         final = 0.5 * (final + final.T)
 
-        isotope = int(self._za)
+        isotope = int(round(self._za))
         result = CrossSectionCovariance(energy_unit=energy_unit)
         result.add_matrix(
             isotope, self.number, isotope, self.number,
@@ -955,13 +969,19 @@ class MF33MT(MT):
         """
         from ....cov.cross_section_covariance import CrossSectionCovariance
 
-        isotope = int(self._za)
+        isotope = int(round(self._za))
         result = CrossSectionCovariance(energy_unit=energy_unit)
 
+        own_mat = int(self._mat or 0)
         for subsection in self._subsections:
             mt1 = int(subsection.mt1)
             mat1 = int(subsection.mat1 or 0)
-            iso_col = isotope if mat1 == 0 else mat1
+            # ENDF-6 §33.3.1 convention is MAT1=0 for intra-material
+            # cross-MT blocks, but some evaluations (e.g. JEFF-4.0 H-1)
+            # write the file's own MAT number instead. Treat that case as
+            # same-isotope to avoid manufacturing a phantom isotope band
+            # whose self-self diagonal is never populated (→ NaN bins).
+            iso_col = isotope if (mat1 == 0 or mat1 == own_mat) else mat1
 
             # Step A: resolve NC-type sub-subsections (LTY=0 sum rule)
             nc_matrix: Optional[np.ndarray] = None

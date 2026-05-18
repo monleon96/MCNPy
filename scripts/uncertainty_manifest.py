@@ -47,6 +47,16 @@ _MANIFEST_PATH = Path(os.environ.get(
 ))
 _manifest_cache: Optional[dict] = None
 
+# Minimum statistical (uncorrelated) uncertainty as fraction of |value|.
+# Applied at the resolver when ``derive_stat_only`` decomposes a loaded total
+# into σ_stat ⊕ σ_sys: replaces the previous floor at 0, so a row never
+# leaves the resolver with σ_stat = 0. Matches the per-point floor already
+# applied later during the GLS fit (``MIN_STAT_RELATIVE_UNCERTAINTY`` in
+# ``exfor_to_endf_sampling_v2.py``); keeping the same value at both stages
+# means the published parquet carries a σ_stat consistent with what the
+# pipeline actually fitted with.
+SIGMA_STAT_MIN_REL = 0.01
+
 
 # =============================================================================
 # Manifest IO
@@ -107,6 +117,37 @@ def _find_component(components: List[dict], header: str) -> Optional[dict]:
     return None
 
 
+def _piecewise_E_coverage(
+    sys_spec: dict, energies_mev: np.ndarray,
+) -> np.ndarray:
+    """Per-row coverage mask for a top-level piecewise_E sys-spec.
+
+    Returns a boolean array of the same length as ``energies_mev``: True at
+    rows whose energy falls inside at least one segment of the piecewise_E
+    spec, False otherwise. For nested specs (``source: components``) the
+    coverage is True wherever any piecewise_E part covers the row. Returns
+    all-False for non-piecewise specs.
+
+    Used by ``resolve_for_dataset`` to apply ``kind: total_minus_stat`` only
+    on rows where the piecewise spec actually carries the σ_total amplitude
+    (outside-coverage rows fall back to the defaults σ_sys, which is already
+    σ_sys not σ_total, and must not be reduced).
+    """
+    energies_mev = np.asarray(energies_mev, dtype=float)
+    if not isinstance(sys_spec, dict):
+        return np.zeros_like(energies_mev, dtype=bool)
+    src = sys_spec.get("source")
+    if src == "piecewise_E":
+        _pcts, covered = _eval_piecewise_E(sys_spec.get("spec", []), energies_mev)
+        return covered
+    if src == "components":
+        out = np.zeros_like(energies_mev, dtype=bool)
+        for part in sys_spec.get("parts", []):
+            out |= _piecewise_E_coverage(part, energies_mev)
+        return out
+    return np.zeros_like(energies_mev, dtype=bool)
+
+
 def _eval_piecewise_E(
     spec: List[dict], energies_mev: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -146,13 +187,54 @@ def _eval_piecewise_E(
 
 def _best_available_column(
     components: List[dict], values_b_sr: np.ndarray
-) -> np.ndarray:
-    """Default fallback: try DATA-ERR > ERR-T > ERR-S."""
+) -> Tuple[np.ndarray, Optional[str]]:
+    """Default fallback. Returns (sigma_per_point_b_sr, picked_header).
+
+    Search order:
+      1. ``DATA-ERR1`` (+ ``DATA-ERR2`` in quadrature if both present) — split
+         components reported by some labs (e.g. EXFOR entries 10384, 10633).
+      2. ``DATA-ERR``  — most common single column.
+      3. ``ERR-T``     — explicitly the total uncertainty.
+      4. ``ERR-S``     — explicitly the statistical uncertainty.
+
+    ``picked_header`` is the literal name returned (or
+    ``"DATA-ERR1+DATA-ERR2"`` when both halves are combined). ``None`` means
+    no usable column was found.
+    """
+    c1 = _find_component(components, "DATA-ERR1")
+    if c1 is not None and (c1.get("kind") == "scalar" or c1.get("values")):
+        v1 = _component_to_b_sr(c1, values_b_sr)
+        c2 = _find_component(components, "DATA-ERR2")
+        if c2 is not None and (c2.get("kind") == "scalar" or c2.get("values")):
+            v2 = _component_to_b_sr(c2, values_b_sr)
+            return np.sqrt(v1 ** 2 + v2 ** 2), "DATA-ERR1+DATA-ERR2"
+        return v1, "DATA-ERR1"
     for header in ("DATA-ERR", "ERR-T", "ERR-S"):
         c = _find_component(components, header)
         if c is not None and (c.get("kind") == "scalar" or c.get("values")):
-            return _component_to_b_sr(c, values_b_sr)
-    return np.zeros_like(values_b_sr)
+            return _component_to_b_sr(c, values_b_sr), header
+    return np.zeros_like(values_b_sr), None
+
+
+# Headers whose column value is interpreted as a TOTAL uncertainty (stat ⊕
+# sys). When ``best_available`` returns one of these and the stat-spec is the
+# default fallback (i.e. the dataset is uncurated or has no manifest entry),
+# the resolver applies the same ``derive_stat_only`` decomposition that
+# explicit curated entries with ``semantics: total_per_point`` use:
+# σ_stat = √(σ_total² − σ_sys²), σ_sys capped at σ_total. Documented in
+# ``scripts/uncertainty_manifest_methodology.md`` §3.2.
+_DEFAULT_TOTAL_HEADERS = {
+    "DATA-ERR", "ERR-T", "DATA-ERR1", "DATA-ERR1+DATA-ERR2",
+}
+
+# Stat-spec labels that document the resolved σ_stat as a TOTAL uncertainty
+# rather than a pure statistical one. When present, the resolver treats the
+# spec as if ``derive_stat_only: true`` had been set explicitly: σ_stat is
+# decomposed into σ_stat ⊕ σ_sys (with σ_sys capped at σ_total). This lets
+# uncurated entries that document the column semantics in prose (e.g.
+# Jacquot 20379003, ``kind: total_per_point``) get the correct treatment
+# without every YAML author having to remember to set the boolean flag.
+_TOTAL_LABEL_VALUES = {"total_per_point"}
 
 
 def _resolve_stat_spec(
@@ -174,7 +256,8 @@ def _resolve_stat_spec(
     if source == "column":
         col = spec.get("column", "best_available")
         if col == "best_available":
-            return _best_available_column(components, values_b_sr)
+            sigma, _picked = _best_available_column(components, values_b_sr)
+            return sigma
         c = _find_component(components, col)
         if c is None:
             return np.zeros_like(values_b_sr)
@@ -196,9 +279,15 @@ def _resolve_stat_spec(
 
     if source == "rule":
         # Currently only the Cox 10%/30mb correction rule is implemented.
+        # The YAML's stat_expr is sqrt(max(total_expr^2 - (0.10*value)^2, 0));
+        # i.e. the residual after removing the correlated 10% sys (which is
+        # added back through _resolve_sys_spec). Returning the total here
+        # would double-count the 10% sys.
         total_expr = spec.get("total_expr", "")
         if "max(0.10 * value, 0.030" in total_expr:
-            return np.maximum(0.10 * np.abs(values_b_sr), 0.030)
+            total = np.maximum(0.10 * np.abs(values_b_sr), 0.030)
+            sys = 0.10 * np.abs(values_b_sr)
+            return np.sqrt(np.maximum(total ** 2 - sys ** 2, 0.0))
         return np.zeros_like(values_b_sr)
 
     return np.zeros_like(values_b_sr)
@@ -252,7 +341,7 @@ def _split_sys_spec(
 
     if source == "piecewise_E":
         pcts, covered = _eval_piecewise_E(spec.get("spec", []), energies_mev)
-        dep = pcts / 100.0
+        per_point = pcts / 100.0
         # For points outside the piecewise spec, fall back to the defaults sys
         # (treat the fallback as energy-independent for those points).
         if not np.all(covered) and defaults:
@@ -260,8 +349,22 @@ def _split_sys_spec(
                 defaults.get("sys", {"source": "scalar", "value_pct": 5.0}),
                 values_b_sr, energies_mev, defaults={}
             )
-            dep = np.where(covered, dep, fb_indep)
-        return 0.0, dep
+            per_point = np.where(covered, per_point, fb_indep)
+        # Routing depends on whether this systematic is correlated *within*
+        # an experiment. correlated=true (the natural default for a
+        # piecewise calibration error like Cierjacks's ERR-T) means the
+        # whole experiment shifts together — one shared draw per experiment
+        # per MC sample, with per-point amplitude varying along the
+        # piecewise spec. We surface that via dep (per-point), but the
+        # downstream worker uses the per-row total (sigma_sys_relative)
+        # plus a single shared z per experiment to apply it correctly.
+        # correlated=false (rare; not used by any current manifest entry)
+        # would mean each (experiment, energy) is genuinely independent —
+        # the legacy "dep" semantics — and in that case the worker would
+        # need a per-(experiment, energy) draw instead. The per-row total
+        # column (sigma_sys_relative) is identical in both cases; only the
+        # routing semantics for downstream consumers change.
+        return 0.0, per_point
 
     if source == "components":
         indep_sq = 0.0
@@ -325,6 +428,49 @@ def resolve_for_dataset(
     sys_spec = entry.get("sys", {"source": "default"})
     flag = entry.get("flag", "default" if not entry else "uncurated")
 
+    # ── Default-spec column sniffing ─────────────────────────────────────────
+    # When the dataset is uncurated (or absent from the manifest entirely) and
+    # the stat-spec falls through to ``best_available``, peek at *which* column
+    # the fallback would pick. Headers in ``_DEFAULT_TOTAL_HEADERS``
+    # (DATA-ERR, ERR-T, DATA-ERR1, DATA-ERR1+DATA-ERR2) are conventionally
+    # totals — the resolver promotes them to ``derive_stat_only`` so that the
+    # default 5% σ_sys is *carved out* of the column rather than added on top
+    # (which would silently inflate the lab's reported total by ~12% in
+    # quadrature). Headers explicitly named ``ERR-S`` are statistical-only and
+    # keep the pre-existing additive treatment (column = σ_stat, +5% σ_sys).
+    # Documented in scripts/uncertainty_manifest_methodology.md §3.2.
+    default_promoted_total = False
+    label_promoted_total = False
+    if (
+        isinstance(stat_spec, dict)
+        and stat_spec.get("source", "default") == "default"
+    ):
+        _picked = _best_available_column(uncertainty_components, values_b_sr)[1]
+        if _picked in _DEFAULT_TOTAL_HEADERS:
+            stat_spec = {
+                "source": "column",
+                "column": "best_available",
+                "semantics": "total_per_point",
+                "derive_stat_only": True,
+            }
+            default_promoted_total = True
+
+    # ── Label-based total promotion ──────────────────────────────────────────
+    # YAML entries can document the column semantics with either
+    # ``semantics: total_per_point`` or ``kind: total_per_point``. Without
+    # this promotion, only ``derive_stat_only: true`` actually triggered the
+    # decomposition — labels alone were silently inert and the default 5% sys
+    # was added on top of a lab-reported total. Promotion preserves the
+    # documented intent for entries that named themselves as totals without
+    # remembering the boolean flag (e.g. Jacquot 20379003).
+    if isinstance(stat_spec, dict) and not stat_spec.get("derive_stat_only"):
+        sem = stat_spec.get("semantics")
+        knd = stat_spec.get("kind")
+        if sem in _TOTAL_LABEL_VALUES or knd in _TOTAL_LABEL_VALUES:
+            stat_spec = dict(stat_spec)        # copy: don't mutate cached manifest
+            stat_spec["derive_stat_only"] = True
+            label_promoted_total = True
+
     # Split sys into energy-independent (scalar) and energy-dependent (piecewise_E)
     # parts. Pipeline can then draw two factors: one per-experiment for indep,
     # one per-(experiment, energy) for dep.
@@ -337,14 +483,108 @@ def resolve_for_dataset(
         stat_spec, uncertainty_components, values_b_sr, energies_mev, defaults
     )
 
-    # When prose says the column is a TOTAL with sys "included", subtract sys
-    # from stat in quadrature to recover the pure-stat (uncorrelated) component.
-    # This avoids double-counting σ_sys when the per-experiment MC factor is
-    # layered on top — per-point MC variance then reproduces σ_total² exactly.
-    # Floored at 0 when σ_sys > σ_total (signals a manifest/prose mismatch
-    # that should be fixed by adjusting the sys spec, not papered over).
-    if isinstance(stat_spec, dict) and stat_spec.get("derive_stat_only"):
-        sigma_stat = np.sqrt(np.maximum(sigma_stat ** 2 - sigma_sys ** 2, 0.0))
+    # ── kind: total_minus_stat ───────────────────────────────────────────────
+    # When a sys-spec is labeled ``kind: total_minus_stat`` the resolved
+    # σ_sys here actually represents σ_total (not σ_sys), and σ_sys must be
+    # recovered by subtracting σ_stat in quadrature per row:
+    #     σ_sys_per_row = √(max(σ_total² − σ_stat², 0))
+    # The label is currently used by Cierjacks 20743002, where the piecewise
+    # ERR-T spec gives 7-12% σ_total and ERR-S column gives σ_stat. Without
+    # the subtraction the per-point σ_sys is overestimated, which inflates
+    # GLS weights (under-fits the data) and pulls the rank-1 Mahalanobis
+    # variance away from the documented model. Points outside the piecewise
+    # coverage fall back to the defaults σ_sys (see ``_split_sys_spec``),
+    # which is interpreted directly as σ_sys (not σ_total), so the
+    # subtraction is applied row-wise only where the dep amplitude came from
+    # the labeled piecewise_E spec — tracked via the ``covered`` mask.
+    sys_kind = sys_spec.get("kind") if isinstance(sys_spec, dict) else None
+    if sys_kind == "total_minus_stat":
+        covered = _piecewise_E_coverage(sys_spec, energies_mev)
+        # On covered rows σ_total = √(indep² + dep²) · |y| (indep is 0 in
+        # practice for total_minus_stat entries, but the formula stays
+        # general). Subtract σ_stat² in quadrature.
+        sigma_total_sq = sigma_sys_indep_b_sr ** 2 + sigma_sys_dep_b_sr ** 2
+        sigma_sys_new_sq = np.where(
+            covered,
+            np.maximum(sigma_total_sq - sigma_stat ** 2, 0.0),
+            sigma_total_sq,  # uncovered: defaults σ_sys is already σ_sys, leave it
+        )
+        # Re-split: indep stays as-is (any scalar component in `components`
+        # is unaffected by the subtraction since it's not the total
+        # carrier); dep absorbs all of the change in covered rows.
+        sigma_sys = np.sqrt(sigma_sys_new_sq)
+        sigma_sys_dep_b_sr = np.sqrt(np.maximum(
+            sigma_sys ** 2 - sigma_sys_indep_b_sr ** 2, 0.0
+        ))
+        nz = np.abs(values_b_sr) > 0
+        dep_rel = np.zeros_like(values_b_sr)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            dep_rel[nz] = sigma_sys_dep_b_sr[nz] / np.abs(values_b_sr[nz])
+
+    # ── derive_stat_only: σ_total preserved, σ_sys capped at σ_total ─────────
+    # When prose (or the auto-promotion above) says the loaded column is a
+    # TOTAL containing the named sys components, we need to recover σ_stat
+    # without inflating the lab's reported total. The interpretation adopted
+    # here is "trust the reported total":
+    #
+    #   σ_total_per_point = the loaded column (= ``sigma_stat`` at this point
+    #                       in the function, before the next two lines run)
+    #   σ_sys_per_point  := min(σ_sys_per_point, σ_total_per_point)   (cap)
+    #   σ_stat_per_point := √(σ_total² − σ_sys²)  floored at 1% · |y|
+    #
+    # When the manifest's named σ_sys exceeds the lab's reported total at
+    # some points (e.g. a constant 8% sys on a Kinney point with DATA-ERR=6%),
+    # the cap reduces σ_sys at those points so σ_stat ⊕ σ_sys ≤ σ_total + ε
+    # rather than blowing past σ_total. Documented in
+    # scripts/uncertainty_manifest_methodology.md §3.3.
+    #
+    # Coherence with rank-1 GLS: the per-experiment scalar ``indep_rel`` is
+    # also capped to the *minimum* per-point relative σ_sys after cap so the
+    # rank-1 column never exceeds per-point σ_sys at any row (otherwise the
+    # downstream Woodbury update would re-inflate the variance there).
+    derive_stat_only = isinstance(stat_spec, dict) and stat_spec.get("derive_stat_only")
+    if derive_stat_only:
+        sigma_total = sigma_stat  # rename for clarity: column-as-total
+        sigma_stat_floor = SIGMA_STAT_MIN_REL * np.abs(values_b_sr)
+
+        # Cap σ_sys at √(σ_total² − floor²) so that, when the cap binds,
+        # σ_stat = floor produces a total of exactly σ_total (preserving
+        # the lab's reported total to machine precision instead of
+        # over-estimating it by floor² in quadrature).
+        sigma_sys_max = np.sqrt(np.maximum(sigma_total ** 2 - sigma_stat_floor ** 2, 0.0))
+        n_violations = int(np.sum(sigma_sys > sigma_sys_max))
+        sigma_sys = np.minimum(sigma_sys, sigma_sys_max)
+
+        # Recompute σ_stat from the (possibly capped) σ_sys — exact
+        # decomposition; the floor only binds where the cap binds.
+        sigma_stat = np.sqrt(np.maximum(sigma_total ** 2 - sigma_sys ** 2,
+                                        sigma_stat_floor ** 2))
+
+        # Cap indep_rel scalar so the rank-1 GLS column ≤ σ_sys at every row.
+        nz = np.abs(values_b_sr) > 0
+        if np.any(nz):
+            per_point_rel = sigma_sys[nz] / np.abs(values_b_sr[nz])
+            indep_cap = float(np.min(per_point_rel))
+            if indep_rel > indep_cap:
+                indep_rel = indep_cap
+        # Recompute the per-point indep/dep split from the capped scalars.
+        sigma_sys_indep_b_sr = np.abs(values_b_sr) * indep_rel
+        sigma_sys_dep_b_sr = np.sqrt(np.maximum(
+            sigma_sys ** 2 - sigma_sys_indep_b_sr ** 2, 0.0
+        ))
+        # dep_rel becomes per-point after the cap; expose the per-row array.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            dep_rel = np.where(
+                nz, sigma_sys_dep_b_sr / np.maximum(np.abs(values_b_sr), 1e-300), 0.0
+            )
+
+        n_floored = int(np.sum(sigma_stat <= sigma_stat_floor + 1e-30))
+        if n_violations or n_floored:
+            tag = "default→total" if default_promoted_total else "manifest"
+            print(f"  [uncertainty_manifest] {dataset_id} ({tag}): "
+                  f"σ_sys capped at σ_total on {n_violations}/{len(sigma_total)} rows; "
+                  f"σ_stat floored at {SIGMA_STAT_MIN_REL*100:g}% of |y| on "
+                  f"{n_floored}/{len(sigma_stat)} rows.")
 
     # Per-experiment representative scalar sigma_sys (relative, for diagnostics)
     nz = np.abs(values_b_sr) > 0

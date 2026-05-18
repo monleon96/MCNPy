@@ -1361,7 +1361,7 @@ def _read_n_values(lines: List[str], cursor: int, n: int) -> Tuple[List[float], 
     return values, cursor
 
 
-def _parse_covfil_mf1(lines: List[str], cursor: int) -> Tuple[float, float, int, List[float], int]:
+def _parse_covfil_mf1(lines: List[str], cursor: int) -> Tuple[float, float, float, int, List[float], int]:
     """
     Parse MF1 MT451 energy-grid section of a COVFIL file.
 
@@ -1371,6 +1371,8 @@ def _parse_covfil_mf1(lines: List[str], cursor: int) -> Tuple[float, float, int,
         ZA identifier (Z*1000 + A).
     awr : float
         Atomic weight ratio.
+    temperature : float
+        Temperature in K (CONT C1 field).
     ngrp : int
         Number of energy groups.
     energy_grid : list of float
@@ -1384,8 +1386,9 @@ def _parse_covfil_mf1(lines: List[str], cursor: int) -> Tuple[float, float, int,
     awr = float(head['C2'] or 0)
     cursor += 1
 
-    # CONT record — contains NGRP in C3, NGRP+1 in C5
+    # CONT record — contains TEMP in C1, NGRP in C3, NGRP+1 in C5
     cont = parse_line(lines[cursor])
+    temperature = float(cont['C1'] or 0)
     ngrp = int(cont['C3'] or 0)
     n_energies = int(cont['C5'] or 0)
     cursor += 1
@@ -1399,7 +1402,7 @@ def _parse_covfil_mf1(lines: List[str], cursor: int) -> Tuple[float, float, int,
         cursor += 1
         if mf == 0:  # FEND
             break
-    return za, awr, ngrp, energy_grid, cursor
+    return za, awr, temperature, ngrp, energy_grid, cursor
 
 
 def _parse_covfil_mf3(
@@ -1631,7 +1634,7 @@ def read_covfil(file_path: str, energy_unit: str = 'eV') -> Union[CrossSectionCo
     cursor = 1
 
     # --- MF1 MT451: energy grid ---
-    za, awr, ngrp, energy_grid, cursor = _parse_covfil_mf1(lines, cursor)
+    za, awr, temperature, ngrp, energy_grid, cursor = _parse_covfil_mf1(lines, cursor)
     mat, _, _ = parse_endf_id(lines[1])  # MAT from first data line
 
     # --- MF3: cross sections (optional) ---
@@ -1653,6 +1656,8 @@ def read_covfil(file_path: str, energy_unit: str = 'eV') -> Union[CrossSectionCo
         blocks, cursor = _parse_covfil_mf33(lines, cursor, ngrp, mat)
         covmat = CrossSectionCovariance(num_groups=ngrp, energy_unit=energy_unit)
         covmat.energy_grid = energy_grid
+        covmat.metadata['awr'] = awr
+        covmat.metadata['temperature'] = temperature
         for iso_row, mt_row, iso_col, mt_col, matrix in blocks:
             covmat.add_matrix(iso_row, mt_row, iso_col, mt_col, matrix, is_relative=True)
         covmat.cross_sections.update(xs_dict)
@@ -1665,6 +1670,8 @@ def read_covfil(file_path: str, energy_unit: str = 'eV') -> Union[CrossSectionCo
     elif peek_mf == 34:
         blocks34, cursor = _parse_covfil_mf34(lines, cursor, ngrp, mat, energy_grid)
         mf34 = LegendreCovariance(energy_unit=energy_unit)
+        mf34.metadata['awr'] = awr
+        mf34.metadata['temperature'] = temperature
         for iso_row, mt_row, l_row, iso_col, mt_col, l_col, matrix in blocks34:
             mf34.add_matrix(
                 isotope_row=iso_row, reaction_row=mt_row, l_row=l_row,
@@ -1915,7 +1922,8 @@ def write_covfil(
     data: Union[CrossSectionCovariance, LegendreCovariance],
     file_path: str,
     tape_label: str = '',
-    temperature: float = 0.0,
+    temperature: Optional[float] = None,
+    awr: Optional[float] = None,
 ) -> None:
     """
     Write a :class:`CrossSectionCovariance` or :class:`LegendreCovariance` to an NJOY COVFIL/GENDF text file.
@@ -1929,9 +1937,20 @@ def write_covfil(
     tape_label : str, optional
         Label for the tape header line (max 66 chars). Default ``''``.
     temperature : float, optional
-        Temperature in K written into MF1 MT451 CONT record. Default ``0.0``.
+        Temperature in K written into MF1 MT451 CONT record. If ``None``
+        (default), uses ``data.metadata['temperature']`` (set by
+        :func:`read_covfil`), falling back to ``0.0``.
+    awr : float, optional
+        Atomic weight ratio written into MF1 MT451 HEAD and each MF33/MF34
+        section HEAD. If ``None`` (default), uses ``data.metadata['awr']``
+        (set by :func:`read_covfil`), falling back to ``0.0``.
     """
     is_mf33 = isinstance(data, CrossSectionCovariance)
+    meta = getattr(data, 'metadata', None) or {}
+    if temperature is None:
+        temperature = float(meta.get('temperature') or 0.0)
+    if awr is None:
+        awr = float(meta.get('awr') or 0.0)
 
     # Check for MAT overflow (COVFIL 4-char field: max 9999)
     bad_zaids = set()
@@ -1949,22 +1968,20 @@ def write_covfil(
             stacklevel=2,
         )
 
-    # Determine MAT, ZA, AWR, NGRP
+    # Determine MAT, ZA, NGRP. AWR is taken from the resolved parameter above
+    # (data.awr by default, or an explicit override).
     if is_mf33:
         ngrp = data.num_groups
         energy_grid = list(data.energy_grid) if data.energy_grid else []
-        # Infer ZA from the first isotope
         first_zaid = data.isotope_rows[0] if data.isotope_rows else 0
         za = float(first_zaid)
         mat = _zaid_to_mat(first_zaid)
-        awr = 0.0  # will be approximated from ZA
     else:
         energy_grid = list(data.energy_grids[0]) if data.energy_grids else []
         ngrp = len(energy_grid) - 1 if energy_grid else 0
         first_zaid = data.isotope_rows[0] if data.isotope_rows else 0
         za = float(first_zaid)
         mat = _zaid_to_mat(first_zaid)
-        awr = 0.0
 
     # Convert MeV to eV if needed
     if data.energy_unit == 'MeV':

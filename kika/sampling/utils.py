@@ -15,6 +15,26 @@ from kika.cov.parse_covmat import read_coverx, read_covfil, read_boxer, read_sca
 from kika._utils import zaid_to_symbol
 
 
+def make_ace_sample_paths(output_dir: Union[str, os.PathLike], sample_index: int):
+    """
+    Build the per-sample ACE/xsdir output directories under the new layout
+    (shared by endf_perturbation, pendf_perturbation, and combined_perturbation).
+
+    Returns
+    -------
+    ace_dir : str   — output_dir/ace/<NNNN>
+    xsdir_dir : str — output_dir/ace/<NNNN>/xsdir
+    sample_str : str — zero-padded NNNN
+
+    All temperatures and isotopes for a given sample live in the same
+    directory; per-(ZAID, ext) filenames disambiguate them.
+    """
+    sample_str = f"{sample_index + 1:04d}"
+    ace_dir = os.path.join(str(output_dir), "ace", sample_str)
+    xsdir_dir = os.path.join(ace_dir, "xsdir")
+    return ace_dir, xsdir_dir, sample_str
+
+
 def _format_energy_group_name(energy_grid: List[float], group_index: int) -> str:
     """
     Format energy group name using actual energy boundary values in scientific notation.
@@ -56,18 +76,31 @@ class DualLogger:
     story in the log file without console spam.
     """
     
-    def __init__(self, log_file: str, console_level: str = 'CRITICAL'):
+    def __init__(self, log_file: str, console_level: str = 'CRITICAL', mode: str = 'w'):
+        """
+        Parameters
+        ----------
+        log_file
+            Destination log path.
+        console_level
+            (Reserved.) Console handler level threshold; defaults to a value
+            above CRITICAL so console output is opt-in via ``console=True``.
+        mode
+            File-handler mode: ``'w'`` (default) starts a new file, ``'a'``
+            appends. The orchestrator pipeline opens with ``'w'``; sub-
+            pipelines that want to share the same log file pass ``'a'``.
+        """
         self.log_file = log_file
-        
+
         # Create logger
         self.logger = logging.getLogger('sampling_perturbation')
         self.logger.setLevel(logging.DEBUG)
-        
+
         # Clear existing handlers
         self.logger.handlers.clear()
-        
+
         # File handler - gets everything at DEBUG level
-        file_handler = logging.FileHandler(log_file, mode='w')
+        file_handler = logging.FileHandler(log_file, mode=mode)
         file_handler.setLevel(logging.DEBUG)
         file_formatter = logging.Formatter('%(message)s')
         file_handler.setFormatter(file_formatter)
@@ -421,6 +454,60 @@ def _finalize_master_perturbation_matrix(matrix_dir: str, verbose: bool = True) 
             logger.warning(f"[MATRIX] [FINALIZE] Could not clean up temporary directory: {e}")
     
     return master_file
+
+def resolve_signed_request(
+    request: List[int],
+    available: List[int],
+    group_map: Optional[List] = None,
+) -> tuple:
+    """Apply positive/negative signed-list semantics to an integer request.
+
+    Rules:
+      * empty request          → all entries in ``available``
+      * positives only         → those entries
+      * negatives only         → ``available`` minus expanded negatives
+      * mixed positive/negative → positives minus expanded negatives
+
+    A negative entry that matches a key in ``group_map`` (a list of
+    ``(key, iterable)`` pairs like :data:`kika._constants.MT_GROUPS`)
+    expands to drop the whole group too. Pass ``group_map=None`` for
+    plain "drop only the explicit negatives" semantics — appropriate for
+    indices with no grouping (e.g. Legendre coefficients).
+
+    Returns ``(resolved, log_lines)`` where ``log_lines`` is a list of
+    user-facing summary strings the caller writes via the active logger.
+    """
+    log_lines: List[str] = []
+    available_set = {int(x) for x in available}
+
+    if not request:
+        return sorted(available_set), log_lines
+
+    positives = sorted({int(x) for x in request if int(x) > 0})
+    negatives = sorted({abs(int(x)) for x in request if int(x) < 0})
+
+    expanded_negatives = set(negatives)
+    if group_map and negatives:
+        for excluded in negatives:
+            for key, rng in group_map:
+                if key == excluded:
+                    expanded_negatives.update(int(p) for p in rng)
+                    break
+
+    start = set(positives) if positives else available_set
+    resolved = sorted(start - expanded_negatives)
+
+    if negatives:
+        explicit = sorted(set(negatives))
+        also = sorted(expanded_negatives - set(negatives))
+        if also:
+            log_lines.append(
+                f"Excluding entries: {explicit} (group expansion also drops {also})"
+            )
+        else:
+            log_lines.append(f"Excluding entries: {explicit}")
+    return resolved, log_lines
+
 
 def normalize_mt_list(
     mt_list: Union[List[int], List[List[int]], None],
