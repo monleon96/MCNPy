@@ -1054,7 +1054,7 @@ def read_boxer(file_path: str, energy_unit: str = 'eV') -> CrossSectionCovarianc
     cur_mat = cur_mt = cur_mat1 = cur_mt1 = 0
     cur_nrowh = cur_ncolh = 0
     cur_itype = 0
-    last_row = -1
+    cur_row = 0
 
     while cursor < len(lines):
         line = lines[cursor]
@@ -1105,42 +1105,31 @@ def read_boxer(file_path: str, energy_unit: str = 'eV') -> CrossSectionCovarianc
             stddevs[(zaid, mt)] = sd
 
         elif itype in (3, 4):
-            # Covariance (3) or correlation (4) matrix
-            if nrowm == 0:
-                # First block (or single block)
-                cur_matrix = _decompress_boxer(xval, icons, nrowh, ncolh)
+            # Covariance (3) or correlation (4) matrix.
+            # BOXER emits blocks in forward row order; ``nrowm`` is the count of
+            # rows still BELOW this block, i.e. (nrowh - 1) - last_row_in_block.
+            # The first block of a matrix carries the largest ``nrowm``; the
+            # final block has ``nrowm == 0``. ``nrowm`` is NOT a starting row.
+            key = (mat, mt, mat1, mt1, itype)
+            is_new_matrix = (
+                cur_matrix is None
+                or key != (cur_mat, cur_mt, cur_mat1, cur_mt1, cur_itype)
+            )
+            if is_new_matrix:
+                ncol_init = nrowh if ncolh == 0 else ncolh
+                cur_matrix = np.zeros((nrowh, ncol_init))
                 cur_mat, cur_mt, cur_mat1, cur_mt1 = mat, mt, mat1, mt1
                 cur_nrowh, cur_ncolh = nrowh, ncolh
                 cur_itype = itype
-                # Determine last row filled
-                symmetric = (ncolh == 0)
-                ncol_eff = nrowh if symmetric else ncolh
-                total_elements = sum(abs(c) for c in icons)
-                # Calculate last row from element count
-                if symmetric:
-                    last_row = _boxer_last_row_sym(total_elements, nrowh)
-                else:
-                    last_row = (total_elements // ncol_eff) - 1 + 0  # 0-based
-            else:
-                # Continuation block — nrowm is the starting row (1-based)
-                istart = nrowm
-                cur_matrix = _decompress_boxer(
-                    xval, icons, cur_nrowh, cur_ncolh,
-                    istart=istart, matrix=cur_matrix,
-                )
+                cur_row = 0
 
-            # Check if matrix is complete: last continuation has data through the end
-            # A block is the final one if there are no more continuation blocks
-            # Peek at next header to see if it continues
-            is_final = True
-            if cursor < len(lines) and len(lines[cursor].strip()) > 0:
-                next_hdr = _parse_boxer_header(lines[cursor])
-                if next_hdr['nrowm'] > 0 and next_hdr['itype'] == itype:
-                    if (next_hdr['mat'] == mat and next_hdr['mt'] == mt and
-                            next_hdr['mat1'] == mat1 and next_hdr['mt1'] == mt1):
-                        is_final = False
+            cur_matrix = _decompress_boxer(
+                xval, icons, cur_nrowh, cur_ncolh,
+                istart=cur_row, matrix=cur_matrix,
+            )
+            cur_row = nrowh - nrowm
 
-            if is_final and cur_matrix is not None:
+            if nrowm == 0:
                 zaid_row = int(_map_mat(str(cur_mat)))
                 zaid_col = int(_map_mat(str(cur_mat1)))
 
@@ -1155,25 +1144,13 @@ def read_boxer(file_path: str, energy_unit: str = 'eV') -> CrossSectionCovarianc
                     covmat.add_matrix(zaid_row, cur_mt, zaid_col, cur_mt1, cur_matrix)
 
                 cur_matrix = None
+                cur_row = 0
 
     if covmat.num_matrices == 0:
         raise EmptyParsingError(
             f"No valid data was extracted from the BOXER file: {file_path}"
         )
     return covmat
-
-
-def _boxer_last_row_sym(total_elements: int, nrowh: int) -> int:
-    """Determine the last row filled in a symmetric traversal given *total_elements*."""
-    count = 0
-    for i in range(nrowh):
-        row_elems = nrowh - i  # elements in row i of lower triangle
-        if count + row_elems > total_elements:
-            return i
-        count += row_elems
-        if count >= total_elements:
-            return i
-    return nrowh - 1
 
 
 def write_boxer(
