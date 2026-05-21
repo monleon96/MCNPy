@@ -616,13 +616,14 @@ class SDFData:
         # 1. Energy-integrated sensitivity coefficient (sum of groupwise sensitivities)
         s_int = sum(reaction.sensitivity)
         
-        # 2. Standard deviation of S_int (error propagation for sum)
-        # For absolute errors: σ_total = sqrt(Σ σ_i²)
-        s_int_std = (sum(err**2 for err in reaction.error))**0.5
-        
+        # 2. Standard deviation of S_int (error propagation for sum).
+        # reaction.error stores *relative* errors (σ/|s|), so the absolute
+        # per-group standard deviation is |s_i · err_i|; combine in quadrature.
+        s_int_std = (sum((s * err)**2 for s, err in zip(reaction.sensitivity, reaction.error)))**0.5
+
         # 3. Sum of absolute values of groupwise sensitivities
         sum_abs = sum(abs(s) for s in reaction.sensitivity)
-        
+
         # 4. "osc" = sum of sensitivities with sign opposite to S_int
         if s_int == 0:
             # If S_int is zero, all terms contribute to oscillation
@@ -631,7 +632,7 @@ class SDFData:
             # Collect terms with opposite sign to S_int
             s_int_sign = 1 if s_int >= 0 else -1
             osc = sum(s for s in reaction.sensitivity if (s >= 0) != (s_int_sign > 0))
-        
+
         # 5. Standard deviation of "osc" (error propagation for the oscillating terms)
         if s_int == 0:
             # If S_int is zero, all errors contribute to osc uncertainty
@@ -639,7 +640,7 @@ class SDFData:
         else:
             # Only include errors for terms that contribute to osc
             s_int_sign = 1 if s_int >= 0 else -1
-            osc_std = (sum(err**2 for s, err in zip(reaction.sensitivity, reaction.error) 
+            osc_std = (sum((s * err)**2 for s, err in zip(reaction.sensitivity, reaction.error)
                           if (s >= 0) != (s_int_sign > 0)))**0.5
         
         block += f"{s_int:>14.6E}{s_int_std:>14.6E}{sum_abs:>14.6E}{osc:>14.6E}{osc_std:>14.6E}\n"

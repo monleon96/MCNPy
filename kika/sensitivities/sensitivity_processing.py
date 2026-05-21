@@ -1069,17 +1069,18 @@ def _process_single_serpent_file(
                         
                         # Extract 1D arrays (remove any singleton dimensions)
                         sens_values = np.squeeze(values).tolist()
-                        rel_errors_raw = np.squeeze(rel_errors).tolist()
-                        
-                        # Convert relative errors to absolute errors to be consistent with MCNP approach
-                        # SERPENT provides relative errors (σ/μ), but SDF format expects absolute errors (σ)
-                        sens_errors = [abs(sens_val * rel_err) for sens_val, rel_err in zip(sens_values, rel_errors_raw)]
-                        
+                        sens_errors = np.squeeze(rel_errors).tolist()
+
                         # Skip if all sensitivity coefficients are zero
                         if all(abs(v) < 1e-15 for v in sens_values):
                             continue
-                        
-                        # Create SDFReactionData
+
+                        # Create SDFReactionData. SERPENT provides relative errors
+                        # (σ/μ) on the sensitivity coefficients; SDFReactionData.error
+                        # is the relative-error convention used by the rest of kika
+                        # (to_plot_data, group_inelastic_reactions, the SDF writer's
+                        # scalar block, and the kika-app frontend), so we store them
+                        # verbatim.
                         reaction_data = SDFReactionData(
                             zaid=zaid,
                             mt=mt,
@@ -1115,19 +1116,16 @@ def _process_single_serpent_file(
                         # Average the values and relative errors (properly handling relative error averaging)
                         avg_values = np.mean(all_values, axis=0).tolist()
                         avg_rel_errors = np.sqrt(np.mean(np.array(all_errors)**2, axis=0)).tolist()
-                        
-                        # Convert relative errors to absolute errors
-                        avg_abs_errors = [abs(sens_val * rel_err) for sens_val, rel_err in zip(avg_values, avg_rel_errors)]
-                        
+
                         # Skip if all sensitivity coefficients are zero
                         if all(abs(v) < 1e-15 for v in avg_values):
                             continue
-                        
+
                         reaction_data = SDFReactionData(
                             zaid=zaid,
                             mt=mt,
                             sensitivity=avg_values,
-                            error=avg_abs_errors
+                            error=avg_rel_errors
                         )
                         
                         reaction_data_list.append(reaction_data)
