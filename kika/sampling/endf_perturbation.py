@@ -122,42 +122,49 @@ def _process_sample(
             "dry_run": True,
         }
     
-    # Parse the ENDF file
-    endf = parse_endf_file(endf_file)
-
-    # Apply perturbations to MF4 data
-    perturbed_params, positivity_events = apply_perturbation_factors_to_endf(
-        endf, sample, sample_index, energy_grids, param_mapping, verbose=False,
-        enforce_positivity=enforce_positivity,
-        positivity_check_points=positivity_check_points,
-    )
-    
-    # Write perturbed ENDF file
+    # Compute the expected output path before doing any heavy work. If the
+    # perturbed ENDF already exists, reuse it and skip parse + perturbation +
+    # write — this lets re-runs cheaply add ACE files at a new temperature.
+    # MF1 is enough to recover the ZAID; full parse only happens on the
+    # write path below.
     base, ext = os.path.splitext(os.path.basename(endf_file))
     sample_str = f"{sample_index+1:04d}"
-    sample_dir = os.path.join(output_dir, "endf", str(endf.zaid or "unknown"), sample_str)
-    os.makedirs(sample_dir, exist_ok=True)
+    try:
+        zaid_dir = str(read_endf(endf_file, mf_numbers=[1]).zaid or "unknown")
+    except Exception:
+        zaid_dir = "unknown"
+    sample_dir = os.path.join(output_dir, "endf", zaid_dir, sample_str)
     out_endf = os.path.join(sample_dir, f"{base}_{sample_str}{ext}")
-    
-    # Use ENDF writer to save the modified file
-    writer = ENDFWriter(endf_file)
-    if 4 in endf.files:
-        success = writer.replace_mf_section(endf.files[4], out_endf)
-        if not success:
-            if _get_logger():
-                _get_logger().error(f"  [ERROR] [ENDF] Failed to write perturbed ENDF file: {out_endf}")
-            return {"success": False, "positivity_events": positivity_events,
-                    "temperatures_processed": [], "errors": [], "warnings": []}
 
-    # Write sample summary
-    _write_sample_summary(
-        sample=sample,
-        sample_index=sample_index,
-        energy_grids=energy_grids,
-        param_mapping=param_mapping,
-        sample_dir=sample_dir,
-        base=base,
-    )
+    if os.path.exists(out_endf):
+        reused = True
+        positivity_events: List[Tuple[int, float, float, float]] = []
+    else:
+        reused = False
+        endf = parse_endf_file(endf_file)
+        perturbed_params, positivity_events = apply_perturbation_factors_to_endf(
+            endf, sample, sample_index, energy_grids, param_mapping, verbose=False,
+            enforce_positivity=enforce_positivity,
+            positivity_check_points=positivity_check_points,
+        )
+        os.makedirs(sample_dir, exist_ok=True)
+        writer = ENDFWriter(endf_file)
+        if 4 in endf.files:
+            success = writer.replace_mf_section(endf.files[4], out_endf)
+            if not success:
+                if _get_logger():
+                    _get_logger().error(f"  [ERROR] [ENDF] Failed to write perturbed ENDF file: {out_endf}")
+                return {"success": False, "positivity_events": positivity_events,
+                        "temperatures_processed": [], "errors": [], "warnings": [],
+                        "reused": False}
+        _write_sample_summary(
+            sample=sample,
+            sample_index=sample_index,
+            energy_grids=energy_grids,
+            param_mapping=param_mapping,
+            sample_dir=sample_dir,
+            base=base,
+        )
 
     # Generate ACE files using NJOY if requested
     if generate_ace and not dry_run:
@@ -173,10 +180,12 @@ def _process_sample(
             xsdir_file=xsdir_file,
         )
         njoy_result["positivity_events"] = positivity_events
+        njoy_result["reused"] = reused
         return njoy_result
 
     return {"success": True, "temperatures_processed": [], "errors": [],
-            "warnings": [], "positivity_events": positivity_events}
+            "warnings": [], "positivity_events": positivity_events,
+            "reused": reused}
 
 
 def _process_njoy_for_sample(
@@ -1055,6 +1064,8 @@ def perturb_ENDF_files(
             njoy_results = []  # Track NJOY results for batch logging
             # (sample_index, [(mt, energy, sigma_min, max_delta_a_l), ...])
             positivity_events_by_sample: List[Tuple[int, List[Tuple[int, float, float, float]]]] = []
+            # Mutable container so nested _absorb_result can mutate it without nonlocal.
+            reused_count = [0]
 
             def _absorb_result(sample_idx, result):
                 if not isinstance(result, dict):
@@ -1062,6 +1073,8 @@ def perturb_ENDF_files(
                 events = result.get("positivity_events") or []
                 if events:
                     positivity_events_by_sample.append((sample_idx, events))
+                if result.get("reused"):
+                    reused_count[0] += 1
                 if generate_ace and not dry_run:
                     njoy_results.append((sample_idx, result))
 
@@ -1149,6 +1162,13 @@ def perturb_ENDF_files(
                     except Exception as e:
                         _logger.error(f"  [ERROR] [ENDF] File {step_num}: Sample {sample_idx+1:04d} processing failed: {e}")
                         continue
+
+            # Report reuse of existing perturbed ENDFs (re-runs at new temperature).
+            if reused_count[0] > 0:
+                _logger.info(
+                    f"  [INFO] [ENDF] File {step_num}: Reused {reused_count[0]}/{num_samples} "
+                    f"existing perturbed ENDFs on disk; skipped perturbation+write for those samples."
+                )
 
             # Positivity reporting: per-event in verbose, summary always.
             if enforce_positivity:
