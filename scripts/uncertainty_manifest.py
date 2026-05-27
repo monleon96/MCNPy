@@ -42,6 +42,11 @@ import os
 # Default manifest location (alongside the EXFOR data on the shared volume).
 # Override with the ``KIKA_UNCERTAINTY_MANIFEST_PATH`` environment variable.
 _DEFAULT_MANIFEST_PATH = "/share_snc/snc/JuanMonleon/EXFOR/uncertainty_manifest.yaml"
+# Alternate manifest with Cierjacks ERR-T routed to a diagonal residual via a
+# ``sys_dep`` block (instead of the legacy ``kind: total_minus_stat`` rank-1
+# treatment). Toggle with:
+#     export KIKA_UNCERTAINTY_MANIFEST_PATH=/share_snc/snc/JuanMonleon/EXFOR/uncertainty_manifest_diagonal_cierjacks.yaml
+# Unset to fall back to the default manifest (identical legacy behavior).
 _MANIFEST_PATH = Path(os.environ.get(
     "KIKA_UNCERTAINTY_MANIFEST_PATH", _DEFAULT_MANIFEST_PATH
 ))
@@ -585,6 +590,38 @@ def resolve_for_dataset(
                   f"σ_sys capped at σ_total on {n_violations}/{len(sigma_total)} rows; "
                   f"σ_stat floored at {SIGMA_STAT_MIN_REL*100:g}% of |y| on "
                   f"{n_floored}/{len(sigma_stat)} rows.")
+
+    # ── Optional sys_dep block: diagonal residual ────────────────────────────
+    # Backward-compatible extension. When an entry carries a top-level
+    # ``sys_dep`` block with ``covariance_role: diagonal_residual``, the
+    # piecewise_E ``total_error_spec`` defines σ_total per row (% of |y|), and
+    # the residual after removing σ_stat and σ_sys_indep in quadrature is
+    # folded into σ_stat. Effect: the documented energy-dependent envelope
+    # becomes uncorrelated point-to-point noise instead of a rank-1 shape
+    # mode (which is the legacy ``kind: total_minus_stat`` treatment). Used
+    # by the ``uncertainty_manifest_diagonal_cierjacks.yaml`` alternate.
+    # Entries without a ``sys_dep`` block are unaffected.
+    sys_dep_spec = entry.get("sys_dep") if entry else None
+    if (
+        isinstance(sys_dep_spec, dict)
+        and sys_dep_spec.get("covariance_role") == "diagonal_residual"
+        and sys_dep_spec.get("correlated") is False
+        and sys_dep_spec.get("source") == "piecewise_E"
+    ):
+        pw = sys_dep_spec.get("total_error_spec") or sys_dep_spec.get("spec", [])
+        pcts, covered = _eval_piecewise_E(pw, energies_mev)
+        sigma_total_dep = np.abs(values_b_sr) * (pcts / 100.0)
+        residual_sq = np.maximum(
+            sigma_total_dep ** 2 - sigma_stat ** 2 - sigma_sys_indep_b_sr ** 2,
+            0.0,
+        )
+        residual = np.where(covered, np.sqrt(residual_sq), 0.0)
+        n_applied = int(np.sum(residual > 0))
+        if n_applied:
+            sigma_stat = np.sqrt(sigma_stat ** 2 + residual ** 2)
+            print(f"  [uncertainty_manifest] {dataset_id}: sys_dep diagonal "
+                  f"residual folded into σ_stat on {n_applied}/{len(residual)} rows "
+                  f"(max {100*np.max(residual[covered] / np.maximum(np.abs(values_b_sr[covered]), 1e-30)):.2f}% of |y|).")
 
     # Per-experiment representative scalar sigma_sys (relative, for diagnostics)
     nz = np.abs(values_b_sr) > 0

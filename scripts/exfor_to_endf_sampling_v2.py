@@ -186,7 +186,7 @@ ENDF_FILE = "/share_snc/snc/JuanMonleon/jeff40_with_MF4_from_jeff33/26-Fe-56g.tx
 MF34_SOURCE_FILE = None                          # Separate MF34 source (None = use ENDF_FILE)
 EXFOR_DIRECTORY = "/share_snc/snc/JuanMonleon/EXFOR/data_v1/"
 EXFOR_DB_PATH = '/share_snc/snc/JuanMonleon/EXFOR/x4_iron_angular.db'
-OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_67/"
+OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_77/"
 TOF_PARAMETERS_FILE = "/share_snc/snc/JuanMonleon/EXFOR/exfor_tof_parameters.json"
 
 # --- DATA SOURCE ----------------------------------------------------------- #
@@ -523,12 +523,12 @@ def _write_run_metadata(output_dir: str) -> Dict[str, Any]:
     manifest_sha256: Optional[str] = None
     manifest_path_reachable: Optional[bool] = None
     try:
-        from scripts.uncertainty_manifest import _DEFAULT_MANIFEST_PATH as _mp
-        manifest_path = _mp
+        from scripts.uncertainty_manifest import _MANIFEST_PATH as _mp
+        manifest_path = str(_mp)
     except Exception:
         try:
-            from uncertainty_manifest import _DEFAULT_MANIFEST_PATH as _mp
-            manifest_path = _mp
+            from uncertainty_manifest import _MANIFEST_PATH as _mp
+            manifest_path = str(_mp)
         except Exception:
             manifest_path = None
     if manifest_path is not None:

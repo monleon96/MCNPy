@@ -236,6 +236,7 @@ def chi2_per_experiment_variants(
     eval_cov: Optional[Dict[Tuple, np.ndarray]] = None,
     *,
     group_cols: Tuple[str, ...] = ("library", "experiment_id"),
+    include_eval_diag: bool = True,
 ) -> pd.DataFrame:
     """Compute all four chi^2 variants per group in a single pass.
 
@@ -254,14 +255,22 @@ def chi2_per_experiment_variants(
 
     V4 is computed only if `eval_cov` is provided; otherwise the V4 column is
     NaN.
+
+    Setting `include_eval_diag=False` zeroes σ_eval_diag everywhere, turning V1
+    into the "EXFOR-only" variant (σ² = σ_stat² + (σ_indep·y)² + (σ_dep·y)²)
+    that removes the per-library evaluator cushion. V3 then collapses to V2
+    and V4 is unchanged (the dense block is independent of the diagonal flag).
     """
     D_all, u_all, v_all, r_all = _components(df)
     eval_cov = eval_cov or {}
-    sigma_eval_diag = (
-        df["sigma_eval_diag"].to_numpy(dtype=float)
-        if "sigma_eval_diag" in df.columns
-        else np.zeros(len(df), dtype=float)
-    )
+    if include_eval_diag:
+        sigma_eval_diag = (
+            df["sigma_eval_diag"].to_numpy(dtype=float)
+            if "sigma_eval_diag" in df.columns
+            else np.zeros(len(df), dtype=float)
+        )
+    else:
+        sigma_eval_diag = np.zeros(len(df), dtype=float)
 
     groups = df.groupby(list(group_cols), observed=True, sort=False)
     out_rows = []
@@ -353,6 +362,7 @@ def whitened_residuals_per_experiment_variant(
     *,
     variant: str = "V4",
     group_cols: Tuple[str, ...] = ("library", "experiment_id"),
+    include_eval_diag: bool = True,
 ) -> pd.Series:
     """Per-row whitened residual z for one of the four chi^2 variants.
 
@@ -364,17 +374,23 @@ def whitened_residuals_per_experiment_variant(
 
     sum(z²) per group equals chi²_v{n} from chi2_per_experiment_variants
     to numerical precision.
+
+    Setting `include_eval_diag=False` zeroes σ_eval_diag everywhere (EXFOR-only
+    diagonal); affects V1 and V3, leaves V2/V4 unchanged.
     """
     variant = variant.upper()
     if variant not in {"V1", "V2", "V3", "V4"}:
         raise ValueError(f"variant must be V1/V2/V3/V4, got {variant!r}")
     D_all, u_all, v_all, r_all = _components(df)
     eval_cov = eval_cov or {}
-    sigma_eval_diag = (
-        df["sigma_eval_diag"].to_numpy(dtype=float)
-        if "sigma_eval_diag" in df.columns
-        else np.zeros(len(df), dtype=float)
-    )
+    if include_eval_diag:
+        sigma_eval_diag = (
+            df["sigma_eval_diag"].to_numpy(dtype=float)
+            if "sigma_eval_diag" in df.columns
+            else np.zeros(len(df), dtype=float)
+        )
+    else:
+        sigma_eval_diag = np.zeros(len(df), dtype=float)
 
     z_full = np.full(len(df), np.nan, dtype=float)
     for key, sub in df.groupby(list(group_cols), observed=True, sort=False):
