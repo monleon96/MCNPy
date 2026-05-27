@@ -181,6 +181,13 @@ MT_TO_REACTION = {
     115: "(n,pd)",
     116: "(n,pt)",
     117: "(n,dα)",
+    # Fission neutron yields (ν̄) and spectra (χ) — Serpent sensitivity perturbations
+    452: "ν̄ total",
+    455: "ν̄ delayed",
+    456: "ν̄ prompt",
+    1018: "χ total",
+    1019: "χ prompt",
+    1020: "χ delayed",
     # Legendre coefficients for elastic angular distributions (custom extension)
     4001: "(n,el)P₁",
     4002: "(n,el)P₂",

@@ -17,6 +17,8 @@ from kika._utils import zaid_to_symbol
 class PertCategory(str, Enum):
     MT_XS = "mt_xs"
     LEGENDRE_MOMENT = "legendre_moment"
+    NUBAR = "nubar"
+    CHI = "chi"
     OTHER = "other"
 
 
