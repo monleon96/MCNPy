@@ -16,7 +16,12 @@ import logging
 from kika.sensitivities.sdf import SDFData, SDFReactionData
 from kika.cov.cross_section_covariance import CrossSectionCovariance
 from kika.cov.multigroup.mg_legendre_covariance import MultigroupLegendreCovariance
-from kika._constants import MT_TO_REACTION, ATOMIC_NUMBER_TO_SYMBOL
+from kika._constants import (
+    MT_TO_REACTION,
+    ATOMIC_NUMBER_TO_SYMBOL,
+    NUBAR_TOTAL_MT,
+    NUBAR_COMPONENT_MTS,
+)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -465,6 +470,7 @@ def sandwich_uncertainty_propagation(
     cov_mat: Optional[Union[CrossSectionCovariance, List[CrossSectionCovariance]]] = None,
     legendre_cov_mat: Optional[Union[MultigroupLegendreCovariance, List[MultigroupLegendreCovariance]]] = None,
     reaction_filter: Optional[Dict[int, List[int]]] = None,
+    nubar_mode: Union[str, Dict[int, str]] = "total",
     energy_tolerance: float = 1e-6,
     verbose: bool = False,
     bootstrap: bool = True,
@@ -508,6 +514,15 @@ def sandwich_uncertainty_propagation(
         If None, all matching reactions between sensitivity and covariance data are used.
         Example: {26056: [2, 102]} includes only elastic and (n,γ) for Fe-56
                  {26056: [4001, 4002]} includes only P1 and P2 Legendre moments
+    nubar_mode : str or Dict[int, str], optional
+        How to resolve redundant nu-bar reactions when a covariance file provides
+        the total (MT 452) together with its prompt/delayed components (MT 456/455),
+        since total = prompt + delayed and including both double-counts the variance.
+        Either a single mode applied to all isotopes, or a dict mapping ZAID -> mode
+        (isotopes absent from the dict default to "total"). Modes:
+        - "total" (default): keep the total (MT 452), drop prompt/delayed.
+        - "components": keep prompt + delayed, drop the total (only when both
+          components are present; otherwise the total is kept to avoid undercounting).
     energy_tolerance : float, optional
         Tolerance for matching energy grid boundaries (default: 1e-6)
     verbose : bool, optional
@@ -634,13 +649,19 @@ def sandwich_uncertainty_propagation(
             
             # Find matching cross-section reactions
             xs_matching_reactions = _find_matching_reactions(
-                xs_sensitivities, 
-                merged_cov_mat, 
+                xs_sensitivities,
+                merged_cov_mat,
                 reaction_filter,
                 verbose,
                 "cross-section"
             )
-            
+
+            # Resolve nu-bar redundancy (total MT 452 vs prompt/delayed MT 456/455)
+            # per the requested view, to avoid double-counting (total = prompt + delayed).
+            xs_matching_reactions = _resolve_nubar_redundancy(
+                xs_matching_reactions, nubar_mode, verbose
+            )
+
             if xs_matching_reactions:
                 # Build matrices for cross-sections
                 xs_result = {
@@ -975,8 +996,110 @@ def _find_matching_reactions(
             logger.info(f"  {nuclide} {reaction}")
         if len(matching_reactions) > 5:
             logger.info(f"  ... and {len(matching_reactions) - 5} more")
-    
+
     return matching_reactions
+
+
+def _resolve_nubar_redundancy(
+    matching_reactions: List[Tuple[int, int]],
+    nubar_mode: Union[str, Dict[int, str]],
+    verbose: bool,
+) -> List[Tuple[int, int]]:
+    """Resolve redundant nu-bar reactions according to the requested view.
+
+    Nu-bar is described by three quantities: total (MT 452), prompt (MT 456) and
+    delayed (MT 455), with total = prompt + delayed (and, in relative terms,
+    S_total = S_prompt + S_delayed). When a covariance file provides the total
+    *and* its components, the sandwich formula would count the same nu-bar
+    uncertainty more than once, so for each isotope only one of the two views is
+    kept:
+
+    - ``"total"`` (default): keep the total (MT 452), drop prompt/delayed. The
+      total is the standard integral quantity for k-eff uncertainty.
+    - ``"components"``: keep prompt + delayed, drop the total — but only when the
+      decomposition is complete (both MT 455 and MT 456 present). With only one
+      component available, dropping the total would silently undercount the
+      missing piece, so the total is kept and a warning is emitted instead.
+
+    ``nubar_mode`` may be a single string applied to every isotope, or a dict
+    mapping ZAID -> mode (isotopes absent from the dict default to ``"total"``).
+    Isotopes that have only the total, or only components, are returned unchanged.
+    """
+    def mode_for(zaid: int) -> str:
+        if isinstance(nubar_mode, dict):
+            return nubar_mode.get(zaid, "total")
+        return nubar_mode or "total"
+
+    isotopes_with_total = {z for z, mt in matching_reactions if mt == NUBAR_TOTAL_MT}
+    if not isotopes_with_total:
+        return matching_reactions
+
+    components_by_isotope: Dict[int, set] = {}
+    for zaid, mt in matching_reactions:
+        if mt in NUBAR_COMPONENT_MTS and zaid in isotopes_with_total:
+            components_by_isotope.setdefault(zaid, set()).add(mt)
+
+    kept: List[Tuple[int, int]] = []
+    dropped_components: List[Tuple[int, int]] = []
+    dropped_total: List[Tuple[int, int]] = []
+    incomplete: List[int] = []
+    for zaid, mt in matching_reactions:
+        present_components = components_by_isotope.get(zaid, set())
+        # Only the (total + >=1 component) isotopes carry a real choice.
+        if zaid not in components_by_isotope:
+            kept.append((zaid, mt))
+            continue
+
+        want_components = mode_for(zaid) == "components"
+        complete = set(NUBAR_COMPONENT_MTS).issubset(present_components)
+
+        if want_components and complete:
+            # Keep the decomposition, drop the total.
+            if mt == NUBAR_TOTAL_MT:
+                dropped_total.append((zaid, mt))
+            else:
+                kept.append((zaid, mt))
+        else:
+            # Keep the total, drop the components.
+            if want_components and not complete and mt == NUBAR_TOTAL_MT:
+                incomplete.append(zaid)
+            if mt in NUBAR_COMPONENT_MTS:
+                dropped_components.append((zaid, mt))
+            else:
+                kept.append((zaid, mt))
+
+    def _labels(pairs):
+        return ", ".join(
+            f"{_format_nuclide(z)} {MT_TO_REACTION.get(mt, f'MT{mt}')}" for z, mt in pairs
+        )
+
+    if dropped_components:
+        labels = _labels(dropped_components)
+        warnings.warn(
+            "Excluded prompt/delayed nu-bar to avoid double-counting with total "
+            f"nu-bar (MT 452): {labels}."
+        )
+        if verbose:
+            logger.info(f"  Kept total nu-bar (MT 452), dropped components: {labels}")
+
+    if dropped_total:
+        labels = _labels(dropped_total)
+        warnings.warn(
+            "Excluded total nu-bar (MT 452) to avoid double-counting with its "
+            f"prompt/delayed components: {labels}."
+        )
+        if verbose:
+            logger.info(f"  Kept prompt/delayed nu-bar, dropped total: {labels}")
+
+    if incomplete:
+        labels = ", ".join(_format_nuclide(z) for z in incomplete)
+        warnings.warn(
+            "Requested prompt/delayed nu-bar decomposition but only one component "
+            f"is available for {labels}; kept total nu-bar (MT 452) instead to "
+            "avoid undercounting."
+        )
+
+    return kept
 
 
 def _find_matching_legendre_reactions(

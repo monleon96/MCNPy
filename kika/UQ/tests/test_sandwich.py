@@ -60,7 +60,8 @@ from kika.UQ.sandwich import (
     UncertaintyResult,
     UncertaintyContribution,
     filter_reactions_by_nuclide,
-    filter_reactions_by_type
+    filter_reactions_by_type,
+    _resolve_nubar_redundancy,
 )
 
 
@@ -767,6 +768,142 @@ class TestUtilityFunctions:
         # Should return a dict where all isotopes can have these reactions
         # Implementation might vary, but basic functionality should work
         assert isinstance(filter_dict, dict)
+
+
+class TestNubarDoubleCounting:
+    """Nu-bar total (MT 452) = prompt (456) + delayed (455).
+
+    Serpent reports sensitivities to all three; if a covariance file also
+    provides all three, the sandwich formula must not count them together or the
+    nu-bar variance is double-counted. The total is retained, the components are
+    dropped.
+    """
+
+    def test_resolve_nubar_redundancy_total_mode(self):
+        """Default 'total' mode: drop prompt/delayed, keep total."""
+        # Total + both components for U-235 -> drop components, keep total.
+        with pytest.warns(UserWarning, match="double-counting"):
+            kept = _resolve_nubar_redundancy(
+                [(92235, 452), (92235, 455), (92235, 456), (92238, 18)], "total", False
+            )
+        assert kept == [(92235, 452), (92238, 18)]
+
+        # Components only (no total) -> keep both, no warning.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert _resolve_nubar_redundancy(
+                [(92235, 455), (92235, 456)], "total", False
+            ) == [(92235, 455), (92235, 456)]
+
+        # Total only -> unchanged.
+        assert _resolve_nubar_redundancy([(92235, 452)], "total", False) == [(92235, 452)]
+
+        # Per-isotope isolation: U-235 has total, U-238 has only delayed.
+        with pytest.warns(UserWarning):
+            kept = _resolve_nubar_redundancy(
+                [(92235, 452), (92235, 455), (92238, 455)], "total", False
+            )
+        assert kept == [(92235, 452), (92238, 455)]
+
+    def test_resolve_nubar_redundancy_components_mode(self):
+        """'components' mode: drop total, keep prompt + delayed when both present."""
+        with pytest.warns(UserWarning, match="Excluded total nu-bar"):
+            kept = _resolve_nubar_redundancy(
+                [(92235, 452), (92235, 455), (92235, 456), (92238, 18)],
+                "components",
+                False,
+            )
+        assert kept == [(92235, 455), (92235, 456), (92238, 18)]
+
+        # Per-isotope dict: U-235 decomposed, U-238 keeps total.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            kept = _resolve_nubar_redundancy(
+                [(92235, 452), (92235, 455), (92235, 456),
+                 (92238, 452), (92238, 455), (92238, 456)],
+                {92235: "components"},
+                False,
+            )
+        assert set(kept) == {(92235, 455), (92235, 456), (92238, 452)}
+
+    def test_resolve_nubar_redundancy_incomplete_decomposition(self):
+        """'components' requested but only one component present -> keep total + warn."""
+        with pytest.warns(UserWarning, match="only one component"):
+            kept = _resolve_nubar_redundancy(
+                [(92235, 452), (92235, 455)], "components", False
+            )
+        assert kept == [(92235, 452)]
+
+    def _nubar_sdf(self) -> SDFData:
+        """U-235 nu-bar sensitivities: total = prompt + delayed (0.3 = 0.2 + 0.1)."""
+        energy_boundaries = [2.0e7, 0.0]  # single group
+        return SDFData(
+            title="Nu-bar double-count",
+            energy="0.0e+00_2.0e+07",
+            pert_energies=energy_boundaries,
+            r0=1.0,
+            e0=0.01,
+            data=[
+                SDFReactionData(zaid=92235, mt=452, sensitivity=[0.3], error=[0.0]),
+                SDFReactionData(zaid=92235, mt=455, sensitivity=[0.1], error=[0.0]),
+                SDFReactionData(zaid=92235, mt=456, sensitivity=[0.2], error=[0.0]),
+            ],
+        )
+
+    def _nubar_cov(self) -> CrossSectionCovariance:
+        """Diagonal (relative) covariance for nu-bar total, delayed and prompt."""
+        cov = CrossSectionCovariance()
+        cov.energy_grid = [2.0e7, 0.0]
+        cov.isotope_rows = [92235, 92235, 92235]
+        cov.reaction_rows = [452, 455, 456]
+        cov.isotope_cols = [92235, 92235, 92235]
+        cov.reaction_cols = [452, 455, 456]
+        cov.matrices = [
+            np.array([[0.0025]]),  # total  (5% rel)
+            np.array([[0.0004]]),  # delayed (2% rel)
+            np.array([[0.0009]]),  # prompt  (3% rel)
+        ]
+        return cov
+
+    def test_total_nubar_kept_components_dropped(self):
+        """Only the total contributes; variance excludes the redundant components."""
+        with pytest.warns(UserWarning, match="double-counting"):
+            result = sandwich_uncertainty_propagation(
+                sdf_data=self._nubar_sdf(),
+                cov_mat=self._nubar_cov(),
+                verbose=False,
+            )
+
+        # Exactly one reaction survives: the total (MT 452).
+        assert result.n_reactions == 1
+        assert len(result.contributions) == 1
+        assert result.contributions[0].mt == 452
+
+        # Variance equals S_452^2 * cov_452 = 0.3^2 * 0.0025, NOT the double-counted
+        # sum that would also add the prompt/delayed contributions.
+        expected = 0.3**2 * 0.0025
+        double_counted = expected + 0.1**2 * 0.0004 + 0.2**2 * 0.0009
+        assert result.total_variance == pytest.approx(expected, rel=1e-9)
+        assert result.total_variance < double_counted
+
+    def test_components_mode_keeps_prompt_delayed(self):
+        """nubar_mode='components': total dropped, prompt + delayed contribute."""
+        with pytest.warns(UserWarning, match="Excluded total nu-bar"):
+            result = sandwich_uncertainty_propagation(
+                sdf_data=self._nubar_sdf(),
+                cov_mat=self._nubar_cov(),
+                nubar_mode="components",
+                verbose=False,
+            )
+
+        # The two components survive; the total (MT 452) is dropped.
+        assert result.n_reactions == 2
+        mts = sorted(c.mt for c in result.contributions)
+        assert mts == [455, 456]
+
+        # Diagonal covariance -> variance is the sum of the component auto-terms.
+        expected = 0.1**2 * 0.0004 + 0.2**2 * 0.0009
+        assert result.total_variance == pytest.approx(expected, rel=1e-9)
 
 
 if __name__ == "__main__":

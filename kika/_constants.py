@@ -91,6 +91,12 @@ MT_COMPOSITES = {
 # Order for computing composites (dependencies first)
 MT_COMPOSITE_ORDER = [4, 16, 18, 103, 104, 105, 106, 107, 101, 27, 3, 1]
 
+# Nu-bar decomposition: total (MT 452) = prompt (MT 456) + delayed (MT 455).
+# Kept separate from MT_COMPOSITES (which drives cross-section summation) because
+# this is a covariance double-counting concern, not a cross-section sum.
+NUBAR_TOTAL_MT = 452
+NUBAR_COMPONENT_MTS = (455, 456)  # delayed, prompt
+
 MT_TO_REACTION = {
     1: "(n,total)",
     2: "(n,el)",

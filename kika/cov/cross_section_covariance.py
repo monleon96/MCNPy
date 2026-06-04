@@ -97,6 +97,60 @@ if TYPE_CHECKING:
     from kika.plotting.plot_data import CovarianceHeatmapData, MultigroupCrossSectionPlotData, MultigroupUncertaintyPlotData
 
 
+def _rescale_energy_grid(
+    grid: Optional[Sequence[float]], from_unit: Optional[str], to_unit: Optional[str],
+) -> Optional[List[float]]:
+    """Convert an energy grid between 'eV' and 'MeV'. Returns a new list (or None).
+
+    Covariance matrix *values* are unaffected by the energy-axis unit (relative
+    covariances are dimensionless; absolute ones are in cross-section units), so
+    only the grid boundaries are rescaled.
+    """
+    if grid is None:
+        return None
+    fu = (from_unit or 'eV').lower()
+    tu = (to_unit or 'eV').lower()
+    if fu == tu:
+        return [float(x) for x in grid]
+    if fu == 'ev' and tu == 'mev':
+        factor = 1e-6
+    elif fu == 'mev' and tu == 'ev':
+        factor = 1e6
+    else:
+        return [float(x) for x in grid]  # unknown unit pair: leave magnitudes as-is
+    return [float(x) * factor for x in grid]
+
+
+@dataclass
+class TransferResult:
+    """Outcome of :meth:`CrossSectionCovariance.transfer_reactions`.
+
+    Attributes
+    ----------
+    covariance : CrossSectionCovariance
+        The merged covariance (a new object; inputs are not mutated).
+    diagonal_transferred : list of (isotope, mt)
+        Self-blocks copied from the source.
+    cross_transferred : list of (iso_row, mt_row, iso_col, mt_col)
+        Off-diagonal cross-correlation blocks copied from the source.
+    cross_dropped : list of ((iso_row, mt_row, iso_col, mt_col), reason)
+        Cross blocks that were *not* copied, with the reason.
+    reactions_replaced : list of (isotope, mt)
+        Destination reactions whose existing blocks were removed before re-adding.
+    cross_sections_transferred : list of (isotope, mt)
+        Reactions whose associated cross-section vector was copied.
+    missing_in_source : list of (isotope, mt)
+        Requested reactions not found in the source.
+    """
+    covariance: "CrossSectionCovariance"
+    diagonal_transferred: List[Tuple[int, int]] = field(default_factory=list)
+    cross_transferred: List[Tuple[int, int, int, int]] = field(default_factory=list)
+    cross_dropped: List[Tuple[Tuple[int, int, int, int], str]] = field(default_factory=list)
+    reactions_replaced: List[Tuple[int, int]] = field(default_factory=list)
+    cross_sections_transferred: List[Tuple[int, int]] = field(default_factory=list)
+    missing_in_source: List[Tuple[int, int]] = field(default_factory=list)
+
+
 @dataclass
 class CrossSectionCovariance:
     """
@@ -482,6 +536,240 @@ class CrossSectionCovariance:
 
 
 
+
+    # ------------------------------------------------------------------
+    # Merge / transfer
+    # ------------------------------------------------------------------
+
+    def _align_block_lists(self) -> None:
+        """Pad per-block lists to ``len(matrices)`` so positional appends stay aligned.
+
+        ``is_relative`` and ``energy_grids`` are permitted to be shorter than
+        ``matrices`` (some readers leave them empty), with consumers defaulting
+        the missing entries. Before merging we materialise those defaults so that
+        blocks appended afterwards keep a correct 1:1 index with their flag/grid.
+        ``is_relative`` defaults to ``True`` (the convention used by
+        :meth:`get_uncertainty`); ``energy_grids`` defaults to the shared
+        ``energy_grid`` when one is available.
+        """
+        n = len(self.matrices)
+        if len(self.is_relative) < n:
+            self.is_relative.extend([True] * (n - len(self.is_relative)))
+        if self.energy_grid is not None and len(self.energy_grids) < n:
+            self.energy_grids.extend(
+                list(self.energy_grid) for _ in range(n - len(self.energy_grids))
+            )
+
+    def _drop_reaction(self, isotope: int, reaction: int) -> None:
+        """Remove, in place, every block touching ``(isotope, reaction)`` on either
+        axis, plus its cross-section entry. Assumes lists were aligned first."""
+        n = len(self.matrices)
+        keep = [
+            i for i in range(n)
+            if not (
+                (self.isotope_rows[i] == isotope and self.reaction_rows[i] == reaction)
+                or (self.isotope_cols[i] == isotope and self.reaction_cols[i] == reaction)
+            )
+        ]
+
+        def _sel(lst):
+            return [lst[i] for i in keep] if len(lst) == n else lst
+
+        self.isotope_rows = _sel(self.isotope_rows)
+        self.reaction_rows = _sel(self.reaction_rows)
+        self.isotope_cols = _sel(self.isotope_cols)
+        self.reaction_cols = _sel(self.reaction_cols)
+        self.matrices = _sel(self.matrices)
+        self.is_relative = _sel(self.is_relative)
+        self.energy_grids = _sel(self.energy_grids)
+        self.cross_sections.pop((isotope, reaction), None)
+
+    def _validate_mergeable(
+        self, source: "CrossSectionCovariance", *, grid_atol: float, grid_rtol: float,
+    ) -> None:
+        """Raise ``ValueError`` if ``source`` cannot be merged into ``self`` because
+        of an incompatible group structure. Regridding is intentionally unsupported."""
+        import warnings
+
+        dest_g = self.num_groups or (self.matrices[0].shape[0] if self.matrices else 0)
+        src_g = source.num_groups or (source.matrices[0].shape[0] if source.matrices else 0)
+        if dest_g and src_g and dest_g != src_g:
+            raise ValueError(
+                f"Cannot merge covariances with different group counts "
+                f"(destination has {dest_g} groups, source has {src_g}). "
+                "Regridding is not supported; convert both files to a common "
+                "group structure first."
+            )
+
+        if self.energy_grid is not None and source.energy_grid is not None:
+            src_in_dest = _rescale_energy_grid(
+                source.energy_grid, source.energy_unit, self.energy_unit,
+            )
+            a = np.asarray(self.energy_grid, dtype=float)
+            b = np.asarray(src_in_dest, dtype=float)
+            if a.shape != b.shape or not np.allclose(a, b, rtol=grid_rtol, atol=grid_atol):
+                raise ValueError(
+                    "Cannot merge covariances on different energy grids "
+                    f"(destination unit={self.energy_unit}, source unit={source.energy_unit}). "
+                    "Regridding is not supported; convert both files to a common "
+                    "group structure first."
+                )
+        else:
+            warnings.warn(
+                "One or both covariances have no explicit energy grid; "
+                "merging on matching group count only.",
+                RuntimeWarning, stacklevel=2,
+            )
+
+    def transfer_reactions(
+        self,
+        source: "CrossSectionCovariance",
+        reactions: Sequence[Tuple[int, int]],
+        *,
+        cross_correlation: str = "both-present",
+        grid_atol: float = 1e-6,
+        grid_rtol: float = 1e-6,
+        replace: bool = True,
+    ) -> "TransferResult":
+        """Copy selected reaction blocks from ``source`` into a copy of ``self``.
+
+        ``self`` is the *destination* and is never mutated; a new
+        :class:`CrossSectionCovariance` is returned inside the
+        :class:`TransferResult`.
+
+        Parameters
+        ----------
+        source : CrossSectionCovariance
+            The covariance to take blocks from.
+        reactions : sequence of (isotope_zaid, mt)
+            Reactions to transfer. For each, the diagonal self-block and the
+            associated cross-section vector are copied, plus off-diagonal
+            cross-correlation blocks according to ``cross_correlation``.
+        cross_correlation : {'both-present', 'diagonal-only', 'always'}
+            How to handle off-diagonal blocks of a transferred reaction:
+
+            - ``'both-present'`` (default): copy a cross block only when *both*
+              partner reactions exist in the destination after the transfer;
+              otherwise record it in ``cross_dropped``.
+            - ``'diagonal-only'``: never copy cross blocks.
+            - ``'always'``: copy every cross block the reaction participates in,
+              even if the partner reaction is absent (may leave dangling refs).
+        grid_atol, grid_rtol : float
+            Tolerances for the energy-grid equality check (after eV/MeV
+            normalisation).
+        replace : bool
+            If True, a transferred reaction that already exists in the
+            destination has its existing blocks/cross-section removed first.
+
+        Returns
+        -------
+        TransferResult
+            The merged covariance plus a report of what was transferred/dropped.
+
+        Raises
+        ------
+        ValueError
+            If the group structures are incompatible, or ``cross_correlation``
+            is not a recognised mode.
+        """
+        valid_modes = {"both-present", "diagonal-only", "always"}
+        if cross_correlation not in valid_modes:
+            raise ValueError(
+                f"cross_correlation must be one of {sorted(valid_modes)}, "
+                f"got {cross_correlation!r}"
+            )
+
+        self._validate_mergeable(source, grid_atol=grid_atol, grid_rtol=grid_rtol)
+
+        new = self.copy()
+        new._align_block_lists()
+
+        # De-duplicate the request, preserving order.
+        requested: List[Tuple[int, int]] = []
+        seen: Set[Tuple[int, int]] = set()
+        for z, m in reactions:
+            key = (int(z), int(m))
+            if key not in seen:
+                seen.add(key)
+                requested.append(key)
+
+        source_pairs = set(source._get_param_pairs())
+        present = [p for p in requested if p in source_pairs]
+        present_set = set(present)
+
+        result = TransferResult(covariance=new)
+        result.missing_in_source = [p for p in requested if p not in source_pairs]
+
+        dest_existing = set(new._get_param_pairs())
+        dest_after = dest_existing | present_set
+
+        if replace:
+            for pair in present:
+                if pair in dest_existing:
+                    new._drop_reaction(pair[0], pair[1])
+                    result.reactions_replaced.append(pair)
+
+        use_grid = new.energy_grid is not None
+        for i in range(len(source.matrices)):
+            ir = int(source.isotope_rows[i])
+            rr = int(source.reaction_rows[i])
+            ic = int(source.isotope_cols[i])
+            rc = int(source.reaction_cols[i])
+            row_pair = (ir, rr)
+            col_pair = (ic, rc)
+            is_diagonal = row_pair == col_pair
+
+            if is_diagonal:
+                if row_pair not in present_set:
+                    continue
+            else:
+                if row_pair not in present_set and col_pair not in present_set:
+                    continue
+                if cross_correlation == "diagonal-only":
+                    result.cross_dropped.append(((ir, rr, ic, rc), "diagonal-only mode"))
+                    continue
+                if cross_correlation == "both-present" and not (
+                    row_pair in dest_after and col_pair in dest_after
+                ):
+                    missing = col_pair if row_pair in dest_after else row_pair
+                    result.cross_dropped.append((
+                        (ir, rr, ic, rc),
+                        f"partner reaction {missing} not present in destination",
+                    ))
+                    continue
+
+            new.isotope_rows.append(ir)
+            new.reaction_rows.append(rr)
+            new.isotope_cols.append(ic)
+            new.reaction_cols.append(rc)
+            new.matrices.append(np.array(source.matrices[i], copy=True))
+            is_rel = source.is_relative[i] if i < len(source.is_relative) else True
+            new.is_relative.append(bool(is_rel))
+            if use_grid:
+                src_grid = (
+                    source.energy_grids[i]
+                    if i < len(source.energy_grids) and source.energy_grids[i]
+                    else None
+                )
+                if src_grid is not None:
+                    new.energy_grids.append(
+                        _rescale_energy_grid(src_grid, source.energy_unit, new.energy_unit)
+                    )
+                else:
+                    new.energy_grids.append(list(new.energy_grid))
+
+            if is_diagonal:
+                result.diagonal_transferred.append(row_pair)
+            else:
+                result.cross_transferred.append((ir, rr, ic, rc))
+
+        for pair in present:
+            if pair in source.cross_sections:
+                new.cross_sections[pair] = np.array(source.cross_sections[pair], copy=True)
+                result.cross_sections_transferred.append(pair)
+
+        new._invalidate_cov_graph_cache()
+        return result
 
     # ------------------------------------------------------------------
     # Projection
