@@ -407,6 +407,7 @@ class ComparisonBuilder:
         self._main_display: Literal['pointwise', 'average', 'both'] = 'both'
         # "ref: <label>" annotation on the diff and diff-only panels.
         self._show_reference_label: bool = True
+        self._reference_label_fontsize: float = 11
 
     # ---- fluent API -------------------------------------------------------
 
@@ -574,9 +575,17 @@ class ComparisonBuilder:
         self._main_display = main_display
         return self
 
-    def set_reference_label(self, show: bool = True) -> 'ComparisonBuilder':
-        """Toggle the 'ref: <label>' annotation on the diff panel."""
+    def set_reference_label(
+        self, show: bool = True, fontsize: Optional[float] = None
+    ) -> 'ComparisonBuilder':
+        """Toggle the 'ref: <label>' annotation on the diff panel.
+
+        ``fontsize`` scales the annotation; pass the legend fontsize so the
+        label tracks it. ``None`` keeps the current value.
+        """
         self._show_reference_label = show
+        if fontsize is not None:
+            self._reference_label_fontsize = fontsize
         return self
 
     # ---- interpolation inference ------------------------------------------
@@ -892,7 +901,9 @@ class ComparisonBuilder:
                         (edges, diff_values, diff_color, cmp_data.linewidth or 1.5)
                     )
 
-            builder.add_data(diff_data, color=diff_color)
+            builder.add_data(
+                diff_data, color=diff_color, linewidth=cmp_data.linewidth or 1.5
+            )
 
         # Add scatter overlays to diff-only panel
         for ovl_data, ovl_styling in self._scatter_overlays:
@@ -952,7 +963,7 @@ class ComparisonBuilder:
             ax.text(
                 0.02, 0.97, f'ref: {ref_label}',
                 transform=ax.transAxes,
-                fontsize=11, va='top', ha='left',
+                fontsize=self._reference_label_fontsize, va='top', ha='left',
                 fontstyle='italic', alpha=0.7,
             )
 
@@ -1127,7 +1138,7 @@ class ComparisonBuilder:
             # Use the comparison series' own color if specified; fall back to palette
             color_idx = (i + 1) % len(colors)
             diff_color = cmp_data.color if cmp_data.color else colors[color_idx]
-            diff_styling = {'color': diff_color}
+            diff_styling = {'color': diff_color, 'linewidth': cmp_data.linewidth or 1.5}
             diff_data = result.difference
             # In dual-panel mode: labels are suppressed by default (colors match main panel)
             # but a per-series diff_label in metadata overrides this
@@ -1216,7 +1227,7 @@ class ComparisonBuilder:
             ax_diff.text(
                 0.02, 0.97, f'ref: {ref_label}',
                 transform=ax_diff.transAxes,
-                fontsize=11, va='top', ha='left',
+                fontsize=self._reference_label_fontsize, va='top', ha='left',
                 fontstyle='italic', alpha=0.7,
             )
 
