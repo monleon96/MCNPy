@@ -125,9 +125,28 @@ def load_mf31_covariance(
         Subset of requested MTs for which MF31 data was available (sorted).
     """
     endf_obj = parse_endf_file(str(endf_path))
+    return build_mf31_covariance(
+        endf_obj, mt_list, energy_unit=energy_unit, logger=logger
+    )
+
+
+def build_mf31_covariance(
+    endf_obj,
+    mt_list: Optional[Sequence[int]] = None,
+    *,
+    energy_unit: str = "eV",
+    logger=None,
+) -> Tuple[CrossSectionCovariance, Dict[int, object], List[float], List[int]]:
+    """Build the MF31 nu-bar covariance from an already-parsed ENDF object.
+
+    Identical to :func:`load_mf31_covariance` but accepts a parsed ``endf_obj``,
+    avoiding a re-parse when the caller already holds one (e.g. the kika-app
+    ENDF endpoints). Returns the same 4-tuple
+    ``(cov, nubar_sections, union_grid, mts_present)``.
+    """
     mf31_file = endf_obj.get_file(31)
     if mf31_file is None or not getattr(mf31_file, "sections", None):
-        raise RuntimeError(f"ENDF {endf_path} has no MF31 sections")
+        raise RuntimeError("ENDF object has no MF31 sections")
     mf1_file = endf_obj.get_file(1)
 
     nubar_central = _nubar_central_values(mf1_file)
@@ -145,7 +164,7 @@ def load_mf31_covariance(
         )
     if not mts_present:
         raise RuntimeError(
-            f"None of MTs {requested_mts} are present in MF31 of {endf_path}"
+            f"None of MTs {requested_mts} are present in MF31"
         )
 
     per_mt_covs: Dict[int, CrossSectionCovariance] = {}

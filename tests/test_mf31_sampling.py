@@ -160,6 +160,25 @@ def test_apply_lnu1_polynomial_reconstructed_to_tabulated():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.skipif(not os.path.exists(U235), reason="U-235 JEFF-4.0 tape not available")
+def test_build_from_object_matches_load_from_path():
+    # The app endpoints call build_mf31_covariance() on an already-parsed object;
+    # it must produce the same covariance as load_mf31_covariance() from a path.
+    from kika.sampling.mf31_sampling import (
+        load_mf31_covariance,
+        build_mf31_covariance,
+    )
+    from kika.endf.parsers.parse_endf import parse_endf_file
+
+    cov_p, _, grid_p, mts_p = load_mf31_covariance(U235)
+    cov_o, _, grid_o, mts_o = build_mf31_covariance(parse_endf_file(U235))
+    assert mts_p == mts_o
+    np.testing.assert_allclose(grid_p, grid_o)
+    assert len(cov_p.matrices) == len(cov_o.matrices)
+    for a, b in zip(cov_p.matrices, cov_o.matrices):
+        np.testing.assert_allclose(a, b)
+
+
+@pytest.mark.skipif(not os.path.exists(U235), reason="U-235 JEFF-4.0 tape not available")
 def test_load_mf31_u235_prompt_block_is_psd():
     from kika.sampling.mf31_sampling import load_mf31_covariance
     cov, secs, grid, mts = load_mf31_covariance(U235)
