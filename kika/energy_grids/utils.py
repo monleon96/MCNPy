@@ -10,13 +10,20 @@ from .grids import (
     WIMS69, ECCO33, ONEGROUP20, CASMO12, CASMO40, CASMO70, LANL30, XMAS172
 )
 
-def _identify_energy_grid(energies, tolerance=1e-5):
+def _identify_energy_grid(energies, tolerance=1e-3):
     """
     Compare an energy grid with known predefined grids to identify which standard grid it matches.
-    
+
+    The default ``tolerance`` is relative (0.1%). It is deliberately looser than
+    machine precision because the preset grids are stored at ~4-5 significant
+    figures while real SDF/data files often carry full-precision boundaries; a
+    tighter tolerance spuriously fails to match grids that agree to 4 sig figs.
+    Matching is restricted to grids of equal length (and every preset grid has a
+    distinct length), so a loose tolerance cannot conflate two different grids.
+
     :param energies: List or array of energy bin boundaries
     :type energies: list or numpy.ndarray
-    :param tolerance: Relative tolerance for floating point comparison, defaults to 1e-5
+    :param tolerance: Relative tolerance for floating point comparison, defaults to 1e-3
     :type tolerance: float, optional
     :returns: Name of the matching grid or None if no match is found
     :rtype: str or None
@@ -92,7 +99,7 @@ _ALL_GRIDS = {
 
 
 def _identify_energy_grid_or_subset(
-    energies, tolerance=1e-5
+    energies, tolerance=1e-3
 ) -> Tuple[Optional[str], Optional[float], Optional[float]]:
     """
     Try exact match first, then check if energies is a contiguous subset of a preset grid.

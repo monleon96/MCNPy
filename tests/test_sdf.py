@@ -1,6 +1,7 @@
 import pytest
 import kika
 import os
+import numpy as np
 
 
 def test_sdf():
@@ -71,3 +72,45 @@ def test_sdf():
         # Clean up - delete the generated file after test completes
         if os.path.exists(test_file_name):
             os.remove(test_file_name)
+
+
+def test_read_scale_dialect_sdf():
+    """Read a standard SCALE/TSUNAMI SDF file (foreign dialect).
+
+    Unlike KIKA's own writer output, this dialect has a free-form title line,
+    lowercase ``e`` scientific notation, a ``k-eff`` line with plain decimals and
+    a trailing comment, and energies in eV. The parser must accept all of these
+    and normalise the grid to MeV. Fixture is a 3-reaction trim of the OECD
+    SNEAK-LMFR-EXP-001-001 file (the SCALE 238-group structure in eV).
+    """
+    from kika.energy_grids.utils import _identify_energy_grid
+
+    fixture = os.path.join(os.path.dirname(__file__), 'data', 'sdf',
+                           'scale_dialect_eV.sdf')
+
+    sdf = kika.read_sdf(fixture)
+
+    # 238-group structure -> 239 boundaries; 3 reaction blocks kept.
+    assert len(sdf.pert_energies) == 239
+    assert len(sdf.data) == 3
+
+    # Energies normalised from eV to MeV (top boundary 2e7 eV -> 20 MeV) and
+    # recognised as the SCALE 238-group grid.
+    assert sdf.pert_energies == sorted(sdf.pert_energies)  # ascending
+    assert sdf.pert_energies[-1] == pytest.approx(20.0)
+    assert sdf.pert_energies[0] == pytest.approx(1e-11)
+    assert _identify_energy_grid(sdf.pert_energies) == 'SCALE238'
+
+    # k-eff line parsed despite plain decimals + trailing comment.
+    assert sdf.r0 == pytest.approx(1.003930)
+    assert sdf.e0 == pytest.approx(0.000290)
+
+    # Free-form title preserved verbatim (no magic suffix to strip).
+    assert sdf.title.startswith('Warning, this file was generated')
+
+    # Reaction headers tokenised; ZAID/MT read, nuclide derived from ZAID.
+    assert [(r.zaid, r.mt) for r in sdf.data] == [(6000, 1), (6000, 2), (6000, 4)]
+    assert sdf.data[0].nuclide == 'C-0'
+
+    # Lowercase-``e`` sensitivities parsed to non-zero floats.
+    assert any(np.any(np.asarray(r.sensitivity) != 0.0) for r in sdf.data)

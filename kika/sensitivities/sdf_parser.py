@@ -1,10 +1,24 @@
 """Parser for legacy SDF (Sensitivity Data File) format.
 
-The goal of this module is to allow round‑trip fidelity with the writer
-implemented in ``sdf.SDFData.write_file``. Parsing a file and then writing the
-returned object again MUST yield a byte‑for‑byte identical file (except for
-possible trailing newlines if the original file had platform specific line
-endings which we normalise to ``\n`` on read).  We therefore:
+This module reads two dialects of the SDF format into the same ``SDFData``
+object:
+
+* **KIKA's own writer output** (``sdf.SDFData.write_file``) – for which parsing
+  and re-writing yields a byte‑for‑byte identical file (modulo line endings,
+  which we normalise to ``\n`` on read).
+* **Standard SCALE / TSUNAMI SDF files** produced by other tools (e.g. the OECD
+  MCNP→SCALE conversion script). These use a free‑form title line, lowercase
+  ``e`` scientific notation, a ``k-eff`` line with plain decimals and trailing
+  comment text, and energies expressed in **eV**.
+
+To keep the rest of the library consistent, foreign files are *normalised* to
+KIKA's canonical form on read: the title is stored verbatim, and energy
+boundaries are converted to **MeV** (KIKA's internal/plotting/grid convention).
+As a consequence, re-writing a foreign file will NOT reproduce it byte-for-byte
+(the writer emits KIKA's header and MeV grid) – only KIKA-generated files
+round-trip exactly.
+
+We therefore:
 
 1. Preserve ordering of reactions exactly as they appear in the file.
 2. Do not attempt to 'normalise' floating point formatting – we store floats as
@@ -40,21 +54,33 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
+import logging
 import re
 
 from .sdf import SDFData, SDFReactionData
 from kika._constants import ATOMIC_NUMBER_TO_SYMBOL, MT_TO_REACTION
 
+logger = logging.getLogger(__name__)
+
+# Magic header produced by KIKA's own writer; the title precedes it. When this
+# matches we recover the *bare* title so KIKA files round-trip byte-identically.
+# Foreign files (free-form first line) don't match and the whole line is the title.
 HEADER_RE = re.compile(r"^(?P<title>.+) MCNP to SCALE sdf (?P<ngroups>\d+)gr\s*$")
 NGROUP_LINE_RE = re.compile(r"^\s*(?P<ngroups>\d+) number of neutron groups\s*$")
 NPROF_LINE_RE = re.compile(r"^\s*(?P<nprofiles>\d+)\s+ number of sensitivity profiles\s+(?P<nprofiles2>\d+) are region integrated\s*$")
-R0_LINE_RE = re.compile(r"^\s*(?P<r0>[+-]?\d?\.\d+E[+-]\d+) \+/-\s+(?P<e0>[+-]?\d?\.\d+E[+-]\d+)\s*$")
-REACTION_HEADER_RE = re.compile(r"^(?P<form>.{13})(?P<reac>.{17})\s*(?P<zaid>\d+)\s+(?P<mt>\d+)\s*$")
 # The second and third fixed lines inside a reaction block are literal
 FIXED_LINE_1 = "      0      0"
 FIXED_LINE_2 = "  0.000000E+00  0.000000E+00      0      0"
 
-FLOAT_PATTERN = r"[+-]?\d?\.\d+E[+-]\d+"
+# Permissive float matcher: accepts lowercase/uppercase ``e``, an optional
+# exponent (plain decimals such as the k-eff value ``1.003930``), and multi-digit
+# mantissas. Covers both KIKA's writer (uppercase ``E``) and standard SCALE files.
+FLOAT_PATTERN = r"[+-]?\d*\.?\d+(?:[eE][+-]?\d+)?"
+
+# Above ~1 GeV in "MeV" is unphysical for the reactor/criticality domain this
+# tool targets (neutron grids top out near 20 MeV), so a grid whose maximum
+# boundary exceeds this threshold is interpreted as eV and converted to MeV.
+EV_DETECTION_THRESHOLD_MEV = 1.0e3
 
 
 def _parse_scientific_numbers(line: str) -> List[float]:
@@ -80,31 +106,46 @@ def read_sdf(path: str) -> SDFData:
     if idx >= len(lines):
         raise ValueError("Empty SDF file")
 
-    m = HEADER_RE.match(lines[idx])
+    # Line 1: title. KIKA's writer appends a magic " MCNP to SCALE sdf <N>gr"
+    # suffix; recover the bare title from it so KIKA files round-trip exactly.
+    # Standard SCALE files use a free-form first line, which we keep verbatim.
+    header_match = HEADER_RE.match(lines[idx])
+    title = header_match.group("title") if header_match else lines[idx]
+    idx += 1
+
+    # Line 2: authoritative neutron-group count (KIKA's line-1 suffix may be
+    # absent, so we always read ngroups from here).
+    m = NGROUP_LINE_RE.match(lines[idx]) if idx < len(lines) else None
     if not m:
-        raise ValueError(f"Header line malformed: '{lines[idx]}'")
-    title = m.group("title")
+        raise ValueError("Missing/invalid neutron groups line")
     ngroups_declared = int(m.group("ngroups"))
     idx += 1
 
-    if idx >= len(lines) or not NGROUP_LINE_RE.match(lines[idx]):
-        raise ValueError("Missing/invalid neutron groups line")
-    idx += 1
-
-    m = NPROF_LINE_RE.match(lines[idx])
+    m = NPROF_LINE_RE.match(lines[idx]) if idx < len(lines) else None
     if not m:
         raise ValueError("Missing/invalid sensitivity profiles line")
     nprofiles_declared = int(m.group("nprofiles"))
-    # optional cross check second number
+    # Cross check second number; a mismatch (total vs region-integrated count)
+    # is unusual but not fatal, so warn rather than reject the file.
     if int(m.group("nprofiles2")) != nprofiles_declared:
-        raise ValueError("Mismatch in profile counts on line 3")
+        logger.warning(
+            "SDF profile counts differ on line 3 (%s vs %s); using %s",
+            nprofiles_declared, m.group("nprofiles2"), nprofiles_declared,
+        )
     idx += 1
 
-    m = R0_LINE_RE.match(lines[idx])
-    if not m:
+    # k-eff line: "<r0> +/- <e0>" possibly with plain decimals and a trailing
+    # comment (e.g. "1.003930 +/- 0.000290  k-eff from the forward case").
+    # Take the first float before '+/-' and the first float after it.
+    if idx >= len(lines) or "+/-" not in lines[idx]:
         raise ValueError("Missing/invalid r0/e0 line")
-    r0 = float(m.group("r0"))
-    e0 = float(m.group("e0"))
+    before, _, after = lines[idx].partition("+/-")
+    r0_nums = _parse_scientific_numbers(before)
+    e0_nums = _parse_scientific_numbers(after)
+    if not r0_nums or not e0_nums:
+        raise ValueError(f"Could not parse r0/e0 from line: '{lines[idx]}'")
+    r0 = r0_nums[0]
+    e0 = e0_nums[0]
     idx += 1
 
     if idx >= len(lines) or lines[idx].strip() != "energy boundaries:":
@@ -123,6 +164,13 @@ def read_sdf(path: str) -> SDFData:
     # File stores descending order; convert to ascending for internal object.
     pert_energies = list(reversed(energy_values))
 
+    # Normalise units to MeV (KIKA's internal convention for plotting, grid
+    # identification and covariance). Standard SCALE files express the grid in
+    # eV; detect that from the maximum boundary and convert. The threshold is
+    # intentionally conservative (see EV_DETECTION_THRESHOLD_MEV).
+    if pert_energies and max(pert_energies) > EV_DETECTION_THRESHOLD_MEV:
+        pert_energies = [e / 1.0e6 for e in pert_energies]
+
     reactions: List[SDFReactionData] = []
 
     # Parse reaction blocks until end of file
@@ -132,13 +180,17 @@ def read_sdf(path: str) -> SDFData:
             # skip blank lines (should not normally happen, but be tolerant)
             idx += 1
             continue
-        m = REACTION_HEADER_RE.match(line)
-        if not m:
+        # Reaction header: "<form> <reaction_name> <zaid> <mt>". Tokenise on
+        # whitespace rather than fixed columns so differing column widths across
+        # tools are handled. Reaction names never contain spaces in either
+        # dialect (e.g. KIKA's "(n,n')" / SCALE's "n,2n", "n,gamma"). The form
+        # token is ignored; the nuclide is derived from the ZAID downstream.
+        parts = line.split()
+        if len(parts) != 4 or not (parts[2].isdigit() and parts[3].isdigit()):
             raise ValueError(f"Malformed reaction header at line {idx+1}: {line}")
-        header_reac_raw = m.group("reac")  # includes padding
-        reaction_name = header_reac_raw.strip()
-        zaid = int(m.group("zaid"))
-        mt = int(m.group("mt"))
+        reaction_name = parts[1]
+        zaid = int(parts[2])
+        mt = int(parts[3])
         idx += 1
 
         if idx >= len(lines) or lines[idx] != FIXED_LINE_1:
