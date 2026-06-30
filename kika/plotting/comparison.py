@@ -934,7 +934,11 @@ class ComparisonBuilder:
             y_label=self._resolve_diff_y_label(),
         )
         builder.set_scales(log_x=self._use_log_x, log_y=self._diff_log_y)
-        builder.set_limits(x_lim=self._x_lim, y_lim=self._diff_y_lim)
+        # In diff-only view the diff curve is the only plot, so its Y axis is
+        # driven by the main figure-settings Y limits (self._y_lim). Fall back
+        # to the comparison panel's diff Y limits only when those are unset.
+        diff_only_y_lim = self._y_lim if self._y_lim is not None else self._diff_y_lim
+        builder.set_limits(x_lim=self._x_lim, y_lim=diff_only_y_lim)
         builder.set_legend(loc=self._legend_loc, ncol=self._legend_ncol)
         builder.set_grid(
             grid=self._grid,

@@ -110,9 +110,11 @@ class HeatmapBuilder(PlotBuilder):
         self._heatmap_show_energy_ticks: bool = True
         self._heatmap_show_block_labels: bool = True
         self._heatmap_show_colorbar: bool = True
+        self._heatmap_show_colorbar_label: bool = True
         self._heatmap_energy_tick_fontsize: Optional[float] = None
         self._heatmap_block_label_fontsize: Optional[float] = None
         self._heatmap_colorbar_fontsize: Optional[float] = None
+        self._heatmap_colorbar_tick_fontsize: Optional[float] = None
 
     def _is_multi_block(self, heatmap_data: 'HeatmapPlotData') -> bool:
         """
@@ -770,9 +772,11 @@ class HeatmapBuilder(PlotBuilder):
         show_energy_ticks: bool = True,
         show_block_labels: bool = True,
         show_colorbar: bool = True,
+        show_colorbar_label: bool = True,
         energy_tick_fontsize: Optional[float] = None,
         block_label_fontsize: Optional[float] = None,
         colorbar_fontsize: Optional[float] = None,
+        colorbar_tick_fontsize: Optional[float] = None,
         **styling_overrides
     ) -> 'HeatmapBuilder':
         """
@@ -793,12 +797,16 @@ class HeatmapBuilder(PlotBuilder):
             Whether to show block labels (MT numbers or Legendre orders)
         show_colorbar : bool, default True
             Whether to show the colorbar
+        show_colorbar_label : bool, default True
+            Whether to show the colorbar label text (ticks remain regardless)
         energy_tick_fontsize : float, optional
             Font size for energy tick labels (default: 8)
         block_label_fontsize : float, optional
             Font size for MT/Legendre block labels (default: 11)
         colorbar_fontsize : float, optional
             Font size for colorbar label (default: 12)
+        colorbar_tick_fontsize : float, optional
+            Font size for colorbar tick labels (default: matplotlib default)
         **styling_overrides
             Styling overrides for heatmap rendering. Common options:
             - cmap : str or Colormap - Override colormap (e.g., 'viridis', 'RdBu_r')
@@ -862,9 +870,11 @@ class HeatmapBuilder(PlotBuilder):
         self._heatmap_show_energy_ticks = show_energy_ticks
         self._heatmap_show_block_labels = show_block_labels
         self._heatmap_show_colorbar = show_colorbar
+        self._heatmap_show_colorbar_label = show_colorbar_label
         self._heatmap_energy_tick_fontsize = energy_tick_fontsize
         self._heatmap_block_label_fontsize = block_label_fontsize
         self._heatmap_colorbar_fontsize = colorbar_fontsize
+        self._heatmap_colorbar_tick_fontsize = colorbar_tick_fontsize
 
         return self
 
@@ -1227,9 +1237,11 @@ class HeatmapBuilder(PlotBuilder):
                 heatmap_pos.height
             ])
             cbar = fig.colorbar(im, cax=cbar_ax)
-            if effective_colorbar_label:
+            if effective_colorbar_label and self._heatmap_show_colorbar_label:
                 colorbar_fs = self._heatmap_colorbar_fontsize or 12
                 cbar.set_label(effective_colorbar_label, fontsize=colorbar_fs)
+            if self._heatmap_colorbar_tick_fontsize is not None:
+                cbar.ax.tick_params(labelsize=self._heatmap_colorbar_tick_fontsize)
 
         # Configure figure interactivity
         _configure_figure_interactivity(fig, self._interactive)
