@@ -86,22 +86,48 @@ import chi2_metrics
 
 # Run versioning. Outputs land in `<REPORT_DIR>/run_<RUN_ID>/`; bump this to
 # start a fresh run without overwriting earlier ones.
-RUN_ID: str = "076"
+RUN_ID: str = "079"
 
-# Which methodologies to run. Any non-empty subset of {"exfor_c0", "library_c0"}.
-METHODOLOGIES_TO_RUN: List[str] = ["exfor_c0", "library_c0"]
+# Which methodologies to run. Any non-empty subset of
+# {"exfor_c0", "library_c0", "folded_c0"}. folded_c0 needs its parquet + sidecar
+# built first by scripts/precompute_chi2_folded_c0.py.
+METHODOLOGIES_TO_RUN: List[str] = ["exfor_c0", "library_c0", "folded_c0"]
 
 # Per-methodology I/O. The .npz sidecar is inferred as `<parquet>.eval_cov.npz`.
-PATHS: Dict[str, Dict[str, str]] = {
+#
+# `systematic_block_col` controls how the EXFOR rank-1 systematics (u, v) are
+# correlated in the rank-2/dense variants (V2/V3/V4):
+#   - "energy_mev" → correlated only *within* each incident energy.
+#   - None         → one experiment-wide correlated mode (across all energies).
+# Use "energy_mev" for exfor_c0: there c₀ is fit independently per incident
+# energy, so a single experiment-wide normalization mode would penalise the
+# energy-to-energy level differences the per-energy fit already removed —
+# inflating χ² for multi-energy experiments (Kinney by ~5×). library_c0 takes
+# c₀ from the library's own MF3 (not fit per energy), so its 8% normalization is
+# a genuine global mode and stays None.
+PATHS: Dict[str, Dict[str, Optional[str]]] = {
     "exfor_c0": {
-        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_exfor_c0_75.parquet",
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_exfor_c0_79.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_exfor_c0",
         "title":      "χ² analysis — c₀ from EXFOR Kinney/Smith fit, MF34 eval σ",
+        "systematic_block_col": "energy_mev",
     },
     "library_c0": {
-        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_library_c0_75.parquet",
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_library_c0_79.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_library_c0",
         "title":      "χ² analysis — c₀ from library MF3, MF34+MF33 eval σ",
+        "systematic_block_col": None,
+    },
+    # Fair-c₀ variant: each library's own MF3 elastic σ folded over each
+    # experiment's TOF energy resolution → c₀; MF34-only (value-only) eval σ.
+    # c₀ is a smooth function of energy (not a per-energy fit), so the 8%-style
+    # normalization is a genuine experiment-wide mode → systematic_block_col=None,
+    # same as library_c0. Parquet written by scripts/precompute_chi2_folded_c0.py.
+    "folded_c0": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_c0_79.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_folded_c0",
+        "title":      "χ² analysis — c₀ from resolution-folded library MF3, MF34 eval σ",
+        "systematic_block_col": None,
     },
 }
 
@@ -182,6 +208,7 @@ class RunPaths:
     per_exp_csv_dir: Path
     run_dir: Path
     title: str
+    systematic_block_col: Optional[str]
 
 
 def build_paths(methodology: str) -> RunPaths:
@@ -198,6 +225,7 @@ def build_paths(methodology: str) -> RunPaths:
         summary_json=run_dir / "summary.json",
         per_exp_csv_dir=run_dir / "per_experiment",
         run_dir=run_dir,
+        systematic_block_col=cfg.get("systematic_block_col"),
         title=cfg["title"],
     )
 
@@ -812,6 +840,7 @@ def run_subset_primary_detail(
 def per_subentry_table_all_variants(
     df_in: pd.DataFrame, eval_cov: Optional[Dict],
     libraries: List[str], report: List[str],
+    systematic_block_col: Optional[str] = None,
 ) -> pd.DataFrame:
     """χ²/N per (subentry × variant), all four variants in one table.
 
@@ -825,7 +854,9 @@ def per_subentry_table_all_variants(
         sub_df = df_in if ks_label == "BOTH/ALL" else df_in[df_in["ks_subentry"] == ks_label]
         if len(sub_df) == 0:
             continue
-        per_exp = chi2_metrics.chi2_per_experiment_variants(sub_df, eval_cov)
+        per_exp = chi2_metrics.chi2_per_experiment_variants(
+            sub_df, eval_cov, systematic_block_col=systematic_block_col,
+        )
         n_first = int(per_exp[per_exp["library"] == libraries[0]]["N"].sum()) if libraries else 0
         for variant in VARIANTS:
             v_lo = _v_low(variant)
@@ -1026,6 +1057,9 @@ def run_methodology(methodology: str, paths: RunPaths) -> Dict:
         f"**{PRIMARY_VARIANT}** ({VARIANT_LABELS[PRIMARY_VARIANT]})_  \n"
         f"_Parquet: `{paths.parquet}`_  \n"
         f"_Eval-cov: `{paths.eval_cov}`_  \n"
+        f"_EXFOR systematic correlation: "
+        f"{('per-' + paths.systematic_block_col) if paths.systematic_block_col else 'experiment-wide (global)'} "
+        f"(V2/V3/V4)_  \n"
         f"_Energy window: [{E_MIN_MEV}, {E_MAX_MEV}] MeV; "
         f"L_max truncation: see precompute script._\n"
     )
@@ -1074,7 +1108,7 @@ def run_methodology(methodology: str, paths: RunPaths) -> Dict:
             continue
 
         per_exp_av = chi2_metrics.chi2_per_experiment_variants(
-            df_subset, eval_cov
+            df_subset, eval_cov, systematic_block_col=paths.systematic_block_col,
         )
         decision_summary = aggregate_all_variants_by_library(per_exp_av, libraries)
         all_variants_summaries[subset_key] = decision_summary
@@ -1094,6 +1128,7 @@ def run_methodology(methodology: str, paths: RunPaths) -> Dict:
 
         z_primary = chi2_metrics.whitened_residuals_per_experiment_variant(
             df_subset, eval_cov, variant=PRIMARY_VARIANT,
+            systematic_block_col=paths.systematic_block_col,
         )
         primary_summaries[subset_key] = run_subset_primary_detail(
             df_s=df_subset,
@@ -1184,7 +1219,10 @@ def run_methodology(methodology: str, paths: RunPaths) -> Dict:
     report.append(
         "\n## Per-subentry breakdown (Kinney 1976 / Smith 1980 / OTHER) — all variants\n"
     )
-    per_subentry_table_all_variants(df, eval_cov, libraries, report)
+    per_subentry_table_all_variants(
+        df, eval_cov, libraries, report,
+        systematic_block_col=paths.systematic_block_col,
+    )
 
     # Combined comparison: every (subset × variant) cell per library.
     report.append("\n## Combined comparison — all subsets × variants\n")
@@ -1240,6 +1278,7 @@ def run_methodology(methodology: str, paths: RunPaths) -> Dict:
         "run_id": RUN_ID,
         "primary_variant": PRIMARY_VARIANT,
         "variants": list(VARIANTS),
+        "systematic_block_col": paths.systematic_block_col,
         "parquet": str(paths.parquet),
         "eval_cov": str(paths.eval_cov),
         "e_min_mev": E_MIN_MEV, "e_max_mev": E_MAX_MEV,

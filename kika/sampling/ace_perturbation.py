@@ -121,10 +121,14 @@ def _process_sample(
     mt_numbers: List[int],
     output_dir: str,
     xsdir_file: Optional[str],
+    mt_request: Optional[List[int]] = None,
 ):
     # — read & perturb ACE —
     ace = read_ace(ace_file)
-    apply_perturbation_factor_to_ace(ace, sample, sample_index, energy_grid, mt_numbers, False)  # Set verbose=False to reduce output
+    apply_perturbation_factor_to_ace(
+        ace, sample, sample_index, energy_grid, mt_numbers, False,
+        mt_request=mt_request,
+    )  # Set verbose=False to reduce output
 
     # — write perturbed ACE —
     base, ext = os.path.splitext(os.path.basename(ace_file))
@@ -411,10 +415,32 @@ def _do_isotope_work(args: dict, log) -> dict:
     if to_remove:
         cov = cov.remove_matrix(zaid, to_remove)
 
+    # The cov-mapped `mt_perturb` is what sampling operates on (its length
+    # × n_groups is the sampling dimensionality, reported as `mt_count`
+    # below). At ACE-write time each summary MT in `mt_perturb` expands
+    # onto its ACE partials per `_partials_to_apply`, which can be
+    # restricted to a user-requested subset. Print the *actual* perturbed
+    # partials so the log reflects what gets touched in the ACE file, not
+    # just the covariance index.
+    _ace_partials_perturbed = []
+    for _mt in mt_perturb:
+        if _mt in _SUMMARY_MT_PARTIAL_RANGES:
+            _ace_partials_perturbed.extend(
+                _partials_to_apply(
+                    _mt, _SUMMARY_MT_PARTIAL_RANGES[_mt],
+                    set(mt_in_ace), mt_request,
+                )
+            )
+        else:
+            _ace_partials_perturbed.append(_mt)
+    _ace_partials_perturbed = sorted(set(_ace_partials_perturbed))
+
     log.info("  [INFO] [ACE] MT selection:")
     log.info(f"    MTs in ACE file:          {mt_in_ace}")
     log.info(f"    MTs in covariance matrix: {mt_in_cov}")
-    log.info(f"    MTs to be perturbed:      {mt_perturb}")
+    log.info(f"    MTs to be perturbed:      {_ace_partials_perturbed}")
+    if _ace_partials_perturbed != list(mt_perturb):
+        log.info(f"      (sampled on cov MTs {mt_perturb}; summary MTs expanded onto ACE partials)")
     log.info(f">> mt_count = {len(mt_perturb)}")
 
     energy_grid_eV = cov.energy_grid
@@ -1251,11 +1277,32 @@ def perturb_ACE_files(
         if to_remove:
             cov = cov.remove_matrix(zaid, to_remove)
 
-        # Print available MT numbers TO LOG FILE
+        # The cov-mapped `mt_perturb` is what sampling operates on (its
+        # length × n_groups is the sampling dimensionality, reported as
+        # `mt_count`). At ACE-write time each summary MT in `mt_perturb`
+        # expands onto its ACE partials via `_partials_to_apply`, which
+        # can be restricted to a user-requested subset. Print the *actual*
+        # perturbed partials so the log reflects what gets touched in the
+        # ACE file, not just the covariance index.
+        _ace_partials_perturbed = []
+        for _mt in mt_perturb:
+            if _mt in _SUMMARY_MT_PARTIAL_RANGES:
+                _ace_partials_perturbed.extend(
+                    _partials_to_apply(
+                        _mt, _SUMMARY_MT_PARTIAL_RANGES[_mt],
+                        set(mt_in_ace), mt_request,
+                    )
+                )
+            else:
+                _ace_partials_perturbed.append(_mt)
+        _ace_partials_perturbed = sorted(set(_ace_partials_perturbed))
+
         _logger.info(f"  [INFO] [ACE] MT selection:")
         _logger.info(f"    MTs in ACE file:          {mt_in_ace}")
         _logger.info(f"    MTs in covariance matrix: {mt_in_cov}")
-        _logger.info(f"    MTs to be perturbed:      {mt_perturb}")
+        _logger.info(f"    MTs to be perturbed:      {_ace_partials_perturbed}")
+        if _ace_partials_perturbed != list(mt_perturb):
+            _logger.info(f"      (sampled on cov MTs {mt_perturb}; summary MTs expanded onto ACE partials)")
         _logger.info(f">> mt_count = {len(mt_perturb)}")
 
         # Convert energy grid from eV to MeV for ACE (ACE energies are in MeV)
@@ -1443,11 +1490,11 @@ def perturb_ACE_files(
         _logger.info(f"    Output directory: {os.path.abspath(output_dir)}")
         if nprocs > 1:
             _logger.info(f"    Using {nprocs} parallel processes")
-            
+
         # Create progress tracking variables
         report_interval = max(1, min(100, num_samples // 10))  # Report at most 10 times
-        
-        tasks = [(ace_file, factors[j], j, energy_grid, mt_perturb_final, output_dir, xsdir_file) for j in range(num_samples)]
+
+        tasks = [(ace_file, factors[j], j, energy_grid, mt_perturb_final, output_dir, xsdir_file, mt_request) for j in range(num_samples)]
 
         if nprocs > 1:
             # For parallel processing, just show start and end messages
@@ -1662,64 +1709,98 @@ def _mask_factors_by_energy_range_ace(
     return masked
 
 
-def apply_perturbation_factor_to_ace(ace, sample, sample_index, energy_grid, mt_numbers, verbose=True):
-    """Apply per-group perturbation factors to ACE, and list which MTs were actually perturbed."""
+# Map from a summary MT (as stored in the covariance) to the range of
+# partial MTs it lumps in the ACE file. Used by
+# apply_perturbation_factor_to_ace to expand summary-MT factors onto the
+# partials. Centralized here so the same table drives both the default
+# (expand to all partials in ACE) and the restricted (user-requested
+# subset) behavior.
+_SUMMARY_MT_PARTIAL_RANGES = {
+    4:   range(51,  92),   # total inelastic = MT 50-91
+    103: range(600, 650),  # (n,p)
+    104: range(650, 700),  # (n,d)
+    105: range(700, 750),  # (n,t)
+    106: range(750, 800),  # (n,3He)
+    107: range(800, 850),  # (n,α)
+}
+
+
+def _partials_to_apply(summary_mt, partial_range, ace_mts, mt_request):
+    """Return the ACE partial MTs that a summary-MT factor should be applied to.
+
+    Default (``mt_request`` is None, or user requested the summary MT itself,
+    or requested no partial in the range): apply to *every* partial in
+    ``partial_range`` that exists in the ACE file. This is the conventional
+    interpretation of a lumped-MT covariance: the same relative perturbation
+    is shared across all partials in the group (fully correlated levels).
+
+    Restricted (user requested only specific partials in the range, e.g.
+    ``mt_request = [51, 52]`` for the MT 4 group, and did *not* request the
+    summary MT itself): apply only to the requested partials. This makes
+    the MC sample exactly the same reaction scope as a sandwich pipeline
+    whose ``PERT`` cards cover only those partials. Note: the resulting
+    sample under-propagates the lumped-MT covariance, because the other
+    partials in the group are left at their nominal values.
+    """
+    all_in_ace = [m for m in partial_range if m in ace_mts]
+    if mt_request is None:
+        return all_in_ace
+    if summary_mt in mt_request:
+        # User asked for the lumped MT explicitly → standard behavior.
+        return all_in_ace
+    explicit = [m for m in mt_request if m in partial_range]
+    if explicit:
+        return [m for m in explicit if m in ace_mts]
+    return all_in_ace
+
+
+def apply_perturbation_factor_to_ace(
+    ace, sample, sample_index, energy_grid, mt_numbers, verbose=True,
+    mt_request=None,
+):
+    """Apply per-group perturbation factors to ACE, and list which MTs were actually perturbed.
+
+    Parameters
+    ----------
+    ace, sample, sample_index, energy_grid, mt_numbers, verbose
+        Standard arguments. ``mt_numbers`` is the cov-mapped list (e.g.
+        ``[2, 4, 102]`` even when the user originally asked for
+        ``[2, 51, 52, 102]``).
+    mt_request : list[int] or None, optional
+        The user's *original* positive MT request, before the
+        cov-mapping step collapsed partials onto summary MTs. When
+        provided, a summary MT's factor is applied only to the partials
+        the user explicitly named (see :func:`_partials_to_apply` for
+        the full rule). ``None`` preserves the historical behavior of
+        expanding every summary MT to its full partial range.
+    """
     logger = _get_logger()
-    
+
     # Convert sample to float32
     sample = sample.astype(np.float32)
-    
+
     n_groups = len(energy_grid) - 1
     if sample.shape[0] != len(mt_numbers) * n_groups:
         raise ValueError(f"sample length {sample.shape[0]} ≠ {len(mt_numbers)}×{n_groups}")
 
     boundaries = np.asarray(energy_grid)
     perturbed_mts = []  # collect the actual MT numbers
+    ace_mts_set = set(ace.mt_numbers)
 
     for mt_idx, mt in enumerate(mt_numbers):
         start = mt_idx * n_groups
         end   = start + n_groups
         factors = sample[start:end]
 
-        if mt == 4:
-            for mt_inelastic in range(51, 92):
-                if mt_inelastic in ace.mt_numbers:
-                    _apply_factors_to_mt(ace, mt_inelastic, factors, boundaries, verbose)
-                    perturbed_mts.append(mt_inelastic)
-
-        elif mt == 103:
-            for mt_proton in range(600, 650):
-                if mt_proton in ace.mt_numbers:
-                    _apply_factors_to_mt(ace, mt_proton, factors, boundaries, verbose)
-                    perturbed_mts.append(mt_proton)
-
-        elif mt == 104:
-            for mt_H2 in range(650, 700):
-                if mt_H2 in ace.mt_numbers:
-                    _apply_factors_to_mt(ace, mt_H2, factors, boundaries, verbose)
-                    perturbed_mts.append(mt_H2)
-
-        elif mt == 105:
-            for mt_H3 in range(700, 750):
-                if mt_H3 in ace.mt_numbers:
-                    _apply_factors_to_mt(ace, mt_H3, factors, boundaries, verbose)
-                    perturbed_mts.append(mt_H3)
-
-        elif mt == 106:
-            for mt_He3 in range(750, 800):
-                if mt_He3 in ace.mt_numbers:
-                    _apply_factors_to_mt(ace, mt_He3, factors, boundaries, verbose)
-                    perturbed_mts.append(mt_He3)
-
-        elif mt == 107:
-            for mt_He4 in range(800, 850):
-                if mt_He4 in ace.mt_numbers:
-                    _apply_factors_to_mt(ace, mt_He4, factors, boundaries, verbose)
-                    perturbed_mts.append(mt_He4)
-
+        if mt in _SUMMARY_MT_PARTIAL_RANGES:
+            partial_range = _SUMMARY_MT_PARTIAL_RANGES[mt]
+            targets = _partials_to_apply(mt, partial_range, ace_mts_set, mt_request)
+            for partial_mt in targets:
+                _apply_factors_to_mt(ace, partial_mt, factors, boundaries, verbose)
+                perturbed_mts.append(partial_mt)
         else:
             # direct mt
-            if mt in ace.mt_numbers:
+            if mt in ace_mts_set:
                 _apply_factors_to_mt(ace, mt, factors, boundaries, verbose)
                 perturbed_mts.append(mt)
 

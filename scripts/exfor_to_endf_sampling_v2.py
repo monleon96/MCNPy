@@ -186,7 +186,7 @@ ENDF_FILE = "/share_snc/snc/JuanMonleon/jeff40_with_MF4_from_jeff33/26-Fe-56g.tx
 MF34_SOURCE_FILE = None                          # Separate MF34 source (None = use ENDF_FILE)
 EXFOR_DIRECTORY = "/share_snc/snc/JuanMonleon/EXFOR/data_v1/"
 EXFOR_DB_PATH = '/share_snc/snc/JuanMonleon/EXFOR/x4_iron_angular.db'
-OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_77/"
+OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_80/"
 TOF_PARAMETERS_FILE = "/share_snc/snc/JuanMonleon/EXFOR/exfor_tof_parameters.json"
 
 # --- DATA SOURCE ----------------------------------------------------------- #
@@ -227,12 +227,11 @@ MIN_POINTS_PER_BAND = 4                          # Min points to estimate s_b pe
 MAX_BAND_SCALE_FACTOR = 5.0                      # Max multiplicative scale per band
 TAU_SMOOTHING_WINDOW = 1                         # Moving median window for s_b(E) (1 = disabled)
 TAU_PRIOR_FLOOR = True                           # Apply tau prior floor from well-supported bins
-TAU_PRIOR_NEFF_THRESHOLD = 4.0                   # Min N_eff to count as "well-supported"
-                                                  # (matches MIN_POINTS_PER_BAND=4 for symmetric
-                                                  # quality criterion across band/bin filters;
-                                                  # gives ~50/50 donor/recipient split on this
-                                                  # dataset and stays above the N_eff<3 zone where
-                                                  # single-experiment residual collapse biases τ down).
+TAU_PRIOR_NEFF_THRESHOLD = 5.0                   # Min N_eff to count as "well-supported" for the
+                                                  # tau prior floor. Stays above the N_eff<3 zone
+                                                  # where single-experiment residual collapse biases
+                                                  # τ down, and gives a robust donor/recipient split
+                                                  # on this dataset.
 TAU_PRIOR_PERCENTILE = 50                        # Percentile of well-supported tau for baseline
 TAU_IRLS_MAX_ITERS = 20                           # Max (τ, refit) iterations for band discrepancy
 TAU_IRLS_TOL = 1e-2                              # Converge when max |Δτ_b| < tol
@@ -310,7 +309,9 @@ FREEZE_C0 = True                                 # Freeze c0 in MC/KW shape refi
                                                   # a_l = c_l/c0 with c0 fixed at the nominal).
 MAX_SAMPLE_ORDER = 6                             # Publish covariance for l=1..MAX_SAMPLE_ORDER only
 # Angular quality gate
-ANGULAR_QUALITY_GATE = True
+ANGULAR_QUALITY_GATE = True                      # Matches run77. A no-op on this database (every bin
+                                                  # in the 0.847-4 MeV grid already passes the angular
+                                                  # coverage check, so no bin is expanded/interpolated)
 MIN_ANGULAR_POINTS = 4                           # Min total angular data points
 MIN_BANDS_COVERED = 3                            # Must have data in all 3 bands (F/M/B)
 MAX_BIN_EXPANSION = 3                            # Max expansion steps (1=+-1 bins, 2=+-2, etc.)
@@ -708,8 +709,10 @@ def _mc_one_bin(args):
     Returns
     -------
     tuple
-        (energy_idx, is_interpolated, results_by_sample, success)
-        where results_by_sample is Dict[s_idx, np.ndarray] of ENDF coefficients.
+        (energy_idx, is_interpolated, results_by_sample, success, error_msg)
+        where results_by_sample is Dict[s_idx, np.ndarray] of ENDF coefficients
+        and error_msg is None on success or the exception summary when the bin
+        fell back to nominal coefficients (zero MC variance).
     """
     (
         nr_energy_idx,
@@ -747,7 +750,7 @@ def _mc_one_bin(args):
     if nr_interpolated:
         endf_coeffs = endf_normalize_legendre_coeffs(nr_nominal_coeffs, include_a0=False)
         results = {s_idx: endf_coeffs for s_idx in range(n_samples)}
-        return (energy_idx, True, results, True)
+        return (energy_idx, True, results, True, None)
 
     bin_seed = base_seed + energy_idx
     rng = np.random.default_rng(bin_seed)
@@ -897,12 +900,40 @@ def _mc_one_bin(args):
                     endf_coeffs = padded
                 results[s_idx] = endf_coeffs
 
-        return (energy_idx, False, results, True)
+        return (energy_idx, False, results, True, None)
 
-    except Exception:
+    except Exception as exc:
         endf_coeffs = endf_normalize_legendre_coeffs(nr_nominal_coeffs, include_a0=False)
         results = {s_idx: endf_coeffs for s_idx in range(n_samples)}
-        return (energy_idx, False, results, False)
+        return (energy_idx, False, results, False,
+                f"{type(exc).__name__}: {exc}")
+
+
+def _log_mc_bin_failures(bin_results, nominal_results, warning_counts, logger):
+    """Log every per-bin MC failure (nominal fallback = zero MC variance).
+
+    A failed bin contributes identical (nominal) coefficients to all samples,
+    so its Pass-2 variance is ~0 and the published MF34 silently understates
+    the uncertainty there unless the failure is surfaced.
+    """
+    energy_by_idx = {nr.energy_index: nr.energy_mev for nr in nominal_results}
+    n_failed = 0
+    for energy_idx, _interp, _results, success, error_msg in bin_results:
+        if success:
+            continue
+        n_failed += 1
+        e_mev = energy_by_idx.get(energy_idx)
+        e_str = f"E={e_mev:.4f} MeV" if e_mev is not None else f"idx={energy_idx}"
+        if logger:
+            logger.error(
+                f"[ERROR] [MC] Bin {e_str}: per-bin MC failed, all samples "
+                f"fell back to nominal (zero MC variance) — {error_msg}",
+                console=True,
+            )
+    if n_failed:
+        warning_counts['mc_bin_failures'] = (
+            warning_counts.get('mc_bin_failures', 0) + n_failed
+        )
 
 
 # =============================================================================
@@ -1218,6 +1249,7 @@ def perform_nominal_fits(
     max_bin_expansion: int = 2,
     rerun_aicc_post_tau: bool = True,
     use_gls_kernel: bool = True,
+    sigma_norm_systematic: float = NORM_SYSTEMATIC_SIGMA,
     logger = None,
 ) -> List[NominalFitResult]:
     """Phase 1: Perform nominal fits using energy_bin method.
@@ -1253,7 +1285,7 @@ def perform_nominal_fits(
             min_relative_uncertainty=min_relative_uncertainty,
             unc_floor_strategy=UNCERTAINTY_FLOOR_STRATEGY,
             normalize_by_n_points=NORMALIZE_BY_N_POINTS,
-            sigma_norm=NORM_SYSTEMATIC_SIGMA,
+            sigma_norm=sigma_norm_systematic,
             band_aware_ess=BAND_AWARE_ESS,
             max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
             logger=_logger,
@@ -1312,7 +1344,7 @@ def perform_nominal_fits(
                         min_relative_uncertainty=min_relative_uncertainty,
                         unc_floor_strategy=UNCERTAINTY_FLOOR_STRATEGY,
                         normalize_by_n_points=NORMALIZE_BY_N_POINTS,
-                        sigma_norm=NORM_SYSTEMATIC_SIGMA,
+                        sigma_norm=sigma_norm_systematic,
                         band_aware_ess=BAND_AWARE_ESS,
                         max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
                         logger=_logger,
@@ -1997,7 +2029,7 @@ def run_exfor_to_endf_sampling_v2(
     tau_prior_neff_threshold: float = 5.0,
     tau_prior_percentile: float = 50.0,
     sigma_norm_systematic: float = 0.05,
-    sigma_norm_elastic: float = 0.05,
+    sigma_norm_elastic: float = 0.0,
     use_model_averaging: bool = True,
     min_degree_for_averaging: int = 3,
     n_eff_warning_threshold: float = 5.0,
@@ -2573,6 +2605,7 @@ def run_exfor_to_endf_sampling_v2(
         max_bin_expansion=MAX_BIN_EXPANSION,
         rerun_aicc_post_tau=RERUN_AICC_POST_TAU,
         use_gls_kernel=USE_GLS_KERNEL,
+        sigma_norm_systematic=sigma_norm_systematic,
         logger=_logger,
     )
 
@@ -2704,8 +2737,8 @@ def run_exfor_to_endf_sampling_v2(
                 RESCALE_UNC_BY_CHI2,
                 ALLOW_SHRINK_UNC,
                 FREEZE_C0,
-                NORM_SYSTEMATIC_SIGMA,
-                NORM_ELASTIC_SIGMA,
+                sigma_norm_systematic,
+                sigma_norm_elastic,
                 NORM_DIST,
                 MAX_SAMPLE_ORDER,
                 apply_positivity_projection,
@@ -2720,8 +2753,9 @@ def run_exfor_to_endf_sampling_v2(
         else:
             bin_results = [_mc_one_bin(a) for a in bin_args_list]
 
+        _log_mc_bin_failures(bin_results, nominal_results, _warning_counts, _logger)
         all_samples_stochastic = {s_idx: {} for s_idx in range(n_samples)}
-        for energy_idx, is_interpolated, results_by_sample, success in bin_results:
+        for energy_idx, is_interpolated, results_by_sample, success, error_msg in bin_results:
             for s_idx, endf_coeffs in results_by_sample.items():
                 all_samples_stochastic[s_idx][energy_idx] = endf_coeffs
 
@@ -2824,8 +2858,8 @@ def run_exfor_to_endf_sampling_v2(
             overlap_weights=overlap_weights,
             n_samples=n_samples,
             n_workers=N_PROCS,
-            sigma_norm=NORM_SYSTEMATIC_SIGMA,
-            sigma_norm_elastic=NORM_ELASTIC_SIGMA,
+            sigma_norm=sigma_norm_systematic,
+            sigma_norm_elastic=sigma_norm_elastic,
             norm_dist=NORM_DIST,
             max_degree=max_degree,
             ridge_lambda=ridge_lambda,
@@ -2885,8 +2919,8 @@ def run_exfor_to_endf_sampling_v2(
                     RESCALE_UNC_BY_CHI2,
                     ALLOW_SHRINK_UNC,
                     FREEZE_C0,
-                    NORM_SYSTEMATIC_SIGMA,
-                    NORM_ELASTIC_SIGMA,
+                    sigma_norm_systematic,
+                    sigma_norm_elastic,
                     NORM_DIST,
                     MAX_SAMPLE_ORDER,
                     apply_positivity_projection,
@@ -2901,8 +2935,9 @@ def run_exfor_to_endf_sampling_v2(
             else:
                 bin_results = [_mc_one_bin(a) for a in bin_args_list]
 
+            _log_mc_bin_failures(bin_results, nominal_results, _warning_counts, _logger)
             all_samples_perbin = {s_idx: {} for s_idx in range(n_samples)}
-            for energy_idx, is_interpolated, results_by_sample, success in bin_results:
+            for energy_idx, is_interpolated, results_by_sample, success, error_msg in bin_results:
                 for s_idx, endf_coeffs in results_by_sample.items():
                     all_samples_perbin[s_idx][energy_idx] = endf_coeffs
 
@@ -3515,6 +3550,7 @@ def run_exfor_to_endf_sampling_v2(
         mc_mean_params = mc_mean_params[keep]
         cov_abs = cov_abs[np.ix_(keep, keep)]
         param_labels = [param_labels[i] for i in keep]
+        valid_mask_s7 = valid_mask_s7[keep]
         _logger.info(f"  Trimmed covariance from {max_degree} to {_eff} orders/bin "
                      f"(MAX_SAMPLE_ORDER={MAX_SAMPLE_ORDER}): {cov_matrix.shape[0]} params")
         max_degree = _eff
@@ -3989,10 +4025,10 @@ def run_exfor_to_endf_sampling_v2(
                     pipe_emin = float(pipe_grid_ev[0])
                     pipe_emax = float(pipe_grid_ev[-1])
                     return merge_mf34(
-                        original_mf34=original_mf34_mt,
-                        pipeline_mf34=pipeline_mf34_obj,
-                        pipeline_energy_min_ev=pipe_emin,
-                        pipeline_energy_max_ev=pipe_emax,
+                        base_mf34=original_mf34_mt,
+                        overlay_mf34=pipeline_mf34_obj,
+                        overlay_energy_min_ev=pipe_emin,
+                        overlay_energy_max_ev=pipe_emax,
                     )
                 return pipeline_mf34_obj
 
@@ -4685,6 +4721,9 @@ if __name__ == "__main__":
         min_points_per_band=MIN_POINTS_PER_BAND,
         max_band_scale=MAX_BAND_SCALE_FACTOR,
         tau_smoothing_window=TAU_SMOOTHING_WINDOW,
+        tau_prior_floor=TAU_PRIOR_FLOOR,
+        tau_prior_neff_threshold=TAU_PRIOR_NEFF_THRESHOLD,
+        tau_prior_percentile=TAU_PRIOR_PERCENTILE,
         sigma_norm_systematic=NORM_SYSTEMATIC_SIGMA,
         sigma_norm_elastic=NORM_ELASTIC_SIGMA,
         use_model_averaging=USE_MODEL_AVERAGING,

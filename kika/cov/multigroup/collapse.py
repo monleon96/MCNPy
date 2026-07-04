@@ -241,10 +241,16 @@ def compute_base_cell_means(base_energy_grid: np.ndarray,
 
     max_order = max(legendre_orders)
 
-    # Check coefficients cache (keyed by mf4_data identity and CM→lab alpha)
+    # Check coefficients cache (keyed by mf4_data identity and CM→lab alpha).
+    # Only honor a cache hit if the cached set already covers max_order. The
+    # cache key does not encode the order, so an earlier block may have
+    # populated it for a lower order (non-lab path uses extract_order ==
+    # max_order); reusing that under-populated set would silently return zeros
+    # for every missing higher order. Re-extract in that case.
     _cache_key = (id(mf4_data), cm_to_lab_alpha)
-    if _coeffs_cache is not None and _cache_key in _coeffs_cache:
-        native_E, _all_coeffs = _coeffs_cache[_cache_key]
+    _cached = _coeffs_cache.get(_cache_key) if _coeffs_cache is not None else None
+    if _cached is not None and _cached[1] and max(_cached[1]) >= max_order:
+        native_E, _all_coeffs = _cached
         # Filter to only needed orders
         coeffs_native = {l: v for l, v in _all_coeffs.items() if l <= max_order}
     else:
@@ -1041,26 +1047,35 @@ def MF34_to_MG(endf_object,
             # 3) Expand relative MF34 matrix to union grid
             R_union = expand_matrix_to_union_grid(base_matrix, mf34_energy_grid, union_grid)
 
-            # 4) Build flux-fraction matrix and collapse R directly
+            # 4) Build the sigma*phi overlap weights w_{i,g}
             union_overlap_weights = _build_overlap_from_flux(
                 union_grid, mg_energy_edges, union_flux
             )
-            W_g = np.sum(union_overlap_weights, axis=0)  # (N_mg,)
-            # f[i, g] = W_i / W_g  (flux fraction of union cell i in group g)
-            with np.errstate(divide='ignore', invalid='ignore'):
-                flux_fractions = np.where(
-                    W_g[None, :] > 1e-30,
-                    union_overlap_weights / W_g[None, :],
-                    0.0,
-                )
-            relative_fine = flux_fractions.T @ R_union @ flux_fractions
 
-            # 5) Compute MG means for normalization and absolute covariance
+            # 5) Compute MG means (group-mean coefficient a_bar_{l,g}); these
+            #    serve both the a_l-weighted collapse and the relative<->absolute
+            #    conversion below.
             mf34_mg_means_row = compute_mg_means(union_base_means_row, union_overlap_weights)[l_row]
             if union_base_means_col is union_base_means_row:
                 mf34_mg_means_col = mf34_mg_means_row
             else:
                 mf34_mg_means_col = compute_mg_means(union_base_means_col, union_overlap_weights)[l_col]
+
+            # 6) Collapse R with NJOY's a_l-weighting (see comment above).
+            relative_fine = collapse_relative_covariance(
+                R_union,
+                union_base_means_row[l_row],
+                union_base_means_col[l_col],
+                union_overlap_weights,
+                mf34_mg_means_row,
+                mf34_mg_means_col,
+            )
+            # NJOY drops elements whose group-mean product is non-positive
+            # (it sets the relative covariance to zero); mirror that here so a
+            # near-zero a_bar does not produce NaN/inf.
+            relative_fine = np.nan_to_num(
+                relative_fine, nan=0.0, posinf=0.0, neginf=0.0
+            )
 
             col_vals_symmetric = mg_means_col_vals if mg_base_means_col is not mg_base_means_row else mg_means_row_vals
             if relative_normalization.lower() == "mg_cell":

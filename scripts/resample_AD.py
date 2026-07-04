@@ -2267,10 +2267,18 @@ def sample_legendre_coefficients(
             for l in range(max_sample_order + 1, degree_use + 1)
         }
 
-    # Build group mapping for correlated normalization (Improvement 1.3)
+    # Build group mapping for correlated normalization (Improvement 1.3).
+    # Groups are needed whenever the global sigma_norm is active OR the
+    # manifest supplies per-experiment sigma_sys_relative values; gating on
+    # sigma_norm alone would silently drop all manifest-driven normalization
+    # perturbations when sigma_norm=0.
+    _has_manifest_sys = (
+        'sigma_sys_relative' in work.columns
+        and bool(np.any(work['sigma_sys_relative'].to_numpy(dtype=float) > 0.0))
+    )
     group_indices: Dict[Tuple, List[int]] = {}
     group_keys: List[Tuple] = []
-    if sigma_norm > 0.0:
+    if sigma_norm > 0.0 or _has_manifest_sys:
         # Check if required columns exist
         available_cols = [col for col in norm_group_cols if col in work.columns]
         if available_cols:
@@ -2307,7 +2315,7 @@ def sample_legendre_coefficients(
         # Each group's sigma is taken from the manifest-derived
         # 'sigma_sys_relative' column on the data, falling back to the global
         # sigma_norm when the column is absent or zero.
-        if sigma_norm > 0.0 and group_keys:
+        if group_keys:
             has_sys_col = 'sigma_sys_relative' in work.columns
             for key in group_keys:
                 indices = group_indices[key]
@@ -2319,6 +2327,8 @@ def sample_legendre_coefficients(
                 # variable name to avoid shadowing the per-point ``sigma_eff``
                 # array that is used for additive noise + fit weights below.
                 ex_norm_sigma = ex_sigma_sys if ex_sigma_sys > 0 else sigma_norm
+                if ex_norm_sigma <= 0.0:
+                    continue
                 if norm_dist == "lognormal":
                     N_g = rng.lognormal(
                         mean=-0.5 * ex_norm_sigma ** 2,
@@ -2376,7 +2386,7 @@ def sample_legendre_coefficients(
         freeze_c0=freeze_c0,
         fixed_c0_value=c0_fix,
         sigma_norm=sigma_norm,
-        n_experiments_for_norm=len(group_keys) if sigma_norm > 0.0 else 0,
+        n_experiments_for_norm=len(group_keys),
         max_sample_order=max_sample_order,
         n_frozen_high=len(fixed_high) if fixed_high else 0,
         # Phase B audit follow-up: keep the pre-τ AICc snapshot (when the
@@ -2428,141 +2438,6 @@ def evaluate_legendre_series(mu: np.ndarray, c: np.ndarray) -> np.ndarray:
     return legval(mu, c)
 
 
-def load_exfor_for_fitting(
-    exfor_directory: str,
-    energy_mev: float,
-    tolerance: float = 0.015,
-    m_proj_u: float = 1.008665,
-    m_targ_u: float = 55.93494,
-) -> pd.DataFrame:
-    """
-    Load EXFOR experimental data for a specific energy and format for Legendre fitting.
-
-    This function loads EXFOR data at the specified energy (within tolerance),
-    transforms LAB frame data to CM frame if needed, and returns a DataFrame
-    compatible with sample_legendre_coefficients().
-
-    Parameters
-    ----------
-    exfor_directory : str
-        Path to directory containing EXFOR JSON files
-    energy_mev : float
-        Target energy in MeV
-    tolerance : float, optional
-        Energy matching tolerance in MeV (default: 0.015)
-    m_proj_u : float, optional
-        Projectile mass in atomic mass units (default: 1.008665 for neutron)
-    m_targ_u : float, optional
-        Target mass in atomic mass units (default: 55.93494 for Fe-56)
-
-    Returns
-    -------
-    pd.DataFrame
-        Combined DataFrame with columns:
-        - 'theta_deg': scattering angle in degrees
-        - 'value': differential cross section dσ/dΩ in barns/sr
-        - 'unc': uncertainty (error_stat) in barns/sr
-        - 'mu': cos(theta) in CM frame
-        - 'frame': reference frame ('CM' or 'LAB')
-        - 'entry': EXFOR entry number
-        - 'subentry': EXFOR subentry number
-        - 'author': first author name
-        - 'year': publication year
-        - 'reaction': reaction string (e.g., '26-FE-56(N,EL)26-FE-56' or '26-FE-0(N,EL)26-FE-0' for natural)
-
-    Notes
-    -----
-    - All LAB frame data is automatically converted to CM frame
-    - Only statistical uncertainties (error_stat) are included
-    - Multiple EXFOR experiments at matching energies are concatenated
-    - Returns empty DataFrame if no matching data found
-    """
-    if not _EXFOR_AVAILABLE:
-        raise ImportError(
-            "EXFOR utilities not available. Ensure angular_distribution_utils.py "
-            "and uncertainty_analysis_utils.py are in ../EXFOR/"
-        )
-
-    exfor_data = load_exfor_data_within_tolerance(
-        exfor_directory, energy_mev, tolerance
-    )
-
-    if exfor_data is None or len(exfor_data) == 0:
-        print(f"No EXFOR data found for E={energy_mev:.3f} MeV ± {tolerance:.3f} MeV")
-        return pd.DataFrame(columns=[
-            'theta_deg', 'value', 'unc', 'mu', 'frame', 'entry', 'subentry', 'author', 'year', 'reaction'
-        ])
-
-    all_frames = []
-    for df, meta in exfor_data:
-        # Extract metadata
-        entry = meta.get('entry', 'unknown')
-        subentry = meta.get('subentry', 'unknown')
-        matched_energy = meta.get('matched_energy', energy_mev)
-        frame = meta.get('angle_frame', 'CM').upper()
-        reaction = meta.get('reaction', '')
-
-        # Extract author and year
-        citation = meta.get('citation', {})
-        authors = citation.get('authors', [])
-        author = authors[0] if authors else 'unknown'
-        year = citation.get('year', 'unknown')
-
-        # Extract columns
-        angles_deg = df['angle'].to_numpy(dtype=float)
-        dsig = df['dsig'].to_numpy(dtype=float)
-        error_stat = df['error_stat'].to_numpy(dtype=float)
-
-        # Transform to CM frame if needed
-        if frame == 'LAB':
-            mu_lab = np.cos(np.deg2rad(angles_deg))
-            mu_cm, dsig_cm, error_cm = transform_lab_to_cm(
-                mu_lab, dsig, error_stat, m_proj_u, m_targ_u
-            )
-
-            angles_cm_deg = np.rad2deg(np.arccos(mu_cm))
-
-            # Create transformed dataframe
-            transformed_df = pd.DataFrame({
-                'theta_deg': angles_cm_deg,
-                'value': dsig_cm,
-                'unc': error_cm,
-                'mu': mu_cm,
-                'frame': 'CM',
-                'entry': entry,
-                'subentry': subentry,
-                'author': author,
-                'year': year,
-                'reaction': reaction,
-            })
-        else:
-            # Already in CM frame
-            mu_cm = np.cos(np.deg2rad(angles_deg))
-
-            transformed_df = pd.DataFrame({
-                'theta_deg': angles_deg,
-                'value': dsig,
-                'unc': error_stat,
-                'mu': mu_cm,
-                'frame': frame,
-                'entry': entry,
-                'subentry': subentry,
-                'author': author,
-                'year': year,
-                'reaction': reaction,
-            })
-
-        all_frames.append(transformed_df)
-
-    # Concatenate all experiments
-    result = pd.concat(all_frames, ignore_index=True)
-
-    print(f"Loaded {len(exfor_data)} EXFOR experiment(s) with {len(result)} data points")
-    print(f"Energy match: {energy_mev:.3f} MeV (tolerance: ±{tolerance:.3f} MeV)")
-
-    return result
-
-
 def plot_sampled_angular_distributions(
     coef_df: pd.DataFrame,
     exfor_df: Optional[pd.DataFrame] = None,
@@ -2584,8 +2459,7 @@ def plot_sampled_angular_distributions(
         DataFrame with Legendre coefficients (columns c0, c1, c2, ...)
         from sample_legendre_coefficients()
     exfor_df : pd.DataFrame, optional
-        EXFOR data from load_exfor_for_fitting() with columns
-        theta_deg, value, unc, mu
+        EXFOR data with columns theta_deg, value, unc, mu
     n_plot : int, optional
         Number of sample curves to plot (default: 10)
     analysis_energy : float, optional

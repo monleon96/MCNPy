@@ -57,6 +57,7 @@ if str(_kika_root) not in sys.path:
 from kika.endf import read_endf
 from kika.exfor import read_all_exfor
 import kika.exfor as exfor
+from kika.exfor.transforms import transform_lab_to_cm
 from kika.cov.mf34_covmat import MF34CovMat
 
 from scripts.exfor_utils import build_exfor_cache_from_objects
@@ -71,7 +72,7 @@ MT_NUMBER = 2  # elastic scattering
 # This_work uses the pipeline's nominal ENDF and the matching nominal_fits
 # parquet that lives next to it (both written by exfor_to_endf_sampling_v2.py
 # into OUTPUT_DIR).
-THIS_WORK_DIR        = "/share_snc/snc/JuanMonleon/ENDF_samples/new_test_73"
+THIS_WORK_DIR        = "/share_snc/snc/JuanMonleon/ENDF_samples/new_test_79"
 THIS_WORK_FILE       = f"{THIS_WORK_DIR}/26-Fe-56g_nominal_mg.endf"
 NOMINAL_FITS_PARQUET = f"{THIS_WORK_DIR}/nominal_fits.parquet"
 
@@ -107,7 +108,7 @@ M_TARG_U = 55.93494
 L_MAX = 6
 
 # ── Output ──
-OUTPUT_PARQUET = "/share_snc/snc/JuanMonleon/chi2/chi2_data_exfor_c0_73.parquet"
+OUTPUT_PARQUET = "/share_snc/snc/JuanMonleon/chi2/chi2_data_exfor_c0_79.parquet"
 
 
 # ── ENDF loading ──────────────────────────────────────────────────────────────
@@ -183,10 +184,30 @@ def build_experiment_dataframe(cache_df: pd.DataFrame, meta: Dict) -> pd.DataFra
     is_natural, ks_subentry.
     """
     df = cache_df.copy()
-    mu = np.cos(np.deg2rad(df["angle"].to_numpy(dtype=float)))
+    angle_deg = df["angle"].to_numpy(dtype=float)
     value = df["dsig"].to_numpy(dtype=float)
     sigma_stat = df["error_stat"].to_numpy(dtype=float)
     sigma_sys = df["error_sys"].to_numpy(dtype=float)
+
+    # Frame conversion. The library MF4 Legendre coefficients are CM-frame, so
+    # experiments reported in the LAB frame (e.g. Gkatis 27673002) must be
+    # transformed before mu / dsig are compared. dsig and its absolute
+    # uncertainties all share the same LAB->CM Jacobian; relative uncertainties
+    # are frame-invariant. Mirrors the fit pipeline (exfor_utils build path).
+    frame = str(meta.get("angle_frame", "CM")).upper()
+    if frame == "LAB":
+        mu_lab = np.cos(np.deg2rad(angle_deg))
+        mu, value_cm, sigma_stat = transform_lab_to_cm(
+            mu_lab, value, sigma_stat, M_PROJ_U, M_TARG_U
+        )
+        with np.errstate(divide="ignore", invalid="ignore"):
+            jac_scale = np.where(value != 0.0, value_cm / value, 1.0)
+        sigma_sys = sigma_sys * jac_scale
+        value = value_cm
+        angle_deg = np.rad2deg(np.arccos(np.clip(mu, -1.0, 1.0)))
+    else:
+        mu = np.cos(np.deg2rad(angle_deg))
+
     n = len(df)
     indep = float(meta.get("sigma_sys_indep_relative", 0.0) or 0.0)
     sigma_sys_rel = np.where(np.abs(value) > 0,
@@ -202,7 +223,7 @@ def build_experiment_dataframe(cache_df: pd.DataFrame, meta: Dict) -> pd.DataFra
     entry = meta["entry"]
     sub_no = meta["subentry"]
     return pd.DataFrame({
-        "angle_deg": df["angle"].to_numpy(dtype=float),
+        "angle_deg": angle_deg,
         "mu": mu,
         "value": value,
         "sigma_stat": sigma_stat,

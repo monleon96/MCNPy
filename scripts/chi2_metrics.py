@@ -106,17 +106,52 @@ def _select_block(
     return block[np.ix_(pos, pos)]
 
 
+def _resolve_block_codes(
+    df: pd.DataFrame, systematic_block_col: Optional[str],
+) -> Optional[np.ndarray]:
+    """Integer block code per row for restricting the EXFOR rank-1 systematics.
+
+    When `systematic_block_col` is given (e.g. ``"energy_mev"``), the rank-1
+    normalization (u) and shape (v) modes are correlated only *within* rows
+    that share a code — i.e. block-diagonal in that column. This matches a c_0
+    that was fit independently per block: with c_0 fit per incident energy, the
+    single experiment-wide normalization mode penalises energy-to-energy level
+    differences the fit already removed, inflating chi^2. Restricting the
+    systematic to per-energy correlation makes the covariance consistent with
+    the per-energy fit. None ⇒ one global block (the original behaviour).
+    """
+    if systematic_block_col is None:
+        return None
+    if systematic_block_col not in df.columns:
+        raise ValueError(
+            f"chi2_metrics: systematic_block_col={systematic_block_col!r} "
+            f"not in frame columns {sorted(df.columns)}"
+        )
+    codes, _ = pd.factorize(df[systematic_block_col].to_numpy(), sort=False)
+    return codes.astype(np.int64)
+
+
 def _per_group_sigma(
     D: np.ndarray,
     u: np.ndarray,
     v: np.ndarray,
     eval_cov_block: Optional[np.ndarray],
+    block_ids: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Assemble Sigma = diag(D) + u u^T + v v^T + Sigma_eval for one experiment."""
+    """Assemble Sigma = diag(D) + u u^T + v v^T + Sigma_eval for one experiment.
+
+    When `block_ids` is given, the EXFOR rank-1 systematic modes (u, v) are
+    masked to block-diagonal: they correlate only within rows sharing a block
+    id (e.g. per incident energy). Sigma_eval (MF34/MF33) is left fully dense —
+    the evaluated covariance is genuinely cross-energy. See `_resolve_block_codes`.
+    """
     n = D.size
     sigma = np.diag(D).astype(float)
-    sigma += np.outer(u, u)
-    sigma += np.outer(v, v)
+    rank1 = np.outer(u, u)
+    rank1 += np.outer(v, v)
+    if block_ids is not None:
+        rank1 *= (block_ids[:, None] == block_ids[None, :])
+    sigma += rank1
     if eval_cov_block is not None and eval_cov_block.size:
         if eval_cov_block.shape != (n, n):
             raise ValueError(
@@ -186,11 +221,32 @@ def _rank2_chi2_woodbury(
     return s_rr - correction
 
 
+def _rank2_chi2_woodbury_blocked(
+    D: np.ndarray, u: np.ndarray, v: np.ndarray, r: np.ndarray,
+    block_ids: Optional[np.ndarray] = None,
+) -> float:
+    """Sum of per-block rank-2 Woodbury chi^2.
+
+    With `block_ids=None` this is exactly `_rank2_chi2_woodbury` over all rows.
+    Otherwise Σ = diag(D) + u uᵀ + v vᵀ is block-diagonal in `block_ids` (the
+    systematics correlate only within a block), so χ² = Σ_b r_bᵀ Σ_b⁻¹ r_b. Still
+    O(N) and avoids materialising any dense matrix.
+    """
+    if block_ids is None:
+        return _rank2_chi2_woodbury(D, u, v, r)
+    total = 0.0
+    for b in np.unique(block_ids):
+        m = block_ids == b
+        total += _rank2_chi2_woodbury(D[m], u[m], v[m], r[m])
+    return total
+
+
 def mahalanobis_chi2_per_experiment(
     df: pd.DataFrame,
     eval_cov: Optional[Dict[Tuple, np.ndarray]] = None,
     *,
     group_cols: Tuple[str, ...] = ("library", "experiment_id"),
+    systematic_block_col: Optional[str] = None,
 ) -> pd.DataFrame:
     """One row per group with N, chi^2, chi^2_per_N.
 
@@ -201,9 +257,13 @@ def mahalanobis_chi2_per_experiment(
         Missing keys are treated as zero blocks (no MF34/MF33 contribution).
         Keys are matched as `tuple(str(...) for v in group)` to align with
         the on-disk .npz schema produced by scripts.eval_covariance.
+    systematic_block_col : optional column name (e.g. ``"energy_mev"``) that
+        restricts the EXFOR rank-1 systematic modes to correlate only within
+        each block. See `_resolve_block_codes`. None ⇒ one experiment-wide mode.
     """
     D_all, u_all, v_all, r_all = _components(df)
     eval_cov = eval_cov or {}
+    block_codes = _resolve_block_codes(df, systematic_block_col)
 
     groups = df.groupby(list(group_cols), observed=True, sort=False)
     out_rows = []
@@ -218,7 +278,8 @@ def mahalanobis_chi2_per_experiment(
         r = r_all[ord_pos]
 
         block = _select_block(eval_cov, key, sub)
-        sigma = _per_group_sigma(D, u, v, block)
+        bids = None if block_codes is None else block_codes[ord_pos]
+        sigma = _per_group_sigma(D, u, v, block, bids)
         label = "/".join(str(p) for p in key)
         chi2, _z = _solve(sigma, r, label=label)
         N = len(sub)
@@ -237,6 +298,7 @@ def chi2_per_experiment_variants(
     *,
     group_cols: Tuple[str, ...] = ("library", "experiment_id"),
     include_eval_diag: bool = True,
+    systematic_block_col: Optional[str] = None,
 ) -> pd.DataFrame:
     """Compute all four chi^2 variants per group in a single pass.
 
@@ -260,9 +322,16 @@ def chi2_per_experiment_variants(
     into the "EXFOR-only" variant (σ² = σ_stat² + (σ_indep·y)² + (σ_dep·y)²)
     that removes the per-library evaluator cushion. V3 then collapses to V2
     and V4 is unchanged (the dense block is independent of the diagonal flag).
+
+    `systematic_block_col` (e.g. ``"energy_mev"``) makes the EXFOR rank-1
+    systematics block-diagonal per block in V2/V3/V4 — use it when c_0 was fit
+    per block so the covariance does not penalise per-block level differences
+    the fit already removed. V1 is diagonal and unaffected. None ⇒ one global
+    experiment-wide mode (original behaviour).
     """
     D_all, u_all, v_all, r_all = _components(df)
     eval_cov = eval_cov or {}
+    block_codes = _resolve_block_codes(df, systematic_block_col)
     if include_eval_diag:
         sigma_eval_diag = (
             df["sigma_eval_diag"].to_numpy(dtype=float)
@@ -294,16 +363,19 @@ def chi2_per_experiment_variants(
         v1_denom = np.maximum(D + u ** 2 + v ** 2 + sed ** 2, 1e-300)
         v1 = float(np.sum(r ** 2 / v1_denom))
 
-        # V2 rank-2 only: D + uuᵀ + vvᵀ — Woodbury closed form (O(N)).
-        v2 = _rank2_chi2_woodbury(D, u, v, r)
+        bids = None if block_codes is None else block_codes[ord_pos]
+
+        # V2 rank-2 only: D + uuᵀ + vvᵀ — Woodbury closed form (O(N)),
+        # block-diagonal in `bids` when per-block systematics are requested.
+        v2 = _rank2_chi2_woodbury_blocked(D, u, v, r, bids)
 
         # V3 rank-2 + diag eval: (D + σ_eval_diag²) + uuᵀ + vvᵀ — same form.
-        v3 = _rank2_chi2_woodbury(D + sed ** 2, u, v, r)
+        v3 = _rank2_chi2_woodbury_blocked(D + sed ** 2, u, v, r, bids)
 
-        # V4 rank-2 + dense eval
+        # V4 rank-2 + dense eval (EXFOR rank-1 masked per block, Σ_eval dense).
         if eval_cov:
             block = _select_block(eval_cov, key, sub)
-            sigma_v4 = _per_group_sigma(D, u, v, block)
+            sigma_v4 = _per_group_sigma(D, u, v, block, bids)
             v4, _ = _solve(sigma_v4, r, label=f"{label}/V4")
         else:
             v4 = float("nan")
@@ -328,14 +400,17 @@ def whitened_residuals_per_experiment(
     eval_cov: Optional[Dict[Tuple, np.ndarray]] = None,
     *,
     group_cols: Tuple[str, ...] = ("library", "experiment_id"),
+    systematic_block_col: Optional[str] = None,
 ) -> pd.Series:
     """Per-row whitened residual z aligned to df.index.
 
     Satisfies (z**2).groupby(group_cols).sum() == chi2 from
-    mahalanobis_chi2_per_experiment, to numerical precision.
+    mahalanobis_chi2_per_experiment, to numerical precision. `systematic_block_col`
+    blocks the EXFOR rank-1 systematics per block (see `_resolve_block_codes`).
     """
     D_all, u_all, v_all, r_all = _components(df)
     eval_cov = eval_cov or {}
+    block_codes = _resolve_block_codes(df, systematic_block_col)
 
     z_full = np.full(len(df), np.nan, dtype=float)
     for key, sub in df.groupby(list(group_cols), observed=True, sort=False):
@@ -349,7 +424,8 @@ def whitened_residuals_per_experiment(
         r = r_all[ord_pos]
 
         block = _select_block(eval_cov, key, sub)
-        sigma = _per_group_sigma(D, u, v, block)
+        bids = None if block_codes is None else block_codes[ord_pos]
+        sigma = _per_group_sigma(D, u, v, block, bids)
         label = "/".join(str(p) for p in key)
         _chi2, z = _solve(sigma, r, label=label)
         z_full[ord_pos] = z
@@ -363,6 +439,7 @@ def whitened_residuals_per_experiment_variant(
     variant: str = "V4",
     group_cols: Tuple[str, ...] = ("library", "experiment_id"),
     include_eval_diag: bool = True,
+    systematic_block_col: Optional[str] = None,
 ) -> pd.Series:
     """Per-row whitened residual z for one of the four chi^2 variants.
 
@@ -383,6 +460,7 @@ def whitened_residuals_per_experiment_variant(
         raise ValueError(f"variant must be V1/V2/V3/V4, got {variant!r}")
     D_all, u_all, v_all, r_all = _components(df)
     eval_cov = eval_cov or {}
+    block_codes = _resolve_block_codes(df, systematic_block_col)
     if include_eval_diag:
         sigma_eval_diag = (
             df["sigma_eval_diag"].to_numpy(dtype=float)
@@ -409,13 +487,14 @@ def whitened_residuals_per_experiment_variant(
             z_full[ord_pos] = r / denom
             continue
 
+        bids = None if block_codes is None else block_codes[ord_pos]
         if variant == "V2":
             D_eff, block = D, None
         elif variant == "V3":
             D_eff, block = D + sed ** 2, None
         else:  # V4
             D_eff, block = D, _select_block(eval_cov, key, sub)
-        sigma = _per_group_sigma(D_eff, u, v, block)
+        sigma = _per_group_sigma(D_eff, u, v, block, bids)
         _chi2, z = _solve(sigma, r, label=label)
         z_full[ord_pos] = z
     return pd.Series(z_full, index=df.index, name=f"z_{variant.lower()}")

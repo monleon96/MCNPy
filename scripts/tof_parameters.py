@@ -252,6 +252,52 @@ def compute_sigma_E_direct(
     return compute_sigma_E(energy_mev, tof_params, min_sigma_E_kev)
 
 
+def fold_xs_over_resolution(
+    e_grid_ev: np.ndarray,
+    xs: np.ndarray,
+    energy_mev: float,
+    sigma_E_mev: float,
+    n_nodes: int = 12,
+) -> float:
+    """Average a tabulated cross section σ(E') over a Gaussian energy-resolution
+    kernel N(energy_mev, sigma_E_mev²) via Gauss–Hermite quadrature.
+
+    σ(E') is obtained by linear interpolation on the (e_grid_ev, xs) table and
+    clamped to the table endpoints outside its coverage (numpy.interp default).
+    With sigma_E_mev <= 0 the kernel collapses to a delta and the unfolded value
+    σ(energy_mev) is returned. Units follow `xs` (barns for MF3 elastic).
+
+    Gauss–Hermite is exact for the Gaussian weight: with nodes xᵢ and weights wᵢ
+    for the weight exp(-x²),
+        ⟨σ⟩ = (1/√π) · Σᵢ wᵢ · σ(E₀ + √2·σ_E·xᵢ).
+
+    Parameters
+    ----------
+    e_grid_ev : np.ndarray
+        Cross-section energy grid in eV (ascending), e.g. MF3 `energies`.
+    xs : np.ndarray
+        Cross section on `e_grid_ev` (same length).
+    energy_mev : float
+        Kernel centroid (the datapoint's nominal incident energy) in MeV.
+    sigma_E_mev : float
+        Gaussian energy-resolution width in MeV (e.g. from `compute_sigma_E`).
+    n_nodes : int
+        Number of Gauss–Hermite nodes (default 12).
+
+    Returns
+    -------
+    float
+        Resolution-averaged cross section, same units as `xs`.
+    """
+    e0_ev = energy_mev * 1e6
+    if sigma_E_mev <= 0.0 or n_nodes < 1:
+        return float(np.interp(e0_ev, e_grid_ev, xs))
+    nodes, weights = np.polynomial.hermite.hermgauss(n_nodes)
+    sample_e_ev = e0_ev + np.sqrt(2.0) * (sigma_E_mev * 1e6) * nodes
+    sample_xs = np.interp(sample_e_ev, e_grid_ev, xs)
+    return float(np.sum(weights * sample_xs) / np.sqrt(np.pi))
+
+
 def find_bin_for_energy(
     energy_mev: float,
     energy_bins: list,  # List[EnergyBinInfo]

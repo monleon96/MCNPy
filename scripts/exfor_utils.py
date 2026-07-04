@@ -48,7 +48,6 @@ from scripts.tof_parameters import get_tof_parameters, compute_sigma_E
 
 # Import resample_AD functions (relative import for same directory)
 from .resample_AD import (
-    load_exfor_for_fitting,
     endf_normalize_legendre_coeffs,
     sample_legendre_coefficients,
     compute_energy_resolution_tof,
@@ -1717,70 +1716,6 @@ def apply_per_experiment_weight_cap(
     return capped_weights, exp_weight_fracs, capping_applied
 
 
-def load_exfor_with_asymmetric_tolerance(
-    exfor_directory: str,
-    energy_mev: float,
-    tolerance_lower_mev: float,
-    tolerance_upper_mev: float,
-    m_proj_u: float,
-    m_targ_u: float,
-) -> Tuple[pd.DataFrame, int]:
-    """
-    Load EXFOR data with asymmetric tolerance bounds.
-
-    Parameters
-    ----------
-    exfor_directory : str
-        Path to EXFOR data directory
-    energy_mev : float
-        Target energy in MeV
-    tolerance_lower_mev : float
-        Lower tolerance in MeV
-    tolerance_upper_mev : float
-        Upper tolerance in MeV
-    m_proj_u : float
-        Projectile mass in atomic mass units
-    m_targ_u : float
-        Target mass in atomic mass units
-
-    Returns
-    -------
-    Tuple[pd.DataFrame, int]
-        DataFrame with EXFOR data and count of unique energies found
-    """
-    # Use the maximum tolerance for initial search
-    max_tolerance = max(tolerance_lower_mev, tolerance_upper_mev)
-
-    # Suppress print statements from load_exfor_for_fitting
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        import io
-        old_stdout = sys.stdout
-        sys.stdout = io.StringIO()
-        try:
-            exfor_df = load_exfor_for_fitting(
-                exfor_directory=exfor_directory,
-                energy_mev=energy_mev,
-                tolerance=max_tolerance,
-                m_proj_u=m_proj_u,
-                m_targ_u=m_targ_u,
-            )
-        finally:
-            sys.stdout = old_stdout
-
-    if exfor_df.empty:
-        return exfor_df, 0
-
-    # Count unique experiments (entry, subentry pairs)
-    if 'entry' in exfor_df.columns and 'subentry' in exfor_df.columns:
-        unique_experiments = exfor_df.groupby(['entry', 'subentry']).size()
-        n_experiments = len(unique_experiments)
-    else:
-        n_experiments = 1
-
-    return exfor_df, n_experiments
-
-
 # =============================================================================
 # KERNEL-WEIGHT MC FOR CROSS-ENERGY CORRELATIONS
 # =============================================================================
@@ -2799,8 +2734,9 @@ def compute_covariance_from_samples(
         Cov_rel(i, j) = Cov_abs(i, j) / (mean_i * mean_j)
 
     The conversion is performed here so that the returned matrix can be
-    written directly to MF34 with LB=5 format. Where |mean_i * mean_j| < 1e-30
-    (effectively zero coefficients), the relative covariance is set to zero.
+    written directly to MF34 with LB=5 format. Rows/columns of parameters
+    with |mean| < 1e-6 (effectively zero coefficients at ENDF precision)
+    are set to zero in the relative covariance.
     """
     n_samples = len(all_samples)
     n_energies = len(energy_indices)
@@ -2829,8 +2765,13 @@ def compute_covariance_from_samples(
     # Convert absolute covariance to relative (fractional) covariance
     # Cov_rel(i,j) = Cov_abs(i,j) / (mean_i * mean_j)
     mean_params = np.mean(sample_matrix, axis=0)
+    # Per-parameter safe test (|mean| > 1e-6, ~ENDF 6-sig-digit precision),
+    # mirroring absolute_to_nominal_relative: the pairwise-product test
+    # (|mean_i*mean_j| > threshold²) could zero a diagonal variance while
+    # keeping its cross-terms, breaking PSD.
+    param_safe = np.abs(mean_params) > 1e-6
+    safe_mask = np.outer(param_safe, param_safe)
     denom = np.outer(mean_params, mean_params)
-    safe_mask = np.abs(denom) > 1e-12  # ENDF 6-digit precision squared
     cov_matrix = np.zeros_like(cov_abs)
     cov_matrix[safe_mask] = cov_abs[safe_mask] / denom[safe_mask]
 
