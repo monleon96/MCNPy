@@ -86,12 +86,14 @@ import chi2_metrics
 
 # Run versioning. Outputs land in `<REPORT_DIR>/run_<RUN_ID>/`; bump this to
 # start a fresh run without overwriting earlier ones.
-RUN_ID: str = "079"
+RUN_ID: str = "080"
 
-# Which methodologies to run. Any non-empty subset of
-# {"exfor_c0", "library_c0", "folded_c0"}. folded_c0 needs its parquet + sidecar
-# built first by scripts/precompute_chi2_folded_c0.py.
-METHODOLOGIES_TO_RUN: List[str] = ["exfor_c0", "library_c0", "folded_c0"]
+# Which methodologies to run. Any non-empty subset of the PATHS keys. Each entry
+# needs its parquet + .eval_cov.npz sidecar built first by the matching
+# scripts/precompute_chi2_*.py. The folded_al_c0_ns{1,3} entries are built by
+# scripts/precompute_chi2_folded_al_c0.py (set N_SIGMA=1.0 then 3.0 and rerun).
+# Original headline set: ["exfor_c0", "library_c0", "folded_c0"].
+METHODOLOGIES_TO_RUN: List[str] = ["folded_al_c0_ns1", "folded_al_c0_ns3"]
 
 # Per-methodology I/O. The .npz sidecar is inferred as `<parquet>.eval_cov.npz`.
 #
@@ -107,13 +109,13 @@ METHODOLOGIES_TO_RUN: List[str] = ["exfor_c0", "library_c0", "folded_c0"]
 # a genuine global mode and stays None.
 PATHS: Dict[str, Dict[str, Optional[str]]] = {
     "exfor_c0": {
-        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_exfor_c0_79.parquet",
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_exfor_c0_80.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_exfor_c0",
         "title":      "χ² analysis — c₀ from EXFOR Kinney/Smith fit, MF34 eval σ",
         "systematic_block_col": "energy_mev",
     },
     "library_c0": {
-        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_library_c0_79.parquet",
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_library_c0_80.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_library_c0",
         "title":      "χ² analysis — c₀ from library MF3, MF34+MF33 eval σ",
         "systematic_block_col": None,
@@ -124,9 +126,26 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
     # normalization is a genuine experiment-wide mode → systematic_block_col=None,
     # same as library_c0. Parquet written by scripts/precompute_chi2_folded_c0.py.
     "folded_c0": {
-        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_c0_79.parquet",
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_c0_80.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_folded_c0",
         "title":      "χ² analysis — c₀ from resolution-folded library MF3, MF34 eval σ",
+        "systematic_block_col": None,
+    },
+    # Both-folded variant: like folded_c0 but the angular shape a_l is also folded
+    # over each experiment's TOF resolution window (truncated Gaussian, ±N_SIGMA·σ_E).
+    # One entry per window half-width; parquets written by
+    # scripts/precompute_chi2_folded_al_c0.py (edit N_SIGMA and rerun for each).
+    # Same global-normalization reasoning as folded_c0 → systematic_block_col=None.
+    "folded_al_c0_ns1": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_al_c0_80_ns1.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_folded_al_c0_ns1",
+        "title":      "χ² analysis — c₀ and a_l resolution-folded (±1σ window), MF34 eval σ",
+        "systematic_block_col": None,
+    },
+    "folded_al_c0_ns3": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_al_c0_80_ns3.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_folded_al_c0_ns3",
+        "title":      "χ² analysis — c₀ and a_l resolution-folded (±3σ window), MF34 eval σ",
         "systematic_block_col": None,
     },
 }

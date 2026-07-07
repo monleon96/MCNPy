@@ -1,45 +1,54 @@
 """
 Precompute chi^2 data for Fe-56 elastic angular distributions.
 
-Methodology: c_0 from each library's own MF3 elastic cross section, *folded
-over each experiment's TOF energy resolution*; sigma_eval = MF34 only.
+Methodology: like precompute_chi2_folded_c0.py, but the angular *shape* is folded
+too. Both the cross section sigma (-> c_0) AND the Legendre coefficients a_l are
+averaged over each experiment's TOF energy-resolution window; sigma_eval = MF34.
 
-Motivation. The exfor_c0 methodology normalizes the three evaluations with
-different recipes — a GLS fit to Kinney/Smith for JEFF/JENDL, the saved
-`nominal_fits.parquet` for This_work — which is not a fair magnitude comparison.
-Here every evaluation is normalized by the *same* recipe applied to its own MF3:
+Motivation. A real TOF experiment measures the differential cross section averaged
+over its finite incident-energy resolution, so at a nominal energy E both the
+normalization sigma(E) and the angular shape a_l(E) are broadened across the
+resolution window. The folded_c0 methodology already broadens sigma; here we also
+broaden a_l, exactly like the "both" case in kika/exfor/tests/energy_resolution_impact.ipynb.
 
-    c_0^lib(E) = <sigma_MF3^lib(E')>_fold / (4 pi)
+The averaging kernel is a *truncated Gaussian* over [E - N_SIGMA*sigma_E,
+E + N_SIGMA*sigma_E], renormalized to unit weight. N_SIGMA is a config knob (run
+1 and 3 to see how much the window width matters). At large N_SIGMA the sigma fold
+recovers folded_c0's full-range Gauss-Hermite c_0 as a nested limit.
 
-where <.>_fold is the Gaussian average of MF3 sigma(E') over the experiment's
-TOF energy-resolution kernel N(E, sigma_E^2). The width sigma_E comes from the
-experiment's flight path / time resolution (the same TOF parameters and default
-fallback the sampling pipeline uses). A real TOF experiment measures the cross
-section averaged over its finite incident-energy resolution, so folding the
-evaluation makes the comparison physical where sigma(E) varies fast.
+sigma and a_l are folded *separately* (<sigma> and <a_l>, then reconstructed),
+not as a product <sigma*a_l>: MF3 sigma and MF4 a_l come from different underlying
+data, so a product fold would impose a point-by-point energy correlation the
+evaluation does not claim.
 
 For each EXFOR datapoint at energy E in [E_MIN_MEV, E_MAX_MEV] (across all
 experiments, not just K&S), each library's evaluation is constructed as:
 
-    a_l(E):
-        MF4 a_l interpolated linearly to E and truncated to L=L_MAX (for all
-        libraries — JEFF, JENDL, and This_work, each from its own MF4). a_l is
-        NOT folded; it varies slowly over the keV-scale resolution window.
-
     c_0(E):
-        <sigma_MF3>_fold / (4 pi), folded over the per-experiment Gaussian
-        resolution kernel (Gauss-Hermite quadrature). sigma(E') is interpolated
-        on MF3's native pointwise grid (already linearised through the resonance
-        region in the ENDF file).
+        <sigma_MF3>_fold / (4 pi), the truncated-Gaussian window average of the
+        library's own pointwise MF3 sigma(E'). sigma(E') is interpolated on MF3's
+        native pointwise grid.
+
+    a_l(E):
+        <a_l_MF4>_fold, the truncated-Gaussian window average of the library's own
+        MF4 a_l(E') (interpolated per order), truncated to L=L_MAX. Folded with the
+        same kernel and window as c_0.
+
+    y_eval(E, mu):
+        c_0/(4 pi) * [1 + sum_l (2l+1) <a_l> P_l(mu)], reconstructed from the two
+        separately-folded factors.
 
     sigma_eval(E, mu):
-        MF34 sandwich on a_l propagated to dsigma/dOmega(mu). Value-only: no
-        MF33 magnitude term and no c_0 fit-error contribution.
+        MF34 sandwich propagated to dsigma/dOmega(mu). Value-only: no MF33 magnitude
+        term and no c_0 fit-error contribution. The sandwich reads the folded c_0
+        from each row; its a_l shape term uses the nominal (unfolded) a_l via the
+        lookup (same treatment as folded_c0) — a second-order effect.
 
-Output: one row per (library, experiment, datapoint). The notebook subsets into
-all / no_KS / only_KS for the 6 scenarios, exactly like the other methodologies.
+Output: one row per (library, experiment, datapoint). The notebook / cluster driver
+subsets into all / no_KS / only_KS etc., exactly like the other methodologies.
 
-Run: python scripts/precompute_chi2_folded_c0.py
+Run: python scripts/precompute_chi2_folded_al_c0.py
+     (edit N_SIGMA and rerun to sweep the window width; the output filename encodes it)
 """
 from __future__ import annotations
 
@@ -71,13 +80,20 @@ from scripts.tof_parameters import (
     load_tof_parameters_file,
     get_tof_parameters,
     compute_sigma_E,
-    fold_xs_over_resolution,
 )
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 MT_NUMBER = 2  # elastic scattering
+
+# ── Resolution window (the fold applied to both sigma and a_l) ──
+# N_SIGMA sets the truncated-Gaussian window half-width in units of sigma_E. The
+# user sweeps this (1 and 3); the output filename encodes it. N_WINDOW_SAMPLES is
+# the uniform sampling density across the window (enough to resolve MF3 resonance
+# structure inside the window).
+N_SIGMA           = 1.0
+N_WINDOW_SAMPLES  = 65
 
 # ── Library ENDF files (one per evaluation compared in the chi^2 analysis) ──
 # This_work uses its own MF3 *and* MF4 from the pipeline's nominal ENDF, for a
@@ -104,7 +120,6 @@ EXCLUDE_EXPERIMENTS = ["32246002", "400750022"]  # Tostkii 1957; Morozov 1972 po
 TOF_PARAMETERS_FILE        = "/share_snc/snc/JuanMonleon/EXFOR/exfor_tof_parameters.json"
 DEFAULT_FLIGHT_PATH_M      = 27.037  # ORELA-like; used when the JSON has no entry
 DEFAULT_TIME_RESOLUTION_NS = 5.0
-RESOLUTION_FOLD_NODES      = 12      # Gauss-Hermite nodes for the c_0 fold
 
 # Energy range for the analysis. EXFOR datapoints outside this window are
 # dropped at the precompute stage.
@@ -115,8 +130,27 @@ E_MAX_MEV = 4.0
 # libraries reports is 6, so all evaluations are compared at L=6.
 L_MAX = 6
 
-# ── Output ──
-OUTPUT_PARQUET = "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_c0_80.parquet"
+# ── Output (filename encodes the window width so the two runs don't collide) ──
+OUTPUT_PARQUET = f"/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_al_c0_80_ns{N_SIGMA:g}.parquet"
+
+
+# ── Resolution window ─────────────────────────────────────────────────────────
+
+def _resolution_window(e_mev: float, sigma_E_mev: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Truncated-Gaussian resolution kernel nodes and weights.
+
+    Returns (sample_e_ev, weights): N_WINDOW_SAMPLES energies uniformly spaced on
+    [e - N_SIGMA*sigma_E, e + N_SIGMA*sigma_E] and Gaussian weights
+    w_i ∝ exp(-½((E_i - e)/sigma_E)²) renormalized to sum 1. With sigma_E <= 0 the
+    kernel collapses to a single node at e (delta), matching fold_xs_over_resolution.
+    """
+    if sigma_E_mev <= 0.0 or N_WINDOW_SAMPLES < 2:
+        return np.array([e_mev * 1e6]), np.array([1.0])
+    half = N_SIGMA * sigma_E_mev
+    e_grid_mev = np.linspace(e_mev - half, e_mev + half, N_WINDOW_SAMPLES)
+    w = np.exp(-0.5 * ((e_grid_mev - e_mev) / sigma_E_mev) ** 2)
+    w /= w.sum()
+    return e_grid_mev * 1e6, w
 
 
 # ── ENDF loading (MF3 + MF4 + MF34; no MF33, so no NJOY/PENDF) ────────────────
@@ -136,7 +170,7 @@ def load_library_folded(filepath: str, label: str) -> Dict:
     mf3_file = endf.get_file(3)
     if mf3_file is None or MT_NUMBER not in mf3_file.sections:
         raise RuntimeError(
-            f"{label}: MF3/MT={MT_NUMBER} not present in {filepath}; the folded-c_0 "
+            f"{label}: MF3/MT={MT_NUMBER} not present in {filepath}; the folded "
             f"methodology needs each library's own elastic cross section."
         )
     mt3 = mf3_file.sections[MT_NUMBER]
@@ -161,6 +195,21 @@ def load_library_folded(filepath: str, label: str) -> Dict:
     )
 
 
+def _fold_a_l(lib: Dict, sample_e_ev: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    """Window-average a_l over the resolution kernel: <a_l> = sum_i w_i a_l(E_i).
+
+    Returns a length-L_MAX vector [<a_1>..<a_L_MAX>]. Each order is interpolated
+    on MF4's native grid at every window node, then Gaussian-weighted. With a
+    single node this reduces to the nominal a_l(E).
+    """
+    if sample_e_ev.size == 1:
+        return interp_a_l_to_energy(lib, sample_e_ev[0] / 1e6, L_MAX)
+    a_samples = np.empty((sample_e_ev.size, L_MAX), dtype=float)
+    for i, e_ev in enumerate(sample_e_ev):
+        a_samples[i, :] = interp_a_l_to_energy(lib, e_ev / 1e6, L_MAX)
+    return weights @ a_samples
+
+
 # ── Per-energy row builder ────────────────────────────────────────────────────
 
 def build_rows_at_energy(
@@ -171,9 +220,9 @@ def build_rows_at_energy(
 ) -> List[dict]:
     """Compute one row per (library, experiment, datapoint) at this energy.
 
-    c_0 is folded per experiment (sigma_E depends on the subentry's TOF params),
-    so unlike the energy-only methodologies it is computed inside the experiment
-    loop rather than cached once per energy.
+    Both c_0 and a_l are folded per experiment (sigma_E depends on the subentry's
+    TOF params), so the fold is computed inside the experiment loop rather than
+    cached once per energy.
     """
     rows: List[dict] = []
     for cache_df, meta in experiments_at_energy:
@@ -188,6 +237,7 @@ def build_rows_at_energy(
             default_time_resolution_ns=DEFAULT_TIME_RESOLUTION_NS,
         )
         sigma_E_mev = compute_sigma_E(e_mev, tof)
+        sample_e_ev, weights = _resolution_window(e_mev, sigma_E_mev)
 
         mu = exp_df["mu"].to_numpy(dtype=float)
         y_exp = exp_df["value"].to_numpy(dtype=float)
@@ -196,15 +246,15 @@ def build_rows_at_energy(
         sigma_exp = np.sqrt(sigma_stat ** 2 + sigma_sys ** 2)
 
         for lib_key, lib in libraries.items():
-            sigma_avg_b = fold_xs_over_resolution(
-                lib["e_mf3_ev"], lib["xs_mf3"], e_mev, sigma_E_mev,
-                n_nodes=RESOLUTION_FOLD_NODES,
-            )
+            # <sigma>_fold over the truncated-Gaussian window.
+            sigma_samples = np.interp(sample_e_ev, lib["e_mf3_ev"], lib["xs_mf3"])
+            sigma_avg_b = float(weights @ sigma_samples)
             if not np.isfinite(sigma_avg_b) or sigma_avg_b <= 0:
                 continue
             c0 = sigma_avg_b / (4.0 * np.pi)
 
-            a_l = interp_a_l_to_energy(lib, e_mev, L_MAX)
+            # <a_l>_fold over the same window (separate fold, then reconstruct).
+            a_l = _fold_a_l(lib, sample_e_ev, weights)
             full = np.empty(L_MAX + 1, dtype=float)
             full[0] = c0
             for l in range(1, L_MAX + 1):
@@ -233,7 +283,9 @@ def build_rows_at_energy(
                     "c0":              float(c0),
                     "L_max":           int(L_MAX),
                     "sigma_avg_b":     float(sigma_avg_b),
+                    "a1_folded":       float(a_l[0]),
                     "sigma_E_mev":     float(sigma_E_mev),
+                    "n_sigma":         float(N_SIGMA),
                     "tof_source":      str(tof.source),
                 })
     return rows
@@ -247,6 +299,9 @@ def main() -> None:
         "JENDL":     load_library_folded(JENDL_FILE,      "JENDL-5"),
         "This_work": load_library_folded(THIS_WORK_FILE,  "This work"),
     }
+
+    print(f"\nResolution fold: truncated Gaussian, ±{N_SIGMA:g}σ_E window, "
+          f"{N_WINDOW_SAMPLES} samples; both c_0 and a_l folded (separately).")
 
     try:
         tof_cache = load_tof_parameters_file(TOF_PARAMETERS_FILE)
@@ -289,7 +344,8 @@ def main() -> None:
 
     # Build per-(library, experiment) dense Sigma_eval blocks. Each library dict
     # carries no MF33 fields, so build_mf33_block returns zero — MF34 (shape)
-    # only. The MF34 sandwich reads c0 from each row, i.e. the folded c0.
+    # only. The MF34 sandwich reads c0 from each row (the folded c0); its a_l
+    # shape term uses the nominal a_l from this lookup (see module docstring).
     def _a_l_lookup(lib_key: str, lib: dict, e_mev: float) -> np.ndarray:
         return interp_a_l_to_energy(lib, e_mev, L_MAX)
 
