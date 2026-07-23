@@ -69,7 +69,7 @@ from kika.cov.mf34_covmat import MF34CovMat
 from scripts.precompute_chi2_exfor_c0 import (
     load_exfor, build_experiment_dataframe,
 )
-from scripts.njoy_pendf_cache import (
+from kika.processing.njoy_pendf_cache import (
     mf33_needs_pendf, get_or_create_pendf, read_pendf_mf3_sections,
 )
 from scripts.eval_covariance import build_eval_cov_for_groups, save_eval_cov
