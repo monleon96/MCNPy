@@ -35,8 +35,9 @@ kika/endf/files/
 tmp_inspect/
 kika/cov/legacy/
 
-# Library dev notebooks & scratch outputs live in the private kika-workspace repo, not here
+# Library dev notebooks, scratch outputs & dev notes live in the private kika-workspace repo, not here
 kika/**/*.ipynb
+kika/**/*.md
 kika/**/output_directory/
 kika/**/test_output/
 nul

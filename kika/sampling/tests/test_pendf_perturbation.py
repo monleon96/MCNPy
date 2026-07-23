@@ -20,7 +20,7 @@ from kika.endf import read_endf
 from kika.sampling.pendf_perturbation import perturb_PENDF_files
 
 
-_DEFAULT_ENDF_DIR = Path(__file__).resolve().parent.parent / "files" / "endf"
+_DEFAULT_ENDF_DIR = Path(__file__).resolve().parents[3] / "files" / "endf"
 _DEFAULT_NJOY_PATHS = [
     Path(r"C:\Users\Usuario\BaradDur\Codes\NJOY2016\build\njoy.exe"),
     Path("/usr/local/bin/njoy"),

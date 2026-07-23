@@ -232,7 +232,7 @@ def test_sumrule_offdiagonal_propagates():
 # Fe-56 JENDL-5 regression (opt-in — requires the 64 MB ENDF file)
 # ---------------------------------------------------------------------------
 
-FE56 = Path(__file__).resolve().parents[1] / "files" / "endf" / "Fe56_jendl5_n.endf"
+FE56 = Path(__file__).resolve().parents[3] / "files" / "endf" / "Fe56_jendl5_n.endf"
 
 
 @pytest.mark.skipif(not FE56.is_file(), reason="Fe56 JENDL-5 file not present")

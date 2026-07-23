@@ -20,7 +20,7 @@ from kika.endf import read_endf
 from kika.sampling.combined_perturbation import perturb_ENDF_PENDF_combined
 
 
-_DEFAULT_ENDF_DIR = Path(__file__).resolve().parent.parent / "files" / "endf"
+_DEFAULT_ENDF_DIR = Path(__file__).resolve().parents[3] / "files" / "endf"
 _DEFAULT_NJOY_PATHS = [
     Path("/home/MONLEON-JUAN/NJOY2016/build/njoy"),
     Path("/usr/local/bin/njoy"),

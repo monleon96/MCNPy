@@ -1,11 +1,14 @@
+import os
 import pytest
 import numpy as np
 import pandas as pd
 from kika.mcnp.parse_mctal import read_mctal
 
+_DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+
 def test_mctal_parsing():
     
-    filename = "tests/data/mctal/mctalfile_test_1.m"
+    filename = _DATA + "/mctal/mctalfile_test_1.m"
 
     try:
         # Parse file (set pert=False to avoid TallyPert parsing)
@@ -70,7 +73,7 @@ def test_mctal_parsing():
 
 def test_mctal_pert_parsing():
     
-    filename = "tests/data/pert/mctalfile_PERT_test_1.m"
+    filename = _DATA + "/pert/mctalfile_PERT_test_1.m"
 
     try:
         # Parse file (set pert=False to avoid TallyPert parsing)
@@ -118,7 +121,7 @@ def test_mctal_pert_parsing():
 
 def test_mctal_multidim_parsing():
 
-    filename = "tests/data/mctal/mctalfile_test_2.m"
+    filename = _DATA + "/mctal/mctalfile_test_2.m"
 
     try:
         # Parse file (set pert=False to avoid TallyPert parsing)
@@ -211,7 +214,7 @@ def test_to_dataframe():
     """Test the to_dataframe method for simple and multidimensional tallies."""
     
     # Test with simple tally (energy-only)
-    filename = "tests/data/mctal/mctalfile_test_1.m"
+    filename = _DATA + "/mctal/mctalfile_test_1.m"
     try:
         mctal = read_mctal(filename)
         
@@ -247,7 +250,7 @@ def test_to_dataframe():
         pytest.fail(f"Test file not found: {filename}")
 
     # Test with multidimensional tally
-    filename = "tests/data/mctal/mctalfile_test_2.m"
+    filename = _DATA + "/mctal/mctalfile_test_2.m"
     try:
         mctal = read_mctal(filename)
         tally = mctal.tally.get(10014)
@@ -279,7 +282,7 @@ def test_to_dataframe():
         pytest.fail(f"Test file not found: {filename}")
         
     # Test with perturbation data
-    filename = "tests/data/pert/mctalfile_PERT_test_1.m"
+    filename = _DATA + "/pert/mctalfile_PERT_test_1.m"
     try:
         mctal = read_mctal(filename)
         
@@ -318,7 +321,7 @@ def test_to_xarray():
         pytest.skip("xarray not installed")
     
     # Test with simple tally (energy-only)
-    filename = "tests/data/mctal/mctalfile_test_1.m"
+    filename = _DATA + "/mctal/mctalfile_test_1.m"
     try:
         mctal = read_mctal(filename)
         
@@ -345,7 +348,7 @@ def test_to_xarray():
         pytest.fail(f"Test file not found: {filename}")
 
     # Test with multidimensional tally
-    filename = "tests/data/mctal/mctalfile_test_2.m"
+    filename = _DATA + "/mctal/mctalfile_test_2.m"
     try:
         mctal = read_mctal(filename)
         tally = mctal.tally.get(10014)
@@ -382,7 +385,7 @@ def test_to_xarray():
 def test_integral_energy_data():
     """Test methods for getting energy-integrated data."""
     
-    filename = "tests/data/mctal/mctalfile_test_2.m"
+    filename = _DATA + "/mctal/mctalfile_test_2.m"
     try:
         mctal = read_mctal(filename)
         tally = mctal.tally.get(10014)

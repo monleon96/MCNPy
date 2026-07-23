@@ -3,6 +3,8 @@ import kika
 import os
 import numpy as np
 
+_DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+
 
 def test_sdf():
 
@@ -10,16 +12,16 @@ def test_sdf():
     test_file_name = 'test_1.00e+00_3.00e+00.sdf'
     
     try:
-        reference_sdf_path = 'tests/data/sdf/ref_1.00e+00_3.00e+00.sdf'
+        reference_sdf_path = _DATA + '/sdf/ref_1.00e+00_3.00e+00.sdf'
 
-        pertfile1 = 'tests/data/sdf/pertfile_26056_PERT.i'
-        mctalfile1 = 'tests/data/sdf/pertfile_26056.m'
-        pertfile2 = 'tests/data/sdf/pertfile_26054_PERT.i'
-        mctalfile2 = 'tests/data/sdf/pertfile_26054.m'
-        pertfile3 = 'tests/data/sdf/pertfile_1001_PERT.i'
-        mctalfile3 = 'tests/data/sdf/pertfile_1001.m'
-        pertfile4 = 'tests/data/sdf/pertfile_8016_PERT.i'
-        mctalfile4 = 'tests/data/sdf/pertfile_8016.m'
+        pertfile1 = _DATA + '/sdf/pertfile_26056_PERT.i'
+        mctalfile1 = _DATA + '/sdf/pertfile_26056.m'
+        pertfile2 = _DATA + '/sdf/pertfile_26054_PERT.i'
+        mctalfile2 = _DATA + '/sdf/pertfile_26054.m'
+        pertfile3 = _DATA + '/sdf/pertfile_1001_PERT.i'
+        mctalfile3 = _DATA + '/sdf/pertfile_1001.m'
+        pertfile4 = _DATA + '/sdf/pertfile_8016_PERT.i'
+        mctalfile4 = _DATA + '/sdf/pertfile_8016.m'
 
         sensData1 = kika.compute_sensitivity(pertfile1, mctalfile1, 4, 26056, 'Fe56')
         sensData2 = kika.compute_sensitivity(pertfile2, mctalfile2, 4, 26054, 'Fe54')

@@ -37,6 +37,7 @@ Quick Links
    :hidden:
 
    user_guide/quickstart
+   user_guide/sampling_pipelines
    user_guide/tutorials/index
 
 .. toctree::

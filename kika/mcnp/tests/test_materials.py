@@ -7,11 +7,13 @@ from kika.mcnp.pert_generator import perturb_material
 from kika.mcnp.parse_materials import read_material
 from kika.materials import Material
 
+_DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+
 
 def test_material_parsing():
 
-    matfile = "tests/data/mat/matfile_test_1.i"
-    inputfile = "tests/data/input/inputfile_test_1.i"
+    matfile = _DATA + "/mat/matfile_test_1.i"
+    inputfile = _DATA + "/input/inputfile_test_1.i"
 
     try:
 
@@ -114,7 +116,7 @@ def test_material_parsing():
 
 def test_mat_perturbation():
     # Define input file
-    matfile = "tests/data/mat/matfile_test_1.i"
+    matfile = _DATA + "/mat/matfile_test_1.i"
 
     try:
         # Parse materials
