@@ -34,11 +34,11 @@ kika/sampling/testing/
 kika/endf/files/
 tmp_inspect/
 kika/cov/legacy/
-kika/cov/tests/test_new_plotting_implementations.ipynb
-kika/cov/tests/test_plotbuilder_direct.ipynb
-kika/plotting/tests/test_old_vs_new_covariance.ipynb
-kika/ace/work.ipynb
-kika/endf/classes/mf4/debug_example.ipynb
+
+# Library dev notebooks & scratch outputs live in the private kika-workspace repo, not here
+kika/**/*.ipynb
+kika/**/output_directory/
+kika/**/test_output/
 nul
 dir
 ND25/
