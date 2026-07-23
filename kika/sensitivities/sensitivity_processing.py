@@ -48,8 +48,9 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int,
     :type pert_metadata: list of tuple, optional
     :returns: Object containing computed sensitivity coefficients
     :rtype: SensitivityData
-    :raises ValueError: If ZAID metadata is missing and no pert_metadata is provided,
-        or if pert_metadata contains multiple ZAIDs (use compute_total_sensitivity instead).
+    :raises ValueError: If no zaid is given and none can be resolved from
+        pert_metadata or PERT-card metadata, or if pert_metadata contains
+        multiple ZAIDs (use compute_total_sensitivity instead).
     """
     input_data = read_mcnp(inputfile, pert_metadata=pert_metadata)
     mctal = read_mctal(mctalfile)
@@ -82,11 +83,13 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int,
         )
 
     if not input_data.perturbation.has_zaid_info:
-        raise ValueError(
-            "No ZAID metadata found in PERT cards. "
-            "Provide pert_metadata=[(start, end, zaid, material), ...] "
-            "or add 'c kika:pert_zaid=ZAID pert_mat=MAT' comments to the input file."
-        )
+        # No per-card ZAID metadata (no pert_metadata argument and no
+        # 'c kika:pert_zaid=' comments in the input file). A single ZAID was
+        # provided explicitly, so treat this as a single-nuclide input and
+        # assign that ZAID to every PERT card. Multi-nuclide inputs must supply
+        # per-card metadata (or use compute_total_sensitivity()).
+        for p in input_data.perturbation.pert.values():
+            p.zaid = zaid
 
     # Guard: if no material specified and multiple materials exist, raise error
     if material is None:

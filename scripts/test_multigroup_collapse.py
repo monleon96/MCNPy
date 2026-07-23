@@ -126,13 +126,13 @@ class TestNoOpWhenBaseline50:
             cov_fine=cov_fine,
             groups=groups,
             max_order=max_order,
-            variance_percentile=50.0,
+            variance_percentile_min=50.0,
+            variance_percentile_max=50.0,
             fine_bin_widths_mev=widths,
         )
-        # p_max = 50*1.5-25 = 50, so group_pct=50 for all groups
-        # With no-deflation guard, scale >= 1.0
-        # For uniform variance percentile=50 picks the median → same as collapsed
-        # No-deflation ensures no shrinkage, so effectively identity or slight inflation
+        # min=max=50, so group_pct=50 for every group regardless of heterogeneity.
+        # Percentile 50 targets the median fine variance; with the no-deflation
+        # guard the diagonal can only stay equal or inflate, never shrink.
         np.testing.assert_array_less(0.99, np.diag(result) / np.diag(cov_grouped))
 
 
@@ -155,7 +155,7 @@ class TestNoDeflation:
             cov_fine=cov_fine,
             groups=groups,
             max_order=max_order,
-            variance_percentile=66.67,
+            variance_percentile_min=66.67,
             fine_bin_widths_mev=widths,
         )
 
@@ -188,7 +188,7 @@ class TestPSDPreservation:
             cov_fine=cov_fine,
             groups=groups,
             max_order=max_order,
-            variance_percentile=75.0,
+            variance_percentile_min=75.0,
             fine_bin_widths_mev=widths,
         )
 
@@ -218,7 +218,7 @@ class TestBackwardCompatibility:
             cov_fine=cov_fine,
             groups=groups,
             max_order=max_order,
-            variance_percentile=66.67,
+            variance_percentile_min=66.67,
             fine_bin_widths_mev=None,
         )
         assert result.shape == cov_grouped.shape
