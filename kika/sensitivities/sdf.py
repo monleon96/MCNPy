@@ -8,6 +8,103 @@ from kika.energy_grids.utils import _identify_energy_grid
 from kika.plotting import MultigroupCrossSectionPlotData, UncertaintyBand
 
 
+def sensitivity_to_plot_data(
+    pert_energies,
+    sensitivity,
+    error=None,
+    zaid: int = None,
+    mt: int = None,
+    nuclide: str = None,
+    reaction_name: str = None,
+    per_lethargy: bool = True,
+    uncertainty: bool = True,
+    sigma: float = 1.0,
+    uncertainty_style: str = 'errorbar',
+    label: str = None,
+    **styling_kwargs,
+) -> Union['MultigroupCrossSectionPlotData', Tuple['MultigroupCrossSectionPlotData', 'UncertaintyBand']]:
+    """Build PlotData objects from raw sensitivity arrays.
+
+    Shared core behind :meth:`SDFReactionData.to_plot_data`; usable directly on
+    plain arrays (e.g. the dicts returned by
+    :meth:`kika.benchmarks.database.BenchmarksDatabase.get_profile_vector`) so
+    both SDF objects and benchmark profiles render through the same code path.
+
+    Produces a :class:`~kika.plotting.MultigroupCrossSectionPlotData` step plot
+    and, when *uncertainty* is True and per-group *error* values are available, an
+    :class:`~kika.plotting.UncertaintyBand`, both suitable for
+    :class:`~kika.plotting.PlotBuilder`.
+
+    :param pert_energies: Energy bin boundaries (n+1 values, ascending, MeV).
+    :param sensitivity: Per-group sensitivity coefficients (n values).
+    :param error: Per-group *relative* errors (n values). If ``None`` (or
+        *uncertainty* is False) no uncertainty band is returned.
+    :param zaid: ZAID, used for the plot metadata and the default label.
+    :param mt: MT reaction number, used for metadata and the default label.
+    :param nuclide: Nuclide symbol for the default label (e.g. ``"Fe-56"``).
+    :param reaction_name: Reaction label for the default label (e.g. ``"(n,el)"``).
+    :param per_lethargy: Normalise by the lethargy width of each bin (default True).
+    :param uncertainty: Return an ``UncertaintyBand`` when error data is present.
+    :param sigma: Sigma multiplier for the uncertainty band.
+    :param uncertainty_style: ``'errorbar'`` (default) or ``'band'``.
+    :param label: Legend label; auto-generated from nuclide/reaction when None.
+    :param styling_kwargs: Forwarded to ``MultigroupCrossSectionPlotData``.
+    :returns: ``MultigroupCrossSectionPlotData`` alone when no uncertainty band is
+        produced, otherwise ``(MultigroupCrossSectionPlotData, UncertaintyBand)``.
+    """
+    energies = np.asarray(pert_energies, dtype=float)
+    sens = np.asarray(sensitivity, dtype=float)
+
+    if per_lethargy:
+        lethargy = np.log(energies[1:] / energies[:-1])
+        y_vals = sens / lethargy
+    else:
+        y_vals = sens.copy()
+
+    # Step plot: n+1 x-points, repeat last y value.
+    x = energies
+    y = np.append(y_vals, y_vals[-1])
+
+    if label is None:
+        parts = [
+            nuclide or (f"ZAID {zaid}" if zaid is not None else ""),
+            reaction_name or (f"MT{mt}" if mt is not None else ""),
+        ]
+        label = " ".join(p for p in parts if p).strip() or None
+
+    plot_data = MultigroupCrossSectionPlotData(
+        x=x,
+        y=y,
+        label=label,
+        plot_type='step',
+        step_where='post',
+        zaid=zaid,
+        mt=mt,
+        energy_bins=energies,
+        **styling_kwargs,
+    )
+
+    # No uncertainty band when not requested or when no per-group errors exist
+    # (e.g. compact SDF dialect / benchmark reactions stored without errors).
+    if not uncertainty or error is None:
+        return plot_data
+
+    # error stores relative errors (fractional) on the raw sensitivity. Because
+    # per-lethargy scaling divides each bin by a constant, the *relative* error is
+    # unchanged, so the same values apply to the plotted y.
+    rel_err = np.asarray(error, dtype=float)
+    rel_err_extended = np.append(rel_err, rel_err[-1])
+
+    band = UncertaintyBand(
+        x=x,
+        relative_uncertainty=rel_err_extended,
+        sigma=sigma,
+        label=f"{label} ({sigma}σ)" if sigma != 1.0 else None,
+        style=uncertainty_style,
+    )
+    return plot_data, band
+
+
 @dataclass
 class SDFReactionData:
     """Container for sensitivity data for a specific nuclide and reaction.
@@ -33,6 +130,12 @@ class SDFReactionData:
     # reaction_name can be provided (e.g. for unknown MT numbers not in mapping);
     # if None it's inferred from MT_TO_REACTION in __post_init__.
     reaction_name: str | None = None
+    # SCALE unit/region indices from the profile's first metadata line. (0, 0)
+    # denotes a region-integrated (system-total) profile; other values are
+    # per-region/per-mixture breakdowns. None for KIKA-written files without the
+    # information. Used by the benchmarks subpackage to keep only system totals.
+    unit: int | None = None
+    region: int | None = None
     
     def __post_init__(self):
         """Calculate and store nuclide symbol and reaction name after initialization.
@@ -146,54 +249,21 @@ class SDFReactionData:
             or ``(MultigroupCrossSectionPlotData, UncertaintyBand)`` when *uncertainty=True*.
         :rtype: MultigroupCrossSectionPlotData or Tuple[MultigroupCrossSectionPlotData, UncertaintyBand]
         """
-        energies = np.asarray(pert_energies, dtype=float)
-        sens = np.asarray(self.sensitivity, dtype=float)
-        n = len(sens)
-
-        if per_lethargy:
-            lethargy = np.log(energies[1:] / energies[:-1])
-            y_vals = sens / lethargy
-        else:
-            y_vals = sens.copy()
-
-        # Step plot: n+1 x-points, repeat last y value
-        x = energies
-        y = np.append(y_vals, y_vals[-1])
-
-        if label is None:
-            label = f"{self.nuclide} {self.reaction_name}"
-
-        plot_data = MultigroupCrossSectionPlotData(
-            x=x,
-            y=y,
-            label=label,
-            plot_type='step',
-            step_where='post',
+        return sensitivity_to_plot_data(
+            pert_energies,
+            self.sensitivity,
+            error=self.error,
             zaid=self.zaid,
             mt=self.mt,
-            energy_bins=energies,
+            nuclide=self.nuclide,
+            reaction_name=self.reaction_name,
+            per_lethargy=per_lethargy,
+            uncertainty=uncertainty,
+            sigma=sigma,
+            uncertainty_style=uncertainty_style,
+            label=label,
             **styling_kwargs,
         )
-
-        if not uncertainty:
-            return plot_data
-
-        # Build UncertaintyBand from relative errors.
-        # self.error stores relative errors (fractional) on the raw sensitivity.
-        # We need relative errors on the plotted y values. Since per-lethargy
-        # divides by a constant per bin, the *relative* error is unchanged.
-        rel_err = np.asarray(self.error, dtype=float)
-        rel_err_extended = np.append(rel_err, rel_err[-1])
-
-        band = UncertaintyBand(
-            x=x,
-            relative_uncertainty=rel_err_extended,
-            sigma=sigma,
-            label=f"{label} ({sigma}\u03c3)" if sigma != 1.0 else None,
-            style=uncertainty_style,
-        )
-
-        return plot_data, band
 
 
 @dataclass

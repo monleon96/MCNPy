@@ -77,6 +77,12 @@ FIXED_LINE_2 = "  0.000000E+00  0.000000E+00      0      0"
 # mantissas. Covers both KIKA's writer (uppercase ``E``) and standard SCALE files.
 FLOAT_PATTERN = r"[+-]?\d*\.?\d+(?:[eE][+-]?\d+)?"
 
+# Metadata line 1 inside a reaction block: two leading integer columns
+# (unit, region). Standard SCALE files may append a free-text label directly
+# after the integers (e.g. "      1      1zpr-9/31 loading 22"), so match only
+# the two leading integers and ignore any trailing text.
+_META1_RE = re.compile(r"^\s*(-?\d+)\s+(-?\d+)")
+
 # Above ~1 GeV in "MeV" is unphysical for the reactor/criticality domain this
 # tool targets (neutron grids top out near 20 MeV), so a grid whose maximum
 # boundary exceeds this threshold is interpreted as eV and converted to MeV.
@@ -125,27 +131,36 @@ def read_sdf(path: str) -> SDFData:
     if not m:
         raise ValueError("Missing/invalid sensitivity profiles line")
     nprofiles_declared = int(m.group("nprofiles"))
-    # Cross check second number; a mismatch (total vs region-integrated count)
-    # is unusual but not fatal, so warn rather than reject the file.
+    # Cross check second number. In standard SCALE/TSUNAMI files line 3 carries
+    # both the total profile count and the smaller energy-integrated count, so a
+    # mismatch is the common case (only KIKA's own writer sets them equal). Keep
+    # the larger (total) and note it at debug level rather than reject the file.
     if int(m.group("nprofiles2")) != nprofiles_declared:
-        logger.warning(
+        logger.debug(
             "SDF profile counts differ on line 3 (%s vs %s); using %s",
             nprofiles_declared, m.group("nprofiles2"), nprofiles_declared,
         )
     idx += 1
 
-    # k-eff line: "<r0> +/- <e0>" possibly with plain decimals and a trailing
-    # comment (e.g. "1.003930 +/- 0.000290  k-eff from the forward case").
-    # Take the first float before '+/-' and the first float after it.
-    if idx >= len(lines) or "+/-" not in lines[idx]:
-        raise ValueError("Missing/invalid r0/e0 line")
-    before, _, after = lines[idx].partition("+/-")
-    r0_nums = _parse_scientific_numbers(before)
-    e0_nums = _parse_scientific_numbers(after)
-    if not r0_nums or not e0_nums:
-        raise ValueError(f"Could not parse r0/e0 from line: '{lines[idx]}'")
-    r0 = r0_nums[0]
-    e0 = e0_nums[0]
+    # k-eff line: "<r0> +/- <e0>" with a trailing comment (e.g.
+    # "1.003930 +/- 0.000290  k-eff from the forward case"). Some standard SCALE
+    # files omit the uncertainty entirely ("1.000717    k-eff from the forward
+    # case"); in that case e0 is taken as 0.
+    if idx >= len(lines):
+        raise ValueError("Missing r0/e0 line")
+    kline = lines[idx]
+    if "+/-" in kline:
+        before, _, after = kline.partition("+/-")
+        r0_nums = _parse_scientific_numbers(before)
+        e0_nums = _parse_scientific_numbers(after)
+        if not r0_nums or not e0_nums:
+            raise ValueError(f"Could not parse r0/e0 from line: '{kline}'")
+        r0, e0 = r0_nums[0], e0_nums[0]
+    else:
+        r0_nums = _parse_scientific_numbers(kline)
+        if not r0_nums:
+            raise ValueError(f"Could not parse r0 from line: '{kline}'")
+        r0, e0 = r0_nums[0], 0.0
     idx += 1
 
     if idx >= len(lines) or lines[idx].strip() != "energy boundaries:":
@@ -173,40 +188,71 @@ def read_sdf(path: str) -> SDFData:
 
     reactions: List[SDFReactionData] = []
 
-    # Parse reaction blocks until end of file
-    while idx < len(lines):
+    # Parse reaction blocks until we have the declared number of profiles. We stop
+    # at nprofiles_declared rather than EOF so that any trailing footer (standard
+    # SCALE files append a "file verification information" block) is ignored.
+    while idx < len(lines) and len(reactions) < nprofiles_declared:
         line = lines[idx]
         if not line.strip():
             # skip blank lines (should not normally happen, but be tolerant)
             idx += 1
             continue
-        # Reaction header: "<form> <reaction_name> <zaid> <mt>". Tokenise on
-        # whitespace rather than fixed columns so differing column widths across
-        # tools are handled. Reaction names never contain spaces in either
-        # dialect (e.g. KIKA's "(n,n')" / SCALE's "n,2n", "n,gamma"). The form
-        # token is ignored; the nuclide is derived from the ZAID downstream.
+        # Reaction header. Tokenise on whitespace (column widths vary across tools).
+        # Two SCALE dialects occur, distinguished by token count:
+        #   verbose (TSUNAMI-3D): "<form> <reaction> <zaid> <mt>"                 (4 tokens)
+        #   compact (TSUNAMI-1D): "<form> <reaction> <zaid> <mt> <unit> <value>"  (6 tokens)
+        # The verbose form is followed by two metadata lines, a 5-scalar line, then
+        # groupwise sensitivities AND errors. The compact form is followed by a
+        # single summary line, then groupwise sensitivities ONLY (no error block);
+        # every compact profile is a single-region system total.
         parts = line.split()
-        if len(parts) != 4 or not (parts[2].isdigit() and parts[3].isdigit()):
+        if len(parts) not in (4, 6) or not (parts[2].isdigit() and parts[3].isdigit()):
             raise ValueError(f"Malformed reaction header at line {idx+1}: {line}")
         reaction_name = parts[1]
         zaid = int(parts[2])
         mt = int(parts[3])
+        compact = len(parts) == 6
         idx += 1
 
-        if idx >= len(lines) or lines[idx] != FIXED_LINE_1:
-            raise ValueError(f"Missing fixed line 1 after reaction header at line {idx+1}")
-        idx += 1
-        if idx >= len(lines) or lines[idx] != FIXED_LINE_2:
-            raise ValueError(f"Missing fixed line 2 after reaction header at line {idx+1}")
-        idx += 1
+        if compact:
+            # unit is inline; compact profiles are region-integrated -> region 0.
+            unit, region = int(parts[4]), 0
+            # One summary line (integrated sensitivity etc.) - read and discard.
+            if idx >= len(lines) or not _parse_scientific_numbers(lines[idx]):
+                raise ValueError(f"Missing compact summary line at line {idx+1}")
+            idx += 1
+        else:
+            # Two metadata lines follow the reaction header. KIKA's writer emits the
+            # literal FIXED_LINE_1/FIXED_LINE_2 (all zeros), but standard SCALE/TSUNAMI
+            # files put varying integer indices on the first line (e.g. "-1  0") and
+            # may right-pad with trailing whitespace or glue on a label. Validate
+            # structurally rather than by exact match, then discard.
+            if idx >= len(lines):
+                raise ValueError(f"Missing metadata line 1 after reaction header at line {idx+1}")
+            meta1 = _META1_RE.match(lines[idx])
+            if not meta1:
+                raise ValueError(
+                    f"Malformed metadata line 1 after reaction header at line {idx+1}: {lines[idx]!r}"
+                )
+            # (unit, region) indices: (0, 0) marks a region-integrated system total.
+            unit, region = int(meta1.group(1)), int(meta1.group(2))
+            idx += 1
+            if idx >= len(lines):
+                raise ValueError(f"Missing metadata line 2 after reaction header at line {idx+1}")
+            # Two floats + two integers (optionally followed by a label); values unused.
+            if len(lines[idx].split()) < 4:
+                raise ValueError(
+                    f"Malformed metadata line 2 after reaction header at line {idx+1}: {lines[idx]!r}"
+                )
+            idx += 1
 
-        # Scalar values line (5 numbers) - read and discard
-        if idx >= len(lines):
-            raise ValueError("Unexpected EOF reading scalar values line")
-        scalar_nums = _parse_scientific_numbers(lines[idx])
-        if len(scalar_nums) != 5:
-            raise ValueError(f"Expected 5 scalar values, got {len(scalar_nums)} at line {idx+1}")
-        idx += 1
+            # Scalar values line (5 numbers) - read and discard.
+            if idx >= len(lines):
+                raise ValueError("Unexpected EOF reading scalar values line")
+            scalar_nums = _parse_scientific_numbers(lines[idx])
+            if len(scalar_nums) != 5:
+                raise ValueError(f"Expected 5 scalar values, got {len(scalar_nums)} at line {idx+1}")
+            idx += 1
 
         # Read groupwise sensitivities (reversed order) until we have ngroups numbers
         sens_vals: List[float] = []
@@ -219,16 +265,20 @@ def read_sdf(path: str) -> SDFData:
         if len(sens_vals) != ngroups_declared:
             raise ValueError("Sensitivity values count mismatch")
 
-        # Read errors (reversed order) until we have ngroups numbers
-        err_vals: List[float] = []
-        while idx < len(lines) and len(err_vals) < ngroups_declared:
-            nums = _parse_scientific_numbers(lines[idx])
-            if not nums:
-                break
-            err_vals.extend(nums)
-            idx += 1
-        if len(err_vals) != ngroups_declared:
-            raise ValueError("Error values count mismatch")
+        # Read errors (reversed order) until we have ngroups numbers. The compact
+        # dialect has no error block, so errors default to zeros.
+        if compact:
+            err_vals = [0.0] * ngroups_declared
+        else:
+            err_vals = []
+            while idx < len(lines) and len(err_vals) < ngroups_declared:
+                nums = _parse_scientific_numbers(lines[idx])
+                if not nums:
+                    break
+                err_vals.extend(nums)
+                idx += 1
+            if len(err_vals) != ngroups_declared:
+                raise ValueError("Error values count mismatch")
 
         # Reverse back to ascending energy order
         sens_vals.reverse()
@@ -236,7 +286,7 @@ def read_sdf(path: str) -> SDFData:
 
         # Construct reaction data (nuclide symbol & reaction name resolved in __post_init__).
         # Provide reaction_name so unknown MT numbers are preserved.
-        reaction = SDFReactionData(zaid=zaid, mt=mt, sensitivity=sens_vals, error=err_vals, reaction_name=reaction_name)
+        reaction = SDFReactionData(zaid=zaid, mt=mt, sensitivity=sens_vals, error=err_vals, reaction_name=reaction_name, unit=unit, region=region)
         reactions.append(reaction)
 
     if len(reactions) != nprofiles_declared:
