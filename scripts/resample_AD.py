@@ -1712,6 +1712,15 @@ def sample_legendre_coefficients(
     # when σ_sys_indep = 0. τ-IRLS, freeze_c0 refit, and MC sampler always
     # stay diagonal.
     use_gls_kernel: bool = False,
+    # Phase-2 elastic magnitude channel. When True, record the closed-form
+    # fixed-shape c0 scale of every (perturbed) sample against the nominal
+    # bin curve into ``info["c0_samples"]`` — a read-only side channel that
+    # leaves ``coef_df`` and the shape fit untouched (default off → the info
+    # dict is unchanged). ``c0_scale_ref_coeffs`` is the shape to project onto
+    # (the pipeline nominal bin coeffs); when None the fit's own ``coeffs0``
+    # is used.
+    record_c0_scale: bool = False,
+    c0_scale_ref_coeffs: Optional[np.ndarray] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Fit Legendre coefficients c_l for y(mu) = sum c_l P_l(mu) and return samples.
@@ -2290,8 +2299,15 @@ def sample_legendre_coefficients(
             group_keys = list(group_indices.keys())
 
     # Sampling fits
+    # Perturbed data + σ captured for the optional fixed-shape c0 recording
+    # (Phase-2 magnitude channel); stays None on the default path.
+    c0_record_Y = None
+    c0_record_sigma = None
     if n_samples <= 1 and not stochastic:
         coef_mat = coeffs0[np.newaxis, :]
+        if record_c0_scale:
+            c0_record_Y = y[np.newaxis, :]
+            c0_record_sigma = sigma_for_fit
     else:
         n_draws = max(1, int(n_samples))
 
@@ -2363,7 +2379,26 @@ def sample_legendre_coefficients(
             fixed_c0=c0_fix,
             fixed_coeffs=fixed_high,
         )
+        if record_c0_scale:
+            c0_record_Y = Y_perturbed
+            c0_record_sigma = sigma_for_mc_fit
     coef_df = pd.DataFrame(coef_mat, columns=[f"c{l}" for l in range(degree_use + 1)])
+
+    # Optional fixed-shape c0 (elastic magnitude) recording. Projects each
+    # perturbed sample onto the frozen nominal shape using the same weights the
+    # fit used; read-only, so ``coef_df`` above is untouched.
+    c0_samples = None
+    if record_c0_scale and c0_record_Y is not None:
+        ref_coeffs = (
+            coeffs0 if c0_scale_ref_coeffs is None
+            else np.asarray(c0_scale_ref_coeffs, dtype=float)
+        )
+        _, c0_samples = fixed_shape_c0_scale(
+            c0_record_Y, mu, ref_coeffs,
+            external_weights=external_weights,
+            sigma_for_fit=c0_record_sigma,
+        )
+        c0_samples = np.atleast_1d(c0_samples)
 
     info = dict(
         n_points=n,
@@ -2396,6 +2431,10 @@ def sample_legendre_coefficients(
         all_degrees_info_pre_tau=all_degrees_info_pre_tau,
         post_tau_winner_changed=post_tau_winner_changed,
     )
+    # Magnitude side channel: only present when explicitly requested so the
+    # default info dict is byte-for-byte what every existing caller sees.
+    if record_c0_scale:
+        info["c0_samples"] = c0_samples
     return coef_df, info
 
 
@@ -2436,6 +2475,154 @@ def evaluate_legendre_series(mu: np.ndarray, c: np.ndarray) -> np.ndarray:
     mu = np.asarray(mu, dtype=float)
     c = np.asarray(c, dtype=float)
     return legval(mu, c)
+
+
+def fixed_shape_c0_scale(
+    Y: np.ndarray,
+    mu: np.ndarray,
+    nominal_coeffs: np.ndarray,
+    external_weights: Optional[np.ndarray] = None,
+    sigma_for_fit: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Closed-form "fit c0 with the shape frozen" magnitude scale.
+
+    The elastic magnitude channel (MF3 MT2 / MF33 MT2) of the EXFOR pipeline.
+    With the angular *shape* held at the nominal bin curve
+    ``y_nom(mu) = sum_l c_l^nom P_l(mu)``, the only free parameter of a
+    perturbed dataset ``Y`` is a single multiplicative scale ``s``.  The
+    weighted-least-squares estimate of that scale is the closed form::
+
+        s = sum(w * Y * y_nom) / sum(w * y_nom**2)          c0 = s * c0_nom
+
+    with the *same* fit weights the shape refit uses, ``w = external_weights /
+    sigma_for_fit**2`` (``external_weights`` = the kernel/ESS weights ``g``;
+    ``sigma_for_fit`` = the per-point σ the WLS observes, i.e. τ-inflated σ_stat
+    optionally combined in quadrature with σ_sys).  ``c0_nom = nominal_coeffs[0]``
+    and ``sigma_el = 4*pi*c0``.
+
+    Because this only *reads* the perturbed data ``Y`` and never re-solves the
+    shape fit, recording it alongside the frozen-c0 MF34 refits leaves MF4 and
+    MF34 bit-identical.
+
+    Parameters
+    ----------
+    Y : np.ndarray
+        Perturbed data values (barns/sr), either 1-D ``(n_points,)`` for a
+        single sample or 2-D ``(n_draws, n_points)`` for a batch of samples.
+    mu : np.ndarray
+        ``cos(theta)`` of each point, shape ``(n_points,)``.
+    nominal_coeffs : np.ndarray
+        Nominal Legendre coefficients ``[c0, c1, ...]`` defining the frozen
+        shape; ``nominal_coeffs[0]`` is ``c0_nom``.
+    external_weights : np.ndarray, optional
+        Per-point kernel/ESS weights ``g`` (shape ``(n_points,)``).  Defaults to
+        ones (unweighted) when omitted.
+    sigma_for_fit : np.ndarray, optional
+        Per-point σ the WLS uses (shape ``(n_points,)``).  Defaults to ones
+        (plain kernel-weighted) when omitted; points with non-finite or
+        non-positive σ are dropped.
+
+    Returns
+    -------
+    (s, c0) : Tuple[np.ndarray, np.ndarray]
+        The scale ``s`` and magnitude ``c0 = s * c0_nom``.  Both are 0-D arrays
+        for 1-D ``Y`` and shape ``(n_draws,)`` for 2-D ``Y``.
+    """
+    Y = np.asarray(Y, dtype=float)
+    mu = np.asarray(mu, dtype=float)
+    nominal_coeffs = np.asarray(nominal_coeffs, dtype=float)
+
+    y_nom = legval(mu, nominal_coeffs)
+
+    g = (
+        np.ones_like(mu)
+        if external_weights is None
+        else np.asarray(external_weights, dtype=float)
+    )
+    if sigma_for_fit is None:
+        w = g
+    else:
+        sigma = np.asarray(sigma_for_fit, dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            inv_var = np.where(np.isfinite(sigma) & (sigma > 0), 1.0 / sigma ** 2, 0.0)
+        w = g * inv_var
+
+    denom = float(np.sum(w * y_nom ** 2))
+    if not np.isfinite(denom) or denom <= 0.0:
+        raise ValueError(
+            "fixed_shape_c0_scale: sum(w * y_nom**2) is non-positive; the "
+            "nominal curve is zero over all weighted points."
+        )
+
+    # numer = sum_j w_j Y_j y_nom_j  — matmul broadcasts over the batch axis
+    # of a 2-D Y and reduces a 1-D Y to a scalar.
+    numer = Y @ (w * y_nom)
+    s = np.asarray(numer / denom)
+    c0 = s * float(nominal_coeffs[0])
+    return s, c0
+
+
+def combine_c0_covariance(
+    c0_pass1: np.ndarray,
+    c0_pass2: np.ndarray,
+    c0_nominal: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Congruence-combine the two-pass fixed-shape c0 samples into an MF33 block.
+
+    Mirrors the Legendre-vector combine used for MF34
+    (``cov = corr_pass1 * outer(std_pass2, std_pass2)``): cross-bin correlations
+    come from the Pass-1 shared-draw samples, marginal variances from the
+    Pass-2 independent-per-bin samples.  The result is the elastic **magnitude**
+    covariance — one square block over energy bins.
+
+    Parameters
+    ----------
+    c0_pass1 : np.ndarray
+        Pass-1 c0 samples, shape ``(n_samples_1, n_bins)`` (shared draws →
+        correlations).  Missing entries may be NaN; correlations use the
+        pairwise-complete observations.
+    c0_pass2 : np.ndarray
+        Pass-2 c0 samples, shape ``(n_samples_2, n_bins)`` (independent per-bin
+        draws → variances).  NaNs are ignored per column.
+    c0_nominal : np.ndarray
+        Nominal magnitude ``c0_nom`` per bin, shape ``(n_bins,)``.
+
+    Returns
+    -------
+    (rel_cov, cov_abs) : Tuple[np.ndarray, np.ndarray]
+        ``rel_cov`` is the **relative** covariance
+        ``Cov(c0_i, c0_j) / (c0_nom_i * c0_nom_j)`` (the MF33 writer input);
+        ``cov_abs`` is the absolute covariance in c0 units.  Both are
+        ``(n_bins, n_bins)`` symmetric.  Bins with a non-positive nominal get a
+        zero relative row/column.
+    """
+    c0_pass1 = np.asarray(c0_pass1, dtype=float)
+    c0_pass2 = np.asarray(c0_pass2, dtype=float)
+    c0_nominal = np.asarray(c0_nominal, dtype=float)
+    n_bins = c0_nominal.size
+
+    # Pass-1 correlations (pairwise-complete over shared-draw samples).
+    p1 = np.ma.masked_invalid(c0_pass1)
+    corr = np.ma.corrcoef(p1, rowvar=False)
+    corr = np.ma.filled(np.ma.asarray(corr), 0.0)
+    corr = np.atleast_2d(corr)
+    corr = np.clip(corr, -1.0, 1.0)
+    np.fill_diagonal(corr, 1.0)
+
+    # Pass-2 marginal std per bin.
+    std = np.nanstd(c0_pass2, axis=0, ddof=1)
+    std = np.nan_to_num(std, nan=0.0, posinf=0.0, neginf=0.0)
+
+    cov_abs = corr * np.outer(std, std)
+    np.fill_diagonal(cov_abs, std ** 2)
+    cov_abs = 0.5 * (cov_abs + cov_abs.T)
+
+    denom = np.outer(c0_nominal, c0_nominal)
+    rel_cov = np.divide(
+        cov_abs, denom, out=np.zeros((n_bins, n_bins)), where=denom > 0.0,
+    )
+    rel_cov = 0.5 * (rel_cov + rel_cov.T)
+    return rel_cov, cov_abs
 
 
 def plot_sampled_angular_distributions(

@@ -83,6 +83,7 @@ from kika.exfor import read_all_exfor
 
 # Import kika modules - MF34 from library (replaces local implementation)
 from kika.endf.writers import create_mf34_from_covariance, write_mf34_to_file, merge_mf34
+from kika.endf.writers import create_mf33_from_covariance, write_mf33_to_file
 
 # Import local utility module (uses relative import from scripts package)
 from scripts.exfor_utils import (
@@ -133,6 +134,7 @@ from scripts.exfor_utils import (
     precompute_overlap_weights,
     run_mc_with_kernel_weights,
     stack_samples_to_matrix,
+    build_mf33_channel,
     # ENDF writing
     write_nominal_endf,
     write_average_endf,
@@ -151,6 +153,7 @@ from scripts.multigroup_collapse import (
     perform_adaptive_multigroup_collapse,
     try_merge_adjacent_multigroups,
     MultigroupResult,
+    collapse_mf33_covariance_to_grid,
 )
 
 # Import TOF parameters module (Improvement 1.4)
@@ -257,7 +260,10 @@ ALLOW_SHRINK_UNC = False                          # Allow uncertainties to shrin
 #                experiment per MC sample. Also drives the Kish ρ for ESS
 #                collapse in the nominal fit (same physical parameter as the
 #                per-experiment MC perturbation, so one knob).
-NORM_ELASTIC_SIGMA = 0.0                         # Global elastic XS reference uncertainty (0 = disabled, matches test_50)
+NORM_ELASTIC_SIGMA = 0.0                         # Global elastic-XS reference uncertainty (0 = off).
+                                                  # Sets the fully-correlated common-mode term of the MF33
+                                                  # product (shared monitor/reference lineage no between-
+                                                  # experiment method can measure). 0 = document zero.
 NORM_SYSTEMATIC_SIGMA = 0.05                     # Per-experiment systematic uncertainty (5%)
 NORM_DIST = "lognormal"                          # "lognormal" (always positive) or "normal"
 # Experiment exclusion & uncertainty floor
@@ -384,6 +390,13 @@ MULTIGROUP_VARIANCE_PCT_MIN = 67                 # Base percentile for homogeneo
 MULTIGROUP_VARIANCE_PCT_MAX = 85                 # Max percentile for heterogeneous groups
 MULTIGROUP_VARIANCE_RATIO_REF = 5.0              # Sigma ratio at which percentile saturates
 MULTIGROUP_REGROUP_AFTER_SMOOTH = False          # Second-pass regrouping after smoothing
+
+# --- MF33 ELASTIC MAGNITUDE CHANNEL ---------------------------------------- #
+# Record the fixed-shape c0 (sigma_el = 4*pi*c0) and write its MF33 covariance.
+# Read-only: MF4/MF34 are unchanged. The MF3 central stays the host value; the
+# DCS magnitude 4*pi*c0 is saved as a sidecar (reconstructable a posteriori).
+#   0 = off    1 = MF33 in the standalone _mg product    2 = also in the nominal file
+GENERATE_MF3_MF33 = 0
 
 # --- OUTPUT: Pipeline A (fitting) ------------------------------------------ #
 N_SAMPLES = 10000                                # Number of MC samples
@@ -743,14 +756,21 @@ def _mc_one_bin(args):
         _positivity_check_points,
         frozen_tau_info,
         mc_order_cap,
-    ) = args
+    ) = args[:28]
+    # Phase-2 magnitude channel: optional 29th field. Absent (28-tuple) → off,
+    # so the Gaussian-method builder needs no change and behavior is identical.
+    record_c0 = bool(args[28]) if len(args) > 28 else False
+    # Per-sample fixed-shape c0 for this bin; empty unless recording.
+    c0_by_sample: dict = {}
 
     energy_idx = nr_energy_idx
 
     if nr_interpolated:
         endf_coeffs = endf_normalize_legendre_coeffs(nr_nominal_coeffs, include_a0=False)
         results = {s_idx: endf_coeffs for s_idx in range(n_samples)}
-        return (energy_idx, True, results, True, None)
+        if record_c0 and len(nr_nominal_coeffs) > 0:
+            c0_by_sample = {s_idx: float(nr_nominal_coeffs[0]) for s_idx in range(n_samples)}
+        return (energy_idx, True, results, True, None, c0_by_sample)
 
     bin_seed = base_seed + energy_idx
     rng = np.random.default_rng(bin_seed)
@@ -807,7 +827,7 @@ def _mc_one_bin(args):
 
             for deg, s_indices in degree_groups.items():
                 n_batch = len(s_indices)
-                coef_df_batch, _ = sample_legendre_coefficients(
+                coef_df_batch, info_batch = sample_legendre_coefficients(
                     nr_mc_df,
                     value_col="value",
                     unc_col="unc",
@@ -832,7 +852,13 @@ def _mc_one_bin(args):
                     sigma_norm_elastic=sigma_norm_elastic,
                     norm_dist=norm_dist,
                     max_sample_order=effective_sample_order,
+                    record_c0_scale=record_c0,
+                    c0_scale_ref_coeffs=nr_nominal_coeffs if record_c0 else None,
                 )
+                if record_c0 and info_batch.get("c0_samples") is not None:
+                    _c0_batch = np.atleast_1d(info_batch["c0_samples"])
+                    for local_i, s_idx in enumerate(s_indices):
+                        c0_by_sample[s_idx] = float(_c0_batch[local_i])
                 for local_i, s_idx in enumerate(s_indices):
                     sample_coeffs = coef_df_batch.iloc[local_i].to_numpy()
                     if len(sample_coeffs) < max_degree + 1:
@@ -858,7 +884,7 @@ def _mc_one_bin(args):
                 project_to_positive_distribution,
             )
 
-            coef_df, _ = sample_legendre_coefficients(
+            coef_df, info_nd = sample_legendre_coefficients(
                 nr_mc_df,
                 value_col="value",
                 unc_col="unc",
@@ -882,7 +908,13 @@ def _mc_one_bin(args):
                 sigma_norm_elastic=sigma_norm_elastic,
                 norm_dist=norm_dist,
                 max_sample_order=effective_sample_order,
+                record_c0_scale=record_c0,
+                c0_scale_ref_coeffs=nr_nominal_coeffs if record_c0 else None,
             )
+            if record_c0 and info_nd.get("c0_samples") is not None:
+                _c0_nd = np.atleast_1d(info_nd["c0_samples"])
+                for s_idx in range(n_samples):
+                    c0_by_sample[s_idx] = float(_c0_nd[s_idx])
             for s_idx in range(n_samples):
                 sample_coeffs = coef_df.iloc[s_idx].to_numpy()
                 if _apply_positivity_projection:
@@ -900,13 +932,17 @@ def _mc_one_bin(args):
                     endf_coeffs = padded
                 results[s_idx] = endf_coeffs
 
-        return (energy_idx, False, results, True, None)
+        return (energy_idx, False, results, True, None, c0_by_sample)
 
     except Exception as exc:
         endf_coeffs = endf_normalize_legendre_coeffs(nr_nominal_coeffs, include_a0=False)
         results = {s_idx: endf_coeffs for s_idx in range(n_samples)}
+        c0_fallback = (
+            {s_idx: float(nr_nominal_coeffs[0]) for s_idx in range(n_samples)}
+            if record_c0 and len(nr_nominal_coeffs) > 0 else {}
+        )
         return (energy_idx, False, results, False,
-                f"{type(exc).__name__}: {exc}")
+                f"{type(exc).__name__}: {exc}", c0_fallback)
 
 
 def _log_mc_bin_failures(bin_results, nominal_results, warning_counts, logger):
@@ -918,7 +954,8 @@ def _log_mc_bin_failures(bin_results, nominal_results, warning_counts, logger):
     """
     energy_by_idx = {nr.energy_index: nr.energy_mev for nr in nominal_results}
     n_failed = 0
-    for energy_idx, _interp, _results, success, error_msg in bin_results:
+    for rec in bin_results:
+        energy_idx, _interp, _results, success, error_msg = rec[:5]
         if success:
             continue
         n_failed += 1
@@ -2704,6 +2741,13 @@ def run_exfor_to_endf_sampling_v2(
     _prebuilt_gaussian_cov = None
     _prebuilt_mc_mean = None
 
+    # Phase-2 magnitude channel: defined here so the MF33 write block downstream
+    # is safe under every CORRELATION_METHOD (only the KW path can turn it on).
+    record_c0_channel = False
+    mf33_rel_cov_fine = None
+    mf33_c0_nom = None
+    mf33_energy_grid_ev = None
+
     if CORRELATION_METHOD == "gaussian":
         # Per-bin stochastic MC → Gaussian parametric correlations → Cholesky samples
         _logger.info("  " + "=" * 60)
@@ -2755,7 +2799,7 @@ def run_exfor_to_endf_sampling_v2(
 
         _log_mc_bin_failures(bin_results, nominal_results, _warning_counts, _logger)
         all_samples_stochastic = {s_idx: {} for s_idx in range(n_samples)}
-        for energy_idx, is_interpolated, results_by_sample, success, error_msg in bin_results:
+        for energy_idx, is_interpolated, results_by_sample, success, error_msg, _c0 in bin_results:
             for s_idx, endf_coeffs in results_by_sample.items():
                 all_samples_stochastic[s_idx][energy_idx] = endf_coeffs
 
@@ -2852,7 +2896,17 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info(f"  Overlap weights computed: {n_datasets_total} (dataset, bin) pairs")
 
         # Run kernel-weight MC (all bins coupled via shared perturbations)
-        kw_samples = run_mc_with_kernel_weights(
+        # Phase-2 magnitude channel needs both passes (Pass-1 correlations,
+        # Pass-2 variances). If the knob is on but two-pass is off, warn and
+        # skip rather than emit a half-built covariance.
+        record_c0_channel = (GENERATE_MF3_MF33 > 0) and KW_MC_TWO_PASS
+        if GENERATE_MF3_MF33 > 0 and not KW_MC_TWO_PASS:
+            _logger.warning(
+                "  [MF33] GENERATE_MF3_MF33 is on but KW_MC_TWO_PASS=False; "
+                "the fixed-shape c0 channel needs both passes — skipping.",
+                console=True,
+            )
+        _kw_out = run_mc_with_kernel_weights(
             nominal_results=nominal_results,
             energy_bins=energy_bins,
             overlap_weights=overlap_weights,
@@ -2887,8 +2941,13 @@ def run_exfor_to_endf_sampling_v2(
             max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
             min_relative_uncertainty=MIN_RELATIVE_UNCERTAINTY,
             band_aware_ess=BAND_AWARE_ESS,
+            record_c0_channel=record_c0_channel,
             logger=_logger,
         )
+        if record_c0_channel:
+            kw_samples, c0_samples_kw = _kw_out
+        else:
+            kw_samples, c0_samples_kw = _kw_out, None
 
         if KW_MC_TWO_PASS:
             _logger.info("  Two-pass: running per-bin MC for variance")
@@ -2927,6 +2986,8 @@ def run_exfor_to_endf_sampling_v2(
                     positivity_check_points,
                     nr.tau_info,
                     nr.mc_order_cap,
+                    # 29th field: Phase-2 magnitude-channel recording flag.
+                    record_c0_channel,
                 ))
 
             if N_PROCS > 1:
@@ -2937,9 +2998,13 @@ def run_exfor_to_endf_sampling_v2(
 
             _log_mc_bin_failures(bin_results, nominal_results, _warning_counts, _logger)
             all_samples_perbin = {s_idx: {} for s_idx in range(n_samples)}
-            for energy_idx, is_interpolated, results_by_sample, success, error_msg in bin_results:
+            c0_samples_perbin = {s_idx: {} for s_idx in range(n_samples)} if record_c0_channel else None
+            for energy_idx, is_interpolated, results_by_sample, success, error_msg, c0_by_sample in bin_results:
                 for s_idx, endf_coeffs in results_by_sample.items():
                     all_samples_perbin[s_idx][energy_idx] = endf_coeffs
+                if record_c0_channel:
+                    for s_idx, c0_val in c0_by_sample.items():
+                        c0_samples_perbin[s_idx][energy_idx] = c0_val
 
             _logger.info(f"  Per-bin stochastic pass completed: {len(bin_args_list)} bins")
 
@@ -2965,6 +3030,72 @@ def run_exfor_to_endf_sampling_v2(
             # Combine: correlations from kw_samples, variance from per-bin
             energy_indices_kw = [nr.energy_index for nr in nominal_results if nr.has_data]
             nr_by_idx_kw = {nr.energy_index: nr for nr in nominal_results}
+
+            # --- Phase-2 elastic magnitude channel: fixed-shape c0 → MF33 ----
+            # Pass-1 shared draws give cross-bin correlations, Pass-2 per-bin
+            # draws give marginal variances — the same congruence combine as the
+            # Legendre-vector channel, on the scalar c0 per bin. Fine-grid
+            # relative covariance is stashed for the MF33 write + sidecars;
+            # collapse to the multigroup grid happens with the MF34 collapse.
+            mf33_rel_cov_fine = None
+            mf33_c0_nom = None
+            mf33_energy_grid_ev = None
+            if record_c0_channel:
+                try:
+                    _bin_by_idx_mf33 = {b.index: b for b in energy_bins}
+                    mf33_c0_nom = np.array([
+                        float(nr_by_idx_kw[e].nominal_coeffs[0]) for e in energy_indices_kw
+                    ])
+                    mf33_rel_cov_fine, _mf33_cov_abs, _df_c0 = build_mf33_channel(
+                        c0_samples_kw, c0_samples_perbin,
+                        energy_indices_kw, mf33_c0_nom, n_samples,
+                    )
+                    # Fine energy grid (eV): lower edges of the has-data bins
+                    # plus the last upper edge — same construction the MF34 fine
+                    # write uses.
+                    _vb = [_bin_by_idx_mf33[e] for e in energy_indices_kw]
+                    mf33_energy_grid_ev = np.empty(len(_vb) + 1)
+                    for _k, _b in enumerate(_vb):
+                        mf33_energy_grid_ev[_k] = _b.bin_lower_mev * 1e6
+                    mf33_energy_grid_ev[-1] = _vb[-1].bin_upper_mev * 1e6
+
+                    _rel_std = np.sqrt(np.clip(np.diag(mf33_rel_cov_fine), 0.0, None))
+                    _logger.info(
+                        "  [MF33] Fixed-shape c0 channel: "
+                        f"{len(energy_indices_kw)} bins, median rel. σ(σ_el) = "
+                        f"{100.0 * float(np.median(_rel_std)):.2f}% "
+                        f"(range {100.0 * float(np.min(_rel_std)):.2f}–"
+                        f"{100.0 * float(np.max(_rel_std)):.2f}%)"
+                    )
+                    _min_eig = float(np.min(np.linalg.eigvalsh(mf33_rel_cov_fine)))
+                    if _min_eig < -1e-8:
+                        _logger.warning(
+                            f"  [MF33] Fine-grid relative covariance not PSD "
+                            f"(min eig {_min_eig:.2e}) — warn only, not repaired.",
+                            console=True,
+                        )
+
+                    # Sidecar outputs (relative cov, nominal magnitude, grid,
+                    # and the raw two-pass c0 samples for TMC/diagnostics).
+                    np.save(output_path / "mf33_relative_covariance.npy", mf33_rel_cov_fine)
+                    np.save(output_path / "mf33_c0_nominal.npy", mf33_c0_nom)
+                    np.save(output_path / "mf33_energy_grid_ev.npy", mf33_energy_grid_ev)
+                    _df_c0.to_parquet(
+                        output_path / "mf33_c0_samples.parquet",
+                        engine="pyarrow", index=False,
+                    )
+                    _logger.info(
+                        "  [MF33] Sidecar written: mf33_relative_covariance.npy, "
+                        "mf33_c0_nominal.npy, mf33_energy_grid_ev.npy, "
+                        "mf33_c0_samples.parquet"
+                    )
+                except Exception as _e_mf33:
+                    _logger.error(
+                        f"[ERROR] [MF33] Fixed-shape c0 channel failed: {_e_mf33}",
+                        console=True,
+                    )
+                    mf33_rel_cov_fine = None
+
             _valid_mask_kw = np.zeros(len(energy_indices_kw) * max_degree, dtype=bool)
             for ie, e_idx in enumerate(energy_indices_kw):
                 nr = nr_by_idx_kw[e_idx]
@@ -4523,6 +4654,48 @@ def run_exfor_to_endf_sampling_v2(
                     shutil.copy(nominal_file, mg_nom_file)
                     write_mf34_to_file(mg_nom_file, mf34_mg_nom, mg_nom_file)
                     _logger.info(f"  Multigroup MF34 written to: {mg_nom_file}")
+
+                    # --- Phase-2: MF33 MT2 (elastic magnitude covariance) ----
+                    # Collapse the fixed-shape c0 relative covariance onto the
+                    # SAME multigroup grid the MF34 uses, then replace the host
+                    # MF33 MT2 in the multigroup product (whole range). Zero
+                    # (L=0,L1) cross block — a documented factorization
+                    # assumption (Phase 3 measures it), never a format limit.
+                    if record_c0_channel and mf33_rel_cov_fine is not None:
+                        try:
+                            mf33_rel_mg = collapse_mf33_covariance_to_grid(
+                                native_grid_ev=mf33_energy_grid_ev,
+                                native_cov=mf33_rel_cov_fine,
+                                target_grid_ev=multigroup_result.group_boundaries_ev,
+                                native_means=(4.0 * np.pi) * mf33_c0_nom,
+                                is_relative=True,
+                                label="MF33 MT2 (elastic magnitude)",
+                                logger=_logger,
+                            )
+                            mf33_mg = create_mf33_from_covariance(
+                                cov_matrix=mf33_rel_mg,
+                                energy_grid_ev=multigroup_result.group_boundaries_ev,
+                                za=za, awr=awr, mat=mat, mt=mt_number,
+                            )
+                            write_mf33_to_file(mg_nom_file, mf33_mg, mg_nom_file)
+                            _logger.info(
+                                f"  [MF33] Multigroup MF33 MT2 written to: {mg_nom_file}"
+                            )
+                            # Also inject into the main nominal file when asked.
+                            if GENERATE_MF3_MF33 >= 2:
+                                write_mf33_to_file(nominal_file, mf33_mg, nominal_file)
+                                _logger.info(
+                                    f"  [MF33] MF33 MT2 also injected into: {nominal_file}"
+                                )
+                            # The MF3 central is intentionally left at the host
+                            # value; the DCS magnitude is 4*pi*c0, reconstructable
+                            # from mf33_c0_nominal.npy whenever it's needed for a
+                            # comparison (no File-3 rewrite required).
+                        except Exception as _e_mf33w:
+                            _logger.error(
+                                f"[ERROR] [MF33] Multigroup MF33 write failed: {_e_mf33w}",
+                                console=True,
+                            )
 
             elif mf34_covariance_type in ("multigroup", "both") and cov_grouped_nominal is None:
                 if multigroup_failure_reason:

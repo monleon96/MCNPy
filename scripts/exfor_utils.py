@@ -1900,6 +1900,7 @@ def _run_one_kw_sample(args_tuple):
         tau_info_by_bin = sh['tau_info_by_bin']
         mc_order_cap_by_bin = sh['mc_order_cap_by_bin']
         band_aware_ess = sh.get('band_aware_ess', False)
+        record_c0_channel = sh.get('record_c0_channel', False)
     else:
         # Legacy path: full args tuple (sequential mode or old callers)
         (
@@ -1929,6 +1930,7 @@ def _run_one_kw_sample(args_tuple):
         band_aware_ess = False
         fix_c0_at_nominal = False
         sys_aware_mc_fit = False
+        record_c0_channel = False
 
     rng = np.random.default_rng(base_seed + s_idx)
 
@@ -2069,6 +2071,9 @@ def _run_one_kw_sample(args_tuple):
 
     # Step 3-4: For each bin, collect perturbed data, fit
     sample_coeffs = {}
+    # Phase-2 magnitude channel: fixed-shape c0 per bin for this sample. Stays
+    # empty (and is dropped from the return) unless recording is on.
+    sample_c0 = {} if record_c0_channel else None
     # Phase D audit follow-up: count bins where the per-bin coeffs needed a
     # positivity projection (only when projection is enabled). Surfaced via the
     # worker's return tuple so the orchestrator can aggregate across samples.
@@ -2297,7 +2302,7 @@ def _run_one_kw_sample(args_tuple):
             c0_fix_arg = float(nom_for_freeze_high[0])
 
         try:
-            coef_df, _ = sample_legendre_coefficients(
+            coef_df, fit_info = sample_legendre_coefficients(
                 fit_df,
                 value_col="value",
                 unc_col="unc",
@@ -2314,7 +2319,13 @@ def _run_one_kw_sample(args_tuple):
                 max_band_scale=max_band_scale,
                 freeze_c0=freeze_c0,
                 fixed_c0_value=c0_fix_arg,
+                record_c0_scale=record_c0_channel,
+                c0_scale_ref_coeffs=nom_for_freeze_high if record_c0_channel else None,
             )
+            # Fixed-shape c0 scale of this sample's (shared-draw) perturbed data
+            # against the frozen nominal shape — read-only, doesn't touch coeffs.
+            if record_c0_channel and fit_info.get("c0_samples") is not None:
+                sample_c0[bin_idx] = float(np.asarray(fit_info["c0_samples"]).ravel()[0])
             coeffs = coef_df.iloc[0].to_numpy()
             if len(coeffs) < max_degree + 1:
                 coeffs = np.pad(coeffs, (0, max_degree + 1 - len(coeffs)))
@@ -2351,7 +2362,13 @@ def _run_one_kw_sample(args_tuple):
             nom = nominal_coeffs_by_bin.get(bin_idx)
             if nom is not None:
                 sample_coeffs[bin_idx] = endf_normalize_legendre_coeffs(nom, include_a0=False)
+                if record_c0_channel and len(nom) > 0:
+                    # Fall back to the unperturbed magnitude so the c0 sample
+                    # matrix stays aligned with the coeff samples.
+                    sample_c0[bin_idx] = float(nom[0])
 
+    if record_c0_channel:
+        return s_idx, sample_coeffs, n_pos_violations, sample_c0
     return s_idx, sample_coeffs, n_pos_violations
 
 
@@ -2384,6 +2401,7 @@ def run_mc_with_kernel_weights(
     mf33_home_bin_by_e_key: Optional[Dict[str, int]] = None,
     sampled_degrees_per_bin_sample: Optional[Dict[int, np.ndarray]] = None,
     nominal_coeffs_by_bin_by_degree: Optional[Dict[int, Dict[int, np.ndarray]]] = None,
+    record_c0_channel: bool = False,
     logger=None,
 ) -> Dict[int, Dict[int, np.ndarray]]:
     """Orchestrate kernel-weighted multi-bin MC sampling.
@@ -2499,6 +2517,10 @@ def run_mc_with_kernel_weights(
         # Default-off → exact v2 behavior.
         'sampled_degrees_per_bin_sample': sampled_degrees_per_bin_sample,
         'nominal_coeffs_by_bin_by_degree': nominal_coeffs_by_bin_by_degree,
+        # Phase-2 magnitude channel: when True the worker also records the
+        # fixed-shape c0 of each sample's perturbed data (read-only; the shape
+        # coeffs are untouched). Default False → v2/v3 return shape unchanged.
+        'record_c0_channel': record_c0_channel,
     }
 
     if n_workers > 1:
@@ -2515,8 +2537,15 @@ def run_mc_with_kernel_weights(
 
     # Assemble into expected format
     all_samples: Dict[int, Dict[int, np.ndarray]] = {s_idx: {} for s_idx in range(n_samples)}
+    c0_samples_kw: Dict[int, Dict[int, float]] = {} if record_c0_channel else None
     total_pos_violations = 0
-    for s_idx, sample_coeffs, n_pos_violations in results:
+    for res in results:
+        # Worker returns a 4-tuple (…, sample_c0) only when recording is on.
+        if record_c0_channel:
+            s_idx, sample_coeffs, n_pos_violations, sample_c0 = res
+            c0_samples_kw[s_idx] = sample_c0
+        else:
+            s_idx, sample_coeffs, n_pos_violations = res
         all_samples[s_idx] = sample_coeffs
         total_pos_violations += n_pos_violations
 
@@ -2531,6 +2560,8 @@ def run_mc_with_kernel_weights(
                 f"distributions projected ({pct:.2f}%)"
             )
 
+    if record_c0_channel:
+        return all_samples, c0_samples_kw
     return all_samples
 
 
@@ -2597,6 +2628,72 @@ def stack_samples_to_matrix(
             n = min(arr.shape[0], max_degree)
             row[k * max_degree:k * max_degree + n] = arr[:n]
     return out
+
+
+def stack_c0_samples(
+    c0_samples_by_idx: Dict[int, Dict[int, float]],
+    energy_indices: List[int],
+    n_samples: int,
+) -> np.ndarray:
+    """Flatten the fixed-shape c0 side channel ``{sample_idx -> {energy_idx ->
+    c0}}`` into an ``(n_samples, len(energy_indices))`` ndarray.
+
+    Missing (sample, bin) entries become NaN so the two-pass combine can treat
+    them as absent (pairwise-complete correlations, per-column variances) rather
+    than as a spurious zero magnitude.
+    """
+    n_bins = len(energy_indices)
+    out = np.full((n_samples, n_bins), np.nan, dtype=float)
+    for s in range(n_samples):
+        sd = c0_samples_by_idx.get(s)
+        if not sd:
+            continue
+        for k, e_idx in enumerate(energy_indices):
+            val = sd.get(int(e_idx))
+            if val is not None:
+                out[s, k] = float(val)
+    return out
+
+
+def build_mf33_channel(
+    c0_samples_pass1: Dict[int, Dict[int, float]],
+    c0_samples_pass2: Dict[int, Dict[int, float]],
+    energy_indices: List[int],
+    c0_nominal: np.ndarray,
+    n_samples: int,
+) -> Tuple[np.ndarray, np.ndarray, "pd.DataFrame"]:
+    """Assemble the fixed-shape c0 (MF33) channel from the two-pass samples.
+
+    Pure (no I/O): stacks the two per-sample c0 dicts into matrices, runs the
+    two-pass congruence combine, and builds a long-format sample frame for the
+    sidecar.  The pipeline wraps this with the ``np.save`` / ``to_parquet``
+    calls; keeping it separate makes the numeric path unit-testable without a
+    full run.
+
+    Returns
+    -------
+    (rel_cov, cov_abs, samples_df)
+        ``rel_cov`` / ``cov_abs`` are ``(n_bins, n_bins)`` relative / absolute
+        c0 covariances aligned to ``energy_indices``; ``samples_df`` has columns
+        ``sample_idx, energy_index, pass, c0`` for both passes.
+    """
+    from .resample_AD import combine_c0_covariance
+
+    c0_nominal = np.asarray(c0_nominal, dtype=float)
+    p1 = stack_c0_samples(c0_samples_pass1, energy_indices, n_samples)
+    p2 = stack_c0_samples(c0_samples_pass2, energy_indices, n_samples)
+    rel_cov, cov_abs = combine_c0_covariance(p1, p2, c0_nominal)
+
+    n_bins = len(energy_indices)
+    s_col = np.repeat(np.arange(n_samples), n_bins)
+    e_col = np.tile(np.asarray(energy_indices), n_samples)
+    samples_df = pd.concat([
+        pd.DataFrame({"sample_idx": s_col, "energy_index": e_col,
+                      "pass": "pass1", "c0": p1.ravel()}),
+        pd.DataFrame({"sample_idx": s_col, "energy_index": e_col,
+                      "pass": "pass2", "c0": p2.ravel()}),
+    ], ignore_index=True)
+    return rel_cov, cov_abs, samples_df
 
 
 # =============================================================================
