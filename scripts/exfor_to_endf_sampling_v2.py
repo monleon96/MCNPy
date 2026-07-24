@@ -253,18 +253,19 @@ SIGMA_SYS_AWARE_FIT = True                       # Fit weights = 1/σ_total² wi
 RESCALE_UNC_BY_CHI2 = True                       # Apply Birge scaling when band discrepancy disabled
 ALLOW_SHRINK_UNC = False                          # Allow uncertainties to shrink (chi2_red < 1)
 # Normalization model (two physically distinct sources of multiplicative noise):
-#   ELASTIC:     uncertainty in the elastic XS reference / monitor that ALL
-#                experiments rely on. One factor per MC sample, applied globally
-#                to every data point across every experiment.
+#   COMMON-MODE: uncertainty in a shared reference / monitor that ALL experiments
+#                rely on. One factor per MC sample, applied globally to every data
+#                point across every experiment (fully correlated → MF33 floor).
 #   SYSTEMATIC:  per-experiment calibration / setup uncertainty. One factor per
-#                experiment per MC sample. Also drives the Kish ρ for ESS
-#                collapse in the nominal fit (same physical parameter as the
-#                per-experiment MC perturbation, so one knob).
-NORM_ELASTIC_SIGMA = 0.0                         # Global elastic-XS reference uncertainty (0 = off).
-                                                  # Sets the fully-correlated common-mode term of the MF33
-                                                  # product (shared monitor/reference lineage no between-
-                                                  # experiment method can measure). 0 = document zero.
-NORM_SYSTEMATIC_SIGMA = 0.05                     # Per-experiment systematic uncertainty (5%)
+#                experiment per MC sample (superseded by the manifest sigma_sys).
+#                Also drives the Kish ρ for ESS collapse in the nominal fit.
+NORM_COMMON_MODE_SIGMA = 0.0                      # Common-mode normalization uncertainty (0 = off).
+                                                  # ONE global factor applied to ALL experiments together
+                                                  # (shared monitor/reference lineage) — the fully-correlated
+                                                  # floor of MF33 that between-experiment scatter can't see.
+                                                  # 0 = experiment normalizations treated as independent.
+NORM_SYSTEMATIC_SIGMA = 0.05                      # Per-experiment systematic (fallback only): the manifest's
+                                                  # per-dataset sigma_sys supersedes this whenever present.
 NORM_DIST = "lognormal"                          # "lognormal" (always positive) or "normal"
 # Experiment exclusion & uncertainty floor
 EXCLUDE_EXPERIMENTS = ["32246002", "400750022"]   # Tostkii 1957; Morozov 1972 pointer 2 (SPA-fitted sister of 400750021, double-counts raw data)
@@ -749,7 +750,7 @@ def _mc_one_bin(args):
         allow_shrink_unc,
         freeze_c0,
         normalization_sigma,
-        sigma_norm_elastic,
+        sigma_norm_common_mode,
         norm_dist,
         max_sample_order,
         _apply_positivity_projection,
@@ -849,7 +850,7 @@ def _mc_one_bin(args):
                     max_band_scale=max_band_scale,
                     freeze_c0=freeze_c0,
                     sigma_norm=normalization_sigma,
-                    sigma_norm_elastic=sigma_norm_elastic,
+                    sigma_norm_common_mode=sigma_norm_common_mode,
                     norm_dist=norm_dist,
                     max_sample_order=effective_sample_order,
                     record_c0_scale=record_c0,
@@ -905,7 +906,7 @@ def _mc_one_bin(args):
                 max_band_scale=max_band_scale,
                 freeze_c0=freeze_c0,
                 sigma_norm=normalization_sigma,
-                sigma_norm_elastic=sigma_norm_elastic,
+                sigma_norm_common_mode=sigma_norm_common_mode,
                 norm_dist=norm_dist,
                 max_sample_order=effective_sample_order,
                 record_c0_scale=record_c0,
@@ -2066,7 +2067,7 @@ def run_exfor_to_endf_sampling_v2(
     tau_prior_neff_threshold: float = 5.0,
     tau_prior_percentile: float = 50.0,
     sigma_norm_systematic: float = 0.05,
-    sigma_norm_elastic: float = 0.0,
+    sigma_norm_common_mode: float = 0.0,
     use_model_averaging: bool = True,
     min_degree_for_averaging: int = 3,
     n_eff_warning_threshold: float = 5.0,
@@ -2267,7 +2268,7 @@ def run_exfor_to_endf_sampling_v2(
     _logger.info(f"  BAND_SCALE_METHOD = {BAND_SCALE_METHOD}")
     _logger.info(f"  RESCALE_UNC_BY_CHI2 = {RESCALE_UNC_BY_CHI2}")
     _logger.info(f"  ALLOW_SHRINK_UNC = {ALLOW_SHRINK_UNC}")
-    _logger.info(f"  NORM_ELASTIC_SIGMA = {sigma_norm_elastic}  (global, all experiments)")
+    _logger.info(f"  NORM_COMMON_MODE_SIGMA = {sigma_norm_common_mode}  (global, all experiments)")
     _logger.info(f"  NORM_SYSTEMATIC_SIGMA = {sigma_norm_systematic}  (per-experiment, dist={NORM_DIST})")
     _logger.info(f"  EXCLUDE_EXPERIMENTS = {exclude_experiments if exclude_experiments else 'None'}")
     _logger.info(f"  MIN_RELATIVE_UNCERTAINTY = {min_relative_uncertainty} ({min_relative_uncertainty*100:.1f}%)")
@@ -2782,7 +2783,7 @@ def run_exfor_to_endf_sampling_v2(
                 ALLOW_SHRINK_UNC,
                 FREEZE_C0,
                 sigma_norm_systematic,
-                sigma_norm_elastic,
+                sigma_norm_common_mode,
                 NORM_DIST,
                 MAX_SAMPLE_ORDER,
                 apply_positivity_projection,
@@ -2913,7 +2914,7 @@ def run_exfor_to_endf_sampling_v2(
             n_samples=n_samples,
             n_workers=N_PROCS,
             sigma_norm=sigma_norm_systematic,
-            sigma_norm_elastic=sigma_norm_elastic,
+            sigma_norm_common_mode=sigma_norm_common_mode,
             norm_dist=NORM_DIST,
             max_degree=max_degree,
             ridge_lambda=ridge_lambda,
@@ -2979,7 +2980,7 @@ def run_exfor_to_endf_sampling_v2(
                     ALLOW_SHRINK_UNC,
                     FREEZE_C0,
                     sigma_norm_systematic,
-                    sigma_norm_elastic,
+                    sigma_norm_common_mode,
                     NORM_DIST,
                     MAX_SAMPLE_ORDER,
                     apply_positivity_projection,
@@ -4898,7 +4899,7 @@ if __name__ == "__main__":
         tau_prior_neff_threshold=TAU_PRIOR_NEFF_THRESHOLD,
         tau_prior_percentile=TAU_PRIOR_PERCENTILE,
         sigma_norm_systematic=NORM_SYSTEMATIC_SIGMA,
-        sigma_norm_elastic=NORM_ELASTIC_SIGMA,
+        sigma_norm_common_mode=NORM_COMMON_MODE_SIGMA,
         use_model_averaging=USE_MODEL_AVERAGING,
         min_degree_for_averaging=MIN_DEGREE_FOR_AVERAGING,
         n_eff_warning_threshold=N_EFF_WARNING_THRESHOLD,

@@ -1879,7 +1879,7 @@ def _run_one_kw_sample(args_tuple):
         overlap_weights = sh['overlap_weights']
         energy_bins_data = sh['energy_bins_data']
         sigma_norm = sh['sigma_norm']
-        sigma_norm_elastic = sh.get('sigma_norm_elastic', 0.0)
+        sigma_norm_common_mode = sh.get('sigma_norm_common_mode', 0.0)
         norm_dist = sh['norm_dist']
         max_degree = sh['max_degree']
         ridge_lambda = sh['ridge_lambda']
@@ -1926,7 +1926,7 @@ def _run_one_kw_sample(args_tuple):
             tau_info_by_bin,
             mc_order_cap_by_bin,
         ) = args_tuple
-        sigma_norm_elastic = 0.0
+        sigma_norm_common_mode = 0.0
         band_aware_ess = False
         fix_c0_at_nominal = False
         sys_aware_mc_fit = False
@@ -1934,20 +1934,20 @@ def _run_one_kw_sample(args_tuple):
 
     rng = np.random.default_rng(base_seed + s_idx)
 
-    # Step 0: Draw one global elastic-XS factor per MC sample.
-    # Models uncertainty in the shared elastic reference / monitor that all
+    # Step 0: Draw one global common-mode normalization factor per MC sample.
+    # Models uncertainty in the shared reference / monitor that all
     # experiments rely on. Applied to every data point regardless of which
     # experiment produced it; introduces a common-mode correlation across
     # all bins and all entries for this sample.
-    if sigma_norm_elastic > 0:
+    if sigma_norm_common_mode > 0:
         if norm_dist == "lognormal":
-            elastic_factor = float(rng.lognormal(
-                mean=-0.5 * sigma_norm_elastic ** 2, sigma=sigma_norm_elastic
+            common_mode_factor = float(rng.lognormal(
+                mean=-0.5 * sigma_norm_common_mode ** 2, sigma=sigma_norm_common_mode
             ))
         else:
-            elastic_factor = float(rng.normal(1.0, sigma_norm_elastic))
+            common_mode_factor = float(rng.normal(1.0, sigma_norm_common_mode))
     else:
-        elastic_factor = 1.0
+        common_mode_factor = 1.0
 
     # Step 1: Draw ONE shared standard-normal `z` per experiment per sample.
     # The same z is applied to every point of every dataset that experiment
@@ -2020,7 +2020,7 @@ def _run_one_kw_sample(args_tuple):
                 norm_per_pt = 1.0 + z * sigma_per_pt
             # Compose elastic (global, all experiments) with per-experiment
             # shared-direction per-point factor.
-            values = df['value'].to_numpy() * (elastic_factor * norm_per_pt)
+            values = df['value'].to_numpy() * (common_mode_factor * norm_per_pt)
             # Optional MF33 multiplicative factor (v3 hook). When the caller
             # passes mf33_dsigma_per_sample + mf33_c0_per_bin + a home-bin map,
             # apply (1 + δσ/c0_home) to this dataset on top of the per-experiment
@@ -2379,7 +2379,7 @@ def run_mc_with_kernel_weights(
     n_samples: int,
     n_workers: int,
     sigma_norm: float,
-    sigma_norm_elastic: float,
+    sigma_norm_common_mode: float,
     norm_dist: str,
     max_degree: int,
     ridge_lambda: float,
@@ -2422,10 +2422,10 @@ def run_mc_with_kernel_weights(
         Per-experiment systematic normalization uncertainty. Drives the MC
         perturbation amplitude per experiment AND the Kish ρ for ESS collapse
         (same physical parameter in both roles).
-    sigma_norm_elastic : float
+    sigma_norm_common_mode : float
         Global normalization uncertainty applied as a single multiplicative
         factor per MC sample to ALL data points across ALL experiments
-        (e.g. uncertainty in a shared elastic XS reference / monitor).
+        (e.g. uncertainty in a shared reference / monitor).
         Set to 0.0 to disable.
     norm_dist : str
         "lognormal" or "normal".
@@ -2475,7 +2475,7 @@ def run_mc_with_kernel_weights(
         'overlap_weights': overlap_weights,
         'energy_bins_data': energy_bins_data,
         'sigma_norm': sigma_norm,
-        'sigma_norm_elastic': sigma_norm_elastic,
+        'sigma_norm_common_mode': sigma_norm_common_mode,
         'norm_dist': norm_dist,
         'max_degree': max_degree,
         'ridge_lambda': ridge_lambda,

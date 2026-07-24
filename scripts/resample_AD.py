@@ -1694,7 +1694,7 @@ def sample_legendre_coefficients(
     fixed_c0_value: Optional[float] = None,
     # correlated normalization uncertainty (Improvement 1.3)
     sigma_norm: float = 0.0,
-    sigma_norm_elastic: float = 0.0,
+    sigma_norm_common_mode: float = 0.0,
     norm_group_cols: Tuple[str, ...] = ("entry",),
     norm_dist: Literal["lognormal", "normal"] = "lognormal",
     # freeze higher-order coefficients during MC sampling
@@ -2314,18 +2314,18 @@ def sample_legendre_coefficients(
         # Generate all perturbed y vectors at once
         Y_perturbed = np.tile(y, (n_draws, 1))  # (n_draws, n)
 
-        # Global elastic-XS factor: one draw per sample, applied to all points
+        # Global common-mode normalization factor: one draw per sample, applied to all points
         # (models the shared monitor / reference XS uncertainty).
-        if sigma_norm_elastic > 0.0:
+        if sigma_norm_common_mode > 0.0:
             if norm_dist == "lognormal":
-                N_elastic = rng.lognormal(
-                    mean=-0.5 * sigma_norm_elastic ** 2,
-                    sigma=sigma_norm_elastic,
+                N_common_mode = rng.lognormal(
+                    mean=-0.5 * sigma_norm_common_mode ** 2,
+                    sigma=sigma_norm_common_mode,
                     size=n_draws,
                 )
             else:
-                N_elastic = 1.0 + rng.normal(0.0, sigma_norm_elastic, size=n_draws)
-            Y_perturbed *= N_elastic[:, np.newaxis]
+                N_common_mode = 1.0 + rng.normal(0.0, sigma_norm_common_mode, size=n_draws)
+            Y_perturbed *= N_common_mode[:, np.newaxis]
 
         # Apply correlated normalization uncertainty per experiment (Improvement 1.3).
         # Each group's sigma is taken from the manifest-derived
