@@ -134,3 +134,33 @@ def test_load_mf33_sidecar_roundtrip(tmp_path):
     np.testing.assert_array_equal(lib["mf33_grid_ev"], grid)
     np.testing.assert_array_equal(lib["mf33_rel_cov"], rel)
     np.testing.assert_array_equal(lib["mf33_c0_nominal"], c0)
+
+
+# --- bin_average_xs (F2 host-MF3 projection) --------------------------------
+
+from scripts.mf33_diagnostics import bin_average_xs  # noqa: E402
+
+
+def test_bin_average_xs_flat():
+    e = np.array([0.0, 10.0])
+    xs = np.array([3.0, 3.0])
+    grid = np.array([1.0, 4.0, 9.0])
+    np.testing.assert_allclose(bin_average_xs(e, xs, grid), [3.0, 3.0])
+
+
+def test_bin_average_xs_linear():
+    """Linear xs(E) -> bin average equals the midpoint value."""
+    e = np.array([0.0, 10.0])
+    xs = np.array([0.0, 10.0])  # xs(E) = E
+    grid = np.array([2.0, 4.0, 8.0])
+    np.testing.assert_allclose(bin_average_xs(e, xs, grid), [3.0, 6.0], rtol=1e-12)
+
+
+def test_bin_average_xs_catches_narrow_peak():
+    """A native-grid spike inside a wide bin contributes its integral."""
+    # Triangle peak of width 0.2 and height 100 centred at 5.0 on a flat 1.0.
+    e = np.array([0.0, 4.9, 5.0, 5.1, 10.0])
+    xs = np.array([1.0, 1.0, 101.0, 1.0, 1.0])
+    grid = np.array([0.0, 10.0])
+    # integral = 10*1.0 + 0.5*0.2*100 = 20 -> mean 2.0
+    np.testing.assert_allclose(bin_average_xs(e, xs, grid), [2.0], rtol=1e-6)

@@ -14,6 +14,7 @@ packing and the insert-or-replace file writer are shared with the MF34 path via
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 import numpy as np
 
@@ -24,6 +25,8 @@ from ..classes.mf33.mf33 import (
 )
 from ._records import populate_lb5_record, populate_lb6_record
 from ._section_writer import write_mf_section_to_file
+
+_module_logger = logging.getLogger(__name__)
 
 
 def create_mf33_from_covariance(
@@ -148,6 +151,190 @@ def create_mf33_from_covariance(
     return mf33
 
 
+def merge_mf33_covariance_into_host(
+    host_endf: str,
+    cov_matrix: np.ndarray,
+    energy_grid_ev: np.ndarray,
+    mt: int = 2,
+    za: Optional[float] = None,
+    awr: Optional[float] = None,
+    mat: Optional[int] = None,
+    boundary_rtol: float = 1e-6,
+    logger=None,
+) -> MF33MT:
+    """Merge a new relative covariance into the host's MF33 MT section by range.
+
+    The new matrix replaces the host self-covariance **inside** its energy span
+    ``[energy_grid_ev[0], energy_grid_ev[-1]]``; the host values survive
+    unchanged **outside** it (LB=5 is piecewise-constant, so a host bin
+    straddling a boundary keeps its value exactly on the outside part).  The
+    cross blocks between the replaced range and the host remainder are set to
+    zero — the host's own in↔out correlations refer to the replaced in-range
+    model and the new ones are unknown (documented factorization, logged).
+
+    Guards
+    ------
+    - Cross-reaction subsections (``mt1 != mt``) in the host section are
+      **dropped with a warning** — a cross block cannot be range-split
+      meaningfully once its self side is replaced.
+    - NC-type (derived) records in the self subsection raise ``ValueError``
+      (a derived covariance cannot be merged additively).
+    - A non-relative host self block raises ``ValueError``.
+    - No host MF33 section for ``mt`` → plain new section (nothing to
+      preserve), logged.
+
+    Parameters
+    ----------
+    host_endf : str
+        Path to the ENDF file carrying the host MF33 (usually the write
+        template itself).
+    cov_matrix : np.ndarray
+        New **relative** covariance, square (N, N), N = len(energy_grid_ev)-1.
+    energy_grid_ev : np.ndarray
+        Energy boundaries of the new matrix (eV), strictly increasing.
+    mt : int, default 2
+        MT section to merge into.
+    za, awr, mat : optional
+        Header values; inherited from the host section when omitted (required
+        if the host has no MF33 section for ``mt``).
+    boundary_rtol : float, default 1e-6
+        Relative tolerance for deduplicating host edges that coincide with the
+        new range boundaries.
+    logger : optional
+        ``.info``/``.warning`` sink (e.g. the pipeline ``DualLogger``);
+        defaults to the module logger.
+
+    Returns
+    -------
+    MF33MT
+        Single-subsection self-covariance section on the merged grid (one
+        LB=5 record), ready for :func:`write_mf33_to_file`.
+    """
+    log = logger if logger is not None else _module_logger
+
+    from ...endf import read_endf  # local import — avoids a circular import
+
+    cov_matrix = np.asarray(cov_matrix, dtype=float)
+    new_grid = np.asarray(energy_grid_ev, dtype=float)
+    if np.any(np.diff(new_grid) <= 0):
+        raise ValueError("energy_grid_ev must be strictly increasing")
+
+    endf = read_endf(host_endf, mf_numbers=[33])
+    mf33_file = endf.get_file(33)
+    host_section = (
+        mf33_file.sections.get(mt) if mf33_file is not None else None
+    )
+
+    if host_section is not None:
+        if za is None:
+            za = host_section._za
+        if awr is None:
+            awr = host_section._awr
+        if mat is None:
+            mat = host_section._mat
+
+    if host_section is None:
+        log.info(
+            f"[MF33 merge] Host has no MF33 MT{mt} section — writing the new "
+            f"covariance as-is (nothing to preserve)."
+        )
+        if za is None or awr is None or mat is None:
+            raise ValueError(
+                "za/awr/mat are required when the host has no MF33 section "
+                f"for MT{mt} to inherit them from"
+            )
+        return create_mf33_from_covariance(
+            cov_matrix, new_grid, za=za, awr=awr, mat=mat, mt=mt,
+        )
+
+    # Guard: cross-reaction subsections are dropped, loudly.
+    dropped_mt1 = sorted(
+        int(sub.mt1) for sub in host_section._subsections if int(sub.mt1) != mt
+    )
+    if dropped_mt1:
+        log.warning(
+            f"[MF33 merge] Host MF33 MT{mt} carries cross-reaction subsections "
+            f"MT1={dropped_mt1}; they are DROPPED — a cross block cannot be "
+            f"range-split once its self side is replaced."
+        )
+
+    # Guard: derived (NC) records cannot be merged additively.
+    self_sub = next(
+        (s for s in host_section._subsections if int(s.mt1) == mt), None
+    )
+    if self_sub is not None and self_sub.nc_records:
+        raise ValueError(
+            f"Host MF33 MT{mt} self subsection contains NC-type (derived) "
+            f"records; a range merge of a derived covariance is not supported."
+        )
+
+    host_bundle = host_section._self_covariance_matrix()
+    if host_bundle is None:
+        log.warning(
+            f"[MF33 merge] Host MF33 MT{mt} self block failed to decode — "
+            f"writing the new covariance as-is."
+        )
+        return create_mf33_from_covariance(
+            cov_matrix, new_grid, za=za, awr=awr, mat=mat, mt=mt,
+        )
+    host_matrix, host_grid, host_is_rel = host_bundle
+    host_matrix = np.asarray(host_matrix, dtype=float)
+    host_grid = np.asarray(host_grid, dtype=float)
+    if not host_is_rel:
+        raise ValueError(
+            f"Host MF33 MT{mt} self covariance is absolute; merging with a "
+            f"relative matrix is not supported (host is expected relative)."
+        )
+
+    # Merged grid: host edges strictly outside the new range + the new grid.
+    e_lo, e_hi = float(new_grid[0]), float(new_grid[-1])
+    below = host_grid[host_grid < e_lo * (1.0 - boundary_rtol)]
+    above = host_grid[host_grid > e_hi * (1.0 + boundary_rtol)]
+    merged_grid = np.concatenate([below, new_grid, above])
+    if np.any(np.diff(merged_grid) <= 0):
+        raise ValueError("merged energy grid is not strictly increasing")
+
+    n_below = len(below)          # bins below e_lo (edges below + e_lo)
+    n_new = len(new_grid) - 1
+    n_above = len(above)          # bins above e_hi (e_hi + edges above)
+    n_tot = n_below + n_new + n_above
+
+    merged = np.zeros((n_tot, n_tot), dtype=float)
+    merged[n_below:n_below + n_new, n_below:n_below + n_new] = cov_matrix
+
+    if n_below + n_above > 0:
+        # Each outside merged bin lies within exactly one host bin (its edges
+        # are host edges, or the range boundary subdividing a host bin) —
+        # midpoint lookup maps it; piecewise-constant values carry over exactly.
+        mids = 0.5 * (merged_grid[:-1] + merged_grid[1:])
+        out_idx = np.concatenate([
+            np.arange(n_below), np.arange(n_below + n_new, n_tot),
+        ])
+        hmap = np.searchsorted(host_grid, mids[out_idx], side='right') - 1
+        hmap = np.clip(hmap, 0, host_matrix.shape[0] - 1)
+        merged[np.ix_(out_idx, out_idx)] = host_matrix[np.ix_(hmap, hmap)]
+        # in↔out stays zero (documented factorization).
+
+    merged = 0.5 * (merged + merged.T)
+
+    min_eig = float(np.min(np.linalg.eigvalsh(merged)))
+    if min_eig < -1e-8:
+        log.warning(
+            f"[MF33 merge] Merged MT{mt} relative covariance not PSD "
+            f"(min eig {min_eig:.2e}) — warn only, not repaired."
+        )
+
+    log.info(
+        f"[MF33 merge] MT{mt}: replaced [{e_lo:.6g}, {e_hi:.6g}] eV "
+        f"({n_new} bins) inside the host block; preserved {n_below} host bins "
+        f"below and {n_above} above; in↔out cross terms zeroed."
+    )
+
+    return create_mf33_from_covariance(
+        merged, merged_grid, za=za, awr=awr, mat=mat, mt=mt,
+    )
+
+
 def write_mf33_to_file(
     source_endf: str,
     mf33: MF33MT,
@@ -157,9 +344,10 @@ def write_mf33_to_file(
 ) -> str:
     """Write an MF33 section into an ENDF file.
 
-    Thin wrapper over the shared insert-or-replace section writer: replaces an
-    existing MF33 block (e.g. the host MF33 MT2) or inserts a new one before the
-    MEND marker, then refreshes the MF1/MT451 directory.
+    Thin wrapper over the shared insert-or-replace section writer: replaces
+    only the matching (MF33, MT) section — sibling MF33 MT sections survive —
+    or inserts the section (in MT order, or before MEND when no MF33 block
+    exists), then refreshes the MF1/MT451 directory.
 
     Parameters
     ----------

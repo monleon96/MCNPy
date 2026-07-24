@@ -2672,10 +2672,14 @@ def build_mf33_channel(
 
     Returns
     -------
-    (rel_cov, cov_abs, samples_df)
+    (rel_cov, cov_abs, samples_df, diag)
         ``rel_cov`` / ``cov_abs`` are ``(n_bins, n_bins)`` relative / absolute
         c0 covariances aligned to ``energy_indices``; ``samples_df`` has columns
-        ``sample_idx, energy_index, pass, c0`` for both passes.
+        ``sample_idx, energy_index, pass, c0`` for both passes.  ``diag`` holds
+        completeness/PSD inspection numbers (warn-only material):
+        ``p1_finite_per_bin`` / ``p2_finite_per_bin`` (finite-sample counts per
+        bin) and ``corr_pass1_min_eig`` (min eigenvalue of the Pass-1
+        pairwise-complete correlation matrix, which is not guaranteed PSD).
     """
     from .resample_AD import combine_c0_covariance
 
@@ -2683,6 +2687,21 @@ def build_mf33_channel(
     p1 = stack_c0_samples(c0_samples_pass1, energy_indices, n_samples)
     p2 = stack_c0_samples(c0_samples_pass2, energy_indices, n_samples)
     rel_cov, cov_abs = combine_c0_covariance(p1, p2, c0_nominal)
+
+    # Completeness + Pass-1 correlation PSD inspection (pairwise-complete
+    # np.ma.corrcoef can go indefinite when different sample pairs are missing
+    # in different bins).
+    p1_counts = np.sum(np.isfinite(p1), axis=0).astype(int)
+    p2_counts = np.sum(np.isfinite(p2), axis=0).astype(int)
+    corr_p1 = np.ma.corrcoef(np.ma.masked_invalid(p1), rowvar=False)
+    corr_p1 = np.asarray(np.ma.filled(corr_p1, 0.0), dtype=float)
+    np.fill_diagonal(corr_p1, 1.0)
+    corr_p1 = 0.5 * (corr_p1 + corr_p1.T)
+    diag = {
+        "p1_finite_per_bin": p1_counts,
+        "p2_finite_per_bin": p2_counts,
+        "corr_pass1_min_eig": float(np.min(np.linalg.eigvalsh(corr_p1))),
+    }
 
     n_bins = len(energy_indices)
     s_col = np.repeat(np.arange(n_samples), n_bins)
@@ -2693,7 +2712,69 @@ def build_mf33_channel(
         pd.DataFrame({"sample_idx": s_col, "energy_index": e_col,
                       "pass": "pass2", "c0": p2.ravel()}),
     ], ignore_index=True)
-    return rel_cov, cov_abs, samples_df
+    return rel_cov, cov_abs, samples_df, diag
+
+
+def recentre_relative_covariance(
+    cov_abs: np.ndarray, ref_means: np.ndarray
+) -> np.ndarray:
+    """Convert an absolute covariance to relative against reference means.
+
+    ``rel[i, j] = cov_abs[i, j] / (ref_means[i] * ref_means[j])`` — used to
+    recentre the DCS-derived absolute c0 covariance on the HOST MF3 bin means
+    (the shipped File-3 central), so the relative MF33 preserves the absolute
+    uncertainty claim when users multiply it by the host cross section.  Rows
+    and columns with a non-positive reference are zeroed.
+    """
+    cov_abs = np.asarray(cov_abs, dtype=float)
+    ref = np.asarray(ref_means, dtype=float)
+    rel = np.zeros_like(cov_abs)
+    pos = ref > 0
+    outer = np.outer(ref, ref)
+    rel[np.ix_(pos, pos)] = cov_abs[np.ix_(pos, pos)] / outer[np.ix_(pos, pos)]
+    return rel
+
+
+def contiguous_grid_from_bins(valid_bins, rtol: float = 1e-9) -> np.ndarray:
+    """Build the fine energy grid (eV) from has-data bins, asserting adjacency.
+
+    The MF33/MF34 fine writes represent the bins as one contiguous grid
+    (lower edges + last upper edge).  That is only correct when the bins are
+    adjacent — a quality gate leaving an internal gap would silently produce a
+    semantically wrong ENDF grid.  A gap is a structural bug, so this raises
+    (hard error, not the warn-only policy reserved for PSD-type judgement
+    calls).
+
+    Parameters
+    ----------
+    valid_bins : sequence
+        Bin objects exposing ``bin_lower_mev`` / ``bin_upper_mev``, in
+        ascending energy order.
+    rtol : float, default 1e-9
+        Relative tolerance on ``upper[i] == lower[i+1]``.
+
+    Returns
+    -------
+    np.ndarray
+        Energy boundaries in eV, ``len(valid_bins) + 1`` values.
+    """
+    if not valid_bins:
+        raise ValueError("contiguous_grid_from_bins: no bins given")
+    for i in range(len(valid_bins) - 1):
+        upper = float(valid_bins[i].bin_upper_mev)
+        lower_next = float(valid_bins[i + 1].bin_lower_mev)
+        if not np.isclose(upper, lower_next, rtol=rtol, atol=0.0):
+            raise ValueError(
+                f"contiguous_grid_from_bins: gap between bin {i} "
+                f"(upper {upper:.9g} MeV) and bin {i + 1} "
+                f"(lower {lower_next:.9g} MeV) — the fine-grid write assumes "
+                f"adjacent bins; refusing to build a wrong contiguous grid."
+            )
+    grid_ev = np.empty(len(valid_bins) + 1, dtype=float)
+    for k, b in enumerate(valid_bins):
+        grid_ev[k] = float(b.bin_lower_mev) * 1e6
+    grid_ev[-1] = float(valid_bins[-1].bin_upper_mev) * 1e6
+    return grid_ev
 
 
 # =============================================================================

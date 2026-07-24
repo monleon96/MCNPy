@@ -17,6 +17,7 @@ from .mf34_writer import (
 )
 from .mf33_writer import (
     create_mf33_from_covariance,
+    merge_mf33_covariance_into_host,
     write_mf33_to_file,
 )
 from .update_directory import update_mf1_directory
@@ -38,5 +39,6 @@ __all__ = [
     'merge_mf34',
     # MF33 covariance creation
     'create_mf33_from_covariance',
+    'merge_mf33_covariance_into_host',
     'write_mf33_to_file',
 ]

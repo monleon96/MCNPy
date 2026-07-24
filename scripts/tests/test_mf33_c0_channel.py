@@ -244,7 +244,7 @@ def test_build_mf33_channel_shapes_and_frame():
     kw = {s: {e: p1[s, k] for k, e in enumerate(energy_indices)} for s in range(n_samples)}
     pb = {s: {e: p2[s, k] for k, e in enumerate(energy_indices)} for s in range(n_samples)}
 
-    rel, cov, df = build_mf33_channel(kw, pb, energy_indices, c0_nom, n_samples)
+    rel, cov, df, diag = build_mf33_channel(kw, pb, energy_indices, c0_nom, n_samples)
 
     assert rel.shape == (3, 3) and cov.shape == (3, 3)
     np.testing.assert_allclose(rel, rel.T, atol=1e-12)
@@ -253,6 +253,10 @@ def test_build_mf33_channel_shapes_and_frame():
     assert len(df) == 2 * n_samples * len(energy_indices)
     assert set(df["pass"].unique()) == {"pass1", "pass2"}
     assert set(df["energy_index"].unique()) == set(energy_indices)
+    # Completeness/PSD diagnostics: full samples → full counts, PSD corr.
+    np.testing.assert_array_equal(diag["p1_finite_per_bin"], [n_samples] * 3)
+    np.testing.assert_array_equal(diag["p2_finite_per_bin"], [n_samples] * 3)
+    assert diag["corr_pass1_min_eig"] > -1e-10
 
 
 def test_build_mf33_channel_sidecar_roundtrip(tmp_path):
@@ -265,7 +269,7 @@ def test_build_mf33_channel_sidecar_roundtrip(tmp_path):
     p2 = c0_nom[None, :] + rng.normal(0, 0.15, (n_samples, 2))
     kw = {s: {e: p1[s, k] for k, e in enumerate(energy_indices)} for s in range(n_samples)}
     pb = {s: {e: p2[s, k] for k, e in enumerate(energy_indices)} for s in range(n_samples)}
-    rel, cov, df = build_mf33_channel(kw, pb, energy_indices, c0_nom, n_samples)
+    rel, cov, df, _diag = build_mf33_channel(kw, pb, energy_indices, c0_nom, n_samples)
 
     np.save(tmp_path / "mf33_relative_covariance.npy", rel)
     np.save(tmp_path / "mf33_c0_nominal.npy", c0_nom)
@@ -325,3 +329,62 @@ def test_mf33_write_path_collapse_create_write_roundtrip(tmp_path):
     parsed = parse_mf33_mt(mf33_lines, MT)
     M = np.asarray(parsed.to_xs_covmat().matrices[0])
     np.testing.assert_allclose(M, rel_mg, atol=1e-6)
+
+
+# --- Phase-2 pre-run fixes: recentring, contiguity ---------------------------
+
+import pytest  # noqa: E402
+
+from scripts.exfor_utils import (  # noqa: E402
+    contiguous_grid_from_bins,
+    recentre_relative_covariance,
+)
+
+
+class _Bin:
+    def __init__(self, lo, hi):
+        self.bin_lower_mev = lo
+        self.bin_upper_mev = hi
+
+
+def test_contiguous_grid_from_bins_builds_grid():
+    bins = [_Bin(0.8, 0.9), _Bin(0.9, 1.1), _Bin(1.1, 1.5)]
+    grid = contiguous_grid_from_bins(bins)
+    np.testing.assert_allclose(grid, np.array([0.8, 0.9, 1.1, 1.5]) * 1e6)
+
+
+def test_contiguous_grid_from_bins_raises_on_gap():
+    bins = [_Bin(0.8, 0.9), _Bin(1.0, 1.1)]  # gap 0.9 -> 1.0
+    with pytest.raises(ValueError, match="gap"):
+        contiguous_grid_from_bins(bins)
+
+
+def test_contiguous_grid_from_bins_empty_raises():
+    with pytest.raises(ValueError, match="no bins"):
+        contiguous_grid_from_bins([])
+
+
+def test_recentre_relative_covariance_known_values():
+    """rel = C_abs / outer(ref); non-positive reference rows/cols zeroed."""
+    cov_abs = np.array([
+        [4.0, 2.0, 1.0],
+        [2.0, 9.0, 3.0],
+        [1.0, 3.0, 16.0],
+    ])
+    ref = np.array([2.0, 3.0, 0.0])  # third bin: host sigma <= 0
+    rel = recentre_relative_covariance(cov_abs, ref)
+    np.testing.assert_allclose(rel[0, 0], 1.0)      # 4 / (2*2)
+    np.testing.assert_allclose(rel[1, 1], 1.0)      # 9 / (3*3)
+    np.testing.assert_allclose(rel[0, 1], 2.0 / 6.0)
+    assert np.all(rel[2, :] == 0.0) and np.all(rel[:, 2] == 0.0)
+    np.testing.assert_allclose(rel, rel.T)
+
+
+def test_recentre_preserves_absolute_claim():
+    """Recentring on different means keeps rel * outer(means) == C_abs."""
+    rng = np.random.default_rng(5)
+    A = rng.normal(size=(4, 4))
+    cov_abs = A @ A.T
+    host = np.array([1.5, 2.5, 3.5, 4.5])
+    rel = recentre_relative_covariance(cov_abs, host)
+    np.testing.assert_allclose(rel * np.outer(host, host), cov_abs, atol=1e-12)

@@ -65,6 +65,52 @@ def load_mf33_sidecar(sidecar_dir: str) -> Dict[str, np.ndarray]:
     }
 
 
+def bin_average_xs(
+    e_ev: np.ndarray,
+    xs_b: np.ndarray,
+    grid_ev: np.ndarray,
+    n_sub: int = 200,
+) -> np.ndarray:
+    """Width-weighted average of a pointwise cross section over each grid bin.
+
+    Trapezoid integral of the linearly-interpolated ``xs(E)`` over
+    ``[grid_ev[i], grid_ev[i+1]]`` divided by the bin width.  Used to project
+    the host MF3 onto the fine bin grid so the relative MF33 can be recentred
+    on the shipped (host) central value.
+
+    Parameters
+    ----------
+    e_ev, xs_b : np.ndarray
+        Pointwise cross section (energies in eV, values in barns), ascending.
+    grid_ev : np.ndarray
+        Bin boundaries in eV (N+1 values).
+    n_sub : int, default 200
+        Sub-samples per bin for the trapezoid rule (the host grid is dense
+        through the resonance region; uniform sub-sampling of the interpolant
+        is robust to bins wider than the local point spacing).
+
+    Returns
+    -------
+    np.ndarray
+        Bin-averaged cross section (barns), shape ``(N,)``.
+    """
+    e_ev = np.asarray(e_ev, dtype=float)
+    xs_b = np.asarray(xs_b, dtype=float)
+    grid_ev = np.asarray(grid_ev, dtype=float)
+    out = np.empty(len(grid_ev) - 1, dtype=float)
+    for i in range(len(grid_ev) - 1):
+        lo, hi = grid_ev[i], grid_ev[i + 1]
+        # Union of the bin's own sub-grid and the native points inside it, so
+        # narrow resonances on the native grid are not skipped over.
+        inside = e_ev[(e_ev > lo) & (e_ev < hi)]
+        e_sub = np.unique(np.concatenate([
+            np.linspace(lo, hi, n_sub), inside,
+        ]))
+        y_sub = np.interp(e_sub, e_ev, xs_b)
+        out[i] = np.trapezoid(y_sub, e_sub) / (hi - lo)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # 1. Folded host-MF3 vs 4*pi*c0
 # --------------------------------------------------------------------------- #

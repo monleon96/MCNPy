@@ -83,7 +83,11 @@ from kika.exfor import read_all_exfor
 
 # Import kika modules - MF34 from library (replaces local implementation)
 from kika.endf.writers import create_mf34_from_covariance, write_mf34_to_file, merge_mf34
-from kika.endf.writers import create_mf33_from_covariance, write_mf33_to_file
+from kika.endf.writers import (
+    create_mf33_from_covariance,
+    merge_mf33_covariance_into_host,
+    write_mf33_to_file,
+)
 
 # Import local utility module (uses relative import from scripts package)
 from scripts.exfor_utils import (
@@ -135,6 +139,8 @@ from scripts.exfor_utils import (
     run_mc_with_kernel_weights,
     stack_samples_to_matrix,
     build_mf33_channel,
+    contiguous_grid_from_bins,
+    recentre_relative_covariance,
     # ENDF writing
     write_nominal_endf,
     write_average_endf,
@@ -157,6 +163,13 @@ from scripts.multigroup_collapse import (
 )
 
 # Import TOF parameters module (Improvement 1.4)
+from scripts.mf33_diagnostics import (
+    FOUR_PI as _MF33_FOUR_PI,
+    bin_average_xs,
+    fold_host_mf3_at_points,
+    folded_c0_comparison_stats,
+    log_folded_comparison,
+)
 from scripts.tof_parameters import (
     load_tof_parameters_file,
     get_tof_parameters,
@@ -2748,6 +2761,7 @@ def run_exfor_to_endf_sampling_v2(
     mf33_rel_cov_fine = None
     mf33_c0_nom = None
     mf33_energy_grid_ev = None
+    mf33_sigma_host_bin = None
 
     if CORRELATION_METHOD == "gaussian":
         # Per-bin stochastic MC → Gaussian parametric correlations → Cholesky samples
@@ -3041,24 +3055,66 @@ def run_exfor_to_endf_sampling_v2(
             mf33_rel_cov_fine = None
             mf33_c0_nom = None
             mf33_energy_grid_ev = None
+            mf33_sigma_host_bin = None
             if record_c0_channel:
                 try:
                     _bin_by_idx_mf33 = {b.index: b for b in energy_bins}
                     mf33_c0_nom = np.array([
                         float(nr_by_idx_kw[e].nominal_coeffs[0]) for e in energy_indices_kw
                     ])
-                    mf33_rel_cov_fine, _mf33_cov_abs, _df_c0 = build_mf33_channel(
+                    _mf33_rel_dcs, _mf33_cov_abs, _df_c0, _mf33_diag = build_mf33_channel(
                         c0_samples_kw, c0_samples_perbin,
                         energy_indices_kw, mf33_c0_nom, n_samples,
                     )
                     # Fine energy grid (eV): lower edges of the has-data bins
-                    # plus the last upper edge — same construction the MF34 fine
-                    # write uses.
+                    # plus the last upper edge — hard-asserts bin adjacency (a
+                    # gapped grid would be a semantically wrong ENDF grid).
                     _vb = [_bin_by_idx_mf33[e] for e in energy_indices_kw]
-                    mf33_energy_grid_ev = np.empty(len(_vb) + 1)
-                    for _k, _b in enumerate(_vb):
-                        mf33_energy_grid_ev[_k] = _b.bin_lower_mev * 1e6
-                    mf33_energy_grid_ev[-1] = _vb[-1].bin_upper_mev * 1e6
+                    mf33_energy_grid_ev = contiguous_grid_from_bins(_vb)
+
+                    # Completeness + Pass-1 correlation inspection (warn-only).
+                    _p1c = _mf33_diag["p1_finite_per_bin"]
+                    _p2c = _mf33_diag["p2_finite_per_bin"]
+                    _logger.info(
+                        "  [MF33] Sample completeness per bin: "
+                        f"Pass-1 min/median {int(np.min(_p1c))}/{int(np.median(_p1c))}, "
+                        f"Pass-2 min/median {int(np.min(_p2c))}/{int(np.median(_p2c))} "
+                        f"(of {n_samples})"
+                    )
+                    _corr_eig = _mf33_diag["corr_pass1_min_eig"]
+                    if _corr_eig < -1e-8:
+                        _logger.warning(
+                            f"  [MF33] Pass-1 pairwise-complete correlation not PSD "
+                            f"(min eig {_corr_eig:.2e}) — warn only, not repaired.",
+                            console=True,
+                        )
+
+                    # Recentre the relative covariance on the HOST MF3 (the
+                    # shipped File-3 central): the DCS analysis infers the
+                    # absolute covariance C_abs; dividing by the host bin means
+                    # keeps the absolute uncertainty claim intact for users who
+                    # multiply the relative MF33 by the host MF3.
+                    _endf_host3 = read_endf(endf_file, mf_numbers=3)
+                    _mt3_host = _endf_host3.get_file(3).sections[2]
+                    _host_e_ev = np.asarray(_mt3_host.energies, dtype=float)
+                    _host_xs_b = np.asarray(_mt3_host.cross_sections, dtype=float)
+                    mf33_sigma_host_bin = bin_average_xs(
+                        _host_e_ev, _host_xs_b, mf33_energy_grid_ev,
+                    )
+                    _c0_host = mf33_sigma_host_bin / _MF33_FOUR_PI
+                    mf33_rel_cov_fine = recentre_relative_covariance(
+                        _mf33_cov_abs, _c0_host,
+                    )
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        _recentre_ratio = np.where(
+                            _c0_host > 0, mf33_c0_nom / _c0_host, np.nan
+                        )
+                    _logger.info(
+                        "  [MF33] Relative covariance recentred on host MF3: "
+                        f"median |c0_DCS/c0_host - 1| = "
+                        f"{100.0 * float(np.nanmedian(np.abs(_recentre_ratio - 1.0))):.2f}%, "
+                        f"max = {100.0 * float(np.nanmax(np.abs(_recentre_ratio - 1.0))):.2f}%"
+                    )
 
                     _rel_std = np.sqrt(np.clip(np.diag(mf33_rel_cov_fine), 0.0, None))
                     _logger.info(
@@ -3076,26 +3132,75 @@ def run_exfor_to_endf_sampling_v2(
                             console=True,
                         )
 
-                    # Sidecar outputs (relative cov, nominal magnitude, grid,
-                    # and the raw two-pass c0 samples for TMC/diagnostics).
+                    # Sidecar outputs (host-recentred relative cov, absolute
+                    # cov, nominal + host magnitudes, grid, and the raw
+                    # two-pass c0 samples for TMC/diagnostics).
                     np.save(output_path / "mf33_relative_covariance.npy", mf33_rel_cov_fine)
+                    np.save(output_path / "mf33_absolute_covariance.npy", _mf33_cov_abs)
                     np.save(output_path / "mf33_c0_nominal.npy", mf33_c0_nom)
+                    np.save(output_path / "mf33_c0_host.npy", _c0_host)
                     np.save(output_path / "mf33_energy_grid_ev.npy", mf33_energy_grid_ev)
                     _df_c0.to_parquet(
                         output_path / "mf33_c0_samples.parquet",
                         engine="pyarrow", index=False,
                     )
                     _logger.info(
-                        "  [MF33] Sidecar written: mf33_relative_covariance.npy, "
-                        "mf33_c0_nominal.npy, mf33_energy_grid_ev.npy, "
-                        "mf33_c0_samples.parquet"
+                        "  [MF33] Sidecar written: mf33_relative_covariance.npy "
+                        "(host-recentred), mf33_absolute_covariance.npy, "
+                        "mf33_c0_nominal.npy, mf33_c0_host.npy, "
+                        "mf33_energy_grid_ev.npy, mf33_c0_samples.parquet"
                     )
+
+                    # Folded-host comparison (warn-only, never gates): fold the
+                    # host MF3 through each contributing experiment's TOF
+                    # kernel at the bin energy and compare against 4*pi*c0.
+                    try:
+                        _cmp_sub, _cmp_e, _cmp_dcs, _cmp_rel, _cmp_camp = [], [], [], [], []
+                        _rel_dcs_diag = np.sqrt(
+                            np.clip(np.diag(_mf33_rel_dcs), 0.0, None)
+                        )
+                        for _ib, _eidx in enumerate(energy_indices_kw):
+                            _nr_b = nr_by_idx_kw[_eidx]
+                            for _exp in (_nr_b.experiments_info or []):
+                                _cmp_sub.append(
+                                    f"{_exp.get('entry', '')}{_exp.get('subentry', '')}"
+                                )
+                                _cmp_e.append(float(_nr_b.energy_mev))
+                                _cmp_dcs.append(_MF33_FOUR_PI * mf33_c0_nom[_ib])
+                                _cmp_rel.append(float(_rel_dcs_diag[_ib]))
+                                _cmp_camp.append(str(_exp.get('entry', '')))
+                        if _cmp_sub:
+                            _folded_b = fold_host_mf3_at_points(
+                                _host_e_ev, _host_xs_b, _cmp_sub, _cmp_e,
+                                tof_params_cache,
+                                default_flight_path_m=FLIGHT_PATH_M,
+                                default_time_resolution_ns=DELTA_T_NS,
+                            )
+                            _cmp_df = pd.DataFrame({
+                                "campaign": _cmp_camp,
+                                "energy_mev": _cmp_e,
+                                "sigma_folded_b": _folded_b,
+                                "sigma_el_dcs_b": _cmp_dcs,
+                                "rel_sigma_dcs": _cmp_rel,
+                            })
+                            _folded_stats = folded_c0_comparison_stats(_cmp_df)
+                            log_folded_comparison(
+                                _folded_stats, _logger,
+                                verbose=bool(VERBOSE_DIAGNOSTICS),
+                            )
+                    except Exception as _e_fold:
+                        _logger.warning(
+                            f"  [MF33] Folded-host comparison failed "
+                            f"(diagnostic only): {_e_fold}",
+                            console=True,
+                        )
                 except Exception as _e_mf33:
                     _logger.error(
                         f"[ERROR] [MF33] Fixed-shape c0 channel failed: {_e_mf33}",
                         console=True,
                     )
                     mf33_rel_cov_fine = None
+                    mf33_sigma_host_bin = None
 
             _valid_mask_kw = np.zeros(len(energy_indices_kw) * max_degree, dtype=bool)
             for ie, e_idx in enumerate(energy_indices_kw):
@@ -4166,16 +4271,13 @@ def run_exfor_to_endf_sampling_v2(
 
             # Compute fine energy grid from midpoint bin boundaries.
             # Each energy point's fitting bin is [bin_lower, bin_upper] (midpoints
-            # to its neighbours).  These boundaries are contiguous
-            # (bin_upper[i] == bin_lower[i+1]), so they form a proper group
-            # structure that is consistent with the region where EXFOR data was
-            # actually fitted.
+            # to its neighbours).  These boundaries must be contiguous
+            # (bin_upper[i] == bin_lower[i+1]) to form a proper group structure —
+            # contiguous_grid_from_bins hard-asserts it (a gapped grid would be a
+            # semantically wrong ENDF grid).
             bin_by_idx = {b.index: b for b in energy_bins}
             valid_bins = [bin_by_idx[i] for i in energy_indices]
-            energy_grid_ev = np.empty(len(valid_bins) + 1)
-            for k, b in enumerate(valid_bins):
-                energy_grid_ev[k] = b.bin_lower_mev * 1e6
-            energy_grid_ev[-1] = valid_bins[-1].bin_upper_mev * 1e6
+            energy_grid_ev = contiguous_grid_from_bins(valid_bins)
 
             # Write fine-grid MF34 if requested
             if mf34_covariance_type in ("fine", "both"):
@@ -4658,9 +4760,13 @@ def run_exfor_to_endf_sampling_v2(
 
                     # --- Phase-2: MF33 MT2 (elastic magnitude covariance) ----
                     # Collapse the fixed-shape c0 relative covariance onto the
-                    # SAME multigroup grid the MF34 uses, then replace the host
-                    # MF33 MT2 in the multigroup product (whole range). Zero
-                    # (L=0,L1) cross block — a documented factorization
+                    # SAME multigroup grid the MF34 uses, then RANGE-MERGE it
+                    # into the host MF33 MT2: our matrix replaces the host
+                    # inside the working range, the host survives outside, and
+                    # in-range/out-of-range cross terms are zeroed (documented
+                    # factorization). Sibling MF33 MT sections (1, 4, 5, 16,
+                    # 102, 103) are preserved by the per-MT section writer.
+                    # Zero (L=0,L1) cross block — a documented factorization
                     # assumption (Phase 3 measures it), never a format limit.
                     if record_c0_channel and mf33_rel_cov_fine is not None:
                         try:
@@ -4668,25 +4774,36 @@ def run_exfor_to_endf_sampling_v2(
                                 native_grid_ev=mf33_energy_grid_ev,
                                 native_cov=mf33_rel_cov_fine,
                                 target_grid_ev=multigroup_result.group_boundaries_ev,
-                                native_means=(4.0 * np.pi) * mf33_c0_nom,
+                                native_means=mf33_sigma_host_bin,
                                 is_relative=True,
                                 label="MF33 MT2 (elastic magnitude)",
                                 logger=_logger,
                             )
-                            mf33_mg = create_mf33_from_covariance(
+                            mf33_mg = merge_mf33_covariance_into_host(
+                                host_endf=mg_nom_file,
                                 cov_matrix=mf33_rel_mg,
                                 energy_grid_ev=multigroup_result.group_boundaries_ev,
-                                za=za, awr=awr, mat=mat, mt=mt_number,
+                                mt=mt_number,
+                                za=za, awr=awr, mat=mat,
+                                logger=_logger,
                             )
                             write_mf33_to_file(mg_nom_file, mf33_mg, mg_nom_file)
                             _logger.info(
-                                f"  [MF33] Multigroup MF33 MT2 written to: {mg_nom_file}"
+                                f"  [MF33] Range-merged MF33 MT2 written to: {mg_nom_file}"
                             )
                             # Also inject into the main nominal file when asked.
                             if GENERATE_MF3_MF33 >= 2:
-                                write_mf33_to_file(nominal_file, mf33_mg, nominal_file)
+                                mf33_nom = merge_mf33_covariance_into_host(
+                                    host_endf=nominal_file,
+                                    cov_matrix=mf33_rel_mg,
+                                    energy_grid_ev=multigroup_result.group_boundaries_ev,
+                                    mt=mt_number,
+                                    za=za, awr=awr, mat=mat,
+                                    logger=_logger,
+                                )
+                                write_mf33_to_file(nominal_file, mf33_nom, nominal_file)
                                 _logger.info(
-                                    f"  [MF33] MF33 MT2 also injected into: {nominal_file}"
+                                    f"  [MF33] MF33 MT2 also range-merged into: {nominal_file}"
                                 )
                             # The MF3 central is intentionally left at the host
                             # value; the DCS magnitude is 4*pi*c0, reconstructable
