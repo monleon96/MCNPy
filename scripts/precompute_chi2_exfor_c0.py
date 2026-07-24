@@ -72,7 +72,7 @@ MT_NUMBER = 2  # elastic scattering
 # This_work uses the pipeline's nominal ENDF and the matching nominal_fits
 # parquet that lives next to it (both written by exfor_to_endf_sampling_v2.py
 # into OUTPUT_DIR).
-THIS_WORK_DIR        = "/share_snc/snc/JuanMonleon/ENDF_samples/new_test_80"
+THIS_WORK_DIR        = "/share_snc/snc/JuanMonleon/ENDF_samples/new_test_81"
 THIS_WORK_FILE       = f"{THIS_WORK_DIR}/26-Fe-56g_nominal_mg.endf"
 NOMINAL_FITS_PARQUET = f"{THIS_WORK_DIR}/nominal_fits.parquet"
 
@@ -108,7 +108,7 @@ M_TARG_U = 55.93494
 L_MAX = 6
 
 # ── Output ──
-OUTPUT_PARQUET = "/share_snc/snc/JuanMonleon/chi2/chi2_data_exfor_c0_80.parquet"
+OUTPUT_PARQUET = "/share_snc/snc/JuanMonleon/chi2/chi2_data_exfor_c0_81.parquet"
 
 
 # ── ENDF loading ──────────────────────────────────────────────────────────────

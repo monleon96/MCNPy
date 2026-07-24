@@ -98,7 +98,7 @@ N_WINDOW_SAMPLES  = 65
 # ── Library ENDF files (one per evaluation compared in the chi^2 analysis) ──
 # This_work uses its own MF3 *and* MF4 from the pipeline's nominal ENDF, for a
 # fully symmetric treatment (no nominal_fits.parquet dependency).
-THIS_WORK_DIR  = "/share_snc/snc/JuanMonleon/ENDF_samples/new_test_80"
+THIS_WORK_DIR  = "/share_snc/snc/JuanMonleon/ENDF_samples/new_test_81"
 THIS_WORK_FILE = f"{THIS_WORK_DIR}/26-Fe-56g_nominal_mg.endf"
 
 JEFF_FILE  = "/share_snc/snc/JuanMonleon/jeff40_with_MF4_from_jeff33/26-Fe-56g.txt"
@@ -131,7 +131,7 @@ E_MAX_MEV = 4.0
 L_MAX = 6
 
 # ── Output (filename encodes the window width so the two runs don't collide) ──
-OUTPUT_PARQUET = f"/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_al_c0_80_ns{N_SIGMA:g}.parquet"
+OUTPUT_PARQUET = f"/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_al_c0_81_ns{N_SIGMA:g}.parquet"
 
 
 # ── Resolution window ─────────────────────────────────────────────────────────
