@@ -1508,3 +1508,126 @@ def perform_adaptive_multigroup_collapse(
         valid_mask_grouped=_vmg,
         scale_factors=scale_factors,
     )
+
+
+# =============================================================================
+# MF33 (cross-section magnitude) single-block collapse
+# =============================================================================
+
+def collapse_mf33_covariance_to_grid(
+    native_grid_ev: np.ndarray,
+    native_cov: np.ndarray,
+    target_grid_ev: np.ndarray,
+    *,
+    native_means: Optional[np.ndarray] = None,
+    is_relative: bool = True,
+    weighting: str = "width",
+    label: str = "MF33 MT2",
+    logger=None,
+) -> np.ndarray:
+    """Collapse a single-block MF33 covariance onto target (multigroup) bin edges.
+
+    MF33 is a single square self-block (one reaction, no Legendre triangle), so
+    this reuses the width-weighted piecewise-constant overlap operator that
+    ``kika.cov.cross_section_covariance.project_to_grid`` uses
+    (``kika.processing.multigroup.compute_rebin_operator`` +
+    ``collapse_covariance``) — the same MF34 multigroup boundaries can be passed
+    as ``target_grid_ev`` so the MF33 and MF34 outputs share one grid.
+
+    For a **relative** covariance the collapse is done in absolute space and
+    converted back to relative on the target grid (rigorous); this needs the
+    per-native-bin means (``native_means``, the σ per bin). Without means the
+    relative matrix is collapsed directly, which is exact only in the flat-σ
+    limit — documented, and logged when a logger is given.
+
+    The final matrix gets a **warn-only** PSD check (never repaired), matching
+    the pipeline's final-matrix PSD policy.
+
+    Parameters
+    ----------
+    native_grid_ev : np.ndarray
+        Native MF33 bin edges in eV (``N_native + 1``).
+    native_cov : np.ndarray
+        ``(N_native, N_native)`` covariance on the native grid.
+    target_grid_ev : np.ndarray
+        Target (multigroup) bin edges in eV (``N_target + 1``).
+    native_means : np.ndarray, optional
+        Per-native-bin σ (b). Required for a rigorous relative collapse.
+    is_relative : bool, default True
+        Whether ``native_cov`` is relative.
+    weighting : str, default "width"
+        Only ``"width"`` (piecewise-constant) is supported in Phase 1.
+    label : str
+        Name used in the PSD warning / log messages.
+    logger : optional
+        Logger for informational messages.
+
+    Returns
+    -------
+    np.ndarray
+        ``(N_target, N_target)`` collapsed covariance (relative if the input
+        was relative), symmetric.
+    """
+    import warnings
+    from kika.processing.multigroup import (
+        compute_rebin_operator,
+        collapse_covariance,
+        relative_to_absolute,
+        absolute_to_relative,
+    )
+
+    if weighting != "width":
+        raise ValueError(
+            f"weighting={weighting!r} not supported; only 'width' in Phase 1"
+        )
+
+    native_grid = np.asarray(native_grid_ev, dtype=float)
+    target_grid = np.asarray(target_grid_ev, dtype=float)
+    C = np.asarray(native_cov, dtype=float)
+
+    n_native = native_grid.size - 1
+    if C.shape != (n_native, n_native):
+        raise ValueError(
+            f"native_cov shape {C.shape} doesn't match native grid with "
+            f"{n_native} intervals"
+        )
+    if target_grid.size < 2:
+        raise ValueError("target_grid_ev must have at least 2 edges")
+
+    # Row-stochastic width-weighted overlap operator, shape (N_target, N_native).
+    M = compute_rebin_operator(native_grid, target_grid)
+
+    if is_relative and native_means is not None:
+        means = np.asarray(native_means, dtype=float)
+        if means.shape != (n_native,):
+            raise ValueError(
+                f"native_means shape {means.shape} doesn't match {n_native} "
+                f"native intervals"
+            )
+        C_abs = relative_to_absolute(C, means, means)
+        C_tgt_abs = collapse_covariance(C_abs, M)
+        means_tgt = M @ means  # width-weighted group σ
+        C_tgt = absolute_to_relative(C_tgt_abs, means_tgt, means_tgt)
+    else:
+        if is_relative and native_means is None and logger:
+            logger.info(
+                f"  {label}: collapsing relative covariance without means "
+                f"(flat-σ limit; exact only if σ is constant across merged bins)"
+            )
+        C_tgt = collapse_covariance(C, M)
+
+    C_tgt = 0.5 * (C_tgt + C_tgt.T)
+
+    # Warn-only PSD check — never repair (final-matrix PSD policy).
+    _, was_psd = check_positive_semidefinite(
+        C_tgt, name=label, logger=logger, fix_if_needed=False,
+    )
+    if not was_psd:
+        warnings.warn(
+            f"{label}: collapsed MF33 covariance is not PSD (negative "
+            f"eigenvalue); left unrepaired per the warn-only policy.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    return C_tgt

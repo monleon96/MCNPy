@@ -38,6 +38,25 @@ from numpy.polynomial.legendre import legval
 
 # ── MF34: dense Σ_eval contribution from Legendre coefficient covariance ──────
 
+def _legendre_base_sens(mu: np.ndarray, c0: np.ndarray, L_max: int) -> np.ndarray:
+    """base_sens[L-1, j] = c_0(E_j) * (2L+1) * P_L(mu_j) for L = 1..L_max.
+
+    This is dy/da_L(E_j, mu_j) before the relative-a_L scaling; shared by the
+    MF34 self block and the MF33↔MF34 cross block so the two use one sensitivity
+    definition.
+    """
+    mu = np.asarray(mu, dtype=float).ravel()
+    c0 = np.asarray(c0, dtype=float).ravel()
+    N = mu.size
+    P_arr = np.zeros((L_max, N), dtype=float)
+    for L in range(1, L_max + 1):
+        coef = np.zeros(L + 1, dtype=float)
+        coef[L] = 1.0
+        P_arr[L - 1] = legval(mu, coef)
+    twoLp1 = np.arange(3, 2 * L_max + 2, 2, dtype=float)  # 3, 5, 7, ... for L=1..
+    return c0[None, :] * twoLp1[:, None] * P_arr  # (L_max, N)
+
+
 def build_mf34_block(
     mf34,
     e_mev: np.ndarray,
@@ -77,17 +96,9 @@ def build_mf34_block(
     c0 = np.asarray(c0, dtype=float).ravel()
     e_ev = e_mev * 1e6
 
-    # Pre-compute P_L(mu) for L = 1..L_max into rows of P_arr.
-    P_arr = np.zeros((L_max, N), dtype=float)
-    for L in range(1, L_max + 1):
-        coef = np.zeros(L + 1, dtype=float)
-        coef[L] = 1.0
-        P_arr[L - 1] = legval(mu, coef)
-
     # base_sens[L-1, j] = c_0(E_j) * (2L+1) * P_L(mu_j); a_L scaling added per
     # block when relative.
-    twoLp1 = np.arange(3, 2 * L_max + 2, 2, dtype=float)  # 3, 5, 7, ... for L=1..
-    base_sens = c0[None, :] * twoLp1[:, None] * P_arr  # (L_max, N)
+    base_sens = _legendre_base_sens(mu, c0, L_max)  # (L_max, N)
 
     sigma = np.zeros((N, N), dtype=float)
     for idx in range(len(mf34.matrices)):
@@ -216,6 +227,92 @@ def build_mf33_block(
     return 0.5 * (sigma + sigma.T)
 
 
+# ── MF33 ↔ MF34: dense Σ_eval cross contribution (sigma ↔ a_L) ────────────────
+
+def build_mf33_mf34_cross_block(
+    cross,
+    e_mev: np.ndarray,
+    mu: np.ndarray,
+    c0: np.ndarray,
+    a_l_per_pt: np.ndarray,
+    y_eval: np.ndarray,
+) -> np.ndarray:
+    """Dense N×N MF33↔MF34 cross contribution (magnitude ↔ shape).
+
+    This is the chi^2 counterpart of the MF34 (L=0, L1) cross blocks written by
+    ``create_mf34_from_covariance``.  It is **opt-in and defaults to a zero
+    block** when ``cross`` is falsy, so today's Σ_eval numbers are unchanged
+    (the factorization assumption Cov(sigma, a_L) = 0 stays in force until a
+    joint evaluation provides these blocks).
+
+    Parameters
+    ----------
+    cross : sequence of dict, or None
+        Per-order cross-covariance blocks.  Each entry::
+
+            {"l": L1,                       # Legendre order (>= 1)
+             "mag_grid_ev": (N0+1,),        # coarse magnitude (sigma) grid
+             "shape_grid_ev": (Nsh+1,),     # a_L shape grid
+             "matrix": (N0, Nsh),           # Cov(sigma bin, a_L1 bin)
+             "is_relative": bool}           # default True
+
+        Mirrors item-2's LB=6 (L=0, L1) block layout.  Missing/empty → zeros.
+    e_mev, mu, c0, a_l_per_pt, y_eval
+        Same per-point arrays as :func:`build_mf34_block` /
+        :func:`build_mf33_block`.
+
+    Notes
+    -----
+    Sensitivities: dy/dsigma = ``y_eval`` (magnitude side), dy/da_L1 =
+    ``c0*(2L1+1)*P_L1`` (shape side; scaled by the nominal a_L1 for relative
+    blocks, matching :func:`build_mf34_block`).  The block is assembled
+    symmetrically::
+
+        Σ_cross[j,k] = ydsig(j)·C[j,k]·sensL(k) + sensL(j)·C.T[j,k]·ydsig(k)
+    """
+    e_mev = np.asarray(e_mev, dtype=float).ravel()
+    N = e_mev.size
+    if N == 0:
+        return np.zeros((0, 0), dtype=float)
+    if not cross:
+        return np.zeros((N, N), dtype=float)
+
+    a_l_per_pt = np.asarray(a_l_per_pt, dtype=float)
+    if a_l_per_pt.ndim == 1:
+        a_l_per_pt = a_l_per_pt.reshape(N, -1)
+    L_max = a_l_per_pt.shape[1]
+    if L_max == 0:
+        return np.zeros((N, N), dtype=float)
+
+    base_sens = _legendre_base_sens(mu, c0, L_max)  # (L_max, N)
+    y = np.asarray(y_eval, dtype=float).ravel()
+    e_ev = e_mev * 1e6
+
+    sigma = np.zeros((N, N), dtype=float)
+    for blk in cross:
+        L = int(blk["l"])
+        if L < 1 or L > L_max:
+            continue
+        mag_grid = np.asarray(blk["mag_grid_ev"], dtype=float)
+        shape_grid = np.asarray(blk["shape_grid_ev"], dtype=float)
+        mat = np.asarray(blk["matrix"], dtype=float)
+        if mat.size == 0:
+            continue
+        n0, n_sh = mat.shape
+        bin0 = np.clip(np.searchsorted(mag_grid, e_ev, side="right") - 1, 0, n0 - 1)
+        binL = np.clip(np.searchsorted(shape_grid, e_ev, side="right") - 1, 0, n_sh - 1)
+        C = mat[np.ix_(bin0, binL)]  # (N, N): C[j,k] = Cov(sigma bin0_j, a_L binL_k)
+
+        sens_L = base_sens[L - 1].copy()
+        if blk.get("is_relative", True):
+            sens_L *= a_l_per_pt[:, L - 1]
+
+        sigma += y[:, None] * C * sens_L[None, :]
+        sigma += sens_L[:, None] * C.T * y[None, :]
+
+    return 0.5 * (sigma + sigma.T)
+
+
 # ── Orchestrator ──────────────────────────────────────────────────────────────
 
 def build_eval_cov_for_groups(
@@ -274,7 +371,11 @@ def build_eval_cov_for_groups(
             lib.get("mf33_grid_ev"), lib.get("mf33_rel_cov"),
             lib.get("energies_mf4_mev"), e_mev, y_eval,
         )
-        eval_cov[key] = (sigma_mf34 + sigma_mf33).astype(np.float32)
+        # Opt-in MF33↔MF34 cross term; None → zero block → numbers unchanged.
+        sigma_cross = build_mf33_mf34_cross_block(
+            lib.get("mf33_mf34_cross"), e_mev, mu, c0, a_l_per_pt, y_eval,
+        )
+        eval_cov[key] = (sigma_mf34 + sigma_mf33 + sigma_cross).astype(np.float32)
     return eval_cov
 
 

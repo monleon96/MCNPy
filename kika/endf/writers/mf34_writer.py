@@ -15,7 +15,8 @@ includes the L=0 sub-subsections of the upper triangle.
 """
 from __future__ import annotations
 
-from typing import List, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, Union, TYPE_CHECKING
+import warnings
 import numpy as np
 
 from ..classes.mf34.mf34 import (
@@ -24,6 +25,8 @@ from ..classes.mf34.mf34 import (
     SubSubsection,
     SubSubsectionRecord,
 )
+from ._records import populate_lb5_record, populate_lb6_record
+from ._section_writer import _find_mf_boundaries, write_mf_section_to_file
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -53,21 +56,7 @@ def _make_lb5_record(
     energy_grid : list of float
         Energy boundaries (m + 1 values).
     """
-    m = len(energy_grid) - 1
-    if matrix.shape != (m, m):
-        raise ValueError(
-            f"Matrix shape {matrix.shape} doesn't match energy grid "
-            f"with {m} intervals ({len(energy_grid)} boundaries)"
-        )
-    record = SubSubsectionRecord()
-    record.ls = 1
-    record.lb = 5
-    record.ne = len(energy_grid)
-    record.energies = list(energy_grid)
-    triu_rows, triu_cols = np.triu_indices(m)
-    record.matrix = matrix[triu_rows, triu_cols].tolist()
-    record.nt = len(energy_grid) + len(record.matrix)
-    return record
+    return populate_lb5_record(SubSubsectionRecord(), matrix, energy_grid)
 
 
 def _make_lb6_record(
@@ -87,22 +76,9 @@ def _make_lb6_record(
     row_energy_grid, col_energy_grid : list of float
         Row and column energy boundaries.
     """
-    r = len(row_energy_grid) - 1
-    c = len(col_energy_grid) - 1
-    if matrix.shape != (r, c):
-        raise ValueError(
-            f"Matrix shape {matrix.shape} doesn't match energy grids "
-            f"with {r} row intervals and {c} column intervals"
-        )
-    record = SubSubsectionRecord()
-    record.ls = 0
-    record.lb = 6
-    record.row_energies = list(row_energy_grid)
-    record.col_energies = list(col_energy_grid)
-    record.rect_matrix = matrix.ravel().tolist()
-    record.nt = len(row_energy_grid) + len(col_energy_grid) + r * c
-    record.ne = len(row_energy_grid)
-    return record
+    return populate_lb6_record(
+        SubSubsectionRecord(), matrix, row_energy_grid, col_energy_grid
+    )
 
 
 def _split_matrix_excluding_range(
@@ -148,6 +124,68 @@ def _split_matrix_excluding_range(
 # ---- MF34 builder ----------------------------------------------------------
 
 
+def _normalize_cross_cov(
+    cross_cov: Union[Dict[int, np.ndarray], np.ndarray],
+    max_order: int,
+    n0: int,
+    n_shape: int,
+    zero_warn_threshold: float,
+) -> Dict[int, np.ndarray]:
+    """Validate and normalize the (L=0, L1) cross-covariance blocks.
+
+    Accepts a dict ``{l1: (n0, n_shape) array}`` for ``l1`` in ``1..max_order``
+    or a stacked array of shape ``(max_order, n0, n_shape)``.  Returns a dict
+    keyed by ``l1``.  Rejects non-finite entries.  Because these are *relative*
+    cross-covariances ``Cov(sigma, a_l)/(sigma*a_l)``, entries blow up where an
+    ``a_l`` crosses zero; a warn-only diagnostic (consistent with the PSD-check
+    policy) flags — but never modifies — cells whose magnitude exceeds
+    ``zero_warn_threshold``.
+    """
+    if isinstance(cross_cov, dict):
+        keys = sorted(int(k) for k in cross_cov)
+        if keys != list(range(1, max_order + 1)):
+            raise ValueError(
+                f"cross_cov keys must be exactly 1..{max_order}, got {keys}"
+            )
+        blocks = {l1: np.asarray(cross_cov[l1], dtype=float)
+                  for l1 in range(1, max_order + 1)}
+    else:
+        arr = np.asarray(cross_cov, dtype=float)
+        if arr.shape != (max_order, n0, n_shape):
+            raise ValueError(
+                f"cross_cov array shape {arr.shape} doesn't match expected "
+                f"({max_order}, {n0}, {n_shape})"
+            )
+        blocks = {l1: arr[l1 - 1] for l1 in range(1, max_order + 1)}
+
+    big_per_order: Dict[int, int] = {}
+    for l1, blk in blocks.items():
+        if blk.shape != (n0, n_shape):
+            raise ValueError(
+                f"cross_cov[{l1}] shape {blk.shape} doesn't match expected "
+                f"({n0}, {n_shape})"
+            )
+        if not np.all(np.isfinite(blk)):
+            raise ValueError(
+                f"cross_cov[{l1}] contains non-finite values "
+                f"({int(np.sum(~np.isfinite(blk)))} cells)"
+            )
+        n_big = int(np.sum(np.abs(blk) > zero_warn_threshold))
+        if n_big:
+            big_per_order[l1] = n_big
+
+    if big_per_order:
+        total = sum(big_per_order.values())
+        warnings.warn(
+            f"MF34 (L=0, L1) cross block: {total} relative cross-covariance "
+            f"entries exceed {zero_warn_threshold:g} (likely a_l near a zero "
+            f"crossing); values kept as-is. Per order: {big_per_order}.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return blocks
+
+
 def create_mf34_from_covariance(
     cov_matrix: np.ndarray,
     energy_grid_ev: np.ndarray,
@@ -159,6 +197,9 @@ def create_mf34_from_covariance(
     ltt: int = 1,
     mt1: Optional[int] = None,
     frame: str = "same-as-MF4",
+    cross_cov: Optional[Union[Dict[int, np.ndarray], np.ndarray]] = None,
+    cross_energy_grid_ev: Optional[np.ndarray] = None,
+    cross_zero_warn_threshold: float = 1.0e3,
 ) -> MF34MT:
     """Build an MF34MT object from a Legendre-coefficient covariance matrix.
 
@@ -197,6 +238,25 @@ def create_mf34_from_covariance(
         Cross-correlation MT.  Defaults to ``mt`` (self-correlation).
     frame : str, default "same-as-MF4"
         Reference frame: "same-as-MF4" (LCT=0), "LAB" (LCT=1), or "CM" (LCT=2).
+    cross_cov : dict or np.ndarray, optional
+        Opt-in sigma↔a_l cross covariance emitted as (L=0, L1) sub-subsections.
+        A dict ``{l1: (N0, N) array}`` for ``l1`` in ``1..max_order`` or a
+        stacked array ``(max_order, N0, N)``, where ``N0`` is the number of
+        cross-grid intervals and ``N`` the shape-grid intervals.  Entries are
+        **relative** ``Cov(sigma, a_l1)/(sigma*a_l1)``.  When given, the section
+        is written in the LTT=2 representation: the L>=1 shape blocks are
+        byte-identical to the default (so ``cov_matrix`` must be the LTT=1
+        a_1..a_L layout, i.e. pass ``ltt=1``), the (L=0, L1>=1) blocks carry the
+        cross terms as LB=6 rectangular records on the coarse×shape grids, and
+        the (0, 0) magnitude self-block is written **null (zeros)** — magnitude
+        self-covariance belongs in MF33, not MF34.  Default ``None`` leaves the
+        output byte-identical to the pre-existing behavior.
+    cross_energy_grid_ev : np.ndarray, optional
+        Coarse (magnitude) energy boundaries in eV for the L=0 dimension of the
+        cross blocks (``N0 + 1`` values).  Defaults to ``energy_grid_ev``.
+    cross_zero_warn_threshold : float, default 1e3
+        Magnitude above which a relative cross-covariance entry triggers a
+        warn-only diagnostic (a_l near a zero crossing).  Never modifies data.
 
     Returns
     -------
@@ -204,6 +264,14 @@ def create_mf34_from_covariance(
     """
     if mt1 is None:
         mt1 = mt
+
+    if cross_cov is not None:
+        return _create_mf34_with_cross(
+            cov_matrix, energy_grid_ev, max_order, za, awr, mat, mt,
+            mt1=mt1, ltt=ltt, frame=frame,
+            cross_cov=cross_cov, cross_energy_grid_ev=cross_energy_grid_ev,
+            cross_zero_warn_threshold=cross_zero_warn_threshold,
+        )
 
     l_min = _l_min_for_ltt(ltt)
     if max_order < l_min:
@@ -263,6 +331,128 @@ def create_mf34_from_covariance(
                 records = [_make_lb5_record(sub_matrix, grid)]
             else:
                 records = [_make_lb6_record(sub_matrix, grid, grid)]
+
+            sub_subsec = SubSubsection(l=l, l1=l1, lct=lct, ni=1, records=records)
+            subsection.sub_subsections.append(sub_subsec)
+
+    mf34._nmt1 = 1
+    mf34._subsections = [subsection]
+    return mf34
+
+
+def _create_mf34_with_cross(
+    cov_matrix: np.ndarray,
+    energy_grid_ev: np.ndarray,
+    max_order: int,
+    za: float,
+    awr: float,
+    mat: int,
+    mt: int,
+    *,
+    mt1: int,
+    ltt: int,
+    frame: str,
+    cross_cov: Union[Dict[int, np.ndarray], np.ndarray],
+    cross_energy_grid_ev: Optional[np.ndarray],
+    cross_zero_warn_threshold: float,
+) -> MF34MT:
+    """LTT=2 builder that appends (L=0, L1) sigma↔a_l cross blocks.
+
+    The L>=1 shape blocks are built from ``cov_matrix`` exactly as the default
+    LTT=1 path (so the shape covariance is unchanged); the L=0 row uses the
+    coarse magnitude grid, with a null (zeros) (0, 0) block and LB=6 (0, L1)
+    cross blocks.  The full upper triangle (including the zero (0, 0)) is
+    emitted so the existing parser's LTT=2 sub-subsection count matches.
+    """
+    if int(ltt or 1) != 1:
+        raise ValueError(
+            "cross_cov requires the shape cov_matrix in the LTT=1 (a_1..a_L) "
+            "layout; pass ltt=1."
+        )
+    if mt1 != mt:
+        raise ValueError(
+            "cross_cov is only supported for the self pair (mt1 == mt); "
+            f"got mt={mt}, mt1={mt1}."
+        )
+    if max_order < 1:
+        raise ValueError(f"max_order={max_order} must be >= 1 for cross blocks")
+
+    n_shape = len(energy_grid_ev) - 1
+    n_orders = max_order  # l_min = 1 for the shape layout
+    expected_size = n_shape * n_orders
+    if cov_matrix.shape != (expected_size, expected_size):
+        raise ValueError(
+            f"Covariance matrix shape {cov_matrix.shape} doesn't match "
+            f"expected ({expected_size}, {expected_size}) for {n_shape} energy "
+            f"intervals and {n_orders} Legendre orders (LTT=1 shape layout, "
+            f"max_order={max_order})"
+        )
+    if not np.all(np.isfinite(cov_matrix)):
+        n_inf = int(np.sum(np.isinf(cov_matrix)))
+        n_nan = int(np.sum(np.isnan(cov_matrix)))
+        bad = np.argwhere(~np.isfinite(cov_matrix))
+        raise ValueError(
+            f"Covariance matrix contains {n_inf} inf and {n_nan} NaN values. "
+            f"First 5 non-finite positions (row, col): {bad[:5].tolist()}"
+        )
+    if not np.all(np.isfinite(energy_grid_ev)):
+        raise ValueError(
+            f"Energy grid contains non-finite values: "
+            f"{energy_grid_ev[~np.isfinite(energy_grid_ev)]}"
+        )
+
+    cross_grid_arr = (
+        energy_grid_ev if cross_energy_grid_ev is None else cross_energy_grid_ev
+    )
+    if not np.all(np.isfinite(cross_grid_arr)):
+        raise ValueError(
+            f"Cross energy grid contains non-finite values: "
+            f"{np.asarray(cross_grid_arr)[~np.isfinite(cross_grid_arr)]}"
+        )
+    n0 = len(cross_grid_arr) - 1
+
+    blocks = _normalize_cross_cov(
+        cross_cov, max_order, n0, n_shape, cross_zero_warn_threshold
+    )
+
+    mf34 = MF34MT(number=mt)
+    mf34._za = za
+    mf34._awr = awr
+    mf34._mat = mat
+    mf34._ltt = 2
+    mf34._mf = 34
+
+    subsection = Subsection()
+    subsection.mt1 = mt1
+    subsection.nl = max_order
+    subsection.nl1 = max_order
+    subsection.mat1 = 0.0
+
+    lct_map = {"same-as-MF4": 0, "LAB": 1, "CM": 2}
+    lct = lct_map.get(frame, 0)
+
+    shape_grid = list(energy_grid_ev)
+    cross_grid = list(cross_grid_arr)
+
+    for l in range(0, max_order + 1):
+        for l1 in range(l, max_order + 1):
+            row_grid = cross_grid if l == 0 else shape_grid
+            col_grid = cross_grid if l1 == 0 else shape_grid
+
+            if l >= 1:
+                row_indices = [i * n_orders + (l - 1) for i in range(n_shape)]
+                col_indices = [i * n_orders + (l1 - 1) for i in range(n_shape)]
+                sub_matrix = cov_matrix[np.ix_(row_indices, col_indices)]
+            elif l1 == 0:
+                # Null magnitude self-block (belongs in MF33).
+                sub_matrix = np.zeros((n0, n0), dtype=float)
+            else:
+                sub_matrix = blocks[l1]
+
+            if l == l1:
+                records = [_make_lb5_record(sub_matrix, row_grid)]
+            else:
+                records = [_make_lb6_record(sub_matrix, row_grid, col_grid)]
 
             sub_subsec = SubSubsection(l=l, l1=l1, lct=lct, ni=1, records=records)
             subsection.sub_subsections.append(sub_subsec)
@@ -461,52 +651,10 @@ def write_mf34_to_file(
     update_directory : bool, default True
         Refresh the MF1/MT451 directory after writing.
     """
-    with open(source_endf, 'r') as f:
-        lines = f.readlines()
-
-    mf34_start, mf34_end = _find_mf34_boundaries(lines)
-    has_mf34 = mf34_start is not None
-
-    if has_mf34 and not replace_existing:
-        raise FileExistsError(
-            f"MF34 already exists in {source_endf}. "
-            f"Set replace_existing=True to replace it."
-        )
-
-    mf34_content = str(mf34)
-    mf34_lines = [line + '\n' for line in mf34_content.split('\n') if line.strip()]
-
-    from ..utils import format_endf_data_line, ENDF_FORMAT_INT
-    mat_num = mf34._mat or 0
-    fend_line = format_endf_data_line(
-        [0, 0, 0, 0, 0, 0], mat_num, 0, 0, 0,
-        formats=[ENDF_FORMAT_INT] * 6
-    ) + '\n'
-    mf34_lines.append(fend_line)
-
-    if has_mf34:
-        skip_end = mf34_end
-        if skip_end < len(lines) and len(lines[skip_end]) >= 75:
-            try:
-                old_mf = int(lines[skip_end][70:72].strip() or '0')
-                old_mt = int(lines[skip_end][72:75].strip() or '0')
-                if old_mf == 0 and old_mt == 0:
-                    skip_end += 1
-            except ValueError:
-                pass
-        new_lines = lines[:mf34_start] + mf34_lines + lines[skip_end:]
-    else:
-        insert_idx = _find_mend_marker(lines)
-        new_lines = lines[:insert_idx] + mf34_lines + lines[insert_idx:]
-
-    with open(output_path, 'w') as f:
-        f.writelines(new_lines)
-
-    if update_directory:
-        from .update_directory import update_mf1_directory
-        update_mf1_directory(output_path, added_sections={(34, mf34.number)})
-
-    return output_path
+    return write_mf_section_to_file(
+        source_endf, mf34, output_path,
+        replace_existing=replace_existing, update_directory=update_directory,
+    )
 
 
 def remove_mf34_from_file(filepath: str, update_directory: bool = True) -> bool:
@@ -517,7 +665,7 @@ def remove_mf34_from_file(filepath: str, update_directory: bool = True) -> bool:
     with open(filepath, 'r') as f:
         lines = f.readlines()
 
-    start, end = _find_mf34_boundaries(lines)
+    start, end = _find_mf_boundaries(lines, 34)
     if start is None:
         return False
 
@@ -530,36 +678,3 @@ def remove_mf34_from_file(filepath: str, update_directory: bool = True) -> bool:
         update_mf1_directory(filepath)
 
     return True
-
-
-def _find_mf34_boundaries(lines: List[str]) -> Tuple[Optional[int], Optional[int]]:
-    """Locate the MF34 block; return (start_idx, end_idx) or (None, None)."""
-    mf34_start = None
-    mf34_end = None
-    for i, line in enumerate(lines):
-        if len(line) >= 75:
-            try:
-                mf = int(line[70:72].strip() or '0')
-                if mf == 34:
-                    if mf34_start is None:
-                        mf34_start = i
-                    mf34_end = i + 1
-            except ValueError:
-                continue
-    return mf34_start, mf34_end
-
-
-def _find_mend_marker(lines: List[str]) -> int:
-    """Find the line index of the MEND marker (MAT=0, MF=0, MT=0)."""
-    for i in range(len(lines) - 1, -1, -1):
-        line = lines[i]
-        if len(line) >= 75:
-            try:
-                mat = int(line[66:70].strip() or '0')
-                mf = int(line[70:72].strip() or '0')
-                mt = int(line[72:75].strip() or '0')
-                if mat == 0 and mf == 0 and mt == 0:
-                    return i
-            except ValueError:
-                continue
-    return len(lines)

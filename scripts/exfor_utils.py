@@ -2026,6 +2026,14 @@ def _run_one_kw_sample(args_tuple):
             # within a sample (drawn once from MF33's full covariance), so
             # bins inherit MF33-driven cross-bin correlation through the
             # per-dataset home-bin lookup. Default-off → exact v2 behavior.
+            #
+            # WARNING (MF33/MF34 roadmap, Phase 1): do NOT repurpose this hook to
+            # derive an MF33↔MF34 cross-covariance. It injects an *assumed* MF33
+            # draw into the DCS while c0 is pinned (fix_c0_at_nominal), so the
+            # resulting a_l = c_l/c0 correlation is manufactured from fit
+            # residuals, not measured. A genuine sigma↔a_l cross block must be
+            # estimated from a joint fit (roadmap Phase 3), never from this
+            # convenience factor. See kika-workspace/docs/mf3_mf33_roadmap.md.
             mf33_dsigma_per_sample = sh.get('mf33_dsigma_per_sample') if isinstance(args_tuple, int) else None
             if mf33_dsigma_per_sample is not None:
                 home_map = sh['mf33_home_bin_by_e_key']
