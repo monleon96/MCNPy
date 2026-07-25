@@ -18,8 +18,9 @@ from typing import Optional
 
 from kika.exfor._constants import DB_PATH_ENV_VAR
 
-# Default path for TOF metadata file (next to this module)
-_DEFAULT_TOF_METADATA_PATH = Path(__file__).parent / "tof_metadata.json"
+# Default path for TOF metadata file (next to this module). Curated per-EXFOR
+# flight path / time resolution, keyed by dataset ID, nested-schema format.
+_DEFAULT_TOF_METADATA_PATH = Path(__file__).parent / "exfor_tof_parameters.json"
 
 # Module-level configuration storage
 _config = {

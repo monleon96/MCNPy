@@ -48,22 +48,25 @@ from kika.exfor.exfor_entry import ExforEntry
 _tof_metadata_cache: Optional[Dict[str, Any]] = None
 
 
+# Default TOF geometry when an experiment has no curated entry (GELINA-style).
+_TOF_DEFAULT_FLIGHT_PATH_M = 27.037
+_TOF_DEFAULT_TIME_RESOLUTION_NS = 10.0
+
+
 def _load_tof_metadata(force_reload: bool = False) -> Dict[str, Any]:
     """
     Load TOF metadata from the configuration file.
 
-    The metadata file contains flight path and time resolution parameters
-    for experiments, which supplements the database that lacks this info.
+    The file (``exfor_tof_parameters.json``) is keyed by EXFOR dataset ID; each
+    entry uses the nested ``energy_resolution_input`` schema (``distance`` and
+    ``time_resolution`` sub-objects). Supplements the database, which lacks this
+    metadata. Returns an empty map if the file is missing or invalid, so every
+    experiment falls back to the defaults.
 
     Parameters
     ----------
     force_reload : bool
         If True, reload from file even if cached
-
-    Returns
-    -------
-    Dict[str, Any]
-        TOF metadata with 'default' and 'experiments' keys
     """
     global _tof_metadata_cache
 
@@ -72,32 +75,27 @@ def _load_tof_metadata(force_reload: bool = False) -> Dict[str, Any]:
 
     metadata_path = get_tof_metadata_path()
 
+    _tof_metadata_cache = {}
     if os.path.exists(metadata_path):
         try:
             with open(metadata_path, "r", encoding="utf-8") as f:
-                _tof_metadata_cache = json.load(f)
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                _tof_metadata_cache = loaded
         except (json.JSONDecodeError, IOError):
-            # Fall back to defaults if file is invalid
-            _tof_metadata_cache = {
-                "default": {"flight_path_m": 27.037, "time_resolution_ns": 10.0},
-                "experiments": {},
-            }
-    else:
-        # No metadata file - use defaults
-        _tof_metadata_cache = {
-            "default": {"flight_path_m": 27.037, "time_resolution_ns": 10.0},
-            "experiments": {},
-        }
+            _tof_metadata_cache = {}
 
     return _tof_metadata_cache
 
 
 def _get_tof_params_for_experiment(dataset_id: str) -> Dict[str, Any]:
     """
-    Get TOF parameters for a specific experiment.
+    Get TOF parameters for a specific experiment, with fallback to defaults.
 
-    Looks up the experiment in the metadata file. If not found,
-    returns the default values.
+    Reads the nested ``energy_resolution_input`` (or ``energy_resolution_inputs``)
+    schema, taking ``distance.value`` as the flight path and
+    ``time_resolution.value`` as the timing resolution. When the experiment is
+    absent, or either value is missing/null, the defaults are used.
 
     Parameters
     ----------
@@ -107,20 +105,29 @@ def _get_tof_params_for_experiment(dataset_id: str) -> Dict[str, Any]:
     Returns
     -------
     Dict[str, Any]
-        Dictionary with 'flight_path_m' and 'time_resolution_ns' keys
+        ``{'flight_path_m': float, 'time_resolution_ns': float,
+           'source': 'file' | 'default'}``
     """
     metadata = _load_tof_metadata()
-    defaults = metadata.get("default", {"flight_path_m": 27.037, "time_resolution_ns": 10.0})
-    experiments = metadata.get("experiments", {})
+    entry = metadata.get(dataset_id) if isinstance(metadata, dict) else None
 
-    if dataset_id in experiments:
-        exp_data = experiments[dataset_id]
-        return {
-            "flight_path_m": exp_data.get("flight_path_m", defaults["flight_path_m"]),
-            "time_resolution_ns": exp_data.get("time_resolution_ns", defaults["time_resolution_ns"]),
-        }
+    if isinstance(entry, dict):
+        eri = entry.get("energy_resolution_input") or entry.get("energy_resolution_inputs")
+        if isinstance(eri, dict):
+            distance = (eri.get("distance") or {}).get("value")
+            time_res = (eri.get("time_resolution") or {}).get("value")
+            if distance is not None and time_res is not None:
+                return {
+                    "flight_path_m": float(distance),
+                    "time_resolution_ns": float(time_res),
+                    "source": "file",
+                }
 
-    return defaults.copy()
+    return {
+        "flight_path_m": _TOF_DEFAULT_FLIGHT_PATH_M,
+        "time_resolution_ns": _TOF_DEFAULT_TIME_RESOLUTION_NS,
+        "source": "default",
+    }
 
 @dataclass
 class X4ProDataset:
@@ -1113,6 +1120,7 @@ class X4ProDatabase:
                     "value": tof_params["time_resolution_ns"],
                     "unit": "ns",
                 },
+                "source": tof_params.get("source", "default"),
             },
         }
 
