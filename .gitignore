@@ -42,6 +42,5 @@ kika/**/output_directory/
 kika/**/test_output/
 nul
 dir
-ND25/
 # CLAUDE.md is a private symlink into kika-workspace (not distributed with the library)
 CLAUDE.md
