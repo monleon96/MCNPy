@@ -317,6 +317,25 @@ def merge_mf33_covariance_into_host(
 
     merged = 0.5 * (merged + merged.T)
 
+    # Validate before the eigendecomposition: LAPACK reports a NaN-poisoned
+    # matrix as "Eigenvalues did not converge", which says nothing about where
+    # the NaNs came from.  Name the rows and their energies instead — for a
+    # relative covariance a non-finite row almost always means the caller
+    # divided by a zero central value somewhere upstream.
+    if not np.all(np.isfinite(merged)):
+        bad_rows = np.flatnonzero(~np.isfinite(merged).all(axis=1))
+        spans = [
+            f"{i} ([{merged_grid[i]:.6g}, {merged_grid[i + 1]:.6g}] eV)"
+            for i in bad_rows[:5]
+        ]
+        raise ValueError(
+            f"Merged MT{mt} covariance has "
+            f"{int(np.count_nonzero(~np.isfinite(merged)))} non-finite entries "
+            f"across {len(bad_rows)} row(s); refusing to write. "
+            f"First rows: {', '.join(spans)}"
+            f"{' ...' if len(bad_rows) > 5 else ''}"
+        )
+
     min_eig = float(np.min(np.linalg.eigvalsh(merged)))
     if min_eig < -1e-8:
         log.warning(

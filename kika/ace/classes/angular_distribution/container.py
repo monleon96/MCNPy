@@ -16,19 +16,23 @@ from kika.ace.classes.angular_distribution.distributions.tabulated import Tabula
 from kika.ace.classes.angular_distribution.utils import Law44DataError
 
 
-# Constants for TOF energy resolution calculation
-_NEUTRON_MASS_MEV = 939.565  # neutron mass in MeV/c²
-_SPEED_OF_LIGHT_M_PER_NS = 0.299792458  # speed of light in m/ns (c = 3e8 m/s = 0.3 m/ns)
+from kika._constants import (
+    NEUTRON_MASS_MEV as _NEUTRON_MASS_MEV,
+    SPEED_OF_LIGHT_M_NS as _SPEED_OF_LIGHT_M_PER_NS,
+)
+from kika.utils.energy_folding import tof_energy_resolution
+from kika.utils.numerics import gauss_hermite_nodes
 
 # Default TOF parameters (GELINA facility)
 _DEFAULT_FLIGHT_PATH_M = 27.037  # meters
-_DEFAULT_DELTA_T_NS = 5.0  # nanoseconds
+_DEFAULT_DELTA_T_NS = 5.0  # nanoseconds — quoted as a FWHM
 
 
 def _compute_energy_resolution_tof(
     energy_mev: float,
     flight_path_m: float = _DEFAULT_FLIGHT_PATH_M,
     delta_t_ns: float = _DEFAULT_DELTA_T_NS,
+    delta_t_is_fwhm: bool = True,
 ) -> float:
     """
     Calculate TOF (Time-of-Flight) energy resolution σE in MeV.
@@ -36,8 +40,11 @@ def _compute_energy_resolution_tof(
     In TOF experiments, neutron energy is determined by measuring time-of-flight.
     This introduces energy uncertainty due to finite time resolution.
 
+    Thin adapter over :func:`kika.utils.energy_folding.tof_energy_resolution`,
+    which is the single definition of the formula.
+
     Energy resolution formula:
-        σE = E × 2 × δt / t
+        FWHM_E = E × 2 × δt / t,   σE = FWHM_E / 2.3548
     where t = L / v = L / (c × sqrt(2E/m_n))
 
     Parameters
@@ -47,7 +54,10 @@ def _compute_energy_resolution_tof(
     flight_path_m : float, optional
         Flight path distance in meters (default: 27.037 m, GELINA facility)
     delta_t_ns : float, optional
-        Time resolution in nanoseconds (default: 5.0 ns)
+        Timing spread in nanoseconds (default: 5.0 ns); see ``delta_t_is_fwhm``.
+    delta_t_is_fwhm : bool, optional
+        Whether ``delta_t_ns`` is a FWHM (default, the usual experimental
+        convention) or already a sigma.  The two differ by a factor 2.355.
 
     Returns
     -------
@@ -56,16 +66,15 @@ def _compute_energy_resolution_tof(
 
     Examples
     --------
-    >>> _compute_energy_resolution_tof(1.0, 27.037, 5.0)  # ~0.0054 MeV
-    >>> _compute_energy_resolution_tof(10.0, 27.037, 5.0)  # ~0.17 MeV
+    >>> _compute_energy_resolution_tof(1.0, 27.037, 5.0)  # ~0.0023 MeV
+    >>> _compute_energy_resolution_tof(10.0, 27.037, 5.0)  # ~0.073 MeV
     """
-    # velocity = c × sqrt(2E/m_n) in m/ns
-    velocity_m_per_ns = _SPEED_OF_LIGHT_M_PER_NS * np.sqrt(2 * energy_mev / _NEUTRON_MASS_MEV)
-    # time of flight in ns
-    t_ns = flight_path_m / velocity_m_per_ns
-    # energy resolution: σE/E = 2 × δt/t
-    sigma_E = energy_mev * 2 * delta_t_ns / t_ns
-    return sigma_E
+    return tof_energy_resolution(
+        energy_mev,
+        flight_path_m=flight_path_m,
+        delta_t_ns=delta_t_ns,
+        delta_t_is_fwhm=delta_t_is_fwhm,
+    )
 
 
 def _get_xs_at_energy(ace, mt: int, energy: float) -> Optional[float]:
@@ -375,16 +384,18 @@ class AngularDistributionContainer:
             e_min = 1e-11
             e_max = 20.0
 
-        # Define energy window, clamped to ACE valid range
-        e_low = max(e_min, target_energy - n_sigma * sigma_E)
-        e_high = min(e_max, target_energy + n_sigma * sigma_E)
-
-        # Sample energies uniformly within the window
-        sample_energies = np.linspace(e_low, e_high, n_samples)
-
-        # Compute Gaussian weights
-        weights = np.exp(-0.5 * ((sample_energies - target_energy) / sigma_E) ** 2)
-        weights /= weights.sum()  # Normalize weights
+        # Gauss-Hermite quadrature over the resolution kernel — the same nodes
+        # kika.utils.numerics.fold_tabulated uses, so the cross-section and
+        # angular folding paths share one scheme. This replaces a uniform
+        # n_samples-point Riemann sum over +-n_sigma, which needed many more
+        # evaluations for the same accuracy.
+        sample_energies, weights = gauss_hermite_nodes(
+            target_energy, sigma_E, n_nodes=n_samples,
+        )
+        # Nodes are unbounded, so clamp into the ACE range and renormalise.
+        # Only matters within a few sigma of the table edges.
+        sample_energies = np.clip(sample_energies, e_min, e_max)
+        weights = weights / weights.sum()
 
         # Initialize accumulators
         cosine_grid = None

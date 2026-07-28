@@ -12,7 +12,7 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 # Neutron mass in amu (unified atomic mass units)
-NEUTRON_MASS_AMU = 1.00866491595
+from kika._constants import NEUTRON_MASS_AMU  # noqa: F401
 
 # (ħc)² in eV²·barn  (1 barn = 1e-24 cm²)
 # ħc = 197.3269804 MeV·fm = 197.3269804e6 eV · 1e-13 cm

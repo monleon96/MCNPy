@@ -19,6 +19,19 @@ SYMBOL_TO_ATOMIC_NUMBER = {v: k for k, v in ATOMIC_NUMBER_TO_SYMBOL.items()}
 N_AVOGADRO = 6.02214e23
 BOLTZMANN_CONSTANT = 8.617333262145e-11  # MeV/K
 
+# --- Particle and kinematic constants (CODATA 2018) ------------------------ #
+# Single source of truth: these were previously duplicated as literals across
+# kika/utils, kika/ace, kika/exfor, kika/endf/processing and scripts/, with two
+# different neutron masses in circulation (1.008665 vs 1.00866491595).
+NEUTRON_MASS_MEV = 939.56542052        # neutron rest mass, MeV/c^2
+NEUTRON_MASS_AMU = 1.00866491595       # neutron rest mass, atomic mass units
+SPEED_OF_LIGHT_M_NS = 0.299792458      # c, m/ns
+
+# Gaussian FWHM -> standard deviation: FWHM = 2*sqrt(2*ln 2) * sigma.
+# Needed wherever an experimental width is quoted as a FWHM (time resolutions
+# and beam bunch widths normally are) but the code needs a sigma.
+FWHM_TO_SIGMA = 2.354820045030949
+
 K_TO_SUFFIX = {
     0.1: ".01",
     293.6: ".02",

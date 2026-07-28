@@ -352,6 +352,84 @@ def test_merge_raises_on_nc_records(tmp_path, monkeypatch):
             str(path), np.array([[0.1]]), np.array([1e6, 2e6]), mt=2)
 
 
+def test_write_mf33_replaces_a_larger_section_with_a_smaller_one(tmp_path):
+    """Shrinking a section must not leave orphan lines or a stale directory.
+
+    The pipeline copies the multigroup product from the nominal file *after* the
+    fine MF33 is written, so the copy carries a large fine-grid section that the
+    coarse one then replaces.  Grow-then-shrink is the real write pattern.
+    """
+    src = _minimal_template(tmp_path / "template.endf")
+    path = tmp_path / "product.endf"
+
+    n_fine = 40
+    fine_grid = np.linspace(1e6, 4e6, n_fine + 1)
+    fine_cov = np.eye(n_fine) * 0.05 + 0.01
+    write_mf33_to_file(
+        str(src),
+        create_mf33_from_covariance(fine_cov, fine_grid, ZA, AWR, MAT, MT),
+        str(path),
+    )
+    big = len([ln for ln in path.read_text().splitlines()
+               if len(ln) >= 72 and ln[70:72] == "33"])
+
+    coarse_grid = np.array([1e6, 2e6, 4e6])
+    coarse_cov = np.array([[0.09, 0.02], [0.02, 0.16]])
+    write_mf33_to_file(
+        str(path),
+        create_mf33_from_covariance(coarse_cov, coarse_grid, ZA, AWR, MAT, MT),
+        str(path),
+    )
+
+    text = path.read_text()
+    mf33_lines = [ln for ln in text.splitlines()
+                  if len(ln) >= 72 and ln[70:72] == "33"]
+    assert len(mf33_lines) < big, "the section should have shrunk"
+
+    parsed = parse_mf33_mt(mf33_lines, MT)
+    M = np.asarray(parsed.to_xs_covmat().matrices[0])
+    assert M.shape == (2, 2), "no remnant of the fine grid may survive"
+    np.testing.assert_allclose(M, coarse_cov, atol=1e-9)
+
+
+def test_merge_raises_named_error_on_non_finite(tmp_path):
+    """A NaN matrix must raise ValueError naming the rows, not a LAPACK error.
+
+    Before this guard, non-finite entries reached ``np.linalg.eigvalsh`` and
+    surfaced as "Eigenvalues did not converge" — which says nothing about where
+    the NaNs came from.  For a relative covariance a non-finite row almost
+    always means the caller divided by a zero central value upstream.
+    """
+    path, _host_cov, _host_grid = _host_file(tmp_path)
+    new_grid = np.array([1e6, 1.5e6, 2e6])
+    new_cov = np.array([[0.10, 0.05], [0.05, 0.20]])
+    new_cov[1, :] = np.nan
+    new_cov[:, 1] = np.nan
+
+    with pytest.raises(ValueError) as exc:
+        merge_mf33_covariance_into_host(str(path), new_cov, new_grid, mt=2)
+
+    msg = str(exc.value)
+    assert "non-finite" in msg
+    assert "eV" in msg, "the error should name the offending rows by energy"
+    assert "refusing to write" in msg
+
+
+def test_merge_accepts_zeroed_rows_where_central_was_absent(tmp_path):
+    """Zeroed (not NaN) rows are legitimate and must still merge.
+
+    Groups with no host central are zeroed upstream by the MF33 collapse; that
+    is a valid, writable matrix and must not trip the finiteness guard.
+    """
+    path, _host_cov, _host_grid = _host_file(tmp_path)
+    new_grid = np.array([1e6, 1.5e6, 2e6])
+    new_cov = np.array([[0.0, 0.0], [0.0, 0.20]])
+
+    sec = merge_mf33_covariance_into_host(str(path), new_cov, new_grid, mt=2)
+    m, _g, _ = sec._self_covariance_matrix()
+    np.testing.assert_allclose(np.asarray(m)[2:4, 2:4], new_cov)
+
+
 def test_merge_without_host_mf33_falls_back(tmp_path):
     """No host MF33 section → the new covariance is written as-is."""
     src = _minimal_template(tmp_path / "template.endf")
