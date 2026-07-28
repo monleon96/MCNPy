@@ -82,7 +82,7 @@ MT_NUMBER = 2  # elastic scattering
 # ── Library ENDF files (one per evaluation compared in the chi^2 analysis) ──
 # This_work uses its own MF3 *and* MF4 from the pipeline's nominal ENDF, for a
 # fully symmetric treatment (no nominal_fits.parquet dependency).
-THIS_WORK_DIR  = "/share_snc/snc/JuanMonleon/ENDF_samples/new_test_81"
+THIS_WORK_DIR  = "/share_snc/snc/JuanMonleon/ENDF_samples/new_test_82_mt1fix"
 THIS_WORK_FILE = f"{THIS_WORK_DIR}/26-Fe-56g_nominal_mg.endf"
 
 JEFF_FILE  = "/share_snc/snc/JuanMonleon/jeff40_with_MF4_from_jeff33/26-Fe-56g.txt"
@@ -104,6 +104,11 @@ EXCLUDE_EXPERIMENTS = ["32246002", "400750022"]  # Tostkii 1957; Morozov 1972 po
 TOF_PARAMETERS_FILE        = "/share_snc/snc/JuanMonleon/EXFOR/exfor_tof_parameters.json"
 DEFAULT_FLIGHT_PATH_M      = 27.037  # ORELA-like; used when the JSON has no entry
 DEFAULT_TIME_RESOLUTION_NS = 5.0
+# Must match DELTA_T_IS_FWHM in exfor_to_endf_sampling_v2.py, or this chi2 folds
+# the library MF3 over a different resolution kernel than the fit used. Runs <=81
+# read delta_t as a sigma; from run 82 it is a FWHM (sigma_E = FWHM/2.3548).
+# Passed explicitly because get_tof_parameters() now defaults it to True.
+DELTA_T_IS_FWHM            = True
 RESOLUTION_FOLD_NODES      = 12      # Gauss-Hermite nodes for the c_0 fold
 
 # Energy range for the analysis. EXFOR datapoints outside this window are
@@ -116,7 +121,7 @@ E_MAX_MEV = 4.0
 L_MAX = 6
 
 # ── Output ──
-OUTPUT_PARQUET = "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_c0_81.parquet"
+OUTPUT_PARQUET = "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_c0_82.parquet"
 
 
 # ── ENDF loading (MF3 + MF4 + MF34; no MF33, so no NJOY/PENDF) ────────────────
@@ -186,6 +191,7 @@ def build_rows_at_energy(
             subentry_id, tof_cache,
             default_flight_path_m=DEFAULT_FLIGHT_PATH_M,
             default_time_resolution_ns=DEFAULT_TIME_RESOLUTION_NS,
+            default_delta_t_is_fwhm=DELTA_T_IS_FWHM,
         )
         sigma_E_mev = compute_sigma_E(e_mev, tof)
 

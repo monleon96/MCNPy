@@ -1,7 +1,8 @@
 """
 EXFOR uncertainty manifest resolver.
 
-Reads ``uncertainty_manifest.yaml`` and computes per-point sigma_stat and
+Reads the EXFOR uncertainty manifest YAML (see ``_DEFAULT_MANIFEST_PATH``
+below for which one, and why there is only one) and computes per-point sigma_stat and
 sigma_sys for each EXFOR dataset, augmenting the X4Pro database loader with
 prose-documented ERR-ANALYS information that isn't surfaced as data-table
 columns.
@@ -41,12 +42,25 @@ import os
 
 # Default manifest location (alongside the EXFOR data on the shared volume).
 # Override with the ``KIKA_UNCERTAINTY_MANIFEST_PATH`` environment variable.
-_DEFAULT_MANIFEST_PATH = "/share_snc/snc/JuanMonleon/EXFOR/uncertainty_manifest.yaml"
-# Alternate manifest with Cierjacks ERR-T routed to a diagonal residual via a
-# ``sys_dep`` block (instead of the legacy ``kind: total_minus_stat`` rank-1
-# treatment). Toggle with:
-#     export KIKA_UNCERTAINTY_MANIFEST_PATH=/share_snc/snc/JuanMonleon/EXFOR/uncertainty_manifest_diagonal_cierjacks.yaml
-# Unset to fall back to the default manifest (identical legacy behavior).
+#
+# This is the PRODUCTION manifest: Cierjacks ERR-T routed to a diagonal residual
+# through a ``sys_dep`` block. It is what run 77 (the production MF4/MF34) and
+# run 81 were built with, and it is now the default so a run is reproducible
+# from the repo without remembering to export anything.
+#
+# It is now the ONLY manifest in the EXFOR directory. The default used to be
+# ``uncertainty_manifest.yaml``, which applies the legacy ``kind:
+# total_minus_stat`` rank-1 treatment to Cierjacks instead. Selecting it by
+# accident silently changes the fits — median n_eff 3.84 vs 2.65 and a different
+# frozen_degree in 945 of 1738 bins — so on 2026-07-27 it was moved out of the
+# way, to
+#     EXFOR/_manifest_archive/uncertainty_manifest_legacy_rank1_cierjacks.yaml
+# (sha256 9d32823b...). It is kept only so runs 68-75, whose ``run_metadata.json``
+# records that hash, stay reproducible; nothing should select it for new work.
+# The env var still overrides, if you ever need to point at it deliberately.
+_DEFAULT_MANIFEST_PATH = (
+    "/share_snc/snc/JuanMonleon/EXFOR/uncertainty_manifest_diagonal_cierjacks.yaml"
+)
 _MANIFEST_PATH = Path(os.environ.get(
     "KIKA_UNCERTAINTY_MANIFEST_PATH", _DEFAULT_MANIFEST_PATH
 ))
@@ -598,8 +612,9 @@ def resolve_for_dataset(
     # the residual after removing σ_stat and σ_sys_indep in quadrature is
     # folded into σ_stat. Effect: the documented energy-dependent envelope
     # becomes uncorrelated point-to-point noise instead of a rank-1 shape
-    # mode (which is the legacy ``kind: total_minus_stat`` treatment). Used
-    # by the ``uncertainty_manifest_diagonal_cierjacks.yaml`` alternate.
+    # mode (which is the legacy ``kind: total_minus_stat`` treatment). This is
+    # how Cierjacks is treated in the production manifest
+    # ``uncertainty_manifest_diagonal_cierjacks.yaml``.
     # Entries without a ``sys_dep`` block are unaffected.
     sys_dep_spec = entry.get("sys_dep") if entry else None
     if (

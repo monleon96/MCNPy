@@ -1514,6 +1514,169 @@ def perform_adaptive_multigroup_collapse(
 # MF33 (cross-section magnitude) single-block collapse
 # =============================================================================
 
+@dataclass
+class MF33MultigroupResult:
+    """Result of the scalar (c0 / magnitude) adaptive collapse."""
+    group_boundaries_mev: np.ndarray   # (N_groups + 1,)
+    group_boundaries_ev: np.ndarray    # same in eV
+    aggregation_matrix: np.ndarray     # A_0, (N_groups, N_fine), row-stochastic
+    cov_rel_grouped: np.ndarray        # (N_groups, N_groups) relative
+    cov_abs_grouped: np.ndarray        # (N_groups, N_groups) absolute
+    means_grouped: np.ndarray          # (N_groups,) width-weighted host central
+    groups: List[List[int]]
+    group_info: List[GroupInfo]
+
+
+def perform_mf33_multigroup_collapse(
+    cov_abs_fine: np.ndarray,
+    means_fine: np.ndarray,
+    energy_bins: List,          # List[EnergyBinInfo], one per fine bin, in order
+    *,
+    rho_min: float = 0.85,
+    sigma_ratio_max: Optional[float] = None,
+    logger=None,
+    diagnostics_file: Optional[Path] = None,
+    label: str = "MF33 MT2",
+) -> MF33MultigroupResult:
+    """Adaptive multigroup collapse for the scalar MF33 magnitude channel.
+
+    The MF34 collapse groups on the ``l=1`` correlation structure of a
+    ``(n_fine * L)`` matrix.  MF33 is a single square block over one scalar per
+    bin, so the very same machinery applies with ``max_order=1``: ``idx(i, 1, 1)``
+    is just ``i``, which makes :func:`find_adaptive_group_boundaries` and the
+    per-bin sigma/correlation diagnostics operate directly on the scalar matrix.
+
+    The grid this produces is **independent of the MF34 grid** — the magnitude
+    channel has its own correlation length, and ENDF lets every MF/MT section
+    carry its own boundaries.  Use :func:`collapse_mf33_covariance_to_grid`
+    instead when you deliberately want MF33 projected onto a *given* grid (the
+    MF34 one, say).
+
+    Collapse runs in **absolute** space and converts back with the collapsed
+    means, which is the rigorous order when the central varies across merged
+    bins:  ``C_abs_g = A0 C_abs A0^T``, ``m_g = A0 m``, ``C_rel_g = C_abs_g /
+    outer(m_g)``.
+
+    No percentile variance compensation is applied, matching what the pipeline
+    actually publishes for MF34 (it rebuilds the multigroup covariance from
+    ``A @ cov_abs @ A.T`` and never applies ``scale_factors``).
+
+    Parameters
+    ----------
+    cov_abs_fine : np.ndarray
+        ``(n_fine, n_fine)`` **absolute** covariance of the magnitude per bin.
+    means_fine : np.ndarray
+        ``(n_fine,)`` central value per bin, in the same units as the covariance
+        (e.g. the TOF-folded host ``sigma_el``, or ``c0`` — the relative result
+        is identical either way as long as both are consistent).
+    energy_bins : List[EnergyBinInfo]
+        One entry per row of ``cov_abs_fine``, in matching order.
+    rho_min, sigma_ratio_max
+        Merge gates, passed straight to :func:`find_adaptive_group_boundaries`.
+    diagnostics_file : Path, optional
+        Per-boundary merge decisions CSV (same schema as the MF34 one).
+
+    Returns
+    -------
+    MF33MultigroupResult
+    """
+    C_abs = np.asarray(cov_abs_fine, dtype=float)
+    means = np.asarray(means_fine, dtype=float)
+    n_fine = len(energy_bins)
+
+    if C_abs.shape != (n_fine, n_fine):
+        raise ValueError(
+            f"cov_abs_fine shape {C_abs.shape} doesn't match {n_fine} energy bins"
+        )
+    if means.shape != (n_fine,):
+        raise ValueError(
+            f"means_fine shape {means.shape} doesn't match {n_fine} energy bins"
+        )
+
+    fine_energies_mev = np.array([eb.energy_mev for eb in energy_bins], dtype=float)
+    sigma_E_mev = np.array([eb.sigma_E_mev for eb in energy_bins], dtype=float)
+    fine_bin_lower_mev = np.array([eb.bin_lower_mev for eb in energy_bins], dtype=float)
+    fine_bin_upper_mev = np.array([eb.bin_upper_mev for eb in energy_bins], dtype=float)
+    fine_bin_widths_mev = fine_bin_upper_mev - fine_bin_lower_mev
+
+    corr_fine = cov_to_corr(C_abs)
+
+    if logger:
+        adj = np.array([corr_fine[i, i + 1] for i in range(n_fine - 1)])
+        logger.info(
+            f"  [{label}] Adaptive grid: {n_fine} fine bins, adjacent c0 corr "
+            f"mean={np.mean(adj):.4f}, median={np.median(adj):.4f}, "
+            f"min={np.min(adj):.4f}, max={np.max(adj):.4f}"
+        )
+
+    # max_order=1 -> idx(i, 1, 1) == i, so the MF34 grouper reads the scalar
+    # matrix directly with no reshaping.
+    groups, group_info = find_adaptive_group_boundaries(
+        corr_matrix=corr_fine,
+        cov_matrix=C_abs,
+        fine_energies_mev=fine_energies_mev,
+        sigma_E_mev=sigma_E_mev,
+        fine_bin_widths_mev=fine_bin_widths_mev,
+        max_order=1,
+        rho_min=rho_min,
+        sigma_ratio_max=sigma_ratio_max,
+        logger=logger,
+        diagnostics_file=diagnostics_file,
+    )
+
+    A0 = build_l0_row_aggregator(
+        groups=groups,
+        fine_bin_widths_mev=fine_bin_widths_mev,
+        n_fine=n_fine,
+    )
+
+    cov_abs_grouped = collapse_covariance(C_abs, A0)
+    means_grouped = A0 @ means
+
+    good = np.isfinite(means_grouped) & (means_grouped > 0.0)
+    cov_rel_grouped = np.zeros_like(cov_abs_grouped)
+    if np.any(good):
+        block = np.ix_(good, good)
+        cov_rel_grouped[block] = (
+            cov_abs_grouped[block] / np.outer(means_grouped[good], means_grouped[good])
+        )
+    if not np.all(good) and logger:
+        logger.warning(
+            f"  [{label}] {int(np.count_nonzero(~good))} group(s) have a "
+            f"non-positive collapsed central; their relative rows are zeroed."
+        )
+
+    cov_rel_grouped = 0.5 * (cov_rel_grouped + cov_rel_grouped.T)
+    cov_rel_grouped, _ = check_positive_semidefinite(
+        cov_rel_grouped, name=f"{label} multigroup", logger=logger,
+        fix_if_needed=False,
+    )
+
+    group_boundaries_mev = construct_group_energy_boundaries(
+        groups=groups,
+        fine_bin_lower_mev=fine_bin_lower_mev,
+        fine_bin_upper_mev=fine_bin_upper_mev,
+    )
+
+    if logger:
+        logger.info(
+            f"  [{label}] Collapsed {n_fine} -> {len(groups)} groups "
+            f"({n_fine / max(1, len(groups)):.1f}x), "
+            f"[{group_boundaries_mev[0]:.4f}, {group_boundaries_mev[-1]:.4f}] MeV"
+        )
+
+    return MF33MultigroupResult(
+        group_boundaries_mev=group_boundaries_mev,
+        group_boundaries_ev=group_boundaries_mev * 1e6,
+        aggregation_matrix=A0,
+        cov_rel_grouped=cov_rel_grouped,
+        cov_abs_grouped=cov_abs_grouped,
+        means_grouped=means_grouped,
+        groups=groups,
+        group_info=group_info,
+    )
+
+
 def collapse_mf33_covariance_to_grid(
     native_grid_ev: np.ndarray,
     native_cov: np.ndarray,
@@ -1607,7 +1770,32 @@ def collapse_mf33_covariance_to_grid(
         C_abs = relative_to_absolute(C, means, means)
         C_tgt_abs = collapse_covariance(C_abs, M)
         means_tgt = M @ means  # width-weighted group σ
-        C_tgt = absolute_to_relative(C_tgt_abs, means_tgt, means_tgt)
+
+        # A target group whose native means are all non-positive has no central
+        # value to be relative to.  ``absolute_to_relative`` flags that division
+        # with NaN by design; letting those rows through is what fed NaNs to
+        # ``np.linalg.eigvalsh`` in the ENDF writer and surfaced as the opaque
+        # "Eigenvalues did not converge".  Zero the affected rows/columns here
+        # and name the groups, instead of relying on a downstream sanitizer.
+        good = np.isfinite(means_tgt) & (means_tgt > 0.0)
+        C_tgt = np.zeros_like(C_tgt_abs)
+        if np.any(good):
+            block = np.ix_(good, good)
+            C_tgt[block] = absolute_to_relative(
+                C_tgt_abs[block], means_tgt[good], means_tgt[good],
+            )
+        n_dropped = int(np.count_nonzero(~good))
+        if n_dropped and logger:
+            spans = [
+                f"[{target_grid[i]:.6g}, {target_grid[i + 1]:.6g}]"
+                for i in np.flatnonzero(~good)
+            ]
+            shown = ", ".join(spans[:5]) + (" ..." if len(spans) > 5 else "")
+            logger.warning(
+                f"  {label}: {n_dropped}/{len(means_tgt)} target groups have a "
+                f"non-positive mean and cannot carry a relative covariance; "
+                f"their rows/columns are zeroed (eV): {shown}"
+            )
     else:
         if is_relative and native_means is None and logger:
             logger.info(
@@ -1618,8 +1806,11 @@ def collapse_mf33_covariance_to_grid(
 
     C_tgt = 0.5 * (C_tgt + C_tgt.T)
 
-    # Warn-only PSD check — never repair (final-matrix PSD policy).
-    _, was_psd = check_positive_semidefinite(
+    # Warn-only PSD check — never repair (final-matrix PSD policy).  Take the
+    # returned matrix: check_positive_semidefinite sanitizes non-finite entries
+    # on a copy, so discarding it (the historical ``_, was_psd = ...``) logged
+    # "replacing with 0" while handing the caller the unsanitized matrix.
+    C_tgt, was_psd = check_positive_semidefinite(
         C_tgt, name=label, logger=logger, fix_if_needed=False,
     )
     if not was_psd:

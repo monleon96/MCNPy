@@ -58,6 +58,7 @@ All knobs are configured in the CONFIGURATION block below — run with:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,14 +87,22 @@ import chi2_metrics
 
 # Run versioning. Outputs land in `<REPORT_DIR>/run_<RUN_ID>/`; bump this to
 # start a fresh run without overwriting earlier ones.
-RUN_ID: str = "081"
+RUN_ID: str = "082"
 
 # Which methodologies to run. Any non-empty subset of the PATHS keys. Each entry
 # needs its parquet + .eval_cov.npz sidecar built first by the matching
 # scripts/precompute_chi2_*.py. The folded_al_c0_ns{1,3} entries are built by
 # scripts/precompute_chi2_folded_al_c0.py (set N_SIGMA=1.0 then 3.0 and rerun).
 # Original headline set: ["exfor_c0", "library_c0", "folded_c0"].
-METHODOLOGIES_TO_RUN: List[str] = ["folded_al_c0_ns1", "folded_al_c0_ns3"]
+METHODOLOGIES_TO_RUN: List[str] = ["predictive", "exfor_c0"]
+
+# Overridable from the environment so a sweep script (run_fold_sweep.sh) can
+# select a different set without editing this file. Comma-separated.
+if os.environ.get("KIKA_CHI2_METHODOLOGIES"):
+    METHODOLOGIES_TO_RUN = [
+        m.strip() for m in os.environ["KIKA_CHI2_METHODOLOGIES"].split(",")
+        if m.strip()
+    ]
 
 # Per-methodology I/O. The .npz sidecar is inferred as `<parquet>.eval_cov.npz`.
 #
@@ -108,14 +117,55 @@ METHODOLOGIES_TO_RUN: List[str] = ["folded_al_c0_ns1", "folded_al_c0_ns3"]
 # c₀ from the library's own MF3 (not fit per energy), so its 8% normalization is
 # a genuine global mode and stays None.
 PATHS: Dict[str, Dict[str, Optional[str]]] = {
+    # PRIMARY. Each library judged by what it ships: its own MF3 + MF4 forward-
+    # folded through each experiment's TOF resolution (product fold), covariance
+    # = its own MF34 + MF33. Written by scripts/precompute_chi2_predictive.py,
+    # which supersedes library_c0 / folded_c0 / folded_al_c0 (each a special
+    # case of it). c0 is a smooth function of energy, not a per-energy fit, so
+    # the normalization is a genuine experiment-wide mode → block col None.
+    "predictive": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_82.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — shipped MF3+MF4 resolution-folded, MF34+MF33 eval σ",
+        "systematic_block_col": None,
+    },
+    # Fold-mode sweep. Identical to `predictive` in every respect except which
+    # part of the forward model is resolution-averaged (FOLD_MODE in
+    # precompute_chi2_predictive.py). Compare V2 across these to decide, over
+    # every bin in the database rather than a handful of hand-picked energies,
+    # whether the product fold is really the right convention.
+    "predictive_factors": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_82_factors.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive_factors",
+        "title":      "χ² analysis — predictive, factors averaged <σ>·F(<a_l>)",
+        "systematic_block_col": None,
+    },
+    "predictive_foldsigma": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_82_foldsigma.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive_foldsigma",
+        "title":      "χ² analysis — predictive, magnitude averaged only <σ>·F(a_l(E0))",
+        "systematic_block_col": None,
+    },
+    "predictive_foldal": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_82_foldal.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive_foldal",
+        "title":      "χ² analysis — predictive, Legendre shape averaged only σ(E0)·F(<a_l>)",
+        "systematic_block_col": None,
+    },
+    "predictive_nofold": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_82_nofold.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive_nofold",
+        "title":      "χ² analysis — predictive, no resolution model σ(E0)·F(a_l(E0))",
+        "systematic_block_col": None,
+    },
     "exfor_c0": {
-        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_exfor_c0_81.parquet",
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_exfor_c0_82.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_exfor_c0",
         "title":      "χ² analysis — c₀ from EXFOR Kinney/Smith fit, MF34 eval σ",
         "systematic_block_col": "energy_mev",
     },
     "library_c0": {
-        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_library_c0_81.parquet",
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_library_c0_82.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_library_c0",
         "title":      "χ² analysis — c₀ from library MF3, MF34+MF33 eval σ",
         "systematic_block_col": None,
@@ -126,7 +176,7 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
     # normalization is a genuine experiment-wide mode → systematic_block_col=None,
     # same as library_c0. Parquet written by scripts/precompute_chi2_folded_c0.py.
     "folded_c0": {
-        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_c0_81.parquet",
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_c0_82.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_folded_c0",
         "title":      "χ² analysis — c₀ from resolution-folded library MF3, MF34 eval σ",
         "systematic_block_col": None,
@@ -137,13 +187,13 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
     # scripts/precompute_chi2_folded_al_c0.py (edit N_SIGMA and rerun for each).
     # Same global-normalization reasoning as folded_c0 → systematic_block_col=None.
     "folded_al_c0_ns1": {
-        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_al_c0_81_ns1.parquet",
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_al_c0_82_ns1.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_folded_al_c0_ns1",
         "title":      "χ² analysis — c₀ and a_l resolution-folded (±1σ window), MF34 eval σ",
         "systematic_block_col": None,
     },
     "folded_al_c0_ns3": {
-        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_al_c0_81_ns3.parquet",
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_al_c0_82_ns3.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_folded_al_c0_ns3",
         "title":      "χ² analysis — c₀ and a_l resolution-folded (±3σ window), MF34 eval σ",
         "systematic_block_col": None,
@@ -177,9 +227,19 @@ LIB_YEAR_OFFSETS = {"JEFF": -0.3, "JENDL": 0.0, "This_work": 0.3}
 # correlated systematics as independent noise.
 # - V1 textbook diag    : Σ = diag(σ_stat² + (σ_indep·y)² + (σ_dep·y)² + σ_eval_diag²)
 # - V2 rank-2 only      : Σ = D + u uᵀ + v vᵀ          (no eval cov)
-# - V3 rank-2 + diag    : Σ = (D + diag σ_eval_diag²) + u uᵀ + v vᵀ  (chapter headline)
-# - V4 rank-2 + dense   : Σ = D + u uᵀ + v vᵀ + Σ_eval_block  (diagnostic only;
-#                          MF34 block is rank-deficient by construction)
+# - V3 rank-2 + diag    : Σ = (D + diag σ_eval_diag²) + u uᵀ + v vᵀ
+# - V4 rank-2 + dense   : Σ = D + u uᵀ + v vᵀ + Σ_eval_block
+#
+# REPORTED PAIR: V2 and V4. Chapter 3 ships chi2_V2.png (EXFOR-only budget) and
+# chi2_V4.png (full budget), and the per-experiment strip figure is V4. V1 and V3
+# are the diagonal approximations of V2 and V4 — they treat correlated
+# systematics (V1) or the evaluation's energy/order correlations (V3) as
+# independent noise — so they are kept as cross-checks and not reported.
+# Σ_eval being rank-deficient on its own is not a problem for V4: it enters only
+# as D + u uᵀ + v vᵀ + Σ_eval, and D is strictly positive.
+# NOTE: an earlier version of this comment called V3 the chapter headline and V4
+# "diagnostic only". That contradicts what the thesis actually ships; see
+# docs/thesis_chi2_review.md before acting on either claim.
 VARIANTS: Tuple[str, ...] = ("V1", "V2", "V3", "V4")
 VARIANT_LABELS: Dict[str, str] = {
     "V1": "V1 textbook diag",
@@ -193,7 +253,7 @@ VARIANT_LABELS: Dict[str, str] = {
 # and avoids the rank-1/rank-2 absorption artefact that lets libraries with
 # uniform multiplicative biases (e.g. JEFF vs Cierjacks) get a free pass.
 # V2/V3/V4 are still computed and tabulated for cross-check.
-PRIMARY_VARIANT: str = "V1"
+PRIMARY_VARIANT: str = "V4"
 
 # Subsets — six slices of the dataset. `no_Cierjacks` is the recommended
 # headline because Cierjacks 1978 contributes 61% of all points and is a

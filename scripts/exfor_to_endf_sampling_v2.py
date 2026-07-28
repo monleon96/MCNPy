@@ -159,7 +159,6 @@ from scripts.multigroup_collapse import (
     perform_adaptive_multigroup_collapse,
     try_merge_adjacent_multigroups,
     MultigroupResult,
-    collapse_mf33_covariance_to_grid,
 )
 
 # Import TOF parameters module (Improvement 1.4)
@@ -169,6 +168,11 @@ from scripts.mf33_diagnostics import (
     fold_host_mf3_at_points,
     folded_c0_comparison_stats,
     log_folded_comparison,
+)
+from scripts.mf33_build import (
+    build_mf33_denominator,
+    build_mf33_matrices,
+    write_mf33_products,
 )
 from scripts.tof_parameters import (
     load_tof_parameters_file,
@@ -202,7 +206,7 @@ ENDF_FILE = "/share_snc/snc/JuanMonleon/jeff40_with_MF4_from_jeff33/26-Fe-56g.tx
 MF34_SOURCE_FILE = None                          # Separate MF34 source (None = use ENDF_FILE)
 EXFOR_DIRECTORY = "/share_snc/snc/JuanMonleon/EXFOR/data_v1/"
 EXFOR_DB_PATH = '/share_snc/snc/JuanMonleon/EXFOR/x4_iron_angular.db'
-OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_81/"
+OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_82/"
 TOF_PARAMETERS_FILE = "/share_snc/snc/JuanMonleon/EXFOR/exfor_tof_parameters.json"
 
 # --- DATA SOURCE ----------------------------------------------------------- #
@@ -357,6 +361,20 @@ KW_MIN_POINTS_REF = None                         # Quality penalty threshold (se
 # TOF energy resolution
 DELTA_T_NS = 5.0                                 # Time resolution in nanoseconds
 FLIGHT_PATH_M = 27.037                           # Flight path in meters
+DELTA_T_IS_FWHM = True                           # Whether DELTA_T_NS (and the per-experiment
+                                                  # time_resolution values in TOF_PARAMETERS_FILE)
+                                                  # are FWHM rather than sigma. Timing spreads are
+                                                  # normally quoted as FWHM — exfor_tof_parameters
+                                                  # records e.g. "neutron_pulse_width_FWHM" — and
+                                                  # sigma_E = FWHM/2.3548 accordingly.
+                                                  #
+                                                  # THIS CHANGES RESULTS. sigma_E sets how far each
+                                                  # experimental point spreads across bins via the
+                                                  # overlap weights, so it moves n_eff, the tau
+                                                  # bands, degree selection and hence MF4/MF34/MF33.
+                                                  # Runs <= 81 were produced with False; set False
+                                                  # to reproduce them. Individual subentries may
+                                                  # override via "is_fwhm" in the TOF JSON.
 N_SIGMA_CUTOFF = 3.0                             # Gaussian kernel cutoff (+-n_sigma * sigma_E)
 
 # --- COVARIANCE PIPELINE --------------------------------------------------- #
@@ -407,10 +425,63 @@ MULTIGROUP_REGROUP_AFTER_SMOOTH = False          # Second-pass regrouping after 
 
 # --- MF33 ELASTIC MAGNITUDE CHANNEL ---------------------------------------- #
 # Record the fixed-shape c0 (sigma_el = 4*pi*c0) and write its MF33 covariance.
-# Read-only: MF4/MF34 are unchanged. The MF3 central stays the host value; the
-# DCS magnitude 4*pi*c0 is saved as a sidecar (reconstructable a posteriori).
-#   0 = off    1 = MF33 in the standalone _mg product    2 = also in the nominal file
-GENERATE_MF3_MF33 = 0
+# Read-only: MF4/MF34 are unchanged. MF3 itself is deliberately NOT written
+# (despite the knob name, which records the eventual intent) — the central stays
+# at the host value and the DCS magnitude 4*pi*c0 is saved as a sidecar. When on,
+# MF33 goes into BOTH products: the nominal file on the fine MF4 grid, and the
+# _mg file on its own adaptive grid (see MF33_MULTIGROUP_* below).
+GENERATE_MF3_MF33 = 1                            # 0 = off, 1 = on
+
+# The MF33 relative covariance is C_abs / sigma_host^2, so it needs a host
+# central per bin. Two things make that non-trivial and both are handled here:
+#
+#   1. RESOLUTION. The fitted c0 is what a detector with a finite TOF resolution
+#      measured (sigma_E = 4-41 keV here), not a box average over the 1 keV bin.
+#      The denominator is folded through the same kernel — see fold_xs_over_bins.
+#   2. RESONANCE RANGE. File 3 carries only the smooth background inside a
+#      resolved resonance range, so MF3 MT2 is identically ZERO below the RRR
+#      upper bound (850 keV for JEFF-4.0 Fe-56, while this grid starts at
+#      846.8 keV). The denominator therefore comes from the RECONR-reconstructed
+#      PENDF, not from File 3 — correct for any target whose RRR reaches into
+#      the analysis window, and it costs one cached NJOY run.
+#
+# RECONR output is 0 K; BROADR is unnecessary because Doppler widths (~eV) are
+# negligible against a 4-41 keV resolution kernel.
+MF33_PENDF_TOLERANCE = 0.001                     # RECONR linearization tolerance
+MF33_PENDF_CACHE_DIR = None                      # None -> kika default temp cache
+                                                  # (keyed on ENDF sha256 + tolerance,
+                                                  #  so repeat runs are free)
+
+# Adaptive multigroup grid for MF33. Independent of the MF34 grid: the magnitude
+# channel has its own correlation structure, and ENDF lets each MF/MT section
+# carry its own grid. Defaults match the MF34 knobs so the first run is directly
+# comparable.
+MF33_MULTIGROUP_RHO_MIN = 0.85                   # Min adjacent c0 correlation to merge
+MF33_MULTIGROUP_SIGMA_RATIO_MAX = 5.0            # Max intra-group max(sigma)/min(sigma)
+MF33_MG_REPRESENTATION = "fine"                  # What MF33 the _mg file carries:
+                                                  # "multigroup" -> the collapsed grid
+                                                  # (as MF34), "fine" -> the full MF4-grid
+                                                  # matrix while MF34 stays collapsed.
+                                                  # MF34 is what makes that file large and
+                                                  # genuinely needs grouping; the MF33
+                                                  # collapse is irreversible and damped the
+                                                  # peak elastic sigma 19.3% -> 12.2% on
+                                                  # run 82. Grouping can always be done
+                                                  # afterwards; un-grouping cannot.
+MF33_REBUILD_MT1 = True                          # Rebuild MF33 MT1 (total) over the analysis
+                                                  # window as the sandwich over the partials,
+                                                  # cross terms zeroed, so the file's total
+                                                  # stops contradicting its own elastic. The
+                                                  # host ships MT1 within 1.4% of the
+                                                  # uncorrelated partial sum, so this keeps
+                                                  # the evaluator's own convention.
+SAVE_MF33_MULTIGROUP_DIAGNOSTICS_CSV = True      # mf33_boundary_decisions.csv
+SAVE_MF33_C0_SAMPLES = False                     # mf33_c0_samples.parquet — the raw
+                                                  # two-pass c0 draws (~300 MB at 10k
+                                                  # samples). Only needed for a
+                                                  # non-Gaussian TMC of the magnitude
+                                                  # channel; the covariance sidecars
+                                                  # carry the Gaussian summary.
 
 # --- OUTPUT: Pipeline A (fitting) ------------------------------------------ #
 N_SAMPLES = 10000                                # Number of MC samples
@@ -437,6 +508,10 @@ SAVE_RAW_KW_PARQUET = False                      # legendre_samples_raw_kw.parqu
 SAVE_MULTIGROUP_DIAGNOSTICS_CSV = True           # multigroup_boundary_decisions.csv — small
                                                   # diagnostic with per-pair merge decisions;
                                                   # useful for tuning rho_min / sigma_ratio_max.
+STOP_AFTER_NOMINAL_FITS = False                  # Exit after Step 4 (~2 min) instead of running the
+                                                  # MC (~5 h). For pre-flighting a config change on
+                                                  # the fits — n_eff, tau bands, degree selection —
+                                                  # before committing to a production run.
 SAVE_NOMINAL_FITS = True                         # nominal_fits.parquet — per-bin c_0..c_L, chi2_red,
                                                   # frozen_degree, tau bands, AICc weights.
 
@@ -2323,6 +2398,10 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info(f"  KW_MIN_POINTS_REF = {KW_MIN_POINTS_REF}")
     _logger.info(f"  DELTA_T_NS = {DELTA_T_NS}")
     _logger.info(f"  FLIGHT_PATH_M = {FLIGHT_PATH_M}")
+    _logger.info(
+        f"  DELTA_T_IS_FWHM = {DELTA_T_IS_FWHM}"
+        f"  (sigma_E{'  = FWHM/2.3548' if DELTA_T_IS_FWHM else ' taken directly; pre-82 behaviour'})"
+    )
     _logger.info(f"  N_SIGMA_CUTOFF = {N_SIGMA_CUTOFF}")
     _logger.info("")
 
@@ -2608,6 +2687,7 @@ def run_exfor_to_endf_sampling_v2(
         delta_t_ns=DELTA_T_NS,
         flight_path_m=FLIGHT_PATH_M,
         reference_grid_ev=energies_ev if energy_grid_source == "union" else None,
+        delta_t_is_fwhm=DELTA_T_IS_FWHM,
     )
 
     if not energy_bins:
@@ -2709,14 +2789,22 @@ def run_exfor_to_endf_sampling_v2(
 
     if save_nominal_fits:
         rows = []
+        # Bin metadata by index, so the per-bin TOF resolution and edges travel
+        # with the fits. rebuild_mf33.py needs them to reconstruct the folding
+        # kernel offline without re-deriving the grid from the EXFOR database.
+        _bin_by_idx_nom = {b.index: b for b in energy_bins}
         for r in nominal_results:
             coeffs = np.full(max_degree + 1, np.nan)
             if r.nominal_coeffs is not None and len(r.nominal_coeffs) > 0:
                 n_c = min(len(r.nominal_coeffs), max_degree + 1)
                 coeffs[:n_c] = r.nominal_coeffs[:n_c]
             tau = r.tau_info or {}
+            _eb = _bin_by_idx_nom.get(r.energy_index)
             row = {
                 'energy_mev': r.energy_mev,
+                'sigma_E_mev': getattr(_eb, 'sigma_E_mev', np.nan),
+                'bin_lower_mev': getattr(_eb, 'bin_lower_mev', np.nan),
+                'bin_upper_mev': getattr(_eb, 'bin_upper_mev', np.nan),
                 'energy_index': r.energy_index,
                 'endf_index': r.endf_index,
                 'has_data': r.has_data,
@@ -2746,6 +2834,17 @@ def run_exfor_to_endf_sampling_v2(
     _logger.info(f"#-- END STEP 4 (elapsed: {time.time() - t_step:.2f}s) -------------------------------------")
     _logger.info(f"  [INFO] [FIT] Nominal fits: {n_with_data}/{len(nominal_results)} with data, {n_interpolated} interpolated", console=True)
 
+    if STOP_AFTER_NOMINAL_FITS:
+        # Steps 1-4 cost ~2 minutes against ~5 h for the MC, so this is the
+        # cheap way to see how a config change lands on the fits (n_eff, tau,
+        # degree selection) before committing to a production run.
+        _logger.info(
+            "  STOP_AFTER_NOMINAL_FITS=True — stopping before MC sampling. "
+            f"nominal_fits.parquet is in {output_dir}",
+            console=True,
+        )
+        return
+
     # Step 5: MC sampling
     t_step = time.time()
     _logger.info("")
@@ -2762,6 +2861,8 @@ def run_exfor_to_endf_sampling_v2(
     mf33_c0_nom = None
     mf33_energy_grid_ev = None
     mf33_sigma_host_bin = None
+    _mf33_products = None
+    _mf33_pendf_path = None
 
     if CORRELATION_METHOD == "gaussian":
         # Per-bin stochastic MC → Gaussian parametric correlations → Cholesky samples
@@ -2905,6 +3006,8 @@ def run_exfor_to_endf_sampling_v2(
             tof_params_cache=tof_params_cache if tof_params_cache else None,
             default_flight_path_m=FLIGHT_PATH_M,
             default_time_resolution_ns=DELTA_T_NS,
+            default_delta_t_is_fwhm=DELTA_T_IS_FWHM,
+            logger=_logger,
         )
 
         n_datasets_total = sum(len(dsets) for dsets in overlap_weights.values())
@@ -3050,12 +3153,15 @@ def run_exfor_to_endf_sampling_v2(
             # Pass-1 shared draws give cross-bin correlations, Pass-2 per-bin
             # draws give marginal variances — the same congruence combine as the
             # Legendre-vector channel, on the scalar c0 per bin. Fine-grid
-            # relative covariance is stashed for the MF33 write + sidecars;
-            # collapse to the multigroup grid happens with the MF34 collapse.
+            # relative covariance is stashed for the MF33 write + sidecars, and
+            # the channel gets its own adaptive multigroup grid (independent of
+            # the MF34 one) built alongside it.
             mf33_rel_cov_fine = None
             mf33_c0_nom = None
             mf33_energy_grid_ev = None
             mf33_sigma_host_bin = None
+            _mf33_products = None
+            _mf33_pendf_path = None
             if record_c0_channel:
                 try:
                     _bin_by_idx_mf33 = {b.index: b for b in energy_bins}
@@ -3089,40 +3195,60 @@ def run_exfor_to_endf_sampling_v2(
                             console=True,
                         )
 
-                    # Recentre the relative covariance on the HOST MF3 (the
-                    # shipped File-3 central): the DCS analysis infers the
-                    # absolute covariance C_abs; dividing by the host bin means
-                    # keeps the absolute uncertainty claim intact for users who
-                    # multiply the relative MF33 by the host MF3.
-                    _endf_host3 = read_endf(endf_file, mf_numbers=3)
-                    _mt3_host = _endf_host3.get_file(3).sections[2]
-                    _host_e_ev = np.asarray(_mt3_host.energies, dtype=float)
-                    _host_xs_b = np.asarray(_mt3_host.cross_sections, dtype=float)
-                    mf33_sigma_host_bin = bin_average_xs(
-                        _host_e_ev, _host_xs_b, mf33_energy_grid_ev,
+                    # Recentre the relative covariance on the HOST central: the
+                    # DCS analysis infers the absolute covariance C_abs; dividing
+                    # by the host means keeps the absolute uncertainty claim
+                    # intact for users who multiply the relative MF33 by MF3.
+                    #
+                    # The denominator is the RECONR-reconstructed cross section
+                    # folded through each bin's TOF kernel, NOT a box average of
+                    # File 3 — File 3 is zero inside the resolved resonance range
+                    # and a 1 keV box is not what the fit measured. See the
+                    # MF33_PENDF_* config block.
+                    _mf33_den = build_mf33_denominator(
+                        endf_file,
+                        _vb,
+                        mt=mt_number,
+                        njoy_exe=ACE_NJOY_EXE,
+                        pendf_tolerance=MF33_PENDF_TOLERANCE,
+                        pendf_cache_dir=MF33_PENDF_CACHE_DIR,
+                        grid_ev=mf33_energy_grid_ev,
+                        logger=_logger,
                     )
+                    mf33_sigma_host_bin = _mf33_den.sigma_host_bin
+                    # Reused by the folded-comparison diagnostic below, so it
+                    # sees the same reconstructed cross section.
+                    _host_e_ev, _host_xs_b = _mf33_den.e_ev, _mf33_den.xs_b
+                    # The MT1 rebuild needs every partial's cross section, so it
+                    # reads the PENDF again rather than just MT2's fold.
+                    _mf33_pendf_path = _mf33_den.pendf_path
                     _c0_host = mf33_sigma_host_bin / _MF33_FOUR_PI
-                    mf33_rel_cov_fine = recentre_relative_covariance(
-                        _mf33_cov_abs, _c0_host,
-                    )
-                    with np.errstate(divide="ignore", invalid="ignore"):
-                        _recentre_ratio = np.where(
-                            _c0_host > 0, mf33_c0_nom / _c0_host, np.nan
-                        )
-                    _logger.info(
-                        "  [MF33] Relative covariance recentred on host MF3: "
-                        f"median |c0_DCS/c0_host - 1| = "
-                        f"{100.0 * float(np.nanmedian(np.abs(_recentre_ratio - 1.0))):.2f}%, "
-                        f"max = {100.0 * float(np.nanmax(np.abs(_recentre_ratio - 1.0))):.2f}%"
-                    )
 
-                    _rel_std = np.sqrt(np.clip(np.diag(mf33_rel_cov_fine), 0.0, None))
+                    # Build the fine relative covariance and its own adaptive
+                    # multigroup collapse in one go — the same call the offline
+                    # rebuild uses, so both paths emit identical sections.
+                    _mf33_products = build_mf33_matrices(
+                        cov_abs_fine=_mf33_cov_abs,
+                        sigma_host_bin=mf33_sigma_host_bin,
+                        energy_bins=_vb,
+                        grid_fine_ev=mf33_energy_grid_ev,
+                        c0_dcs=mf33_c0_nom,
+                        regularize_near_zero=regularize_near_zero,
+                        snr_threshold=near_zero_snr_threshold,
+                        n_neighbors=near_zero_n_neighbors,
+                        rho_min=MF33_MULTIGROUP_RHO_MIN,
+                        sigma_ratio_max=MF33_MULTIGROUP_SIGMA_RATIO_MAX,
+                        diagnostics_file=(
+                            output_path / "mf33_boundary_decisions.csv"
+                            if SAVE_MF33_MULTIGROUP_DIAGNOSTICS_CSV else None
+                        ),
+                        logger=_logger,
+                    )
+                    mf33_rel_cov_fine = _mf33_products.rel_fine
                     _logger.info(
-                        "  [MF33] Fixed-shape c0 channel: "
-                        f"{len(energy_indices_kw)} bins, median rel. σ(σ_el) = "
-                        f"{100.0 * float(np.median(_rel_std)):.2f}% "
-                        f"(range {100.0 * float(np.min(_rel_std)):.2f}–"
-                        f"{100.0 * float(np.max(_rel_std)):.2f}%)"
+                        f"  [MF33] Fixed-shape c0 channel: {len(energy_indices_kw)} "
+                        f"fine bins -> {_mf33_products.multigroup.cov_rel_grouped.shape[0]} "
+                        f"MF33 groups (the MF34 grid is collapsed separately)"
                     )
                     _min_eig = float(np.min(np.linalg.eigvalsh(mf33_rel_cov_fine)))
                     if _min_eig < -1e-8:
@@ -3132,23 +3258,39 @@ def run_exfor_to_endf_sampling_v2(
                             console=True,
                         )
 
-                    # Sidecar outputs (host-recentred relative cov, absolute
-                    # cov, nominal + host magnitudes, grid, and the raw
-                    # two-pass c0 samples for TMC/diagnostics).
+                    # Sidecar outputs. mf33_absolute_covariance.npy is the
+                    # primary object — the relative one is derived from it and
+                    # the folded host central, and is the lossy one (rows with a
+                    # non-positive central are zeroed). Together with the grid
+                    # and nominal_fits.parquet these are exactly what
+                    # scripts/rebuild_mf33.py needs to rebuild MF33 offline.
+                    _mf33_sidecars = [
+                        "mf33_relative_covariance.npy", "mf33_absolute_covariance.npy",
+                        "mf33_c0_nominal.npy", "mf33_c0_host.npy",
+                        "mf33_energy_grid_ev.npy", "mf33_multigroup_grid_ev.npy",
+                        "mf33_multigroup_relative_covariance.npy",
+                    ]
                     np.save(output_path / "mf33_relative_covariance.npy", mf33_rel_cov_fine)
                     np.save(output_path / "mf33_absolute_covariance.npy", _mf33_cov_abs)
                     np.save(output_path / "mf33_c0_nominal.npy", mf33_c0_nom)
                     np.save(output_path / "mf33_c0_host.npy", _c0_host)
                     np.save(output_path / "mf33_energy_grid_ev.npy", mf33_energy_grid_ev)
-                    _df_c0.to_parquet(
-                        output_path / "mf33_c0_samples.parquet",
-                        engine="pyarrow", index=False,
+                    np.save(
+                        output_path / "mf33_multigroup_grid_ev.npy",
+                        _mf33_products.multigroup.group_boundaries_ev,
                     )
+                    np.save(
+                        output_path / "mf33_multigroup_relative_covariance.npy",
+                        _mf33_products.multigroup.cov_rel_grouped,
+                    )
+                    if SAVE_MF33_C0_SAMPLES:
+                        _df_c0.to_parquet(
+                            output_path / "mf33_c0_samples.parquet",
+                            engine="pyarrow", index=False,
+                        )
+                        _mf33_sidecars.append("mf33_c0_samples.parquet")
                     _logger.info(
-                        "  [MF33] Sidecar written: mf33_relative_covariance.npy "
-                        "(host-recentred), mf33_absolute_covariance.npy, "
-                        "mf33_c0_nominal.npy, mf33_c0_host.npy, "
-                        "mf33_energy_grid_ev.npy, mf33_c0_samples.parquet"
+                        f"  [MF33] Sidecars written: {', '.join(_mf33_sidecars)}"
                     )
 
                     # Folded-host comparison (warn-only, never gates): fold the
@@ -3175,6 +3317,7 @@ def run_exfor_to_endf_sampling_v2(
                                 tof_params_cache,
                                 default_flight_path_m=FLIGHT_PATH_M,
                                 default_time_resolution_ns=DELTA_T_NS,
+                                default_delta_t_is_fwhm=DELTA_T_IS_FWHM,
                             )
                             _cmp_df = pd.DataFrame({
                                 "campaign": _cmp_camp,
@@ -4320,6 +4463,27 @@ def run_exfor_to_endf_sampling_v2(
                     write_mf34_to_file(nominal_file, mf34_fine_nom, nominal_file)
                     _logger.info(f"  Fine MF34 added to nominal: {nominal_file}")
 
+                    # Fine MF33 goes in beside the fine MF34, on the same MF4
+                    # grid. Written here rather than with the multigroup MF33 so
+                    # it does not depend on the multigroup branch running.
+                    if record_c0_channel and _mf33_products is not None:
+                        try:
+                            write_mf33_products(
+                                _mf33_products,
+                                fine_endf=nominal_file,
+                                mg_endf=None,
+                                mt=mt_number,
+                                za=za, awr=awr, mat=mat,
+                                rebuild_mt1=MF33_REBUILD_MT1,
+                                pendf_path=_mf33_pendf_path,
+                                logger=_logger,
+                            )
+                        except Exception as _e_mf33f:
+                            _logger.error(
+                                f"[ERROR] [MF33] Fine MF33 write failed: {_e_mf33f}",
+                                console=True,
+                            )
+
             # Compute nominal-relative grouped covariance (needed for MG MF34 and/or Step 11)
             cov_grouped_nominal = None
             if multigroup_result is not None:
@@ -4759,59 +4923,39 @@ def run_exfor_to_endf_sampling_v2(
                     _logger.info(f"  Multigroup MF34 written to: {mg_nom_file}")
 
                     # --- Phase-2: MF33 MT2 (elastic magnitude covariance) ----
-                    # Collapse the fixed-shape c0 relative covariance onto the
-                    # SAME multigroup grid the MF34 uses, then RANGE-MERGE it
-                    # into the host MF33 MT2: our matrix replaces the host
-                    # inside the working range, the host survives outside, and
-                    # in-range/out-of-range cross terms are zeroed (documented
-                    # factorization). Sibling MF33 MT sections (1, 4, 5, 16,
-                    # 102, 103) are preserved by the per-MT section writer.
-                    # Zero (L=0,L1) cross block — a documented factorization
-                    # assumption (Phase 3 measures it), never a format limit.
-                    if record_c0_channel and mf33_rel_cov_fine is not None:
+                    # The _mg product gets MF33 on the MF33 channel's OWN
+                    # adaptive grid — not the MF34 one. The shape and magnitude
+                    # channels have different correlation lengths, and ENDF lets
+                    # each MF/MT section carry its own boundaries. (The fine
+                    # MF33 was written beside the fine MF34 further up, and the
+                    # _mg file inherits it from the copy — this replaces it.)
+                    #
+                    # RANGE-MERGED into the host MF33 MT2: our matrix replaces
+                    # the host inside the working range, the host survives
+                    # outside, and in/out cross terms are zeroed (a documented
+                    # factorization assumption that Phase 3 measures, never a
+                    # format limit). Sibling MF33 MT sections (1, 4, 5, 16, 102,
+                    # 103) are preserved by the per-MT section writer.
+                    #
+                    # The MF3 central is intentionally left at the host value;
+                    # the DCS magnitude is 4*pi*c0, reconstructable from
+                    # mf33_c0_nominal.npy (no File-3 rewrite required).
+                    if record_c0_channel and _mf33_products is not None:
                         try:
-                            mf33_rel_mg = collapse_mf33_covariance_to_grid(
-                                native_grid_ev=mf33_energy_grid_ev,
-                                native_cov=mf33_rel_cov_fine,
-                                target_grid_ev=multigroup_result.group_boundaries_ev,
-                                native_means=mf33_sigma_host_bin,
-                                is_relative=True,
-                                label="MF33 MT2 (elastic magnitude)",
-                                logger=_logger,
-                            )
-                            mf33_mg = merge_mf33_covariance_into_host(
-                                host_endf=mg_nom_file,
-                                cov_matrix=mf33_rel_mg,
-                                energy_grid_ev=multigroup_result.group_boundaries_ev,
+                            write_mf33_products(
+                                _mf33_products,
+                                fine_endf=None,
+                                mg_endf=mg_nom_file,
                                 mt=mt_number,
                                 za=za, awr=awr, mat=mat,
+                                mg_representation=MF33_MG_REPRESENTATION,
+                                rebuild_mt1=MF33_REBUILD_MT1,
+                                pendf_path=_mf33_pendf_path,
                                 logger=_logger,
                             )
-                            write_mf33_to_file(mg_nom_file, mf33_mg, mg_nom_file)
-                            _logger.info(
-                                f"  [MF33] Range-merged MF33 MT2 written to: {mg_nom_file}"
-                            )
-                            # Also inject into the main nominal file when asked.
-                            if GENERATE_MF3_MF33 >= 2:
-                                mf33_nom = merge_mf33_covariance_into_host(
-                                    host_endf=nominal_file,
-                                    cov_matrix=mf33_rel_mg,
-                                    energy_grid_ev=multigroup_result.group_boundaries_ev,
-                                    mt=mt_number,
-                                    za=za, awr=awr, mat=mat,
-                                    logger=_logger,
-                                )
-                                write_mf33_to_file(nominal_file, mf33_nom, nominal_file)
-                                _logger.info(
-                                    f"  [MF33] MF33 MT2 also range-merged into: {nominal_file}"
-                                )
-                            # The MF3 central is intentionally left at the host
-                            # value; the DCS magnitude is 4*pi*c0, reconstructable
-                            # from mf33_c0_nominal.npy whenever it's needed for a
-                            # comparison (no File-3 rewrite required).
                         except Exception as _e_mf33w:
                             _logger.error(
-                                f"[ERROR] [MF33] Multigroup MF33 write failed: {_e_mf33w}",
+                                f"[ERROR] [MF33] MF33 write failed: {_e_mf33w}",
                                 console=True,
                             )
 

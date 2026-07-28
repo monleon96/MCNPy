@@ -30,6 +30,7 @@ from typing import Any, Dict, Iterable, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from kika.utils.numerics import average_over_intervals
 from scripts.tof_parameters import (
     get_tof_parameters,
     compute_sigma_E,
@@ -93,22 +94,15 @@ def bin_average_xs(
     -------
     np.ndarray
         Bin-averaged cross section (barns), shape ``(N,)``.
+
+    Notes
+    -----
+    Domain-named adapter over
+    :func:`kika.utils.numerics.average_over_intervals`, which holds the
+    implementation.  Kept because it reads better at the diagnostic call sites
+    and because the eV/barns units are part of the contract here.
     """
-    e_ev = np.asarray(e_ev, dtype=float)
-    xs_b = np.asarray(xs_b, dtype=float)
-    grid_ev = np.asarray(grid_ev, dtype=float)
-    out = np.empty(len(grid_ev) - 1, dtype=float)
-    for i in range(len(grid_ev) - 1):
-        lo, hi = grid_ev[i], grid_ev[i + 1]
-        # Union of the bin's own sub-grid and the native points inside it, so
-        # narrow resonances on the native grid are not skipped over.
-        inside = e_ev[(e_ev > lo) & (e_ev < hi)]
-        e_sub = np.unique(np.concatenate([
-            np.linspace(lo, hi, n_sub), inside,
-        ]))
-        y_sub = np.interp(e_sub, e_ev, xs_b)
-        out[i] = np.trapezoid(y_sub, e_sub) / (hi - lo)
-    return out
+    return average_over_intervals(e_ev, xs_b, grid_ev, n_sub=n_sub)
 
 
 # --------------------------------------------------------------------------- #
@@ -125,6 +119,7 @@ def fold_host_mf3_at_points(
     n_nodes: int = 12,
     default_flight_path_m: float = 27.037,
     default_time_resolution_ns: float = 5.0,
+    default_delta_t_is_fwhm: bool = True,
     min_sigma_E_kev: float = 1.0,
 ) -> np.ndarray:
     """Fold the host MF3 elastic cross section through each point's TOF kernel.
@@ -147,6 +142,7 @@ def fold_host_mf3_at_points(
             str(sub), tof_cache,
             default_flight_path_m=default_flight_path_m,
             default_time_resolution_ns=default_time_resolution_ns,
+            default_delta_t_is_fwhm=default_delta_t_is_fwhm,
         )
         sigma_e = compute_sigma_E(float(e_mev), tof, min_sigma_E_kev=min_sigma_E_kev)
         out[i] = fold_xs_over_resolution(

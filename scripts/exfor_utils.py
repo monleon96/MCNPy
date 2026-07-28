@@ -514,6 +514,7 @@ def compute_energy_bins_with_tof_resolution(
     delta_t_ns: float = 5.0,
     flight_path_m: float = 27.037,
     reference_grid_ev: Optional[np.ndarray] = None,
+    delta_t_is_fwhm: bool = True,
 ) -> List[EnergyBinInfo]:
     """
     Compute energy bins with TOF-based energy resolution.
@@ -569,6 +570,7 @@ def compute_energy_bins_with_tof_resolution(
             E_mev=e_mev,
             delta_t_ns=delta_t_ns,
             flight_path_m=flight_path_m,
+            delta_t_is_fwhm=delta_t_is_fwhm,
         )
 
         # Compute bin boundaries (midpoints to neighbors)
@@ -1727,6 +1729,8 @@ def precompute_overlap_weights(
     tof_params_cache: Optional[Dict] = None,
     default_flight_path_m: float = 27.037,
     default_time_resolution_ns: float = 5.0,
+    default_delta_t_is_fwhm: bool = True,
+    logger=None,
 ) -> Dict[int, List[Tuple[Dict, float]]]:
     """Compute overlap weights from ALL datasets across all bins.
 
@@ -1762,6 +1766,8 @@ def precompute_overlap_weights(
     # Collect all unique datasets across all bins
     all_datasets = []
     seen = set()
+    # Which subentries resolved to which TOF convention, for the audit below.
+    _conv_seen: Dict[str, Any] = {}
     for nr in nominal_results:
         if not nr.has_data or nr.interpolated:
             continue
@@ -1803,9 +1809,11 @@ def precompute_overlap_weights(
                 tof_params = get_tof_parameters(
                     subentry_id, tof_params_cache,
                     default_flight_path_m, default_time_resolution_ns,
+                    default_delta_t_is_fwhm=default_delta_t_is_fwhm,
                 )
                 ds_sigma_E = compute_sigma_E(exfor_energy, tof_params)
                 ds_tof_source = tof_params.source
+                _conv_seen.setdefault(subentry_id, tof_params)
             else:
                 ds_sigma_E = None  # will use bin sigma_E as fallback
                 ds_tof_source = "bin_default"
@@ -1842,6 +1850,32 @@ def precompute_overlap_weights(
                 bin_datasets.append((ds, w))
 
         overlap_weights[bin_info.index] = bin_datasets
+
+    # Audit the TOF convention actually applied per subentry. sigma_E scales by
+    # ~2.355 between the FWHM and sigma readings, and it decides how far each
+    # experimental point spreads across bins — so a silent fallback to the
+    # pipeline default is worth naming rather than assuming.
+    if logger is not None and _conv_seen:
+        from_file = sorted(
+            s for s, p in _conv_seen.items() if p.source == "file"
+        )
+        defaulted = sorted(
+            s for s, p in _conv_seen.items() if p.source != "file"
+        )
+        conv = "FWHM" if default_delta_t_is_fwhm else "sigma"
+        logger.info(
+            f"  TOF convention: delta_t read as {conv} by default; "
+            f"{len(from_file)} subentry(ies) had file parameters, "
+            f"{len(defaulted)} fell back to L={default_flight_path_m} m, "
+            f"dt={default_time_resolution_ns} ns"
+        )
+        if defaulted:
+            logger.warning(
+                f"  [TOF] No per-experiment parameters for: "
+                f"{', '.join(defaulted[:12])}"
+                f"{' ...' if len(defaulted) > 12 else ''} — these inherit the "
+                f"global delta_t and its {conv} reading."
+            )
 
     return overlap_weights
 

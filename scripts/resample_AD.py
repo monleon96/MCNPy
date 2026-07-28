@@ -12,6 +12,8 @@ from scipy.stats import norm
 from scipy.linalg import cho_factor, cho_solve
 import matplotlib.pyplot as plt
 
+from kika.utils.energy_folding import tof_energy_resolution
+
 # Import from kika.exfor (new module)
 try:
     from kika.exfor.transforms import (
@@ -806,28 +808,25 @@ def compute_energy_resolution_tof(
     E_mev: float,
     delta_t_ns: float = 5.0,
     flight_path_m: float = 27.037,
+    delta_t_is_fwhm: bool = True,
 ) -> float:
     """
     Compute energy resolution σE from TOF parameters.
 
-    For neutrons measured by time-of-flight:
-      E = m_n * L² / (2 * t²)
-      δE/E = 2 * δt/t
-      t = L / v = L * sqrt(m_n / (2E))
-
-    Therefore:
-      σE = E * 2 * δt / t
-         = E * 2 * δt * v / L
-         = E * 2 * δt * sqrt(2E/m_n) / L
+    Thin adapter over :func:`kika.utils.energy_folding.tof_energy_resolution`,
+    which is the single definition of the formula.
 
     Parameters
     ----------
     E_mev : float
         Neutron energy in MeV
     delta_t_ns : float
-        Time resolution in nanoseconds (default: 10 ns)
+        Timing spread in nanoseconds; see ``delta_t_is_fwhm``.
     flight_path_m : float
         Flight path length in meters (default: 27.037 m)
+    delta_t_is_fwhm : bool, default True
+        Whether ``delta_t_ns`` is a FWHM (usual experimental convention) or
+        already a sigma.  The two differ by a factor 2.355 in the result.
 
     Returns
     -------
@@ -837,24 +836,12 @@ def compute_energy_resolution_tof(
     if E_mev <= 0:
         return 0.0
 
-    # Physical constants
-    m_n_kg = 1.674927e-27       # Neutron mass in kg
-    MeV_to_J = 1.602176634e-13  # MeV to Joules
-
-    E_J = E_mev * MeV_to_J      # Energy in Joules
-    delta_t_s = delta_t_ns * 1e-9  # Time resolution in seconds
-
-    # Velocity: v = sqrt(2E/m)
-    v = np.sqrt(2 * E_J / m_n_kg)  # m/s
-
-    # Time of flight: t = L/v
-    t = flight_path_m / v  # seconds
-
-    # Energy resolution: σE/E = 2 * δt/t
-    sigma_E_rel = 2 * delta_t_s / t
-    sigma_E_mev = E_mev * sigma_E_rel
-
-    return sigma_E_mev
+    return tof_energy_resolution(
+        E_mev,
+        flight_path_m=flight_path_m,
+        delta_t_ns=delta_t_ns,
+        delta_t_is_fwhm=delta_t_is_fwhm,
+    )
 
 
 def compute_energy_kernel_weights(

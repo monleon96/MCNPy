@@ -72,7 +72,7 @@ MT_NUMBER = 2  # elastic scattering
 # This_work uses the pipeline's nominal ENDF and the matching nominal_fits
 # parquet that lives next to it (both written by exfor_to_endf_sampling_v2.py
 # into OUTPUT_DIR).
-THIS_WORK_DIR        = "/share_snc/snc/JuanMonleon/ENDF_samples/new_test_81"
+THIS_WORK_DIR        = "/share_snc/snc/JuanMonleon/ENDF_samples/new_test_82_mt1fix"
 THIS_WORK_FILE       = f"{THIS_WORK_DIR}/26-Fe-56g_nominal_mg.endf"
 NOMINAL_FITS_PARQUET = f"{THIS_WORK_DIR}/nominal_fits.parquet"
 
@@ -99,8 +99,11 @@ KS_SUBENTRIES = {
 E_MIN_MEV = 0.85
 E_MAX_MEV = 4.0
 
-# Physics
-M_PROJ_U = 1.008665
+# Physics.  The neutron mass comes from kika._constants so this script and the
+# fit pipeline transform LAB->CM with the same number; it used to carry a local
+# 1.008665, one of the two values the 2026-07 constants unification removed.
+from kika._constants import NEUTRON_MASS_AMU as M_PROJ_U  # noqa: E402
+
 M_TARG_U = 55.93494
 
 # Legendre truncation. In [0.85, 4] MeV the highest order any of the three
@@ -108,7 +111,7 @@ M_TARG_U = 55.93494
 L_MAX = 6
 
 # ── Output ──
-OUTPUT_PARQUET = "/share_snc/snc/JuanMonleon/chi2/chi2_data_exfor_c0_81.parquet"
+OUTPUT_PARQUET = "/share_snc/snc/JuanMonleon/chi2/chi2_data_exfor_c0_82.parquet"
 
 
 # ── ENDF loading ──────────────────────────────────────────────────────────────
