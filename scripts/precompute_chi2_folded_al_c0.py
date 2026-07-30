@@ -311,12 +311,19 @@ def main() -> None:
 
     try:
         tof_cache = load_tof_parameters_file(TOF_PARAMETERS_FILE)
-        n_with_data = sum(
-            1 for v in tof_cache.values()
-            if (v.get("energy_resolution_input") or {}).get("distance", {}).get("value") is not None
+        n_declared = sum(
+            1 for v in tof_cache.values() if isinstance(v, dict)
+            and (v.get("energy_resolution") or {}).get("fwhm_mev") is not None
+            and not (v.get("energy_resolution") or {}).get("review_required")
         )
-        print(f"Loaded TOF parameters: {len(tof_cache)} subentries "
-              f"({n_with_data} with measured L/δt; the rest fall back to "
+        n_with_data = sum(
+            1 for v in tof_cache.values() if isinstance(v, dict)
+            and (v.get("tof") or {}).get("flight_path_m") is not None
+            and (v.get("tof") or {}).get("time_resolution_ns") is not None
+        )
+        print(f"Loaded TOF parameters: {len(tof_cache)} entries "
+              f"({n_declared} declared EN-RSL* widths, {n_with_data} curated L/δt; "
+              f"the rest fall back to "
               f"L={DEFAULT_FLIGHT_PATH_M} m, δt={DEFAULT_TIME_RESOLUTION_NS} ns)")
     except FileNotFoundError:
         tof_cache = {}

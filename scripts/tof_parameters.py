@@ -46,7 +46,8 @@ class TOFParameters:
     time_resolution_ns : float
         Time resolution in nanoseconds.  See ``delta_t_is_fwhm``.
     source : str
-        Source of parameters: "file" (from JSON) or "default" (fallback values)
+        Source of parameters: "exfor_rsl" (declared EN-RSL* resolution from
+        EXFOR), "file" (curated L/δt from JSON) or "default" (fallback values)
     delta_t_is_fwhm : bool
         Whether ``time_resolution_ns`` is a FWHM (the usual way pulse widths and
         detector timing are quoted) or already a standard deviation.  The two
@@ -54,13 +55,27 @@ class TOFParameters:
         recorded per experiment rather than assumed globally: the JSON may set
         ``time_resolution.is_fwhm`` per subentry, otherwise the pipeline default
         applies.
+    energy_fwhm_mev : Optional[float]
+        Declared incident-energy resolution as a FWHM in MeV (from the
+        ``declared_energy_resolution`` block of the TOF JSON, i.e. EXFOR's
+        EN-RSL/EN-RSL-FW/EN-RSL-HW converted to a FWHM).  When set,
+        ``compute_sigma_E`` uses it directly (σ_E = FWHM/2.3548) and skips the
+        TOF formula entirely — the declared incident spread is the quantity the
+        fold needs, and for many experiments it is not of TOF origin at all
+        (thesis_chi2_review.md §12b).
     """
     flight_path_m: float
     time_resolution_ns: float
-    source: str  # "file" or "default"
+    source: str  # "exfor_rsl", "file" or "default"
     delta_t_is_fwhm: bool = True
+    energy_fwhm_mev: Optional[float] = None
 
     def __repr__(self) -> str:
+        if self.energy_fwhm_mev is not None:
+            return (
+                f"TOFParameters(FWHM_E={1e3 * self.energy_fwhm_mev:.1f}keV, "
+                f"source={self.source})"
+            )
         conv = "FWHM" if self.delta_t_is_fwhm else "sigma"
         return (
             f"TOFParameters(L={self.flight_path_m:.2f}m, "
@@ -72,16 +87,25 @@ def load_tof_parameters_file(filepath: str) -> Dict[str, Dict[str, Any]]:
     """
     Load TOF parameters from a JSON file.
 
-    The JSON file is expected to have the structure:
+    The JSON file is expected to have the unified structure (one schema per
+    subentry, built by myworkspace/EXFOR/extract_en_rsl_resolutions.py):
     {
         "subentry_id": {
-            "energy_resolution_input": {
-                "distance": {"value": <float>, "unit": "m"},
-                "time_resolution": {"value": <float>, "unit": "ns"}
+            "author": <str>, "year": <int>,
+            "energy_resolution": {          # declared EXFOR EN-RSL* (preferred)
+                "fwhm_mev": <float>,        # convention-resolved FWHM
+                "review_required": <bool>,  # quarantined when true
+                ...
             },
-            ...
+            "tof": {                        # curated (L, delta_t) fallback
+                "flight_path_m": <float>,
+                "time_resolution_ns": <float>,
+                "time_resolution_is_fwhm": <bool>,  # optional
+                ...
+            },
+            "details": {...}, "notes": "..."   # not read by the pipeline
         },
-        ...
+        "_meta": {...}
     }
 
     Parameters
@@ -117,12 +141,16 @@ def get_tof_parameters(
     default_flight_path_m: float = 27.037,
     default_time_resolution_ns: float = 5.0,
     default_delta_t_is_fwhm: bool = True,
+    use_declared_resolution: bool = True,
 ) -> TOFParameters:
     """
     Get TOF parameters for a subentry with fallback to defaults.
 
-    Attempts to find TOF parameters in the cache for the given subentry.
-    If not found or values are null, falls back to default values.
+    Precedence (thesis_chi2_review.md §12f): declared EXFOR resolution
+    (``declared_energy_resolution`` block, source="exfor_rsl") → curated
+    (L, δt) pair (``energy_resolution_input``, source="file") → defaults.
+    Declared blocks flagged ``review_required`` (suspect widths, §12e) are
+    quarantined and fall through to the next level.
 
     Parameters
     ----------
@@ -134,6 +162,9 @@ def get_tof_parameters(
         Default flight path in meters (default: 27.037m, typical ORELA)
     default_time_resolution_ns : float
         Default time resolution in nanoseconds (default: 5.0ns)
+    use_declared_resolution : bool
+        If False, ignore ``declared_energy_resolution`` blocks (pre-§12f
+        behaviour, for comparison runs).
 
     Returns
     -------
@@ -144,30 +175,40 @@ def get_tof_parameters(
     if subentry in tof_params_cache:
         entry_data = tof_params_cache[subentry]
 
-        # Try to extract energy_resolution_input
-        eri = entry_data.get('energy_resolution_input') or entry_data.get('energy_resolution_inputs')
-
-        if eri:
-            distance_data = eri.get('distance', {})
-            time_res_data = eri.get('time_resolution', {})
-
-            flight_path = distance_data.get('value')
-            time_res = time_res_data.get('value')
-
-            # If both values are present and not None, use them
-            if flight_path is not None and time_res is not None:
-                # Per-entry convention override. Most entries do not state
-                # whether their delta_t is a FWHM; those inherit the pipeline
-                # default and are reported by summarize_tof_parameters().
-                is_fwhm = time_res_data.get('is_fwhm')
+        # Highest precedence: resolution declared in EXFOR itself (EN-RSL*),
+        # already convention-resolved to a FWHM by the extraction script
+        # (myworkspace/EXFOR/extract_en_rsl_resolutions.py).
+        if use_declared_resolution:
+            decl = entry_data.get("energy_resolution") or {}
+            fwhm = decl.get("fwhm_mev")
+            if fwhm is not None and not decl.get("review_required"):
                 return TOFParameters(
-                    flight_path_m=float(flight_path),
-                    time_resolution_ns=float(time_res),
-                    source="file",
-                    delta_t_is_fwhm=(
-                        default_delta_t_is_fwhm if is_fwhm is None else bool(is_fwhm)
-                    ),
+                    flight_path_m=default_flight_path_m,
+                    time_resolution_ns=default_time_resolution_ns,
+                    source="exfor_rsl",
+                    delta_t_is_fwhm=default_delta_t_is_fwhm,
+                    energy_fwhm_mev=float(fwhm),
                 )
+
+        # Curated (L, delta_t) channel
+        tof = entry_data.get("tof") or {}
+        flight_path = tof.get("flight_path_m")
+        time_res = tof.get("time_resolution_ns")
+
+        # If both values are present and not None, use them
+        if flight_path is not None and time_res is not None:
+            # Per-entry convention override. Most entries do not state
+            # whether their delta_t is a FWHM; those inherit the pipeline
+            # default and are reported by summarize_tof_parameters().
+            is_fwhm = tof.get("time_resolution_is_fwhm")
+            return TOFParameters(
+                flight_path_m=float(flight_path),
+                time_resolution_ns=float(time_res),
+                source="file",
+                delta_t_is_fwhm=(
+                    default_delta_t_is_fwhm if is_fwhm is None else bool(is_fwhm)
+                ),
+            )
 
     # Fallback to defaults
     return TOFParameters(
@@ -186,8 +227,10 @@ def compute_sigma_E(
     """
     Compute energy resolution σE from TOF parameters.
 
-    Delegates to :func:`kika.utils.energy_folding.tof_energy_resolution`, using
-    the convention recorded on ``tof_params.delta_t_is_fwhm``, then applies a
+    If ``tof_params.energy_fwhm_mev`` is set (declared EXFOR resolution),
+    returns ``energy_fwhm_mev / 2.3548`` directly.  Otherwise delegates to
+    :func:`kika.utils.energy_folding.tof_energy_resolution`, using the
+    convention recorded on ``tof_params.delta_t_is_fwhm``, then applies a
     floor.
 
     Uses the formula:
@@ -214,12 +257,17 @@ def compute_sigma_E(
     if energy_mev <= 0:
         return min_sigma_E_kev / 1000.0  # Return minimum in MeV
 
-    sigma_E_mev = tof_energy_resolution(
-        energy_mev,
-        flight_path_m=tof_params.flight_path_m,
-        delta_t_ns=tof_params.time_resolution_ns,
-        delta_t_is_fwhm=tof_params.delta_t_is_fwhm,
-    )
+    if tof_params.energy_fwhm_mev is not None:
+        # Declared incident-energy resolution (EN-RSL*): energy-independent
+        # FWHM straight from EXFOR; the TOF formula does not apply (§12b).
+        sigma_E_mev = tof_params.energy_fwhm_mev / 2.3548
+    else:
+        sigma_E_mev = tof_energy_resolution(
+            energy_mev,
+            flight_path_m=tof_params.flight_path_m,
+            delta_t_ns=tof_params.time_resolution_ns,
+            delta_t_is_fwhm=tof_params.delta_t_is_fwhm,
+        )
 
     # Apply minimum floor. Note this bites more readily under the FWHM reading:
     # sigma_E is 2.355x smaller, so at the bottom of a ~0.85 MeV grid it lands
@@ -368,6 +416,7 @@ def summarize_tof_parameters(
     """
     n_from_file = 0
     n_default = 0
+    n_exfor_rsl = 0
     flight_paths = []
     time_resolutions = []
 
@@ -379,7 +428,10 @@ def summarize_tof_parameters(
             default_time_resolution_ns=default_time_resolution_ns,
         )
 
-        if params.source == "file":
+        if params.source == "exfor_rsl":
+            n_exfor_rsl += 1
+            continue  # no (L, δt) pair to aggregate for declared widths
+        elif params.source == "file":
             n_from_file += 1
         else:
             n_default += 1
@@ -390,6 +442,7 @@ def summarize_tof_parameters(
     return {
         'n_from_file': n_from_file,
         'n_default': n_default,
+        'n_exfor_rsl': n_exfor_rsl,
         'flight_paths': flight_paths,
         'time_resolutions': time_resolutions,
         'mean_flight_path_m': np.mean(flight_paths) if flight_paths else 0.0,
