@@ -1035,6 +1035,9 @@ def filter_exfor_with_energy_bin(
     sigma_norm: float = 0.05,                     # Normalization uncertainty for GLS-ESS weighting
     band_aware_ess: bool = False,                 # Split Kish budget by F/M/B bands
     max_experiment_weight_fraction: float = 1.0,  # 1.0 = disabled
+    # Membership window (see "Membership vs weighting" in the notes)
+    membership_k_sigma: float = 0.0,              # 0.0 = hard bin edges (default)
+    sigma_E_mev: Optional[float] = None,          # required when membership_k_sigma > 0
     logger=None,
 ) -> Tuple[pd.DataFrame, List[Dict], np.ndarray, KernelDiagnostics, Dict]:
     """
@@ -1082,6 +1085,25 @@ def filter_exfor_with_energy_bin(
         Maximum allowed weight fraction per experiment (default: 1.0 = disabled).
         If < 1.0, experiments exceeding this fraction are scaled down.
         Applied AFTER normalize_by_n_points if both are enabled.
+    membership_k_sigma : float, optional
+        Widens the window that decides WHICH datasets may constrain this bin,
+        to ``target_energy_mev +- membership_k_sigma * sigma_E_mev`` (unioned
+        with the bin edges, so data is never lost). Default 0.0 keeps the hard
+        bin edges.
+
+        This is deliberately a membership knob and not a weighting knob. The
+        analysis grid here is ~5x finer than any experiment's TOF resolution,
+        so a bin-width window renews almost the entire point set from one bin
+        to the next; widening it to the resolution scale makes the composition
+        vary slowly. The selected point per experiment is still the one nearest
+        the target and still carries weight 1.0 — no Gaussian overlap weighting
+        is applied. That distinction matters: every EXFOR datum is ALREADY
+        folded by its own resolution, so weighting the fit by an overlap kernel
+        of the same width would convolve a second time and hand back an
+        effective resolution of sqrt(2)*sigma_E. Widening membership does not.
+    sigma_E_mev : float, optional
+        The bin's TOF energy resolution. Required when membership_k_sigma > 0;
+        ignored otherwise.
 
     Returns
     -------
@@ -1111,9 +1133,20 @@ def filter_exfor_with_energy_bin(
     # experiment_candidates: {(entry, subentry): [(energy, df, meta), ...]}
     experiment_candidates: Dict[Tuple[str, str], List[Tuple[float, pd.DataFrame, Dict]]] = defaultdict(list)
 
+    # Membership window. Defaults to the bin edges; when membership_k_sigma > 0
+    # it is unioned with +-k*sigma_E about the target so an experiment whose
+    # resolution spans many bins can constrain all of them. Only membership is
+    # affected — dedupe still picks the point nearest target_energy_mev and the
+    # weight stays 1.0.
+    member_lower_mev, member_upper_mev = bin_lower_mev, bin_upper_mev
+    if membership_k_sigma > 0 and sigma_E_mev and sigma_E_mev > 0:
+        half_width = membership_k_sigma * sigma_E_mev
+        member_lower_mev = min(bin_lower_mev, target_energy_mev - half_width)
+        member_upper_mev = max(bin_upper_mev, target_energy_mev + half_width)
+
     for available_energy in sorted_energies:
         # Exact bin matching - include if within [lower, upper]
-        if available_energy < bin_lower_mev or available_energy > bin_upper_mev:
+        if available_energy < member_lower_mev or available_energy > member_upper_mev:
             continue
 
         entries = exfor_cache.get(available_energy, [])

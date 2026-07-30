@@ -339,6 +339,21 @@ ANGULAR_QUALITY_GATE = True                      # Matches run77. A no-op on thi
 MIN_ANGULAR_POINTS = 4                           # Min total angular data points
 MIN_BANDS_COVERED = 3                            # Must have data in all 3 bands (F/M/B)
 MAX_BIN_EXPANSION = 3                            # Max expansion steps (1=+-1 bins, 2=+-2, etc.)
+MEMBERSHIP_K_SIGMA = 0.0                         # Widen WHICH datasets may constrain a bin to
+                                                  # target +- k*sigma_E (unioned with the bin edges).
+                                                  # 0.0 = hard bin edges, i.e. runs <= 82.
+                                                  #
+                                                  # Motivation: sigma_E is 1.7-8.6 keV here against a
+                                                  # 1 keV grid, so a bin-width window renews ~89% of
+                                                  # the point set from one bin to the next, and an
+                                                  # experiment with coarse resolution constrains a
+                                                  # single 1 keV bin instead of the region it actually
+                                                  # measured. This is a MEMBERSHIP knob only: the
+                                                  # selected point per experiment is still the nearest
+                                                  # to target and still carries weight 1.0. Applying
+                                                  # Gaussian overlap WEIGHTS instead would convolve a
+                                                  # second time (the data are already resolution-
+                                                  # folded) and cost sqrt(2)*sigma_E of resolution.
 # Energy grid source
 ENERGY_GRID_SOURCE = "union"                     # "endf" (MF4 grid) or "union" (from EXFOR subentries)
 UNION_GRID_SUBENTRIES = [                        # (subentry, min_MeV, max_MeV)
@@ -1376,6 +1391,7 @@ def perform_nominal_fits(
     rerun_aicc_post_tau: bool = True,
     use_gls_kernel: bool = True,
     sigma_norm_systematic: float = NORM_SYSTEMATIC_SIGMA,
+    membership_k_sigma: float = 0.0,
     logger = None,
 ) -> List[NominalFitResult]:
     """Phase 1: Perform nominal fits using energy_bin method.
@@ -1414,6 +1430,8 @@ def perform_nominal_fits(
             sigma_norm=sigma_norm_systematic,
             band_aware_ess=BAND_AWARE_ESS,
             max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
+            membership_k_sigma=membership_k_sigma,
+            sigma_E_mev=bin_info.sigma_E_mev,
             logger=_logger,
         )
 
@@ -1473,6 +1491,8 @@ def perform_nominal_fits(
                         sigma_norm=sigma_norm_systematic,
                         band_aware_ess=BAND_AWARE_ESS,
                         max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
+                        membership_k_sigma=membership_k_sigma,
+                        sigma_E_mev=bin_info.sigma_E_mev,
                         logger=_logger,
                     )
 
@@ -2737,6 +2757,7 @@ def run_exfor_to_endf_sampling_v2(
         rerun_aicc_post_tau=RERUN_AICC_POST_TAU,
         use_gls_kernel=USE_GLS_KERNEL,
         sigma_norm_systematic=sigma_norm_systematic,
+        membership_k_sigma=MEMBERSHIP_K_SIGMA,
         logger=_logger,
     )
 
