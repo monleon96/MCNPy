@@ -1696,9 +1696,23 @@ def sample_legendre_coefficients(
     rerun_aicc_post_tau: bool = False,
     # Block-correlated GLS kernel for the IC model-selection scan, the
     # initial nominal fit, and the post-τ rescan. Reduces to diagonal WLS
-    # when σ_sys_indep = 0. τ-IRLS, freeze_c0 refit, and MC sampler always
-    # stay diagonal.
+    # when σ_sys_indep = 0. freeze_c0 refit and MC sampler always stay
+    # diagonal; the τ-IRLS refit follows ``tau_refit_use_gls``.
     use_gls_kernel: bool = False,
+    # Solver for the coefficient refit *inside* the τ-IRLS loop. The default
+    # (False) keeps the historical diagonal WLS refit, which folds σ_sys into
+    # the fit weights as if it were uncorrelated. That is inconsistent with
+    # the scan and the post-τ rescan, which both use the block-correlated GLS
+    # kernel when ``use_gls_kernel`` is on — so with the default the shipped
+    # coeffs0 and the AICc scores that selected its degree come from different
+    # noise models. Set True to run the τ refit under the same GLS kernel.
+    #
+    # ⚠ The GLS branch takes σ_eff (= τ·σ_stat) and carries σ_sys as rank-1
+    #   structure. It must NOT be handed ``sigma_refit`` (σ_sys already folded
+    #   into the diagonal) or σ_sys is counted twice.
+    #
+    # No-op unless ``use_gls_kernel`` is True and GLS inputs were supplied.
+    tau_refit_use_gls: bool = False,
     # Phase-2 elastic magnitude channel. When True, record the closed-form
     # fixed-shape c0 scale of every (perturbed) sample against the nominal
     # bin curve into ``info["c0_samples"]`` — a read-only side channel that
@@ -2066,13 +2080,27 @@ def sample_legendre_coefficients(
                 np.sqrt(sigma_eff ** 2 + sigma_sys ** 2)
                 if sigma_sys is not None else sigma_eff
             )
-            coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
-                mu, y, sigma_refit, degree_use,
-                ridge_lambda=ridge_lambda,
-                ridge_power=ridge_power,
-                df_method=df_method,
-                external_weights=external_weights,
-            )
+            if (tau_refit_use_gls and use_gls_kernel
+                    and gls_indep_per_exp is not None):
+                # σ_eff (τ-inflated stat) on D; σ_sys stays rank-1 in U/V.
+                # Deliberately NOT sigma_refit — see tau_refit_use_gls above.
+                coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit_gls(
+                    mu, y, sigma_eff, gls_indep_per_exp, gls_exp_index,
+                    degree_use,
+                    sigma_sys_dep_per_row=gls_dep_per_row,
+                    ridge_lambda=ridge_lambda,
+                    ridge_power=ridge_power,
+                    df_method=df_method,
+                    external_weights=external_weights,
+                )
+            else:
+                coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
+                    mu, y, sigma_refit, degree_use,
+                    ridge_lambda=ridge_lambda,
+                    ridge_power=ridge_power,
+                    df_method=df_method,
+                    external_weights=external_weights,
+                )
             # Convergence: compare *raw* targets between consecutive iterations
             # (damping smooths the trajectory but we still want to see whether
             # the underlying estimator has settled).
@@ -2196,13 +2224,26 @@ def sample_legendre_coefficients(
                         np.sqrt(sigma_eff ** 2 + sigma_sys ** 2)
                         if sigma_sys is not None else sigma_eff
                     )
-                    coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
-                        mu, y, sigma_refit, degree_use,
-                        ridge_lambda=ridge_lambda,
-                        ridge_power=ridge_power,
-                        df_method=df_method,
-                        external_weights=external_weights,
-                    )
+                    if (tau_refit_use_gls and use_gls_kernel
+                            and gls_indep_per_exp is not None):
+                        # Same contract as the first τ-IRLS loop above.
+                        coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit_gls(
+                            mu, y, sigma_eff, gls_indep_per_exp,
+                            gls_exp_index, degree_use,
+                            sigma_sys_dep_per_row=gls_dep_per_row,
+                            ridge_lambda=ridge_lambda,
+                            ridge_power=ridge_power,
+                            df_method=df_method,
+                            external_weights=external_weights,
+                        )
+                    else:
+                        coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
+                            mu, y, sigma_refit, degree_use,
+                            ridge_lambda=ridge_lambda,
+                            ridge_power=ridge_power,
+                            df_method=df_method,
+                            external_weights=external_weights,
+                        )
                     tau_target_curr = {
                         b: float(tau_info.get(f'raw_{b[-1]}', tau_info[b]))
                         for b in ('tau_F', 'tau_M', 'tau_B')
