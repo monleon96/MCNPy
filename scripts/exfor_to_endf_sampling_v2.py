@@ -206,7 +206,15 @@ ENDF_FILE = "/share_snc/snc/JuanMonleon/jeff40_with_MF4_from_jeff33/26-Fe-56g.tx
 MF34_SOURCE_FILE = None                          # Separate MF34 source (None = use ENDF_FILE)
 EXFOR_DIRECTORY = "/share_snc/snc/JuanMonleon/EXFOR/data_v1/"
 EXFOR_DB_PATH = '/share_snc/snc/JuanMonleon/EXFOR/x4_iron_angular.db'
-OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_82/"
+# Run 83 = run 82's method, re-evaluated with the declared EXFOR EN-RSL*
+# resolutions now read by scripts/tof_parameters.py. Nothing else changed:
+# sigma_E feeds compute_overlap_weight, so which datasets constrain which bin
+# moves and this is a re-evaluation, not a re-scoring. Overridable so a sweep
+# can redirect without editing this file.
+OUTPUT_DIR = os.environ.get(
+    "KIKA_OUTPUT_DIR",
+    "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_83/",
+)
 TOF_PARAMETERS_FILE = "/share_snc/snc/JuanMonleon/EXFOR/exfor_tof_parameters.json"
 
 # --- DATA SOURCE ----------------------------------------------------------- #
