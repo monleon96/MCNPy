@@ -139,10 +139,17 @@ N_WINDOW_SAMPLES  = 65
 
 # ── Library ENDF files ──
 # This_work uses its own MF3, MF4, MF34 and MF33 from the pipeline product.
-# Points at the MT1-repaired run-82 directory: its MF34 is identical to the
+# Defaults to the MT1-repaired run-82 directory: its MF34 is identical to the
 # unrepaired one, and its MF33 is the ungrouped (1738-group) matrix rather than
 # the 190-group collapse, so the magnitude term is not pre-averaged.
-THIS_WORK_DIR  = "/share_snc/snc/JuanMonleon/ENDF_samples/new_test_82_mt1fix"
+#
+# Overridable so the same script can score a different pipeline run (run 83, the
+# EN-RSL re-evaluation) without editing the file. Unset ⇒ byte-identical
+# behaviour to run 82, which must stay reproducible.
+THIS_WORK_DIR  = os.environ.get(
+    "KIKA_THIS_WORK_DIR",
+    "/share_snc/snc/JuanMonleon/ENDF_samples/new_test_82_mt1fix",
+).rstrip("/")
 THIS_WORK_FILE = f"{THIS_WORK_DIR}/26-Fe-56g_nominal_mg.endf"
 
 JEFF_FILE  = "/share_snc/snc/JuanMonleon/jeff40_with_MF4_from_jeff33/26-Fe-56g.txt"
@@ -204,9 +211,18 @@ if FOLD_MODE not in _FOLD_SUFFIX:
         f"FOLD_MODE={FOLD_MODE!r} is not one of {sorted(_FOLD_SUFFIX)}"
     )
 
+# Which pipeline run this scoring belongs to. Tags the parquet so run 82 and
+# run 83 products never collide. Default "82" keeps every existing filename.
+#
+# NOTE the two are independent on purpose: KIKA_THIS_WORK_DIR chooses the
+# evaluation being scored, KIKA_RUN_TAG names the output. Scoring run 82 under a
+# changed σ_E (tag "82_enrsl") is a real use case — it isolates the effect of the
+# resolution fix on the *scoring* from its effect on the *evaluation*.
+RUN_TAG = os.environ.get("KIKA_RUN_TAG", "82").strip()
+
 OUTPUT_PARQUET = (
     "/share_snc/snc/JuanMonleon/chi2/"
-    f"chi2_data_predictive_82{_FOLD_SUFFIX[FOLD_MODE]}.parquet"
+    f"chi2_data_predictive_{RUN_TAG}{_FOLD_SUFFIX[FOLD_MODE]}.parquet"
 )
 
 
@@ -394,6 +410,11 @@ def main() -> None:
     print(f"\nPredictive scenario, FOLD_MODE={FOLD_MODE}: {_fold_label}")
     print(f"  truncated Gaussian ±{N_SIGMA:g}σ_E, {N_WINDOW_SAMPLES} nodes; "
           f"covariance MF34 + MF33.")
+    # Provenance: which evaluation was scored, and under which tag. Both are
+    # environment-driven, so recording them is the only way a reader of the
+    # output can tell run 82 from run 83.
+    print(f"  run tag  : {RUN_TAG}")
+    print(f"  This_work: {THIS_WORK_FILE}")
     print(f"  output: {OUTPUT_PARQUET}")
 
     try:

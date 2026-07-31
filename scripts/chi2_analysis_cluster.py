@@ -87,7 +87,10 @@ import chi2_metrics
 
 # Run versioning. Outputs land in `<REPORT_DIR>/run_<RUN_ID>/`; bump this to
 # start a fresh run without overwriting earlier ones.
-RUN_ID: str = "082"
+#
+# Overridable from the environment so scoring a different pipeline run lands in
+# its own directory instead of overwriting run_082 — which the thesis rests on.
+RUN_ID: str = os.environ.get("KIKA_CHI2_RUN_ID", "082").strip()
 
 # Which methodologies to run. Any non-empty subset of the PATHS keys. Each entry
 # needs its parquet + .eval_cov.npz sidecar built first by the matching
@@ -127,6 +130,61 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
         "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_82.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
         "title":      "χ² analysis — shipped MF3+MF4 resolution-folded, MF34+MF33 eval σ",
+        "systematic_block_col": None,
+    },
+    # ── The EN-RSL pair. Same code, same libraries, same everything as
+    # `predictive` above; they differ only in which σ_E the *fold* uses and
+    # which pipeline run supplies This_work.
+    #
+    # `predictive` itself was built 2026-07-28, before the declared EXFOR
+    # resolutions were read (scripts/tof_parameters.py, deployed 2026-07-30).
+    # σ_E is now ~3.5× wider for the 74 subentries that declare EN-RSL*, and the
+    # fold is part of the *scoring*, not just the evaluation — so every library,
+    # JEFF and JENDL included, scores differently now. That is why `predictive`
+    # cannot be compared against anything built after 2026-07-30, and why
+    # repr_mg failed its validation gate against it.
+    #
+    #   predictive_82_enrsl : run-82 evaluation, new σ_E  → isolates the effect
+    #                         of the fix on SCORING. Also the repaired reference
+    #                         the repr_* gate should be checked against.
+    #   predictive_83       : run-83 evaluation, new σ_E  → isolates the effect
+    #                         of the fix on the EVALUATION, read against
+    #                         predictive_82_enrsl.
+    #
+    # Two invariances make this pair self-checking. Run 83's nominal_fits.parquet
+    # is byte-identical to run 82's, so between these two entries:
+    #   • JEFF and JENDL must be identical in every variant (neither file moved);
+    #   • This_work V2 must be identical (V2 excludes σ_eval, and the MF4 central
+    #     values did not move).
+    # Only V4 should move — run 83 changed MF34 *correlations*, not variances.
+    # Anything else moving means an unintended knob moved with it.
+    "predictive_82_enrsl": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_82_enrsl.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-82 evaluation, declared EN-RSL σ_E in the fold",
+        "systematic_block_col": None,
+    },
+    "predictive_83": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_83.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-83 evaluation (EN-RSL), declared σ_E in the fold",
+        "systematic_block_col": None,
+    },
+    # Run 84 = run 83 re-evaluated with the τ-IRLS refit on the GLS kernel
+    # (TAU_REFIT_USE_GLS=True). Single-variable against predictive_83: same
+    # σ_E, same EN-RSL, and the runner pins DEGREE_WEIGHT_FLOOR=0.01 and
+    # MC_CAP_FROM_SUPPORT_ONLY=0 back to v2 so the fork's other two research
+    # knobs stay out of it. The τ-GLS solver is the ONLY difference.
+    #
+    # Unlike run 83 this DOES move the central values — median |Δa|/|a| ≈ 5 %
+    # at ℓ=1 and ≈ 13 % at ℓ=5, with frozen_degree changing in 12 % of bins —
+    # so V2 is expected to move here, and V2 is the variant that actually
+    # answers the question (it is the pure central-value metric; V4 mixes in
+    # the covariance, which the solver change also perturbs).
+    "predictive_84": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_84.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-84 evaluation (τ-IRLS on GLS), declared σ_E in the fold",
         "systematic_block_col": None,
     },
     # Fold-mode sweep. Identical to `predictive` in every respect except which
@@ -199,6 +257,43 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
         "systematic_block_col": None,
     },
 }
+
+# MF34 representation study — fine vs multigroup, and Legendre-order truncation.
+# Registered programmatically because the mode table lives in the precompute
+# script and duplicating a dozen near-identical dict literals here would
+# guarantee they drift apart. Written by
+# scripts/precompute_chi2_representation.py (REPR_MODE=<mode>); everything
+# except the This_work MF4/MF34 representation is identical to `predictive`,
+# so systematic_block_col matches it.
+#
+# Read the results as:
+#   repr_fine  vs repr_mg          -> what multigroup collapse costs (V4 only;
+#                                     the two files share MF4 and MF33)
+#   repr_fine  vs repr_fine_covN   -> what MF34 orders > N are worth (V4 only)
+#   repr_fine  vs repr_fine_evalN  -> what evaluating above order N is worth
+#                                     (V2 and V4)
+# repr_mg must reproduce `predictive` run 082. It is the validation gate, not
+# a result.
+_REPR_MODES = {
+    "fine":       "fine grid, L=6 — the reference",
+    "mg":         "multigroup grid, L=6 — must reproduce `predictive`",
+    "fine_cov3":  "fine grid, MF4 L=6, MF34 l<=3",
+    "fine_cov4":  "fine grid, MF4 L=6, MF34 l<=4",
+    "fine_cov5":  "fine grid, MF4 L=6, MF34 l<=5",
+    "mg_cov3":    "multigroup grid, MF4 L=6, MF34 l<=3",
+    "mg_cov4":    "multigroup grid, MF4 L=6, MF34 l<=4",
+    "mg_cov5":    "multigroup grid, MF4 L=6, MF34 l<=5",
+    "fine_eval3": "fine grid, MF4 and MF34 both l<=3",
+    "fine_eval4": "fine grid, MF4 and MF34 both l<=4",
+    "fine_eval5": "fine grid, MF4 and MF34 both l<=5",
+}
+for _mode, _desc in _REPR_MODES.items():
+    PATHS[f"repr_{_mode}"] = {
+        "parquet":    f"/share_snc/snc/JuanMonleon/chi2/chi2_data_repr_82_{_mode}.parquet",
+        "report_dir": f"/share_snc/snc/JuanMonleon/CHI_Figures/chi2_repr_{_mode}",
+        "title":      f"χ² analysis — MF34 representation: {_desc}",
+        "systematic_block_col": None,
+    }
 
 # Analysis window (MeV), K&S anchor experiment IDs, Cierjacks anchor IDs.
 E_MIN_MEV = 0.85
