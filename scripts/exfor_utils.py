@@ -2954,6 +2954,7 @@ def compute_covariance_from_samples(
     snr_threshold: float = 0.0,
     n_neighbors: int = 3,
     logger=None,
+    mixture_blocks: Optional[Dict[int, Dict[str, np.ndarray]]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]], np.ndarray, np.ndarray]:
     """
     Compute relative (fractional) covariance and correlation matrices from MC samples.
@@ -2969,6 +2970,24 @@ def compute_covariance_from_samples(
         List of energy indices (sorted)
     max_order : int
         Maximum Legendre order to include
+    mixture_blocks : Dict[int, Dict[str, np.ndarray]], optional
+        Phase-3 per-bin mixture moments, ``{energy_index: {'mean': (max_order,),
+        'cov': (max_order, max_order)}}``, in the same ENDF a-space and the same
+        absolute units as the samples.
+
+        When given, each listed bin's diagonal block of the ABSOLUTE covariance
+        and its slice of the mean vector are replaced before anything else
+        happens. Everything downstream — the ``valid_mask`` zeroing, the
+        relative conversion, the near-zero regularisation and the correlation
+        extraction — then runs on the mixture exactly as it would on a sample
+        covariance. That is deliberate: the near-zero guard is the only active
+        protection against relative-sigma blow-up, and routing the mixture
+        through this function is what keeps it applied rather than requiring a
+        second copy of it at the call site.
+
+        Bins not listed keep their sample estimates, so interpolated bins and
+        bins whose MC failed fall through untouched. **Cross-bin blocks are
+        never replaced** — they stay as estimated from the pooled samples.
 
     Returns
     -------
@@ -3008,6 +3027,35 @@ def compute_covariance_from_samples(
 
     # Compute absolute covariance
     cov_abs = np.cov(sample_matrix, rowvar=False)
+    mean_params = np.mean(sample_matrix, axis=0)
+
+    # Phase 3: substitute the analytic per-bin mixture moments for the sample
+    # estimates. Done here, before the mask and the relative conversion, so the
+    # mixture is subject to every guard the sampled path is subject to.
+    if mixture_blocks:
+        n_sub = 0
+        for k, e_idx in enumerate(energy_indices):
+            blk = mixture_blocks.get(e_idx)
+            if not blk:
+                continue
+            m = np.asarray(blk['mean'], dtype=float)
+            c = np.asarray(blk['cov'], dtype=float)
+            if m.shape != (max_order,) or c.shape != (max_order, max_order):
+                raise ValueError(
+                    f"mixture block for energy_index {e_idx} has mean{m.shape} "
+                    f"cov{c.shape}, expected ({max_order},) and "
+                    f"({max_order}, {max_order})"
+                )
+            s = k * max_order
+            e = s + max_order
+            cov_abs[s:e, s:e] = 0.5 * (c + c.T)
+            mean_params[s:e] = m
+            n_sub += 1
+        if logger:
+            logger.info(
+                f"  [MIX] per-bin mixture blocks substituted for {n_sub}/"
+                f"{n_energies} bins (cross-bin blocks left as sampled)"
+            )
 
     # Zero out rows/columns for parameters that were not actually fitted
     if valid_mask is not None:
@@ -3017,7 +3065,6 @@ def compute_covariance_from_samples(
 
     # Convert absolute covariance to relative (fractional) covariance
     # Cov_rel(i,j) = Cov_abs(i,j) / (mean_i * mean_j)
-    mean_params = np.mean(sample_matrix, axis=0)
     # Per-parameter safe test (|mean| > 1e-6, ~ENDF 6-sig-digit precision),
     # mirroring absolute_to_nominal_relative: the pairwise-product test
     # (|mean_i*mean_j| > threshold²) could zero a diagonal variance while
