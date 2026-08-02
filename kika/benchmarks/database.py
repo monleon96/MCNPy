@@ -14,8 +14,11 @@ from typing import List, Optional
 
 from kika.benchmarks import config
 from kika.benchmarks._blob import unpack_f32
+from kika.benchmarks._constants import SCHEMA_VERSION
+from kika.sensitivities.profile import SensitivityProfile, SensitivityReaction
 from kika.benchmarks.exceptions import (
     BenchmarkNotFoundError,
+    BenchmarksError,
     DatabaseNotConfiguredError,
 )
 
@@ -45,8 +48,30 @@ class BenchmarksDatabase:
                     "kika.benchmarks.build_benchmarks_db(...) or set the path via "
                     "benchmarks.configure(db_path=...) / KIKA_BENCHMARKS_DB_PATH."
                 )
-            self._conn = sqlite3.connect(self.db_path)
-            self._conn.row_factory = sqlite3.Row
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                meta = {
+                    row["key"]: row["value"]
+                    for row in conn.execute("SELECT key, value FROM meta")
+                }
+            except sqlite3.Error as exc:
+                conn.close()
+                raise BenchmarksError(
+                    "Invalid benchmarks database; rebuild it with "
+                    "kika.benchmarks.build_benchmarks_db(...)."
+                ) from exc
+            if (
+                meta.get("schema_version") != str(SCHEMA_VERSION)
+                or meta.get("sensitivity_uncertainty_convention") != "absolute"
+            ):
+                conn.close()
+                raise BenchmarksError(
+                    f"Benchmarks database schema/convention is incompatible "
+                    f"(expected schema_version={SCHEMA_VERSION} and absolute "
+                    "sensitivity uncertainties); rebuild the database."
+                )
+            self._conn = conn
         return self._conn
 
     def close(self) -> None:
@@ -130,7 +155,7 @@ class BenchmarksDatabase:
             dict(p)
             for p in conn.execute(
                 "SELECT profile_id, code, library, group_structure, ngroups, keff, "
-                "keff_rel_err, is_preferred, source_filename "
+                "keff_unc, is_preferred, source_filename "
                 "FROM profiles WHERE benchmark_id = ? "
                 "ORDER BY is_preferred DESC, profile_id",
                 (benchmark_id,),
@@ -153,12 +178,39 @@ class BenchmarksDatabase:
         return dict(row)
 
     # -- vectors (for plotting / UQ) ----------------------------------------
+    def list_similarity_profiles(
+        self,
+        benchmark_ids: Optional[List[str]] = None,
+        preferred_only: bool = True,
+    ) -> List[dict]:
+        """Return deterministic profile candidates for c-k ranking."""
+        conditions = []
+        params: list = []
+        if preferred_only:
+            conditions.append("is_preferred = 1")
+        if benchmark_ids is not None:
+            if not benchmark_ids:
+                return []
+            placeholders = ", ".join("?" for _ in benchmark_ids)
+            conditions.append(f"benchmark_id IN ({placeholders})")
+            params.extend(benchmark_ids)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        rows = self._get_connection().execute(
+            "SELECT profile_id, benchmark_id, code, library, group_structure, "
+            f"is_preferred FROM profiles {where} "
+            "ORDER BY benchmark_id, is_preferred DESC, profile_id",
+            params,
+        )
+        return [dict(row) for row in rows]
+
     def get_profile_vector(
         self, profile_id: int, zaid: Optional[int] = None, mt: Optional[int] = None
     ) -> dict:
         """
         Return a profile's full per-group sensitivity vectors.
 
+        Each reaction error vector contains absolute one-sigma standard
+        deviations, or None when errors were not stored.
         The returned dict matches the app's ``SDFSensitivityData`` shape so the
         existing SDF plotting components can render it directly::
 
@@ -209,6 +261,45 @@ class BenchmarksDatabase:
             )
         return {"pert_energies": pert_energies, "reactions": reactions}
 
+    def get_sensitivity_profile(self, profile_id: int) -> SensitivityProfile:
+        """Return a profile as a validated, format-neutral UQ object."""
+        conn = self._get_connection()
+        row = conn.execute(
+            "SELECT benchmark_id, code, library, group_structure, ngroups, "
+            "keff, keff_unc, pert_energies FROM profiles WHERE profile_id = ?",
+            (profile_id,),
+        ).fetchone()
+        if row is None:
+            raise BenchmarkNotFoundError(f"Unknown profile_id: {profile_id}")
+
+        vector = self.get_profile_vector(profile_id)
+        reactions = tuple(
+            SensitivityReaction(
+                zaid=reaction["zaid"],
+                mt=reaction["mt"],
+                sensitivity=reaction["sensitivity"],
+                uncertainty=reaction["error"],
+                label=reaction["reaction_name"],
+            )
+            for reaction in vector["reactions"]
+        )
+        return SensitivityProfile(
+            energy_grid=vector["pert_energies"],
+            energy_unit="MeV",
+            reactions=reactions,
+            response=row["keff"],
+            response_uncertainty=row["keff_unc"],
+            label=row["benchmark_id"],
+            metadata={
+                "source": "benchmarks-db",
+                "profile_id": profile_id,
+                "benchmark_id": row["benchmark_id"],
+                "code": row["code"],
+                "library": row["library"],
+                "group_structure": row["group_structure"],
+            },
+        )
+
     # -- screening -----------------------------------------------------------
     def screen(
         self,
@@ -238,13 +329,15 @@ class BenchmarksDatabase:
         if mt is not None:
             conditions.append("ps.mt = ?")
             params.append(mt)
+        else:
+            conditions.append("ps.mt != 0")
         if preferred_only:
             conditions.append("p.is_preferred = 1")
-        conditions.append(f"ABS(ps.{col}) >= ?")
+        conditions.append(f"ABS(ps.{col}) > ?")
         params.append(sensitivity_threshold)
         if fraction_threshold is not None:
             conditions.append(
-                f"ps.s_abs_total > 0 AND ABS(ps.{col}) / ps.s_abs_total >= ?"
+                f"ps.s_abs_total > 0 AND ABS(ps.{col}) / ps.s_abs_total > ?"
             )
             params.append(fraction_threshold)
 

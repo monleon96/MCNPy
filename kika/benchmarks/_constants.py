@@ -19,10 +19,10 @@ DEFAULT_DB_DIR = Path.home() / ".kika" / "benchmarks"
 DEFAULT_DB_PATH = DEFAULT_DB_DIR / "kika_benchmarks.db"
 
 # Bump when the on-disk schema changes in a backward-incompatible way.
-# v2: per-group error stored by default; experimental keff on the benchmarks row;
-#     benchmark_spectra / benchmark_balance / benchmark_inputs tables; unit/region
-#     columns on profile_sensitivities (populated only when region profiles are on).
-SCHEMA_VERSION = 2
+# v3: SDF errors and response uncertainty are absolute standard deviations;
+#     profiles.keff_unc replaces the misleading keff_rel_err name; repeated
+#     occurrences are resolved by an explicit ingest policy.
+SCHEMA_VERSION = 3
 
 # ---------------------------------------------------------------------------
 # Coarse energy regions (MeV, ascending). Standard criticality split points:

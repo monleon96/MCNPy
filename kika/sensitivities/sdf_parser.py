@@ -1,69 +1,32 @@
-"""Parser for legacy SDF (Sensitivity Data File) format.
+"""Read SCALE Sensitivity Data Files into the KIKA SDF model.
 
-This module reads two dialects of the SDF format into the same ``SDFData``
-object:
+The public model stores groupwise sensitivity uncertainties and response
+uncertainty as absolute one-sigma standard deviations. Standard SCALE files
+therefore use uncertainty_convention="absolute" by default.
 
-* **KIKA's own writer output** (``sdf.SDFData.write_file``) – for which parsing
-  and re-writing yields a byte‑for‑byte identical file (modulo line endings,
-  which we normalise to ``\n`` on read).
-* **Standard SCALE / TSUNAMI SDF files** produced by other tools (e.g. the OECD
-  MCNP→SCALE conversion script). These use a free‑form title line, lowercase
-  ``e`` scientific notation, a ``k-eff`` line with plain decimals and trailing
-  comment text, and energies expressed in **eV**.
+Historical KIKA files used relative uncertainties and carry a distinctive
+"MCNP to SCALE sdf" header. Read them explicitly with
+uncertainty_convention="relative"; conversion occurs at the boundary.
 
-To keep the rest of the library consistent, foreign files are *normalised* to
-KIKA's canonical form on read: the title is stored verbatim, and energy
-boundaries are converted to **MeV** (KIKA's internal/plotting/grid convention).
-As a consequence, re-writing a foreign file will NOT reproduce it byte-for-byte
-(the writer emits KIKA's header and MeV grid) – only KIKA-generated files
-round-trip exactly.
-
-We therefore:
-
-1. Preserve ordering of reactions exactly as they appear in the file.
-2. Do not attempt to 'normalise' floating point formatting – we store floats as
-   Python floats but reproduce writer formatting which matches the original
-   writer (scientific notation with 6 decimals, width 14, right aligned, 5 per line).
-3. Reconstruct the perturbation energy boundaries in ascending order (writer
-   reverses them when outputting).  The file lists the boundaries in descending
-   order immediately under the line ``energy boundaries:`` with 5 values per line.
-
-The legacy block structure for each reaction (as produced by
-``SDFData._format_reaction_data``) is:
-
-<nuclideSymbol(ljust13)><reactionName(ljust17)><ZAID(>5)><MT(>7)><\n>
-"      0      0"\n
-"  0.000000E+00  0.000000E+00      0      0"\n
-<5 derived scalar values (ignored on parse, recomputed on write)>\n
-<group sensitivities reversed (5 per line)>\n
-<group errors reversed (5 per line)>\n
-We intentionally IGNORE the 5 scalar values while parsing because the writer
-recomputes them; keeping the parsed numbers could conceal inconsistencies.
-
-API
----
-parse_sdf(path: str) -> SDFData
-    Parse file and return ``SDFData`` instance.
-
-roundtrip_equal(path: str, tmp_dir: Optional[str] = None) -> bool
-    Convenience helper that parses, writes to a temporary directory and
-    performs textual comparison with the original file.
+External SCALE energies are converted from eV to internal MeV. Group data
+remain the source of truth; all five reaction scalars are checked and any
+discrepancy is logged with file, ZAID and MT context. Writing always produces
+the SCALE-compatible absolute-uncertainty dialect.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Literal, Optional
 import logging
 import re
+import numpy as np
 
 from .sdf import SDFData, SDFReactionData
-from kika._constants import ATOMIC_NUMBER_TO_SYMBOL, MT_TO_REACTION
 
 logger = logging.getLogger(__name__)
 
-# Magic header produced by KIKA's own writer; the title precedes it. When this
-# matches we recover the *bare* title so KIKA files round-trip byte-identically.
+# Magic header produced by historical KIKA writers; the title precedes it. When this
+# matches we recover the bare title before migrating to the standard dialect.
 # Foreign files (free-form first line) don't match and the whole line is the title.
 HEADER_RE = re.compile(r"^(?P<title>.+) MCNP to SCALE sdf (?P<ngroups>\d+)gr\s*$")
 NGROUP_LINE_RE = re.compile(r"^\s*(?P<ngroups>\d+) number of neutron groups\s*$")
@@ -83,24 +46,28 @@ FLOAT_PATTERN = r"[+-]?\d*\.?\d+(?:[eE][+-]?\d+)?"
 # the two leading integers and ignore any trailing text.
 _META1_RE = re.compile(r"^\s*(-?\d+)\s+(-?\d+)")
 
-# Above ~1 GeV in "MeV" is unphysical for the reactor/criticality domain this
-# tool targets (neutron grids top out near 20 MeV), so a grid whose maximum
-# boundary exceeds this threshold is interpreted as eV and converted to MeV.
-EV_DETECTION_THRESHOLD_MEV = 1.0e3
-
 
 def _parse_scientific_numbers(line: str) -> List[float]:
     return [float(x) for x in re.findall(FLOAT_PATTERN, line)]
 
 
-def read_sdf(path: str) -> SDFData:
+def read_sdf(
+    path: str,
+    *,
+    uncertainty_convention: Literal["absolute", "relative"] = "absolute",
+) -> SDFData:
     """Parse an SDF file returning an ``SDFData`` instance.
 
     Parameters
     ----------
     path : str
         Path to SDF file.
+    uncertainty_convention : {"absolute", "relative"}
+        SCALE uses absolute standard deviations; "relative" supports files
+        written by historical KIKA versions.
     """
+    if uncertainty_convention not in {"absolute", "relative"}:
+        raise ValueError("uncertainty_convention must be 'absolute' or 'relative'")
     p = Path(path)
     if not p.is_file():
         raise FileNotFoundError(path)
@@ -113,9 +80,14 @@ def read_sdf(path: str) -> SDFData:
         raise ValueError("Empty SDF file")
 
     # Line 1: title. KIKA's writer appends a magic " MCNP to SCALE sdf <N>gr"
-    # suffix; recover the bare title from it so KIKA files round-trip exactly.
+    # suffix; recover the bare title while applying the requested legacy conversion.
     # Standard SCALE files use a free-form first line, which we keep verbatim.
     header_match = HEADER_RE.match(lines[idx])
+    if header_match and uncertainty_convention == "absolute":
+        raise ValueError(
+            "This file has the historical KIKA relative-uncertainty header. "
+            "Read it with uncertainty_convention='relative'."
+        )
     title = header_match.group("title") if header_match else lines[idx]
     idx += 1
 
@@ -161,6 +133,10 @@ def read_sdf(path: str) -> SDFData:
         if not r0_nums:
             raise ValueError(f"Could not parse r0 from line: '{kline}'")
         r0, e0 = r0_nums[0], 0.0
+    if uncertainty_convention == "relative":
+        e0 = abs(r0) * abs(e0)
+    else:
+        e0 = abs(e0)
     idx += 1
 
     if idx >= len(lines) or lines[idx].strip() != "energy boundaries:":
@@ -179,11 +155,8 @@ def read_sdf(path: str) -> SDFData:
     # File stores descending order; convert to ascending for internal object.
     pert_energies = list(reversed(energy_values))
 
-    # Normalise units to MeV (KIKA's internal convention for plotting, grid
-    # identification and covariance). Standard SCALE files express the grid in
-    # eV; detect that from the maximum boundary and convert. The threshold is
-    # intentionally conservative (see EV_DETECTION_THRESHOLD_MEV).
-    if pert_energies and max(pert_energies) > EV_DETECTION_THRESHOLD_MEV:
+    # Standard SCALE files store eV; historical KIKA files stored internal MeV.
+    if not header_match:
         pert_energies = [e / 1.0e6 for e in pert_energies]
 
     reactions: List[SDFReactionData] = []
@@ -206,17 +179,36 @@ def read_sdf(path: str) -> SDFData:
         # single summary line, then groupwise sensitivities ONLY (no error block);
         # every compact profile is a single-region system total.
         parts = line.split()
-        if len(parts) not in (4, 6) or not (parts[2].isdigit() and parts[3].isdigit()):
-            raise ValueError(f"Malformed reaction header at line {idx+1}: {line}")
-        reaction_name = parts[1]
-        zaid = int(parts[2])
-        mt = int(parts[3])
-        compact = len(parts) == 6
+        compact = False
+        try:
+            # Compact TSUNAMI-1D headers end in ``ZAID MT unit value``.
+            # Verbose SCALE headers end in ``ZAID MT`` and may use a reaction
+            # label containing whitespace (for example "nu-bar total").
+            if (
+                len(parts) == 6
+                and parts[-4].isdigit()
+                and parts[-3].isdigit()
+                and parts[-2].lstrip("+-").isdigit()
+            ):
+                float(parts[-1])
+                zaid, mt = int(parts[-4]), int(parts[-3])
+                reaction_name = " ".join(parts[1:-4])
+                compact = True
+            elif len(parts) >= 4 and parts[-2].isdigit() and parts[-1].isdigit():
+                zaid, mt = int(parts[-2]), int(parts[-1])
+                reaction_name = " ".join(parts[1:-2])
+            else:
+                raise ValueError
+        except ValueError:
+            raise ValueError(f"Malformed reaction header at line {idx+1}: {line}") from None
+        if not reaction_name:
+            raise ValueError(f"Missing reaction name at line {idx+1}: {line}")
         idx += 1
 
+        scalar_nums = None
         if compact:
             # unit is inline; compact profiles are region-integrated -> region 0.
-            unit, region = int(parts[4]), 0
+            unit, region = int(parts[-2]), 0
             # One summary line (integrated sensitivity etc.) - read and discard.
             if idx >= len(lines) or not _parse_scientific_numbers(lines[idx]):
                 raise ValueError(f"Missing compact summary line at line {idx+1}")
@@ -284,6 +276,84 @@ def read_sdf(path: str) -> SDFData:
         sens_vals.reverse()
         err_vals.reverse()
 
+        sensitivity_array = np.asarray(sens_vals, dtype=float)
+        raw_error = np.asarray(err_vals, dtype=float)
+        if uncertainty_convention == "relative":
+            error_array = np.abs(sensitivity_array) * np.abs(raw_error)
+        else:
+            error_array = np.abs(raw_error)
+        err_vals = error_array.tolist()
+
+        if scalar_nums is not None:
+            integral = float(np.sum(sensitivity_array))
+            integral_std = float(np.sqrt(np.sum(error_array ** 2)))
+            sum_abs = float(np.sum(np.abs(sensitivity_array)))
+            sum_error_abs = float(np.sum(error_array))
+            # The scalar integral was evaluated before each group value was
+            # rounded to ES14.6. Use its sign to reconstruct OSC; otherwise a
+            # near-zero constrained-chi integral can flip sign after rounding.
+            integral_for_sign = scalar_nums[0]
+            if integral_for_sign > 0.0:
+                osc_mask = sensitivity_array < 0.0
+            elif integral_for_sign < 0.0:
+                osc_mask = sensitivity_array > 0.0
+            elif scalar_nums[3] < 0.0:
+                # A constrained profile can have an exactly zero stored
+                # integral. Its stored OSC sign identifies the selected side.
+                osc_mask = sensitivity_array < 0.0
+            elif scalar_nums[3] > 0.0:
+                osc_mask = sensitivity_array > 0.0
+            else:
+                osc_mask = np.zeros_like(sensitivity_array, dtype=bool)
+            osc = float(np.sum(sensitivity_array[osc_mask]))
+            osc_std = float(np.sqrt(np.sum(error_array[osc_mask] ** 2)))
+
+            mismatches = []
+            derived = (integral, integral_std, sum_abs, osc, osc_std)
+            names = (
+                "integral",
+                "integral uncertainty",
+                "absolute sum",
+                "oscillation",
+                "oscillation uncertainty",
+            )
+            # Accumulating N group values rounded to ES14.6 can differ from the
+            # independently rounded scalar by up to roughly 5e-7 times their
+            # absolute sum. Values inside that envelope are formatting noise.
+            value_atol = 5.0e-7 * sum_abs + 1.0e-15
+            uncertainty_atol = 5.0e-7 * sum_error_abs + 1.0e-15
+            atols = (
+                value_atol,
+                uncertainty_atol,
+                value_atol,
+                value_atol,
+                uncertainty_atol,
+            )
+            for name, expected, stored, atol in zip(
+                names,
+                derived,
+                scalar_nums,
+                atols,
+            ):
+                stored_value = abs(stored) if "uncertainty" in name else stored
+                if not np.isclose(
+                    expected,
+                    stored_value,
+                    rtol=5e-7,
+                    atol=atol,
+                ):
+                    mismatches.append(
+                        f"{name} (groups={expected:.8E}, stored={stored_value:.8E})"
+                    )
+            if mismatches:
+                logger.warning(
+                    "SDF scalar mismatch in %s for ZAID=%s MT=%s: %s",
+                    path,
+                    zaid,
+                    mt,
+                    "; ".join(mismatches),
+                )
+
         # Construct reaction data (nuclide symbol & reaction name resolved in __post_init__).
         # Provide reaction_name so unknown MT numbers are preserved.
         reaction = SDFReactionData(zaid=zaid, mt=mt, sensitivity=sens_vals, error=err_vals, reaction_name=reaction_name, unit=unit, region=region)
@@ -306,20 +376,38 @@ def read_sdf(path: str) -> SDFData:
 
 
 def roundtrip_equal(path: str, tmp_dir: Optional[str] = None) -> bool:
-    """Roundtrip parse and write a file; return True if identical.
+    """Return whether parse/write preserves the normalized SDF values."""
+    import tempfile
 
-    The output filename is constructed by ``SDFData.write_file``; we compare
-    the text content of the newly written file with the original path.
-    """
-    import tempfile, filecmp, os
-    sdf = read_sdf(path)
+    first_line = Path(path).read_text(encoding="utf-8").splitlines()[0]
+    convention = "relative" if HEADER_RE.match(first_line) else "absolute"
+    sdf = read_sdf(path, uncertainty_convention=convention)
     if tmp_dir is None:
         tmp_dir = tempfile.mkdtemp(prefix="sdf_rt_")
     sdf.write_file(tmp_dir)
-    # Determine produced filename
-    produced = Path(tmp_dir) / f"{sdf.title}_{sdf.energy}.sdf".replace(' ', '_').replace('/', '_').replace('\\', '_')
+    produced_name = f"{sdf.title}_{sdf.energy}.sdf"
+    produced_name = produced_name.replace(" ", "_").replace("/", "_").replace("\\", "_")
+    produced = Path(tmp_dir) / produced_name
     if not produced.exists():
         return False
-    # Compare textual content
-    with open(path, 'r') as f1, open(produced, 'r') as f2:
-        return f1.read() == f2.read()
+    restored = read_sdf(str(produced))
+
+    def reaction_key(reaction):
+        return reaction.zaid, reaction.mt, reaction.unit or 0, reaction.region or 0
+
+    expected_reactions = sorted(sdf.data, key=reaction_key)
+    actual_reactions = sorted(restored.data, key=reaction_key)
+    if len(expected_reactions) != len(actual_reactions):
+        return False
+    reactions_equal = all(
+        reaction_key(expected) == reaction_key(actual)
+        and np.allclose(expected.sensitivity, actual.sensitivity, rtol=1e-6, atol=1e-12)
+        and np.allclose(expected.error, actual.error, rtol=1e-6, atol=1e-12)
+        for expected, actual in zip(expected_reactions, actual_reactions)
+    )
+    return (
+        reactions_equal
+        and np.allclose(sdf.pert_energies, restored.pert_energies, rtol=1e-6)
+        and np.isclose(sdf.r0 or 0.0, restored.r0 or 0.0, rtol=1e-6)
+        and np.isclose(sdf.e0 or 0.0, restored.e0 or 0.0, rtol=1e-6)
+    )

@@ -31,6 +31,12 @@ from kika.benchmarks.exceptions import (
 )
 from kika.benchmarks.ingest import build_benchmarks_db
 from kika.benchmarks.plotting import plot_profile
+from kika.benchmarks.uq import (
+    BenchmarkSimilarity,
+    benchmark_uncertainty,
+    rank_benchmarks_by_ck,
+    similarity_ck,
+)
 from kika.benchmarks.screening import (
     find_sensitive_benchmarks,
     get_balance,
@@ -39,6 +45,7 @@ from kika.benchmarks.screening import (
     get_experimental_keff,
     get_input_deck,
     get_profile_vector,
+    get_sensitivity_profile,
     get_spectrum,
     rank_benchmarks,
 )
@@ -56,11 +63,16 @@ __all__ = [
     "get_benchmark",
     "get_benchmark_dashboard",
     "get_profile_vector",
+    "get_sensitivity_profile",
     "get_experimental_keff",
     "get_spectrum",
     "get_balance",
     "get_input_deck",
     "plot_profile",
+    "BenchmarkSimilarity",
+    "benchmark_uncertainty",
+    "similarity_ck",
+    "rank_benchmarks_by_ck",
     "BenchmarksError",
     "DatabaseNotConfiguredError",
     "BenchmarkNotFoundError",

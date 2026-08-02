@@ -79,6 +79,48 @@ ace_data = kika.read_ace("path/to/ace_file")
 cov = kika.read_coverx("path/to/covmat_file")  # text or binary, auto-detected
 ```
 
+### SDF uncertainty convention
+
+KIKA follows the SCALE SDF convention: reaction error arrays and e0 are
+absolute one-sigma standard deviations. Energy boundaries are represented
+internally in MeV and written to SDF files in eV.
+
+```python
+# Standard SCALE/KIKA SDF (absolute uncertainties)
+sdf = kika.read_sdf("profile.sdf")
+
+# Historical KIKA SDF written with relative uncertainties
+legacy = kika.read_sdf("old_profile.sdf", uncertainty_convention="relative")
+```
+
+### Sensitivity/covariance alignment and c-k
+
+UQ calculations use a format-neutral `SensitivityProfile`. Alignment is exact
+by default: energy grids and units must agree, and missing covariance raises an
+actionable error instead of silently reducing the calculation.
+
+```python
+from kika.UQ import align_sensitivity_covariance, similarity_ck
+import kika.benchmarks as benchmarks
+
+application = kika.read_sdf("application.sdf").to_sensitivity_profile()
+benchmark = benchmarks.get_sensitivity_profile(profile_id)
+
+aligned = align_sensitivity_covariance(
+    [application, benchmark], covariance,
+    alias_policy="tsurfer",       # explicit SCALE/TSURFER aliases
+    missing="drop",               # explicit opt-in; inspect aligned.report
+)
+ck = similarity_ck(application, benchmark, covariance)
+ranking = benchmarks.rank_benchmarks_by_ck(
+    application, covariance, benchmark_ids=candidate_ids
+)
+```
+
+Ranking and propagation never condense grids implicitly. Until explicit SDF
+condensation is implemented, candidates must use the same grid as the supplied
+covariance.
+
 ## Documentation
 
 For complete documentation, examples, and API reference, visit:

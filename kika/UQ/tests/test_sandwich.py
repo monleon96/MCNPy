@@ -62,17 +62,40 @@ from kika.UQ.sandwich import (
     filter_reactions_by_nuclide,
     filter_reactions_by_type,
     _resolve_nubar_redundancy,
+    _bootstrap_nd_ci,
 )
 
 
 class TestSandwichFormulaBasic:
     """Test basic functionality of sandwich formula with simple cases."""
     
+    def test_bootstrap_uses_additive_absolute_sensitivity_sigma(self):
+        sensitivity = np.array([2.0])
+        sigma_absolute = np.array([0.5])
+        covariance = np.array([[4.0]])
+        actual = _bootstrap_nd_ci(
+            sensitivity,
+            sigma_absolute,
+            covariance,
+            n_samples=8,
+            ci_level=0.75,
+            seed=17,
+        )
+
+        rng = np.random.default_rng(17)
+        samples = sensitivity + sigma_absolute * rng.standard_normal((8, 1))
+        propagated = np.sqrt(
+            np.abs(np.einsum("bi,ij,bj->b", samples, covariance, samples))
+        )
+        expected = (*np.percentile(propagated, [12.5, 87.5]),
+                    np.mean(propagated), np.std(propagated, ddof=1))
+        assert actual == pytest.approx(expected)
+
     def create_simple_sdf_xs_only(self) -> SDFData:
         """Create a simple SDFData with cross-section sensitivities only."""
         # Create test data with 2 energy groups, 2 reactions
         # Fe-56 elastic (MT=2) and (n,gamma) (MT=102)
-        energy_boundaries = [2.0e7, 1.0e6, 0.0]  # 2 groups: [1MeV-20MeV], [0-1MeV]
+        energy_boundaries = [0.0, 1.0, 20.0]  # 2 groups: [1MeV-20MeV], [0-1MeV]
         
         # Simple sensitivity coefficients that we can verify by hand
         fe56_elastic = SDFReactionData(
@@ -105,7 +128,7 @@ class TestSandwichFormulaBasic:
         cov_mat = CrossSectionCovariance()
         
         # Set energy grid (must match SDF)
-        cov_mat.energy_grid = [2.0e7, 1.0e6, 0.0]
+        cov_mat.energy_grid = [0.0, 1.0e6, 2.0e7]
         
         # Add isotope and reaction data
         cov_mat.isotope_rows = [26056, 26056]
@@ -174,7 +197,7 @@ class TestSandwichFormulaBasic:
     def test_hand_calculation_verification_simple(self):
         """Test with very simple case that can be verified by hand calculation."""
         # Create minimal case: 1 energy group, 1 reaction
-        energy_boundaries = [2.0e7, 0.0]  # 1 group: [0-20MeV]
+        energy_boundaries = [0.0, 20.0]  # 1 group: [0-20MeV]
         
         fe56_elastic = SDFReactionData(
             zaid=26056,
@@ -194,7 +217,7 @@ class TestSandwichFormulaBasic:
         
         # Create simple 1x1 covariance matrix
         cov_mat = CrossSectionCovariance()
-        cov_mat.energy_grid = [2.0e7, 0.0]
+        cov_mat.energy_grid = [0.0, 2.0e7]
         cov_mat.isotope_rows = [26056]
         cov_mat.isotope_cols = [26056]
         cov_mat.reaction_rows = [2]
@@ -230,7 +253,7 @@ class TestSandwichFormulaBasic:
     def test_hand_calculation_2x2_matrix(self):
         """Test 2x2 case with known cross-correlations that can be verified by hand."""
         # Create 2 energy group, 2 reaction case with known values
-        energy_boundaries = [2.0e7, 1.0e6, 0.0]  # 2 groups
+        energy_boundaries = [0.0, 1.0, 20.0]  # 2 groups
         
         # Create sensitivities - make them simple for hand calculation
         fe56_elastic = SDFReactionData(
@@ -258,7 +281,7 @@ class TestSandwichFormulaBasic:
         
         # Create simple covariance matrices for hand calculation
         cov_mat = CrossSectionCovariance()
-        cov_mat.energy_grid = [2.0e7, 1.0e6, 0.0]
+        cov_mat.energy_grid = [0.0, 1.0e6, 2.0e7]
         cov_mat.isotope_rows = [26056, 26056, 26056, 26056]
         cov_mat.isotope_cols = [26056, 26056, 26056, 26056]
         cov_mat.reaction_rows = [2, 2, 102, 102]
@@ -325,7 +348,7 @@ class TestSandwichFormulaBasic:
     def test_hand_calculation_with_correlation(self):
         """Test case with known cross-correlation effects."""
         # Simple 1 energy group, 2 reaction case with correlation
-        energy_boundaries = [2.0e7, 0.0]  # 1 group
+        energy_boundaries = [0.0, 20.0]  # 1 group
         
         fe56_elastic = SDFReactionData(
             zaid=26056,
@@ -352,7 +375,7 @@ class TestSandwichFormulaBasic:
         
         # Create covariance matrices with known correlation
         cov_mat = CrossSectionCovariance()
-        cov_mat.energy_grid = [2.0e7, 0.0]
+        cov_mat.energy_grid = [0.0, 2.0e7]
         cov_mat.isotope_rows = [26056, 26056, 26056, 26056]
         cov_mat.isotope_cols = [26056, 26056, 26056, 26056]
         cov_mat.reaction_rows = [2, 2, 102, 102]
@@ -415,7 +438,7 @@ class TestSandwichFormulaLegendre:
     
     def create_simple_sdf_legendre_only(self) -> SDFData:
         """Create SDFData with Legendre moment sensitivities only."""
-        energy_boundaries = [2.0e7, 1.0e6, 0.0]  # 2 groups
+        energy_boundaries = [0.0, 1.0, 20.0]  # 2 groups
         
         # Legendre moments: MT = 4000 + L where L is the Legendre order
         # P1 moment for elastic scattering (MT = 4001 = 4000 + 1)
@@ -453,17 +476,17 @@ class TestSandwichFormulaLegendre:
         mgmf34_cov = MultigroupLegendreCovariance()
         
         # Set basic attributes
-        mgmf34_cov.energy_grid = np.array([2.0e7, 1.0e6, 0.0])
+        mgmf34_cov.energy_grid = np.array([0.0, 1.0e6, 2.0e7])
         
         # Isotope information for rows and columns
-        mgmf34_cov.isotope_rows = [26056, 26056]
-        mgmf34_cov.isotope_cols = [26056, 26056]
-        
-        # Base reaction (2 for elastic) and Legendre orders
-        mgmf34_cov.reaction_rows = [2, 2]  # Base reactions
-        mgmf34_cov.reaction_cols = [2, 2]
-        mgmf34_cov.l_rows = [1, 2]  # P1, P2
-        mgmf34_cov.l_cols = [1, 2]
+        mgmf34_cov.isotope_rows = [26056] * 4
+        mgmf34_cov.isotope_cols = [26056] * 4
+
+        # Base reaction (2 for elastic) and complete P1/P2 block index
+        mgmf34_cov.reaction_rows = [2] * 4
+        mgmf34_cov.reaction_cols = [2] * 4
+        mgmf34_cov.l_rows = [1, 1, 2, 2]
+        mgmf34_cov.l_cols = [1, 2, 1, 2]
         
         # Create relative covariance matrices
         # P1 self-covariance
@@ -528,7 +551,7 @@ class TestSandwichFormulaMixed:
     
     def create_mixed_sdf_data(self) -> SDFData:
         """Create SDFData with both cross-section and Legendre sensitivities."""
-        energy_boundaries = [2.0e7, 1.0e6, 0.0]  # 2 groups
+        energy_boundaries = [0.0, 1.0, 20.0]  # 2 groups
         
         # Cross-section sensitivities
         fe56_elastic = SDFReactionData(
@@ -578,8 +601,8 @@ class TestSandwichFormulaMixed:
         mgmf34_cov.isotope_cols = [26056]
         mgmf34_cov.reaction_rows = [2]
         mgmf34_cov.reaction_cols = [2]
-        mgmf34_cov.legendre_rows = [1]
-        mgmf34_cov.legendre_cols = [1]
+        mgmf34_cov.l_rows = [1]
+        mgmf34_cov.l_cols = [1]
         mgmf34_cov.relative_matrices = [mgmf34_cov.relative_matrices[0]]  # Only P1 self-covariance
         
         # Run propagation with both covariance matrices
@@ -619,12 +642,12 @@ class TestSandwichFormulaEdgeCases:
         sdf_data = SDFData(
             title="Empty",
             energy="test",
-            pert_energies=[1.0, 0.0],
+            pert_energies=[0.0, 1.0],
             data=[]
         )
         cov_mat = TestSandwichFormulaBasic().create_simple_cov_mat_xs()
         
-        with pytest.raises(ValueError, match="SDF data contains no sensitivity information"):
+        with pytest.raises(ValueError, match="No sensitivity reactions remain"):
             sandwich_uncertainty_propagation(sdf_data=sdf_data, cov_mat=cov_mat, verbose=False)
     
     def test_energy_grid_mismatch(self):
@@ -633,9 +656,9 @@ class TestSandwichFormulaEdgeCases:
         cov_mat = TestSandwichFormulaBasic().create_simple_cov_mat_xs()
         
         # Modify covariance energy grid to be incompatible
-        cov_mat.energy_grid = [1.0e8, 1.0e7, 1.0e6, 0.0]  # 3 groups instead of 2
+        cov_mat.energy_grid = [0.0, 1.0e6, 1.0e7, 1.0e8]  # 3 groups instead of 2
         
-        with pytest.raises(ValueError, match="No matching energy groups"):
+        with pytest.raises(ValueError, match="explicitly condense"):
             sandwich_uncertainty_propagation(sdf_data=sdf_data, cov_mat=cov_mat, verbose=False)
     
     def test_no_matching_reactions(self):
@@ -647,7 +670,7 @@ class TestSandwichFormulaEdgeCases:
         cov_mat.reaction_rows = [18, 107]  # fission and alpha reactions
         cov_mat.reaction_cols = [18, 107]
         
-        with pytest.raises(ValueError, match="No matching reactions"):
+        with pytest.raises(ValueError, match='missing="drop"'):
             sandwich_uncertainty_propagation(sdf_data=sdf_data, cov_mat=cov_mat, verbose=False)
     
     def test_reaction_filtering(self):
@@ -705,7 +728,7 @@ class TestContributionCalculations:
     def test_zero_sensitivity_handling(self):
         """Test handling of zero sensitivity coefficients."""
         # Create SDF with one zero sensitivity
-        energy_boundaries = [2.0e7, 0.0]
+        energy_boundaries = [0.0, 20.0]
         
         fe56_elastic = SDFReactionData(
             zaid=26056,
@@ -724,7 +747,7 @@ class TestContributionCalculations:
         )
         
         cov_mat = CrossSectionCovariance()
-        cov_mat.energy_grid = [2.0e7, 0.0]
+        cov_mat.energy_grid = [0.0, 2.0e7]
         cov_mat.isotope_rows = [26056]
         cov_mat.isotope_cols = [26056]
         cov_mat.reaction_rows = [2]
@@ -836,7 +859,7 @@ class TestNubarDoubleCounting:
 
     def _nubar_sdf(self) -> SDFData:
         """U-235 nu-bar sensitivities: total = prompt + delayed (0.3 = 0.2 + 0.1)."""
-        energy_boundaries = [2.0e7, 0.0]  # single group
+        energy_boundaries = [0.0, 20.0]  # single group
         return SDFData(
             title="Nu-bar double-count",
             energy="0.0e+00_2.0e+07",
@@ -853,7 +876,7 @@ class TestNubarDoubleCounting:
     def _nubar_cov(self) -> CrossSectionCovariance:
         """Diagonal (relative) covariance for nu-bar total, delayed and prompt."""
         cov = CrossSectionCovariance()
-        cov.energy_grid = [2.0e7, 0.0]
+        cov.energy_grid = [0.0, 2.0e7]
         cov.isotope_rows = [92235, 92235, 92235]
         cov.reaction_rows = [452, 455, 456]
         cov.isotope_cols = [92235, 92235, 92235]

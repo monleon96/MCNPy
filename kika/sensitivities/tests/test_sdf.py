@@ -41,7 +41,7 @@ def test_sdf():
         assert sdf_data.energy == '1.00e+00_3.00e+00'
         assert sdf_data.pert_energies == [1e-11, 3e-09, 7.5e-09, 1e-08, 2.53e-08, 3e-08, 4e-08, 5e-08, 7e-08, 1e-07, 1.5e-07, 2e-07, 2.25e-07, 2.5e-07, 2.75e-07, 3.25e-07, 3.5e-07, 3.75e-07, 4e-07, 6.25e-07, 1e-06, 1.77e-06, 3e-06, 4.75e-06, 6e-06, 8.1e-06, 1e-05, 3e-05, 0.0001, 0.00055, 0.003, 0.017, 0.025, 0.1, 0.4, 0.9, 1.4, 1.85, 2.354, 2.479, 3.0, 4.8, 6.434, 8.1873, 20.0]
         assert sdf_data.r0 == 1.06652e-09
-        assert sdf_data.e0 == 0.0173
+        assert sdf_data.e0 == pytest.approx(1.06652e-09 * 0.0173)
         assert sdf_data.data[2].mt == 4
         assert sdf_data.data[0].nuclide == 'Fe-56'
         assert sdf_data.data[18].zaid == 1001
@@ -116,3 +116,18 @@ def test_read_scale_dialect_sdf():
 
     # Lowercase-``e`` sensitivities parsed to non-zero floats.
     assert any(np.any(np.asarray(r.sensitivity) != 0.0) for r in sdf.data)
+
+
+def test_read_verbose_reaction_name_with_spaces(tmp_path):
+    fixture = os.path.join(
+        os.path.dirname(__file__), "data", "sdf", "scale_dialect_eV.sdf"
+    )
+    text = open(fixture, encoding="utf-8").read()
+    text = text.replace(" total             6000", " total reaction    6000", 1)
+    path = tmp_path / "reaction-name-with-spaces.sdf"
+    path.write_text(text, encoding="utf-8")
+
+    sdf = kika.read_sdf(path)
+
+    assert sdf.data[0].reaction_name == "total reaction"
+    assert (sdf.data[0].zaid, sdf.data[0].mt) == (6000, 1)

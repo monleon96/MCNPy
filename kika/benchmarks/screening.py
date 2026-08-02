@@ -144,6 +144,12 @@ def get_profile_vector(
         return db.get_profile_vector(profile_id, zaid=zaid, mt=mt)
 
 
+def get_sensitivity_profile(profile_id: int, db_path: Optional[str] = None):
+    """Return a profile as a validated format-neutral sensitivity object."""
+    with BenchmarksDatabase(db_path) as db:
+        return db.get_sensitivity_profile(profile_id)
+
+
 def get_experimental_keff(benchmark_id: str, db_path: Optional[str] = None) -> dict:
     """Return a benchmark's experimental keff ``{'keff', 'keff_unc'}`` (empty if unknown)."""
     with BenchmarksDatabase(db_path) as db:

@@ -21,12 +21,14 @@ the self-contained database is all kika reads.
 import datetime
 import gzip
 import json
+import logging
 import os
+import re
 import sqlite3
 import tempfile
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Literal, Optional
 
 import numpy as np
 
@@ -47,7 +49,11 @@ from kika.benchmarks._constants import (
 )
 from kika.benchmarks._naming import benchmark_id_to_keff_abbrevs, parse_filename
 from kika.benchmarks.exceptions import BenchmarksError
+from kika._utils import symbol_to_zaid
+from kika.sensitivities.sdf import SDFReactionData
 from kika.sensitivities.sdf_parser import read_sdf
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA_SQL = """
 CREATE TABLE benchmarks (
@@ -72,7 +78,7 @@ CREATE TABLE profiles (
     ngroups         INTEGER,
     variant_index   INTEGER DEFAULT 0,
     keff            REAL,
-    keff_rel_err    REAL,
+    keff_unc    REAL,
     pert_energies   BLOB,
     is_preferred    INTEGER DEFAULT 0,
     source_filename TEXT,
@@ -142,6 +148,144 @@ def _region_integrals(pert_energies: np.ndarray, sensitivity: np.ndarray):
     return thermal, epithermal, fast, total, abs_total
 
 
+_ABBN_REACTIONS = (
+    ("FISSION", 18),
+    ("CAPTURE", 102),
+    ("INELASTIC", 4),
+    ("ELASTIC", 2),
+    ("NU-BAR", 452),
+    ("MU-BAR", 251),
+)
+_ABBN_HEADER_RE = re.compile(
+    r"^\s*ZONE\s+\S+\s+ISOTOP\s+(?P<isotope>\S+).*?$",
+    re.MULTILINE,
+)
+
+
+def _parse_abbn_sensitivity(text: str, source_path: Path):
+    """Parse the non-SDF, 30-group ABBN sensitivity tables shipped by DICE.
+
+    DICE names these variants 299-Group after the underlying ABBN-93
+    calculation, but the exported sensitivity table is condensed to 30 groups.
+    It contains neither uncertainty vectors nor a calculated response, so those
+    values remain unavailable instead of being represented by false zeros.
+    """
+    dice_root = source_path.parents[2]
+    grid_path = dice_root / "newE" / "ABBN30.txt"
+    if not grid_path.is_file():
+        raise ValueError(f"ABBN energy grid not found: {grid_path}")
+    upper_descending_ev = [
+        float(line.strip())
+        for line in grid_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if len(upper_descending_ev) != 30:
+        raise ValueError(
+            f"Expected 30 ABBN upper energy boundaries in {grid_path}, "
+            f"got {len(upper_descending_ev)}"
+        )
+    # ABBN-93 extends down to 1e-5 eV. The DICE grid file lists the 30 upper
+    # boundaries only, in descending order.
+    pert_energies = np.asarray(
+        list(reversed([*upper_descending_ev, 1.0e-5])),
+        dtype=float,
+    ) / 1.0e6
+
+    matches = list(_ABBN_HEADER_RE.finditer(text))
+    if not matches:
+        raise ValueError("No ABBN isotope blocks found")
+    reactions: list[SDFReactionData] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        block = text[match.end():end]
+        isotope = match.group("isotope").upper()
+        if isotope in {"D-SC", "SUM"}:
+            logger.warning(
+                "DICE ABBN pseudo-isotope %s omitted from %s; it has no "
+                "unambiguous ZAID and must be handled by the B3 alignment layer",
+                isotope,
+                source_path,
+            )
+            continue
+        compact_isotope = isotope.replace("-", "")
+        abbreviated_actinide = re.fullmatch(r"(PU|AM)(\d{2})", compact_isotope)
+        if abbreviated_actinide:
+            compact_isotope = (
+                f"{abbreviated_actinide.group(1)}"
+                f"{int(abbreviated_actinide.group(2)) + 200}"
+            )
+        rows = []
+        for line in block.splitlines():
+            fields = line.split()
+            if len(fields) != 7 or not fields[0].isdigit():
+                continue
+            rows.append((int(fields[0]), [float(value) for value in fields[1:]]))
+        if [group for group, _ in rows] != list(range(1, 31)):
+            raise ValueError(
+                f"Expected ABBN groups 1..30 for isotope {match.group('isotope')}"
+            )
+        values = np.asarray([row for _, row in rows], dtype=float)
+        zaid = symbol_to_zaid(compact_isotope)
+        for column, (reaction_name, mt) in enumerate(_ABBN_REACTIONS):
+            sensitivity = values[:, column][::-1]
+            reactions.append(
+                SDFReactionData(
+                    zaid=zaid,
+                    mt=mt,
+                    sensitivity=sensitivity.tolist(),
+                    error=np.zeros(30, dtype=float).tolist(),
+                    reaction_name=reaction_name,
+                    unit=0,
+                    region=0,
+                )
+            )
+    return pert_energies, reactions
+
+
+def _resolve_occurrences(
+    reactions: list[SDFReactionData],
+    rule: Literal["sum", "first", "last", "error"],
+) -> list[SDFReactionData]:
+    """Resolve repeated sensitivity profiles by their scientific key."""
+    resolved: dict[tuple[int, int, int, int], SDFReactionData] = {}
+    for reaction in reactions:
+        key = (
+            reaction.zaid,
+            reaction.mt,
+            int(reaction.unit or 0),
+            int(reaction.region or 0),
+        )
+        if key not in resolved:
+            resolved[key] = reaction
+            continue
+        if rule == "first":
+            continue
+        if rule == "last":
+            resolved[key] = reaction
+            continue
+        if rule == "error":
+            raise BenchmarksError(
+                "Repeated sensitivity occurrence for "
+                f"ZAID={key[0]}, MT={key[1]}, unit={key[2]}, region={key[3]}"
+            )
+
+        previous = resolved[key]
+        previous_sensitivity = np.asarray(previous.sensitivity, dtype=float)
+        sensitivity = np.asarray(reaction.sensitivity, dtype=float)
+        previous_error = np.asarray(previous.error, dtype=float)
+        error = np.asarray(reaction.error, dtype=float)
+        resolved[key] = SDFReactionData(
+            zaid=reaction.zaid,
+            mt=reaction.mt,
+            sensitivity=(previous_sensitivity + sensitivity).tolist(),
+            error=np.sqrt(previous_error**2 + error**2).tolist(),
+            reaction_name=reaction.reaction_name,
+            unit=reaction.unit,
+            region=reaction.region,
+        )
+    return list(resolved.values())
+
+
 def _parse_file(task: tuple):
     """
     Worker: parse one gzipped SDF into a serializable payload.
@@ -150,19 +294,36 @@ def _parse_file(task: tuple):
     benchmark/profile metadata and already-compressed vectors, or
     ``("skip", filename, reason)``. Compression happens here so it parallelizes.
     """
-    gz_path, folder_category, store_errors, store_region_profiles = task
+    gz_path, folder_category, store_errors, store_region_profiles, occurrences_rule = task
     name = os.path.basename(gz_path)
     meta = parse_filename(name, folder_category=folder_category)
     tmp_path = None
     try:
         with gzip.open(gz_path, "rt", encoding="utf-8", errors="replace") as fh:
             text = fh.read()
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".sdf", delete=False, encoding="utf-8"
-        ) as out:
-            tmp_path = out.name
-            out.write(text)
-        sdf = read_sdf(tmp_path)
+        if _ABBN_HEADER_RE.search(text):
+            pert, parsed_reactions = _parse_abbn_sensitivity(text, Path(gz_path))
+            r0 = None
+            e0 = None
+            errors_available = False
+            group_structure = f"{len(pert) - 1}-Group"
+        else:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                prefix=f"{Path(name).stem[:100]}.",
+                suffix=".sdf",
+                delete=False,
+                encoding="utf-8",
+            ) as out:
+                tmp_path = out.name
+                out.write(text)
+            sdf = read_sdf(tmp_path)
+            pert = np.asarray(sdf.pert_energies, dtype=float)
+            parsed_reactions = list(sdf.data)
+            r0 = sdf.r0
+            e0 = sdf.e0
+            errors_available = True
+            group_structure = meta.group_structure or f"{len(pert) - 1}-Group"
     except Exception as exc:  # noqa: BLE001 - report and continue
         return ("skip", name, f"{type(exc).__name__}: {exc}")
     finally:
@@ -173,13 +334,13 @@ def _parse_file(task: tuple):
         return (d.unit or 0, d.region or 0) == (0, 0)
 
     if store_region_profiles:
-        kept = list(sdf.data)
+        kept = parsed_reactions
     else:
-        kept = [d for d in sdf.data if _is_system_total(d)]
+        kept = [d for d in parsed_reactions if _is_system_total(d)]
     if not kept:
         return ("skip", name, "no region-integrated profiles")
+    kept = _resolve_occurrences(kept, occurrences_rule)
 
-    pert = np.asarray(sdf.pert_energies, dtype=float)
     ngroups = len(pert) - 1
     reactions = []
     for d in kept:
@@ -199,7 +360,7 @@ def _parse_file(task: tuple):
                 s_tot,
                 s_abs,
                 pack_f32(sens),
-                pack_f32(d.error) if store_errors else None,
+                pack_f32(d.error) if store_errors and errors_available else None,
             )
         )
     payload = {
@@ -211,11 +372,11 @@ def _parse_file(task: tuple):
         "case_number": meta.case_number,
         "code": meta.code,
         "library": meta.library,
-        "group_structure": meta.group_structure or f"{ngroups}-Group",
+        "group_structure": group_structure,
         "ngroups": ngroups,
         "variant_index": meta.variant_index,
-        "keff": sdf.r0,
-        "keff_rel_err": sdf.e0,
+        "keff": r0,
+        "keff_unc": e0,
         "pert_energies": pack_f32(pert),
         "source_filename": name,
         "reactions": reactions,
@@ -241,7 +402,7 @@ def _write_payload(conn: sqlite3.Connection, payload: dict) -> int:
     cur = conn.execute(
         "INSERT OR IGNORE INTO profiles "
         "(benchmark_id, code, library, group_structure, ngroups, variant_index, "
-        " keff, keff_rel_err, pert_energies, source_filename) "
+        " keff, keff_unc, pert_energies, source_filename) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             payload["benchmark_id"],
@@ -251,7 +412,7 @@ def _write_payload(conn: sqlite3.Connection, payload: dict) -> int:
             payload["ngroups"],
             payload["variant_index"],
             payload["keff"],
-            payload["keff_rel_err"],
+            payload["keff_unc"],
             payload["pert_energies"],
             payload["source_filename"],
         ),
@@ -261,7 +422,7 @@ def _write_payload(conn: sqlite3.Connection, payload: dict) -> int:
     profile_id = cur.lastrowid
     rows = [(profile_id, *r) for r in payload["reactions"]]
     conn.executemany(
-        "INSERT OR IGNORE INTO profile_sensitivities "
+        "INSERT INTO profile_sensitivities "
         "(profile_id, zaid, mt, unit, region, nuclide, reaction, s_thermal, "
         " s_epithermal, s_fast, s_total, s_abs_total, sensitivity, error) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -374,6 +535,7 @@ def build_benchmarks_db(
     categories: Optional[List[str]] = None,
     store_errors: bool = True,
     store_region_profiles: bool = False,
+    occurrences_rule: Literal["sum", "first", "last", "error"] = "sum",
     source_root: Optional[str] = None,
     overwrite: bool = True,
     n_workers: Optional[int] = None,
@@ -392,8 +554,11 @@ def build_benchmarks_db(
     categories : list of str, optional
         Restrict ingest to these categories (e.g. ``["HEU"]``) — useful for testing.
     store_errors : bool, optional
-        Store per-group relative-error vectors alongside the sensitivities.
+        Store per-group absolute standard-deviation vectors alongside sensitivities.
         Default True (roughly doubles the per-group vector storage).
+    occurrences_rule : {"sum", "first", "last", "error"}, optional
+        Resolve repeated reaction keys explicitly. "sum" combines absolute
+        uncertainties in quadrature and is the default.
     store_region_profiles : bool, optional
         Also keep the non-system-total per-mixture spatial sub-profiles (the
         non-``(0, 0)`` ``(unit, region)`` profiles). Default False. Enabling this
@@ -418,6 +583,11 @@ def build_benchmarks_db(
         ``balance``, ``inputs``, ``keff_matched``, ``db_bytes``, ``files_total``,
         ``files_skipped``, ``skipped``.
     """
+    allowed_occurrences = {"sum", "first", "last", "error"}
+    if occurrences_rule not in allowed_occurrences:
+        raise ValueError(
+            f"Invalid occurrences_rule {occurrences_rule!r}; expected one of {sorted(allowed_occurrences)}"
+        )
     source_dir = config.get_source_dir(source_dir)
     if not source_dir or not os.path.isdir(source_dir):
         raise BenchmarksError(
@@ -437,7 +607,14 @@ def build_benchmarks_db(
     files = list(_iter_sdf_files(source_dir, categories))
     total = len(files)
     tasks = [
-        (str(gz), gz.parent.name, store_errors, store_region_profiles) for gz in files
+        (
+            str(gz),
+            gz.parent.name,
+            store_errors,
+            store_region_profiles,
+            occurrences_rule,
+        )
+        for gz in files
     ]
     if n_workers is None:
         n_workers = max(1, (os.cpu_count() or 2) - 1)
@@ -503,6 +680,8 @@ def build_benchmarks_db(
             conn,
             {
                 "schema_version": str(SCHEMA_VERSION),
+                "sensitivity_uncertainty_convention": "absolute",
+                "occurrences_rule": occurrences_rule,
                 "ingest_date": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "source_dir": str(source_dir),
                 "store_errors": str(store_errors),
@@ -543,12 +722,12 @@ def build_benchmarks_db(
 
 
 def _iter_sdf_files(source_dir: Path, categories: Optional[List[str]]):
-    """Yield DICE ``*_SENS*.gz`` paths, optionally restricted to some categories."""
+    """Yield canonical DICE *_SENS.gz paths; numbered revisions are excluded."""
     if categories:
         for cat in categories:
-            yield from sorted((source_dir / cat).glob("*_SENS*.gz"))
+            yield from sorted((source_dir / cat).glob("*_SENS.gz"))
     else:
-        yield from sorted(source_dir.rglob("*_SENS*.gz"))
+        yield from sorted(source_dir.rglob("*_SENS.gz"))
 
 
 def _iter_aux_files(folder: Path, categories: Optional[List[str]], pattern: str):

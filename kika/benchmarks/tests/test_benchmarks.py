@@ -1,10 +1,16 @@
 """Tests for the benchmarks (ICSBEP/DICE) subpackage: ingest, screening, reads."""
 
 import gzip
+import sqlite3
 
+import numpy as np
 import pytest
 
 import kika.benchmarks as bm
+from kika.benchmarks.ingest import _iter_sdf_files, _resolve_occurrences
+from kika.sensitivities.sdf import SDFReactionData
+from kika.cov.cross_section_covariance import CrossSectionCovariance
+from kika.UQ.sandwich import sandwich_uncertainty_propagation
 
 
 def _block(nuclide, reaction, zaid, mt, meta1, sens_line):
@@ -94,10 +100,43 @@ def test_isotope_and_reaction_aliases(built_db):
 
 def test_threshold_filters(built_db):
     db_path, _ = built_db
-    # Fe-56 elastic total = 0.01; a threshold above it returns nothing.
+    # Fe-56 elastic total = 0.01; thresholds are strict.
     assert bm.find_sensitive_benchmarks(
         "Fe-56", "elastic", "total", sensitivity_threshold=0.1, db_path=db_path
     ) == []
+    assert bm.find_sensitive_benchmarks(
+        "Fe-56",
+        "elastic",
+        "total",
+        sensitivity_threshold=0.01,
+        db_path=db_path,
+    ) == []
+
+
+def test_mt_zero_is_only_screened_when_explicit(built_db):
+    db_path, _ = built_db
+    connection = sqlite3.connect(db_path)
+    profile_id = connection.execute(
+        "SELECT profile_id FROM profiles LIMIT 1"
+    ).fetchone()[0]
+    connection.execute(
+        "INSERT INTO profile_sensitivities "
+        "(profile_id, zaid, mt, unit, region, nuclide, reaction, "
+        "s_thermal, s_epithermal, s_fast, s_total, s_abs_total) "
+        "VALUES (?, 26056, 0, 0, 0, 'Fe-56', 'aggregate', 2, 2, 2, 2, 2)",
+        (profile_id,),
+    )
+    connection.commit()
+    connection.close()
+
+    with bm.BenchmarksDatabase(db_path) as database:
+        implicit = database.screen(26056)
+        explicit = database.screen(26056, mt=0)
+
+    assert implicit
+    assert all(hit["mt"] != 0 for hit in implicit)
+    assert len(explicit) == 1
+    assert explicit[0]["mt"] == 0
 
 
 def test_get_benchmark_and_vector(built_db):
@@ -117,6 +156,57 @@ def test_get_benchmark_and_vector(built_db):
     assert r["error"] is not None and len(r["error"]) == 4
     assert r["error"][0] == pytest.approx(1e-4, abs=1e-9)
     assert sum(r["sensitivity"]) == pytest.approx(0.5, abs=1e-6)
+
+
+def test_neutral_profile_and_uq_adapters(built_db, monkeypatch):
+    db_path, _ = built_db
+    benchmark = bm.get_benchmark("HEU-MET-FAST-001-001", db_path=db_path)
+    profile_id = benchmark["profiles"][0]["profile_id"]
+    profile = bm.get_sensitivity_profile(profile_id, db_path=db_path)
+    assert profile.energy_unit == "MeV"
+    assert profile.response == pytest.approx(1.001)
+    assert profile.response_uncertainty == pytest.approx(0.0002)
+    assert all(reaction.uncertainty is not None for reaction in profile.reactions)
+
+    cov = CrossSectionCovariance(
+        num_groups=profile.n_groups,
+        energy_grid=profile.energy_grid.tolist(),
+        energy_unit="MeV",
+    )
+    for reaction in profile.reactions:
+        cov.add_matrix(
+            reaction.zaid, reaction.mt, reaction.zaid, reaction.mt,
+            np.eye(profile.n_groups), is_relative=True,
+        )
+
+    direct = sandwich_uncertainty_propagation(profile, cov_mat=cov, bootstrap_seed=7)
+    adapted = bm.benchmark_uncertainty(
+        profile_id, covariance=cov, db_path=db_path, bootstrap_seed=7
+    )
+    assert adapted.total_variance == pytest.approx(direct.total_variance)
+    assert adapted.bootstrap_ci_low == pytest.approx(direct.bootstrap_ci_low)
+
+    pair = bm.similarity_ck(profile, profile_id, cov, db_path=db_path)
+    assert pair.value == pytest.approx(1.0)
+
+    import kika.benchmarks.uq as benchmark_uq
+    prepare_calls = 0
+    original_prepare = benchmark_uq.prepare_covariance
+
+    def counted_prepare(*args, **kwargs):
+        nonlocal prepare_calls
+        prepare_calls += 1
+        return original_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(benchmark_uq, "prepare_covariance", counted_prepare)
+    ranked = bm.rank_benchmarks_by_ck(profile, cov, db_path=db_path)
+    assert prepare_calls == 1
+    assert [(row.benchmark_id, row.profile_id) for row in ranked] == [
+        ("HEU-MET-FAST-001-001", profile_id)
+    ]
+    assert ranked[0].ck == pytest.approx(1.0)
+    assert ranked[0].application_parameter_coverage == pytest.approx(1.0)
+    assert ranked[0].benchmark_sensitivity_coverage == pytest.approx(1.0)
 
 
 def test_store_errors_false(tmp_path):
@@ -206,3 +296,166 @@ def test_aux_parsers():
 def test_missing_database_raises():
     with pytest.raises(bm.DatabaseNotConfiguredError):
         bm.find_sensitive_benchmarks("Fe-56", db_path="/no/such/benchmarks.db")
+
+
+def test_iter_sdf_files_excludes_numbered_revisions(tmp_path):
+    source = tmp_path / "sensitivity" / "HEU"
+    source.mkdir(parents=True)
+    canonical = source / "HEU-MET-FAST-001-001_KENO_LIB---4-Group_SENS.gz"
+    revision = source / "HEU-MET-FAST-001-001_KENO_LIB---4-Group_SENS.1.gz"
+    canonical.touch()
+    revision.touch()
+    found = list(_iter_sdf_files(tmp_path / "sensitivity", None))
+    assert found == [canonical]
+
+
+def test_occurrence_policies_are_explicit_and_absolute():
+    first = SDFReactionData(
+        zaid=26056,
+        mt=2,
+        sensitivity=[1.0, -2.0],
+        error=[0.3, 0.4],
+        unit=0,
+        region=0,
+    )
+    last = SDFReactionData(
+        zaid=26056,
+        mt=2,
+        sensitivity=[-0.5, 3.0],
+        error=[0.4, 0.3],
+        unit=0,
+        region=0,
+    )
+
+    summed = _resolve_occurrences([first, last], "sum")
+    assert len(summed) == 1
+    assert summed[0].sensitivity == pytest.approx([0.5, 1.0])
+    assert summed[0].error == pytest.approx([0.5, 0.5])
+    assert _resolve_occurrences([first, last], "first")[0] is first
+    assert _resolve_occurrences([first, last], "last")[0] is last
+    with pytest.raises(bm.BenchmarksError, match="Repeated sensitivity"):
+        _resolve_occurrences([first, last], "error")
+
+
+def test_schema_v3_metadata_and_absolute_errors(built_db):
+    db_path, _ = built_db
+    with bm.BenchmarksDatabase(db_path) as database:
+        stats = database.get_statistics()
+        assert stats["meta"]["schema_version"] == "3"
+        assert stats["meta"]["sensitivity_uncertainty_convention"] == "absolute"
+        assert stats["meta"]["occurrences_rule"] == "sum"
+        profile = database.get_benchmark("HEU-MET-FAST-001-001")["profiles"][0]
+        assert "keff_unc" in profile
+        assert "keff_rel_err" not in profile
+        vector = database.get_profile_vector(profile["profile_id"])
+        errors = [
+            value
+            for reaction in vector["reactions"]
+            for value in reaction["error"]
+        ]
+        assert np.all(np.isfinite(errors))
+        assert np.all(np.asarray(errors) >= 0.0)
+
+
+def test_schema_v2_requires_rebuild(tmp_path):
+    path = tmp_path / "old.db"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    connection.execute(
+        "INSERT INTO meta (key, value) VALUES ('schema_version', '2')"
+    )
+
+
+def test_ingest_abnn_30_group_profile_without_invented_uncertainties(tmp_path):
+    source = tmp_path / "sensitivity" / "HEU"
+    source.mkdir(parents=True)
+    grid = tmp_path / "newE"
+    grid.mkdir()
+    upper_boundaries = np.geomspace(2.0e7, 1.0e-2, 30)
+    (grid / "ABBN30.txt").write_text(
+        "\n".join(f"{value:.12E}" for value in upper_boundaries),
+        encoding="utf-8",
+    )
+    rows = [
+        f"{group:4d} "
+        + " ".join(f"{group * scale:.8E}" for scale in range(1, 7))
+        for group in range(1, 31)
+    ]
+    sum_rows = [
+        f"{group:4d} {0.01 * group:.8E}"
+        for group in range(1, 31)
+    ]
+    table = (
+        "            ZONE         ALL      ISOTOP        PU39      CONCEN  1.0\n\n"
+        "   G     FISSION     CAPTURE   INELASTIC     ELASTIC      NU-BAR      MU-BAR\n\n"
+        + "\n".join(rows)
+        + "\n"
+        + "            ZONE         ALL      ISOTOP         SUM\n\n"
+        + "   G     FSS.SPECTRA\n\n"
+        + "\n".join(sum_rows)
+        + "\n"
+    )
+    filename = "HEU-MET-FAST-002-001_KENO_ABBN-93---299-Group_SENS.gz"
+    with gzip.open(source / filename, "wt", encoding="utf-8") as stream:
+        stream.write(table)
+
+    db_path = tmp_path / "abbn.db"
+    stats = bm.build_benchmarks_db(
+        source_dir=str(tmp_path / "sensitivity"),
+        db_path=str(db_path),
+        n_workers=1,
+    )
+    assert stats["files_skipped"] == 0
+    assert stats["benchmarks"] == 1
+    assert stats["profiles"] == 1
+    assert stats["reactions"] == 6
+
+    benchmark = bm.get_benchmark("HEU-MET-FAST-002-001", db_path=str(db_path))
+    profile = benchmark["profiles"][0]
+    assert profile["group_structure"] == "30-Group"
+    assert profile["ngroups"] == 30
+    assert profile["keff"] is None
+    assert profile["keff_unc"] is None
+    vector = bm.get_profile_vector(profile["profile_id"], db_path=str(db_path))
+    assert vector["pert_energies"][0] == pytest.approx(1.0e-11)
+    assert vector["pert_energies"][-1] == pytest.approx(20.0)
+    assert all(reaction["error"] is None for reaction in vector["reactions"])
+    neutral = bm.get_sensitivity_profile(profile["profile_id"], db_path=str(db_path))
+    assert all(reaction.uncertainty is None for reaction in neutral.reactions)
+    assert {reaction["zaid"] for reaction in vector["reactions"]} == {94239}
+    fission = next(reaction for reaction in vector["reactions"] if reaction["mt"] == 18)
+    assert fission["sensitivity"] == pytest.approx(
+        [float(group) for group in range(30, 0, -1)]
+    )
+
+
+def test_ck_ranking_tie_breaks_by_benchmark_id(tmp_path):
+    src = tmp_path / "sensitivity" / "HEU"
+    src.mkdir(parents=True)
+    for case in ("002", "001"):
+        name = f"HEU-MET-FAST-001-{case}_KENO_ENDF-B-VII.0---4-Group_SENS.gz"
+        with gzip.open(src / name, "wt", encoding="utf-8") as stream:
+            stream.write(_fixture_sdf())
+    db_path = str(tmp_path / "ranking.db")
+    bm.build_benchmarks_db(source_dir=str(tmp_path / "sensitivity"), db_path=db_path)
+    bm.reset_config()
+
+    first = bm.get_benchmark("HEU-MET-FAST-001-001", db_path=db_path)["profiles"][0]
+    application = bm.get_sensitivity_profile(first["profile_id"], db_path=db_path)
+    cov = CrossSectionCovariance(
+        num_groups=application.n_groups,
+        energy_grid=application.energy_grid.tolist(),
+        energy_unit="MeV",
+    )
+    for reaction in application.reactions:
+        cov.add_matrix(
+            reaction.zaid, reaction.mt, reaction.zaid, reaction.mt,
+            np.eye(application.n_groups), is_relative=True,
+        )
+
+    ranked = bm.rank_benchmarks_by_ck(application, cov, db_path=db_path)
+    assert [row.benchmark_id for row in ranked] == [
+        "HEU-MET-FAST-001-001",
+        "HEU-MET-FAST-001-002",
+    ]
+    assert [row.ck for row in ranked] == pytest.approx([1.0, 1.0])

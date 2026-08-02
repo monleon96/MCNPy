@@ -34,3 +34,16 @@ kika.sensitivities.sdf
    :members:
    :undoc-members:
    :show-inheritance:
+
+
+kika.sensitivities.profile
+--------------------------
+
+``SensitivityProfile`` and ``SensitivityReaction`` are the validated,
+format-neutral inputs used by UQ calculations. Their energy unit is explicit
+and reaction uncertainties are absolute one-sigma standard deviations.
+
+.. automodule:: kika.sensitivities.profile
+   :members:
+   :undoc-members:
+   :show-inheritance:
