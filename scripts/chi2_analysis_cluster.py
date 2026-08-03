@@ -401,7 +401,22 @@ LIB_YEAR_OFFSETS = {"JEFF": -0.3, "JENDL": 0.0, "This_work": 0.3}
 # NOTE: an earlier version of this comment called V3 the chapter headline and V4
 # "diagnostic only". That contradicts what the thesis actually ships; see
 # docs/thesis_chi2_review.md before acting on either claim.
-VARIANTS: Tuple[str, ...] = ("V1", "V2", "V3", "V4")
+# Reported variants. V1 and V3 are DELIBERATELY OMITTED (Juan, 2026-08-03): the
+# two that carry the argument are V2 (rank-2 only — the pure central-value
+# metric, σ_eval excluded) and V4 (rank-2 + dense eval — the only one that sees
+# the off-diagonal structure Phase 3 actually adds). V1/V3 are diagonal
+# statistics that mostly restate the coverage table.
+#
+# ⚠ What this does and does not save. It halves the report tables and the
+# per-(subset × variant) figures — the bulk of the wall-clock in the reporting
+# stage. It does NOT save the χ² computation: the per-experiment chi2_v1..v4
+# columns are still built upstream, and the expensive one is V4's dense eval
+# blocks, which we keep. Add "V1"/"V3" back here to restore them; nothing else
+# needs changing.
+#
+# Coverage is unaffected: coverage_table() computes σ_total itself and never
+# reads VARIANTS, so |z|<1 stays even though its heading names V1's σ.
+VARIANTS: Tuple[str, ...] = ("V2", "V4")
 VARIANT_LABELS: Dict[str, str] = {
     "V1": "V1 textbook diag",
     "V2": "V2 rank-2 only",
@@ -743,11 +758,12 @@ def per_experiment_win_tally(
             row[f"{variant} worst"] = worst
         rows.append(row)
     out = pd.DataFrame(rows)
-    n_v1 = n_total_per_v.get("V1", 0)
+    # Was hardcoded to V1, which now reports 0 whenever V1 is not in VARIANTS.
+    n_ref = n_total_per_v.get(PRIMARY_VARIANT, 0)
     report.append(
         f"\n**Per-experiment ranking, subset `{subset_key}`** "
         f"(count of experiments where each library has best/mid/worst χ²/N; "
-        f"N_experiments under V1 = {n_v1}):\n\n"
+        f"N_experiments under {PRIMARY_VARIANT} = {n_ref}):\n\n"
     )
     show_cols = ["Library"] + [
         f"{v} {kind}" for v in VARIANTS for kind in ("best", "mid", "worst")
