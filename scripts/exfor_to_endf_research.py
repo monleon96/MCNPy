@@ -761,6 +761,17 @@ MF33_REBUILD_MT1 = True                          # Rebuild MF33 MT1 (total) over
                                                   # uncorrelated partial sum, so this keeps
                                                   # the evaluator's own convention.
 SAVE_MF33_MULTIGROUP_DIAGNOSTICS_CSV = True      # mf33_boundary_decisions.csv
+COMPUTE_MF33_MF34_CROSS = True                   # Measure Cov(c0, a_l) across the shared Pass-2 MC
+                                                  # replicas and write mf33_mf34_cross_*.npy
+                                                  # (roadmap §9.4.1). DIAGNOSTIC ONLY — it is not fed
+                                                  # into any covariance the ENDF ships, so turning it
+                                                  # on cannot move a single number in the file. It
+                                                  # exists to answer the one thing the Cauchy-Schwarz
+                                                  # bound cannot: the SIGN of the magnitude-shape
+                                                  # correlation. Costs no MC time; both channels are
+                                                  # already in memory at that point.
+                                                  # Publishing it as an MF34 LB=6 (L=0,L1) block
+                                                  # stays gated on mf3_mf33_roadmap Phase 3 / LTT=3.
 SAVE_MF33_C0_SAMPLES = False                     # mf33_c0_samples.parquet — the raw
                                                   # two-pass c0 draws (~300 MB at 10k
                                                   # samples). Only needed for a
@@ -1233,6 +1244,124 @@ def build_mixture_blocks(mixture_by_bin, nominal_results, max_degree, logger=Non
                             for l in range(min(max_degree, frac.shape[1])))
             )
     return blocks, diag
+
+
+def compute_mf33_mf34_cross(
+    all_samples_perbin,
+    c0_samples_perbin,
+    energy_indices,
+    max_order,
+    min_samples=32,
+):
+    """Per-bin Cov(c0, a_l) over the shared Pass-2 MC replicas (roadmap §9.4.1).
+
+    WHY THIS IS COMPUTABLE AT ALL. Our Sigma_eval today is
+    Sigma^MF34 + Sigma^MF33 with the cross term set to exactly zero, because the
+    evaluation splits one Monte Carlo into two one-at-a-time channels: the
+    magnitude channel varies c0 at frozen shape (-> MF33), the shape channel
+    refits a_l at frozen c0 (-> MF34). That partition, not any external MF3, is
+    what discards Cov(sigma, a_l).
+
+    But the two channels are NOT independent draws. In
+    ``resample_AD.sample_legendre_coefficients`` a single ``Y_perturbed`` matrix
+    is built once per batch; ``_batch_mc_ridge_solve`` turns row i into that
+    replica's a_l, and ``fixed_shape_c0_scale`` turns THE SAME row i into that
+    replica's c0. Row i is one perturbed dataset. So ``all_samples_perbin[s]``
+    and ``c0_samples_perbin[s]`` are the same replica, and their covariance
+    across s is a real measurement of the correlation the shared data induces --
+    no joint evaluation, no relaxing FREEZE_C0, no LTT=3 needed to MEASURE it
+    (publication is still gated by mf3_mf33_roadmap Phase 3; see roadmap §6.4).
+
+    Freezing c0 inside the shape refit does not break this: a_l does not depend
+    on the c0 *drawn* in replica s, but both respond to the same perturbed data,
+    and that is precisely the channel the correlation travels down.
+
+    WHAT IT RETURNS, AND WHY NOT A RELATIVE BLOCK. Absolute covariance and
+    correlation, never Cov(c0/c0_nom, a_l/a_l_nom). The relative form divides by
+    a_l_nom, which passes through zero -- the same near-zero blow-up
+    ``REGULARIZE_NEAR_ZERO_REL_UNC`` exists to contain, and
+    ``absolute_to_nominal_relative`` drops outright at |a_l| < 1e-6. rho is
+    bounded in [-1, 1] by construction and is the quantity the bound in §9.4.1
+    is expressed in, so it is the honest thing to report and to gate on.
+
+    This is the "Level A" estimator: paired one-at-a-time draws. A fully joint
+    refit (c0 and a_l floating together per replica) is Level B and is a
+    different, larger change.
+
+    Parameters
+    ----------
+    all_samples_perbin : dict {s_idx: {energy_idx: a_l array of len >= max_order}}
+        Pass-2 shape draws, post freeze/positivity/normalise -- i.e. the
+        coefficients the file actually ships.
+    c0_samples_perbin : dict {s_idx: {energy_idx: float}}
+        Pass-2 magnitude draws, same replica index.
+    energy_indices : sequence of int
+        Bin order for the returned rows.
+    max_order : int
+        Legendre orders 1..max_order.
+    min_samples : int
+        Bins with fewer paired replicas return NaN rather than a noisy rho.
+
+    Returns
+    -------
+    dict with 'cov', 'rho' (n_bins, max_order), 'std_c0' (n_bins,),
+    'std_a' (n_bins, max_order), 'n_pairs' (n_bins,).
+    """
+    energy_indices = list(energy_indices)
+    n_bins = len(energy_indices)
+    cov = np.full((n_bins, max_order), np.nan, dtype=float)
+    rho = np.full((n_bins, max_order), np.nan, dtype=float)
+    std_a = np.full((n_bins, max_order), np.nan, dtype=float)
+    std_c0 = np.full(n_bins, np.nan, dtype=float)
+    n_pairs = np.zeros(n_bins, dtype=int)
+
+    # Replica indices present in both channels. Intersected per bin: a bin can
+    # fail in one channel and not the other, and pairing the wrong replicas
+    # would manufacture correlation out of nothing.
+    for row, e_idx in enumerate(energy_indices):
+        c0_vals, a_rows = [], []
+        for s_idx, per_bin in c0_samples_perbin.items():
+            if e_idx not in per_bin:
+                continue
+            a_bin = all_samples_perbin.get(s_idx, {}).get(e_idx)
+            if a_bin is None:
+                continue
+            c0_v = float(per_bin[e_idx])
+            a_v = np.asarray(a_bin, dtype=float)[:max_order]
+            if not np.isfinite(c0_v) or a_v.size < max_order or not np.all(np.isfinite(a_v)):
+                continue
+            c0_vals.append(c0_v)
+            a_rows.append(a_v)
+
+        n = len(c0_vals)
+        n_pairs[row] = n
+        if n < min_samples:
+            continue
+
+        c = np.asarray(c0_vals, dtype=float)
+        A = np.vstack(a_rows)
+        cc = c - c.mean()
+        Ac = A - A.mean(axis=0)
+        # ddof=1 to match the mixture blocks' convention (np.cov ddof=1).
+        cov[row] = cc @ Ac / (n - 1)
+        s_c = float(np.sqrt(cc @ cc / (n - 1)))
+        s_a = np.sqrt(np.einsum("ij,ij->j", Ac, Ac) / (n - 1))
+        std_c0[row] = s_c
+        std_a[row] = s_a
+        # Orders restored from nominal (frozen above mc_order_cap / the mixture
+        # mask) have zero spread: rho is genuinely undefined there, not zero.
+        # The threshold is RELATIVE, not `> 0`: subtracting the mean of a
+        # constant column leaves ~1e-17 of rounding, which passes `> 0` and
+        # yields rho ~ 4e-16 -- a confident-looking zero for a quantity that was
+        # never measured. That would bias any median taken over orders, and the
+        # frozen orders are exactly the ones Phase 3 changes the count of.
+        _eps = 1e-12
+        scale_a = np.maximum(np.max(np.abs(A), axis=0), np.finfo(float).tiny)
+        scale_c = max(float(np.max(np.abs(c))), np.finfo(float).tiny)
+        good = (s_a > _eps * scale_a) & (s_c > _eps * scale_c)
+        rho[row, good] = cov[row, good] / (s_c * s_a[good])
+
+    return dict(cov=cov, rho=rho, std_c0=std_c0, std_a=std_a, n_pairs=n_pairs)
 
 
 def _mc_one_bin(args):
@@ -4005,6 +4134,42 @@ def run_exfor_to_endf_sampling_v2(
                     # gapped grid would be a semantically wrong ENDF grid).
                     _vb = [_bin_by_idx_mf33[e] for e in energy_indices_kw]
                     mf33_energy_grid_ev = contiguous_grid_from_bins(_vb)
+
+                    # Phase-2 magnitude<->shape correlation (roadmap §9.4.1).
+                    # Diagnostic sidecar only — nothing downstream reads it, so
+                    # the shipped ENDF is bit-identical with this on or off.
+                    if COMPUTE_MF33_MF34_CROSS and c0_samples_perbin is not None:
+                        try:
+                            _xc = compute_mf33_mf34_cross(
+                                all_samples_perbin, c0_samples_perbin,
+                                energy_indices_kw, max_degree,
+                            )
+                            np.save(output_path / "mf33_mf34_cross_covariance.npy", _xc["cov"])
+                            np.save(output_path / "mf33_mf34_cross_correlation.npy", _xc["rho"])
+                            np.save(output_path / "mf33_mf34_cross_n_pairs.npy", _xc["n_pairs"])
+                            _nb = _xc["rho"].shape[0]
+                            _logger.info(
+                                f"  [XCORR] Cov(c0, a_l) over shared Pass-2 replicas: "
+                                f"{_nb} bins, paired draws min/median "
+                                f"{int(np.min(_xc['n_pairs']))}/{int(np.median(_xc['n_pairs']))}"
+                            )
+                            # THE number this whole exercise is for: the sign.
+                            # §9.4.1 bounded |rho| <= 1 but could not sign it.
+                            _logger.info(
+                                "  [XCORR] median rho by order: "
+                                + ", ".join(
+                                    f"a_{l+1} {np.nanmedian(_xc['rho'][:, l]):+.3f}"
+                                    for l in range(max_degree)
+                                )
+                            )
+                            _finite = np.isfinite(_xc["rho"])
+                            _logger.info(
+                                f"  [XCORR] defined in {int(_finite.sum())}/{_finite.size} "
+                                "(bin, order) slots; the rest are orders restored "
+                                "from nominal, where rho is undefined, not zero."
+                            )
+                        except Exception as _e_xc:
+                            _logger.warning(f"  [XCORR] cross-covariance failed: {_e_xc}")
 
                     # Completeness + Pass-1 correlation inspection (warn-only).
                     _p1c = _mf33_diag["p1_finite_per_bin"]
