@@ -4581,14 +4581,22 @@ def run_exfor_to_endf_sampling_v2(
     energy_indices = [nr.energy_index for nr in nominal_results if nr.has_data]
 
     # Build valid-parameter mask for Step 7 covariance paths
+    #
+    # `_mg_valid_orders` is the SAME rule as a callable, so the multigroup
+    # collapse (Step 7b) and the merge path cannot drift from this mask. They
+    # used to: both rebuilt `min(frozen_degree, max_order)` internally, which is
+    # what kept Phase 3 out of the shipped multigroup file (roadmap §8.4).
+    def _mg_valid_orders(nr, mo):
+        n = bin_valid_orders(nr, mo)
+        if MAX_SAMPLE_ORDER is not None:
+            n = min(n, MAX_SAMPLE_ORDER)
+        return min(n, mo)
+
     nr_by_idx_s7 = {nr.energy_index: nr for nr in nominal_results}
     valid_mask_s7 = np.zeros(len(energy_indices) * max_degree, dtype=bool)
     for ie, e_idx in enumerate(energy_indices):
         nr = nr_by_idx_s7[e_idx]
-        n_valid = bin_valid_orders(nr, max_degree)
-        if MAX_SAMPLE_ORDER is not None:
-            n_valid = min(n_valid, MAX_SAMPLE_ORDER)
-        for l in range(n_valid):
+        for l in range(_mg_valid_orders(nr, max_degree)):
             valid_mask_s7[ie * max_degree + l] = True
 
     if True:  # Covariance always computed (needed for MF34)
@@ -4863,6 +4871,14 @@ def run_exfor_to_endf_sampling_v2(
                     forced_group_boundaries_mev=forced_grid,
                     diagnostics_file=(output_path / "multigroup_boundary_decisions.csv"
                                       if save_multigroup_diagnostics_csv else None),
+                    # PHASE 3 FIX (2026-08-03). Without this the collapse rebuilt
+                    # the legacy winner-take-all mask from `frozen_degree`
+                    # internally, so the mixture reached the fine MF34 and never
+                    # the multigroup one that actually gets scored (roadmap §8.4:
+                    # dead parameters at l=6 went 92.3% -> 1.0% fine, but
+                    # 81.6% -> 81.7% multigroup). Same rule as `valid_mask_s7`
+                    # above, MAX_SAMPLE_ORDER clamp included.
+                    valid_orders_fn=_mg_valid_orders,
                 )
 
                 # Log and save results
@@ -5558,10 +5574,14 @@ def run_exfor_to_endf_sampling_v2(
                     for _l in range(1, min(max_degree + 1, len(_c) + 1)):
                         _rg_mean_fine[_mg_idx(_i, _l, max_degree)] = _c[_l - 1] if _l - 1 < len(_c) else 0.0
 
-                # Build valid_mask
+                # Build valid_mask — same rule as `valid_mask_s7` and the Step-7b
+                # collapse. This site was the second copy of the legacy
+                # winner-take-all rule; dormant because
+                # MULTIGROUP_REGROUP_AFTER_SMOOTH is False, but it would have
+                # silently undone Phase 3 the moment that flag was turned on.
                 _rg_valid_mask = np.zeros(_rg_n_fine * max_degree, dtype=bool)
                 for _i, _nr in enumerate(_rg_valid_nominal):
-                    for _l in range(1, min(_nr.frozen_degree, max_degree) + 1):
+                    for _l in range(1, _mg_valid_orders(_nr, max_degree) + 1):
                         _rg_valid_mask[_mg_idx(_i, _l, max_degree)] = True
 
                 # Use absolute covariance sliced to non-interpolated bins for re-collapse

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict, Any
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 
@@ -1170,6 +1170,7 @@ def perform_adaptive_multigroup_collapse(
     max_relative_std_cap: float = 1.0,
     forced_group_boundaries_mev: Optional[np.ndarray] = None,
     diagnostics_file: Optional[Path] = None,
+    valid_orders_fn: Optional[Callable[[Any, int], int]] = None,
 ) -> MultigroupResult:
     """
     Main entry point for adaptive multigroup covariance collapse.
@@ -1212,6 +1213,19 @@ def perform_adaptive_multigroup_collapse(
         ``variance_percentile_max`` (default 5.0).
     logger : optional
         Logger for diagnostics
+    valid_orders_fn : callable, optional
+        ``f(nominal_result, max_order) -> int`` returning how many leading
+        Legendre orders count as real parameters for that bin. Overrides the
+        legacy winner-take-all rule ``min(frozen_degree, max_order)``.
+
+        Defaults to ``None`` (legacy), so ``exfor_to_endf_sampling_v2.py`` is
+        bit-unchanged. The research fork passes ``bin_valid_orders``, which keys
+        on the inclusion probability ``q_l`` instead of the winning degree.
+
+        **This parameter exists because its absence silently confined Phase 3 to
+        the fine grid** — the fork had replaced the mask everywhere except here,
+        so the shipped multigroup MF34 kept the winner-take-all zero structure
+        while the fine one was fully populated. See the roadmap §8.4.
 
     Returns
     -------
@@ -1256,18 +1270,31 @@ def perform_adaptive_multigroup_collapse(
     valid_energy_bins = [energy_bins[i] for i in valid_indices]
     valid_nominal = [nominal_results[i] for i in valid_indices]
 
-    # Build valid_mask for the non-interpolated fine grid
-    # A parameter (bin i, order l) is valid iff frozen_degree >= l
+    # Build valid_mask for the non-interpolated fine grid.
+    #
+    # Legacy rule: a parameter (bin i, order l) is valid iff frozen_degree >= l,
+    # i.e. winner-take-all. `valid_orders_fn` overrides it with the caller's own
+    # rule (the research fork passes `bin_valid_orders`, keyed on the inclusion
+    # probability q_l). It defaults to None so v2 stays bit-identical.
+    #
+    # ⚠ THIS BLOCK IS WHY PHASE 3 NEVER REACHED THE MULTIGROUP PRODUCT.
+    # The fork replaced the mask on the *fine* path but this function rebuilt the
+    # legacy one from scratch, so run 85's mixture populated the fine MF34
+    # (dead parameters at l=6: 92.3% -> 1.0%) and left the multigroup MF34
+    # untouched (81.6% -> 81.7%). Measured 2026-08-03; see the roadmap §8.4.
+    _orders_of = valid_orders_fn or (lambda nr, mo: min(nr.frozen_degree, mo))
     valid_mask_mg = np.zeros(n_fine * max_order, dtype=bool)
     for i, nr in enumerate(valid_nominal):
-        for l in range(1, min(nr.frozen_degree, max_order) + 1):
+        for l in range(1, min(int(_orders_of(nr, max_order)), max_order) + 1):
             valid_mask_mg[idx(i, l, max_order)] = True
 
     n_fitted = int(valid_mask_mg.sum())
     n_total = n_fine * max_order
     if logger:
+        _rule = "caller-supplied" if valid_orders_fn else "legacy frozen_degree"
         logger.info(f"  Valid mask: {n_fitted}/{n_total} parameters fitted "
-                    f"({n_total - n_fitted} unfitted, {100*(n_total-n_fitted)/n_total:.1f}%)")
+                    f"({n_total - n_fitted} unfitted, {100*(n_total-n_fitted)/n_total:.1f}%)"
+                    f"  [rule: {_rule}]")
 
     # Extract arrays
     fine_energies_mev = np.array([eb.energy_mev for eb in valid_energy_bins])
