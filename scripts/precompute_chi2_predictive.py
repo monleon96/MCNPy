@@ -150,7 +150,25 @@ THIS_WORK_DIR  = os.environ.get(
     "KIKA_THIS_WORK_DIR",
     "/share_snc/snc/JuanMonleon/ENDF_samples/new_test_82_mt1fix",
 ).rstrip("/")
-THIS_WORK_FILE = f"{THIS_WORK_DIR}/26-Fe-56g_nominal_mg.endf"
+
+# Which of the two shipped products to score. The pipeline writes both:
+#   26-Fe-56g_nominal_mg.endf   ~205 MB, ~660 multigroups   <- the default
+#   26-Fe-56g_nominal.endf      ~843 MB, 1738 fine bins
+#
+# Every run from 82 to 85 scored the multigroup file, and that is the default so
+# they stay reproducible. KIKA_THIS_WORK_ENDF overrides it.
+#
+# ⚠ WHY THIS EXISTS. The two products are NOT interchangeable for Phase 3. The
+# mixture covariance reaches the fine MF34 and not the multigroup one (roadmap
+# §8.4 — dead parameters at l=6: 92.3% -> 1.0% fine, 81.6% -> 81.7% multigroup),
+# so scoring the multigroup file measures the mixture's ABSENCE. Pointing this at
+# run 85's fine ENDF answers the Phase-3 question with no re-evaluation.
+#
+# Memory: the fine MF34 is ~734 MB on disk and ~0.5 GB parsed. Ask for 300G, the
+# same as the representation sweep — the 100G that suffices for _mg.endf will not
+# do here.
+THIS_WORK_ENDF = os.environ.get("KIKA_THIS_WORK_ENDF", "26-Fe-56g_nominal_mg.endf")
+THIS_WORK_FILE = f"{THIS_WORK_DIR}/{THIS_WORK_ENDF}"
 
 JEFF_FILE  = "/share_snc/snc/JuanMonleon/jeff40_with_MF4_from_jeff33/26-Fe-56g.txt"
 JENDL_FILE = "/share_snc/snc/JuanMonleon/JENDL-5/260560.jendl5"

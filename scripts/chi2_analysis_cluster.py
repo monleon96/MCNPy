@@ -187,6 +187,72 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
         "title":      "χ² analysis — run-84 evaluation (τ-IRLS on GLS), declared σ_E in the fold",
         "systematic_block_col": None,
     },
+    # Run 85 = run 84 + the Phase-3 mixture. Single-variable against
+    # predictive_84: they share the τ-GLS solver, σ_E, the manifest and
+    # DEGREE_WEIGHT_FLOOR=0.01. Verified on the parquets: run 85's `win_c_*` is
+    # bit-identical to run 84's `c_*` and `frozen_degree` moves in 0 % of bins,
+    # so the underlying fit is the same and only what is *shipped* differs.
+    #
+    # ⚠ READ V2 **AND** V4, and do NOT carry run 83's reading over. Run 83 left
+    # the centrals byte-identical, which made V2 an invariance gate there. Run 85
+    # moves both channels — MF4 ships the mixture mean (median |Δa|/|a| 2 % at
+    # ℓ=1 rising to 20 % at ℓ=5,6) and MF34 ships the mixture covariance — so:
+    #   V2 → did the mixture MEAN help the central value?
+    #   V4 → did the mixture COVARIANCE change the fit?
+    # Neither is a gate. JEFF and JENDL remain hard invariances.
+    "predictive_85": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_85.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-85 evaluation (τ-GLS + Phase-3 mixture), declared σ_E in the fold",
+        "systematic_block_col": None,
+    },
+    # Run 85 again, but scoring the FINE ENDF instead of the multigroup one.
+    # This is the first measurement of the Phase-3 mixture that is not empty.
+    #
+    # WHY IT IS NEEDED. `predictive_85` scored `_mg.endf`, and the mixture never
+    # reached that file: dead parameters at ℓ=6 go 92.3 % → 1.0 % on the fine
+    # grid and 81.6 % → 81.7 % on the multigroup one (roadmap §8.4). So run 85's
+    # V4 (−2.25 %) and its flat calibration measured the mixture's *absence*.
+    # The fine ENDF already carries it — no re-evaluation required.
+    #
+    # The two files carry the SAME MF4 centrals and the SAME MF33 (both ship the
+    # ungrouped 1738-group MF33), so `predictive_85_fine` vs `predictive_85` is a
+    # pure MF34-representation difference — the same clean contrast §3.1 relies
+    # on. Its own baseline is `repr_fine` from the representation sweep, which is
+    # the fine product without the mixture.
+    #
+    # Needs 300G: the fine MF34 is ~734 MB on disk, ~0.5 GB parsed.
+    "predictive_85_fine": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_85_fine.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-85 evaluation, FINE MF34 (τ-GLS + Phase-3 mixture), declared σ_E in the fold",
+        "systematic_block_col": None,
+    },
+    # Run 86 — the §8.4 fix, in the product we actually ship.
+    #
+    # Run 85 proved Phase 3 reached the fine MF34 and not the multigroup one,
+    # because `perform_adaptive_multigroup_collapse` rebuilt the legacy
+    # winner-take-all mask internally from `nr.frozen_degree`. That is now
+    # overridable via `valid_orders_fn` (default = legacy, so v2 stays
+    # bit-identical) and the fork passes its q_ℓ rule through. Run 86 is the
+    # re-evaluation that makes the fix take effect.
+    #
+    # Read it against `predictive_85_fine` (the mixture, fine grid — what the
+    # covariance does when it is present) and `predictive_85` (the mixture
+    # absent from the multigroup file — the bug). Run 86 should land near the
+    # former, not the latter.
+    #
+    # Also carries the first §9.4.2 [XCORR] measurement: Cov(c₀, a_ℓ) over the
+    # shared Pass-2 replicas. Diagnostic-only, so it cannot move any number in
+    # this table — read it from run 86's log, not from here.
+    #
+    # 100G suffices: this scores `_mg.endf` (~205 MB), not the fine file.
+    "predictive_86": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_86.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-86 evaluation (τ-GLS + Phase-3 mixture, multigroup mask fixed), declared σ_E in the fold",
+        "systematic_block_col": None,
+    },
     # Fold-mode sweep. Identical to `predictive` in every respect except which
     # part of the forward model is resolution-averaged (FOLD_MODE in
     # precompute_chi2_predictive.py). Compare V2 across these to decide, over
