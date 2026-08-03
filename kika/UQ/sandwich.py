@@ -299,8 +299,19 @@ def _profile_for_sandwich(
         raise TypeError("sdf_data must be SDFData or SensitivityProfile")
 
     selected = []
+    mt0_excluded = False
     mt1_excluded = False
     for reaction in profile.reactions:
+        mt0_explicit = bool(
+            reaction_filter
+            and (
+                reaction.mt in reaction_filter.get("ALL_NUCLIDES", [])
+                or reaction.mt in reaction_filter.get(reaction.zaid, [])
+            )
+        )
+        if reaction.mt == 0 and not mt0_explicit:
+            mt0_excluded = True
+            continue
         if reaction.mt == 1:
             mt1_excluded = True
             continue
@@ -323,6 +334,7 @@ def _profile_for_sandwich(
     if not selected:
         raise ValueError("No sensitivity reactions remain after applying filters")
     metadata = dict(profile.metadata)
+    metadata["sandwich_mt0_excluded"] = mt0_excluded
     metadata["sandwich_mt1_excluded"] = mt1_excluded
     return SensitivityProfile(
         energy_grid=profile.energy_grid,
@@ -384,9 +396,12 @@ def sandwich_uncertainty_propagation(
     }
     exclusions = sorted(source_keys - selected_keys)
     if exclusions:
-        aligned.report.policy_exclusions[0] = exclusions
+        existing = aligned.report.policy_exclusions.get(0, [])
+        aligned.report.policy_exclusions[0] = sorted(set(existing).union(exclusions))
     if profile.metadata.get("sandwich_mt1_excluded"):
         aligned.report.assumptions.append("MT=1 excluded to avoid total/reaction double counting")
+    if profile.metadata.get("sandwich_mt0_excluded"):
+        aligned.report.assumptions.append("MT=0 pseudo-total excluded from UQ")
     aligned.report.assumptions.append(f"nu-bar redundancy resolved with nubar_mode={nubar_mode!r}")
 
     sensitivity_vector = aligned.sensitivity_vectors[0]
@@ -737,4 +752,3 @@ def filter_reactions_by_type(mt_numbers: List[int]) -> Dict[int, List[int]]:
     """
     # Return special format - the main function handles this case
     return {"ALL_NUCLIDES": mt_numbers}
-

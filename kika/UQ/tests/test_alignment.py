@@ -202,9 +202,60 @@ def test_exact_key_has_priority_over_tsurfer_fallback():
     assert result.report.aliases == []
 
 
+def test_exact_sensitivity_wins_over_competing_mt_alias():
+    p = profile(
+        (92235, 101, [10.0, 20.0], [1.0, 2.0]),
+        (92235, 102, [1.0, 2.0], [0.1, 0.2]),
+    )
+    cov = covariance(((92235, 102), (92235, 102), np.eye(2)))
+
+    result = align_sensitivity_covariance([p], cov, alias_policy="tsurfer")
+
+    np.testing.assert_allclose(result.sensitivity_vectors[0], [1.0, 2.0])
+    assert result.report.aliases == []
+    assert result.report.policy_exclusions[0] == [ParameterKey("xs", 92235, 101)]
+    assert any("preferred over" in note for note in result.report.assumptions)
+
+
+def test_same_mt_bound_alias_wins_over_bound_mt_alias():
+    p = profile(
+        (1801, 101, [10.0, 20.0], [1.0, 2.0]),
+        (1801, 102, [1.0, 2.0], [0.1, 0.2]),
+    )
+    cov = covariance(((1001, 102), (1001, 102), np.eye(2)))
+
+    result = align_sensitivity_covariance([p], cov, alias_policy="tsurfer")
+
+    np.testing.assert_allclose(result.sensitivity_vectors[0], [1.0, 2.0])
+    assert result.report.aliases[0].source == ParameterKey("xs", 1801, 102)
+    assert result.report.policy_exclusions[0] == [ParameterKey("xs", 1801, 101)]
+
+
 def test_incompatible_duplicate_covariance_block_fails():
     p = profile((92235, 18, [1.0, 2.0], [0.0, 0.0]))
     first = covariance(((92235, 18), (92235, 18), np.eye(2)))
     second = covariance(((92235, 18), (92235, 18), 2.0 * np.eye(2)))
     with pytest.raises(AlignmentError, match="incompatible duplicate"):
         align_sensitivity_covariance([p], [first, second])
+
+
+def test_float32_symmetry_noise_is_removed_and_reported():
+    p = profile((92235, 18, [1.0, 2.0], [0.0, 0.0]))
+    matrix = np.array([[1.0, 3.1388999e-4], [3.1390000e-4, 2.0]])
+    cov = covariance(((92235, 18), (92235, 18), matrix))
+
+    result = align_sensitivity_covariance([p], cov)
+
+    np.testing.assert_array_equal(result.covariance, result.covariance.T)
+    np.testing.assert_allclose(result.covariance[0, 1], 3.13894995e-4)
+    assert any("float32 rounding tolerance" in note for note in result.report.assumptions)
+
+
+def test_materially_asymmetric_diagonal_covariance_fails():
+    p = profile((92235, 18, [1.0, 2.0], [0.0, 0.0]))
+    cov = covariance(
+        ((92235, 18), (92235, 18), np.array([[1.0, 0.25], [0.30, 2.0]]))
+    )
+
+    with pytest.raises(AlignmentError, match="asymmetric diagonal"):
+        align_sensitivity_covariance([p], cov)

@@ -47,3 +47,16 @@ and reaction uncertainties are absolute one-sigma standard deviations.
    :members:
    :undoc-members:
    :show-inheritance:
+
+kika.sensitivities.condensation
+-------------------------------
+
+Sensitivity condensation is explicit and format-neutral. Exact condensation
+requires every target boundary to be present in the source grid; non-nested
+projection is deliberately rejected. The returned report records the boundary
+mapping, uncertainty assumption and integral-conservation diagnostic.
+
+.. automodule:: kika.sensitivities.condensation
+   :members:
+   :undoc-members:
+   :show-inheritance:

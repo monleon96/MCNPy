@@ -13,7 +13,6 @@ from kika.endf.utils import (
     format_endf_number, format_endf_data_line,
     ENDF_FORMAT_FLOAT, ENDF_FORMAT_INT,
 )
-from kika.energy_grids.grids import SCALE44, SCALE56, SCALE238, SCALE252
 
 
 class EmptyParsingError(Exception):
@@ -161,6 +160,26 @@ def _detect_endianness(file_path: str) -> str:
     )
 
 
+def _coverx_energy_grid(
+    values: List[float],
+    energy_unit: str,
+    *,
+    ascending: bool,
+) -> Tuple[List[float], bool]:
+    """Convert a COVERX eV grid and report whether data must be reversed."""
+    if energy_unit not in ("eV", "MeV"):
+        raise ValueError("energy_unit must be 'eV' or 'MeV'")
+    if len(values) < 2:
+        return [], False
+
+    file_ascending = values[0] < values[-1]
+    reverse = ascending and not file_ascending
+    grid = list(reversed(values)) if reverse else list(values)
+    if energy_unit == "MeV":
+        grid = [value * 1.0e-6 for value in grid]
+    return grid, reverse
+
+
 # ---------------------------------------------------------------------------
 # Public API — COVERX (text or binary, auto-detected)
 # ---------------------------------------------------------------------------
@@ -236,32 +255,53 @@ def _read_coverx_text(file_path: str, ascending: bool = True, energy_unit: str =
     # Parse the group number from the second line
     num_groups = int(file_lines[1].split()[0])
 
-    # Create CrossSectionCovariance object
-    covmat = CrossSectionCovariance(num_groups, energy_unit=energy_unit)
+    # COVERX stores energy boundaries in eV immediately after the control line.
+    # Parse the file's own grid instead of inferring one from the group count.
+    energy_values = []
+    cursor = 2
+    while cursor < len(file_lines) and len(energy_values) < num_groups + 1:
+        try:
+            energy_values.extend(
+                float(token.replace("D", "E"))
+                for token in file_lines[cursor].split()
+            )
+        except ValueError as exc:
+            raise InvalidDataFormatError(
+                "Invalid COVERX text energy grid"
+            ) from exc
+        cursor += 1
 
-    # Determine the energy grid based on the number of groups
-    potential_grids = {
-        len(SCALE44) - 1: SCALE44,
-        len(SCALE56) - 1: SCALE56,
-        len(SCALE238) - 1: SCALE238,
-        len(SCALE252) - 1: SCALE252,
-    }
+    if len(energy_values) != num_groups + 1:
+        raise InvalidDataFormatError(
+            f"Expected {num_groups + 1} COVERX energy boundaries, "
+            f"found {len(energy_values)}"
+        )
 
-    if num_groups in potential_grids:
-        covmat.energy_grid = potential_grids[num_groups]
+    energy_grid, reverse = _coverx_energy_grid(
+        energy_values,
+        energy_unit,
+        ascending=ascending,
+    )
+    covmat = CrossSectionCovariance(
+        num_groups,
+        energy_grid=energy_grid,
+        energy_unit=energy_unit,
+    )
 
     # Parse the file
-    for i, line in enumerate(file_lines):
-        if i > 2 and len(line.split()) == 5:
+    for i in range(cursor, len(file_lines)):
+        line = file_lines[i]
+        if len(line.split()) == 5:
             try:
-                # Parse isotope and reaction numbers
-                reaction_row = int(line.split()[1])
-                reaction_col = int(line.split()[3])
+                # COVERX labels the first pair as the horizontal (column)
+                # parameter and the second as the vertical (row) parameter.
+                reaction_horizontal = int(line.split()[1])
+                reaction_vertical = int(line.split()[3])
 
-                if (reaction_row in MT_TO_REACTION and reaction_col in MT_TO_REACTION):
+                if (reaction_horizontal in MT_TO_REACTION and reaction_vertical in MT_TO_REACTION):
 
-                    isotope_row = int(line.split()[0])
-                    isotope_col = int(line.split()[2])
+                    isotope_horizontal = int(line.split()[0])
+                    isotope_vertical = int(line.split()[2])
 
                     # Read matrix values
                     matrix_values = []
@@ -276,11 +316,17 @@ def _read_coverx_text(file_path: str, ascending: bool = True, energy_unit: str =
                     # Convert to numpy array and reshape
                     matrix = np.array(matrix_values).reshape(num_groups, num_groups)
 
-                    if ascending:
+                    if reverse:
                         matrix = np.flipud(np.fliplr(matrix))
 
                     # Add to CrossSectionCovariance object
-                    covmat.add_matrix(isotope_row, reaction_row, isotope_col, reaction_col, matrix)
+                    covmat.add_matrix(
+                        isotope_vertical,
+                        reaction_vertical,
+                        isotope_horizontal,
+                        reaction_horizontal,
+                        matrix,
+                    )
             except (ValueError, IndexError):
                 # Skip lines with invalid data
                 continue
@@ -361,21 +407,16 @@ def _read_coverx_binary(file_path: str, ascending: bool = True, energy_unit: str
         # --- Covariance matrix blocks (nmtrix total) ----------------------
         covmat = CrossSectionCovariance(num_groups=ngroup, energy_unit=energy_unit)
 
-        # Use predefined SCALE grids when available (consistent with text parser)
-        potential_grids = {
-            len(SCALE44) - 1: SCALE44,
-            len(SCALE56) - 1: SCALE56,
-            len(SCALE238) - 1: SCALE238,
-            len(SCALE252) - 1: SCALE252,
-        }
-        if ngroup in potential_grids:
-            covmat.energy_grid = potential_grids[ngroup]
-        else:
-            covmat.energy_grid = energy_grid
+        converted_grid, reverse = _coverx_energy_grid(
+            energy_grid,
+            energy_unit,
+            ascending=ascending,
+        )
+        covmat.energy_grid = converted_grid
 
         # Store cross-sections (flip to ascending order if requested)
         for key, xs in xs_data.items():
-            covmat.cross_sections[key] = xs[::-1] if ascending else xs
+            covmat.cross_sections[key] = xs[::-1] if reverse else xs
 
         for _ in range(nmtrix):
             # Control record: mat1, mt1, mat2, mt2, nblock
@@ -416,15 +457,12 @@ def _read_coverx_binary(file_path: str, ascending: bool = True, energy_unit: str
             if mt1 not in MT_TO_REACTION or mt2 not in MT_TO_REACTION:
                 continue
 
-            if ascending:
+            if reverse:
                 matrix = np.flipud(np.fliplr(matrix))
 
-            covmat.add_matrix(mat1, mt1, mat2, mt2, matrix)
-
-        # Flip energy grid if ascending (only needed for file-read grids;
-        # predefined SCALE grids are already in ascending order)
-        if ascending and ngroup not in potential_grids:
-            covmat.energy_grid = list(reversed(covmat.energy_grid))
+            # COVERX control fields 1/2 identify the horizontal (column)
+            # parameter; fields 3/4 identify the vertical (row) parameter.
+            covmat.add_matrix(mat2, mt2, mat1, mt1, matrix)
 
     if covmat.num_matrices == 0:
         raise EmptyParsingError(
@@ -475,7 +513,7 @@ def _write_coverx_binary(
 
     nmmp = len(pairs)
     nmtrix = data.num_matrices
-    nholl = max(1, (len(title) + 3) // 4)  # Hollerith words
+    nholl = max(1, (len(title) + 5) // 6)  # 6-byte COVERX Hollerith words
 
     # Determine if energy grid needs flipping (must be descending for COVERX)
     ascending_input = len(energy_grid) >= 2 and energy_grid[0] < energy_grid[-1]
@@ -503,7 +541,7 @@ def _write_coverx_binary(
         _write_fortran_record(f, rec2, endian)
 
         # Record 3: File description — Hollerith words
-        desc = title[:nholl * 4].ljust(nholl * 4).encode('ascii')
+        desc = title[:nholl * 6].ljust(nholl * 6).encode('ascii')
         _write_fortran_record(f, desc, endian)
 
         # Record 4: Energy group boundaries — (ngroup+1) float32, descending
@@ -528,15 +566,21 @@ def _write_coverx_binary(
                     xs = xs[::-1]
             else:
                 xs = np.zeros(ngroup, dtype=np.float32)
-            rec = struct.pack(endian + f'{ngroup}f', *xs)
+            # Standard COVERX stores the cross section followed by its
+            # fractional error.  CrossSectionCovariance has no error-vector
+            # field, so emit explicit zeros for the latter.
+            errors = np.zeros(ngroup, dtype=np.float32)
+            rec = struct.pack(endian + f'{2 * ngroup}f', *xs, *errors)
             _write_fortran_record(f, rec, endian)
 
         # Covariance blocks — one per matrix
         for idx in range(data.num_matrices):
-            mat1 = data.isotope_rows[idx]
-            mt1 = data.reaction_rows[idx]
-            mat2 = data.isotope_cols[idx]
-            mt2 = data.reaction_cols[idx]
+            # COVERX writes the horizontal (column) parameter first and the
+            # vertical (row) parameter second.
+            mat1 = data.isotope_cols[idx]
+            mt1 = data.reaction_cols[idx]
+            mat2 = data.isotope_rows[idx]
+            mt2 = data.reaction_rows[idx]
             matrix = data.matrices[idx].copy()
 
             # Flip to descending order if input is ascending
@@ -644,9 +688,9 @@ def _write_coverx_text(data: CrossSectionCovariance, file_path: str, title: str 
             if ascending_input:
                 matrix = np.flipud(np.fliplr(matrix))
 
-            # Header: iso_row, mt_row, iso_col, mt_col, 1
+            # Header: horizontal/column pair, then vertical/row pair.
             f.write(
-                f"{iso_r:12d}{mt_r:12d}{iso_c:12d}{mt_c:12d}{1:12d}\n"
+                f"{iso_c:12d}{mt_c:12d}{iso_r:12d}{mt_r:12d}{1:12d}\n"
             )
 
             # Dense values: ngroup² values, 5 per line, E15.7

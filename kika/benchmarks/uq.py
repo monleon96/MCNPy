@@ -87,7 +87,7 @@ def rank_benchmarks_by_ck(
     exclude=None,
     include_mt1: bool = False,
     nubar_mode="total",
-    energy_tolerance: float = 1.0e-8,
+    energy_tolerance: float = 1.0e-6,
 ) -> List[BenchmarkSimilarity]:
     """Rank SQLite benchmark profiles by covariance-weighted c-k.
 

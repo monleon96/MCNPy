@@ -78,6 +78,39 @@ def test_similarity_missing_policy_is_forwarded():
     assert result.alignment_report.parameter_coverage == [0.5, 0.5]
 
 
+def test_similarity_excludes_mt0_pseudo_total_by_default():
+    def with_mt0(vector):
+        return SensitivityProfile(
+            energy_grid=GRID,
+            energy_unit="MeV",
+            reactions=(
+                SensitivityReaction(26056, 0, [10.0, 20.0], [0.0, 0.0]),
+                SensitivityReaction(26056, 2, vector, [0.0, 0.0]),
+            ),
+        )
+
+    covariance = CrossSectionCovariance(
+        num_groups=2, energy_grid=list(GRID), energy_unit="MeV"
+    )
+    covariance.add_matrix(26056, 2, 26056, 2, np.eye(2), is_relative=True)
+
+    result = similarity_ck(with_mt0([1.0, 2.0]), with_mt0([2.0, 4.0]), covariance)
+
+    assert result.value == pytest.approx(1.0)
+    assert result.alignment_report.policy_exclusions == {
+        0: [ParameterKey("xs", 26056, 0)],
+        1: [ParameterKey("xs", 26056, 0)],
+    }
+
+
+def test_similarity_default_grid_tolerance_covers_float32_boundaries():
+    covariance = make_covariance()
+    covariance.energy_grid[-1] *= 1.0 + 5.0e-7
+    profile = make_profile(np.array([0.2, -0.1, 0.3, 0.4]))
+
+    assert similarity_ck(profile, profile, covariance).value == pytest.approx(1.0)
+
+
 def test_similarity_records_policy_exclusions():
     raw = SensitivityProfile(
         energy_grid=GRID,

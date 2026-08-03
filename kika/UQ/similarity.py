@@ -79,6 +79,10 @@ def _prepare_profile(
     selected = [
         reaction for reaction in profile.reactions
         if (include_mt1 or reaction.mt != 1)
+        and (
+            reaction.mt != 0
+            or (include_set is not None and (reaction.zaid, 0) in include_set)
+        )
         and (include_set is None or (reaction.zaid, reaction.mt) in include_set)
         and (reaction.zaid, reaction.mt) not in exclude_set
     ]
@@ -143,7 +147,7 @@ def similarity_ck(
     exclude: Optional[Sequence[Tuple[int, int]]] = None,
     include_mt1: bool = False,
     nubar_mode: Union[str, dict] = "total",
-    energy_tolerance: float = 1.0e-8,
+    energy_tolerance: float = 1.0e-6,
     prepared_covariance: Optional[PreparedCovariance] = None,
 ) -> SimilarityResult:
     """Calculate covariance-weighted c-k between two sensitivity profiles."""
@@ -167,11 +171,20 @@ def similarity_ck(
         }
         exclusions = sorted(raw_keys - selected_keys)
         if exclusions:
-            aligned.report.policy_exclusions[profile_index] = exclusions
+            existing = aligned.report.policy_exclusions.get(profile_index, [])
+            aligned.report.policy_exclusions[profile_index] = sorted(
+                set(existing).union(exclusions)
+            )
     if not include_mt1 and any(
         reaction.mt == 1 for profile in (raw_a, raw_b) for reaction in profile.reactions
     ):
         aligned.report.assumptions.append("MT=1 excluded from c_k")
+    if any(
+        reaction.mt == 0 for profile in (raw_a, raw_b) for reaction in profile.reactions
+    ):
+        aligned.report.assumptions.append(
+            "MT=0 pseudo-total excluded from c_k unless explicitly included"
+        )
     aligned.report.assumptions.append(
         f"nu-bar redundancy resolved with nubar_mode={nubar_mode!r}"
     )

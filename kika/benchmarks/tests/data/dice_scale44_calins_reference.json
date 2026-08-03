@@ -1,0 +1,31 @@
+{
+  "provenance": {
+    "calins_commit": "581347403dd19f98900df0b01c1415ce3511db39",
+    "covariance_file": "scale.rev05.44groupcov",
+    "covariance_library": "SCALE 6.2.3, revision 05, 44 groups",
+    "application_benchmark": "HEU-COMP-INTER-003-001",
+    "comparison_benchmark": "HEU-COMP-INTER-003-002",
+    "sensitivity_library": "ENDF-B-VII.0, SCALE 238 groups",
+    "condensation": "exact nested SCALE-238 to SCALE-44"
+  },
+  "kika": {
+    "application_variance": 0.0002714281754747831,
+    "application_sigma_relative": 0.01647507740421219,
+    "application_sigma_pcm": 1661.091441740992,
+    "application_parameters": 93,
+    "application_parameter_coverage": 0.788135593220339,
+    "application_sensitivity_coverage": 0.9079268467743847,
+    "ck": 0.9845401446110394,
+    "ck_variance_application": 0.0002714281754747831,
+    "ck_variance_benchmark": 0.0002744871881912619,
+    "ck_cross_covariance": 0.00026873357650018657,
+    "ck_parameters": 100
+  },
+  "calins": {
+    "application_sigma_relative": 0.016475077160840977,
+    "application_sigma_pcm": 1661.0914172032112,
+    "application_parameters": 93,
+    "ck": 0.9845401443650141,
+    "ck_parameters": 100
+  }
+}

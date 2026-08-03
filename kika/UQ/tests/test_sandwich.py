@@ -53,6 +53,7 @@ from typing import List, Dict
 import warnings
 
 from kika.sensitivities.sdf import SDFData, SDFReactionData
+from kika.sensitivities.profile import SensitivityProfile, SensitivityReaction
 from kika.cov.cross_section_covariance import CrossSectionCovariance
 from kika.cov.multigroup.mg_legendre_covariance import MultigroupLegendreCovariance
 from kika.UQ.sandwich import (
@@ -64,6 +65,42 @@ from kika.UQ.sandwich import (
     _resolve_nubar_redundancy,
     _bootstrap_nd_ci,
 )
+from kika.UQ.alignment import ParameterKey
+
+
+def test_mt0_pseudo_total_is_excluded_from_uq():
+    profile = SensitivityProfile(
+        energy_grid=np.array([0.0, 1.0, 2.0]),
+        energy_unit="MeV",
+        reactions=(
+            SensitivityReaction(26056, 0, [10.0, 20.0], [0.0, 0.0]),
+            SensitivityReaction(26056, 2, [1.0, 2.0], [0.0, 0.0]),
+        ),
+        response=1.0,
+    )
+    covariance = CrossSectionCovariance(
+        num_groups=2,
+        energy_grid=[0.0, 1.0, 2.0],
+        energy_unit="MeV",
+    )
+    covariance.add_matrix(26056, 2, 26056, 2, np.eye(2), is_relative=True)
+
+    result = sandwich_uncertainty_propagation(profile, covariance, bootstrap=False)
+
+    assert result.n_reactions == 1
+    assert result.alignment_report.policy_exclusions[0] == [ParameterKey("xs", 26056, 0)]
+    assert "MT=0 pseudo-total excluded from UQ" in result.alignment_report.assumptions
+
+    covariance.add_matrix(26056, 0, 26056, 0, np.eye(2), is_relative=True)
+    explicit = sandwich_uncertainty_propagation(
+        profile,
+        covariance,
+        reaction_filter={26056: [0]},
+        bootstrap=False,
+    )
+    assert explicit.n_reactions == 1
+    assert explicit.contributions[0].mt == 0
+    assert "MT=0 pseudo-total excluded from UQ" not in explicit.alignment_report.assumptions
 
 
 class TestSandwichFormulaBasic:

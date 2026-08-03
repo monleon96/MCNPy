@@ -163,12 +163,28 @@ def _store_block(
     col: ParameterKey,
     matrix: np.ndarray,
     source: str,
-) -> None:
+) -> bool:
+    """Store one block and return whether float32 symmetry noise was removed."""
     matrix = np.asarray(matrix, dtype=float)
     if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
         raise AlignmentError(f"non-square covariance block {row.label} x {col.label} in {source}")
     if not np.all(np.isfinite(matrix)):
         raise AlignmentError(f"non-finite covariance block {row.label} x {col.label} in {source}")
+
+    symmetrized = False
+    if row == col and not np.array_equal(matrix, matrix.T):
+        # Binary COVERX stores single-precision values.  Some real SCALE
+        # libraries contain independently rounded upper/lower triangles; the
+        # observed differences are below 6e-8 in absolute covariance and are
+        # sometimes larger than a few ULPs for coefficients close to zero.
+        # Accept only that representational noise; materially asymmetric
+        # covariance still fails loudly.
+        if not np.allclose(matrix, matrix.T, rtol=5.0e-7, atol=2.0e-8):
+            raise AlignmentError(
+                f"incompatible asymmetric diagonal covariance block {row.label} in {source}"
+            )
+        matrix = 0.5 * (matrix + matrix.T)
+        symmetrized = True
 
     for key, value in (((row, col), matrix), ((col, row), matrix.T)):
         previous = blocks.get(key)
@@ -177,6 +193,7 @@ def _store_block(
                 f"incompatible duplicate covariance block {key[0].label} x {key[1].label}"
             )
         blocks[key] = value.copy()
+    return symmetrized
 
 
 def _relative_xs_blocks(
@@ -245,7 +262,13 @@ def _relative_xs_blocks(
                     f"{source} block {row.label} x {col.label} converted from absolute "
                     "to relative covariance using its row and column cross sections"
                 )
-            _store_block(blocks, row, col, matrix, source)
+            if _store_block(blocks, row, col, matrix, source):
+                note = (
+                    f"{source} diagonal covariance blocks were symmetrized within "
+                    "float32 rounding tolerance"
+                )
+                if note not in report.assumptions:
+                    report.assumptions.append(note)
     return blocks
 
 
@@ -282,7 +305,13 @@ def _relative_legendre_blocks(
             col = ParameterKey("legendre", int(zaid_c), int(mt_c), int(order_c))
             if np.asarray(matrix).shape != (len(expected_grid) - 1, len(expected_grid) - 1):
                 raise AlignmentError(f"{source} block shape does not match the energy grid")
-            _store_block(blocks, row, col, matrix, source)
+            if _store_block(blocks, row, col, matrix, source):
+                note = (
+                    f"{source} diagonal covariance blocks were symmetrized within "
+                    "float32 rounding tolerance"
+                )
+                if note not in report.assumptions:
+                    report.assumptions.append(note)
     return blocks
 
 
@@ -422,19 +451,50 @@ def align_sensitivity_covariance(
         }
         source_maps.append(reaction_map)
         resolved: Dict[ParameterKey, ParameterKey] = {}
-        targets = set()
+        target_owners: Dict[ParameterKey, Tuple[ParameterKey, Optional[str]]] = {}
         for source in sorted(reaction_map):
             target, reason = _resolve_key(source, available, alias_policy)
             if target is None:
                 missing_keys.add(source)
                 continue
-            if target in targets:
+            previous = target_owners.get(target)
+            if previous is not None:
+                previous_source = previous[0]
+                # Prefer the source requiring the fewest semantic changes:
+                # exact key, then same reaction with a ZAID alias, then an MT
+                # alias.  This resolves the common DICE MT 101/102 duplicate
+                # without summing it twice, including for bound ZAIDs.  Equal-
+                # specificity collisions remain ambiguous and fail loudly.
+                score = (source != target, source.mt != target.mt, source.zaid != target.zaid)
+                previous_score = (
+                    previous_source != target,
+                    previous_source.mt != target.mt,
+                    previous_source.zaid != target.zaid,
+                )
+                if score != previous_score:
+                    if score < previous_score:
+                        resolved.pop(previous_source)
+                        excluded = previous_source
+                        target_owners[target] = (source, reason)
+                        resolved[source] = target
+                    else:
+                        excluded = source
+                    report.policy_exclusions.setdefault(profile_index, []).append(excluded)
+                    note = (
+                        f"sensitivity profile[{profile_index}] closest source parameter "
+                        "was preferred over a competing TSURFER alias"
+                    )
+                    if note not in report.assumptions:
+                        report.assumptions.append(note)
+                    continue
                 raise AlignmentError(
                     f"alias collision in sensitivity profile[{profile_index}]: multiple "
                     f"source parameters map to {target.label}"
                 )
-            targets.add(target)
+            target_owners[target] = (source, reason)
             resolved[source] = target
+        for source, target in resolved.items():
+            reason = target_owners[target][1]
             if reason is not None:
                 report.aliases.append(AliasMapping(profile_index, source, target, reason))
         resolved_maps.append(resolved)
