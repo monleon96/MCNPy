@@ -78,9 +78,21 @@ def format_endf_number(value: Union[int, float, None], width: int = 11) -> str:
 # Format constants for ENDF data types
 ENDF_FORMAT_FLOAT = 'float'       # Scientific notation (e.g., " 1.234567+5")
 ENDF_FORMAT_INT = 'int'           # Integer format (e.g., "         11")
-ENDF_FORMAT_INT_ZERO = 'int_zero' # Integer with zero rendered as 0 (not blank)
 ENDF_FORMAT_BLANK = 'blank'       # Blank field
 ENDF_FORMAT_PRESERVE = 'preserve' # Use value's own type to determine format
+
+#: Alias for :data:`ENDF_FORMAT_INT`, kept for the ~30 call sites that use it.
+#:
+#: It read "integer with zero rendered as 0 (not blank)", implying a contrast
+#: with ENDF_FORMAT_INT. There has never been one: ``format_endf_data_line``
+#: gave both constants the same branch, and neither has ever blanked a zero —
+#: blanking is what ENDF_FORMAT_BLANK does. Making it an alias states that
+#: outright, rather than leaving two names that look like a choice.
+#:
+#: Do not add the promised behaviour instead. Roughly forty call sites pass
+#: ENDF_FORMAT_INT for fields whose zeros must be written as 0, and giving the
+#: name real meaning would move every one of them.
+ENDF_FORMAT_INT_ZERO = ENDF_FORMAT_INT
 
 
 def format_endf_data_line(values: Sequence[Union[int, float, None]], 
@@ -111,8 +123,8 @@ def format_endf_data_line(values: Sequence[Union[int, float, None]],
 
         for value, fmt in zip(values, format_list):
             if fmt == ENDF_FORMAT_INT and value is not None:
-                parts.append(f"{int(value):11d}")
-            elif fmt == ENDF_FORMAT_INT_ZERO and value is not None:
+                # ENDF_FORMAT_INT_ZERO is an alias for this, so one branch
+                # serves both — as it always did, in two identical copies.
                 parts.append(f"{int(value):11d}")
             elif fmt == ENDF_FORMAT_BLANK or value is None:
                 parts.append("           ")
