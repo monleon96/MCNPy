@@ -125,8 +125,11 @@ def _process_sample(
     # Compute the expected output path before doing any heavy work. If the
     # perturbed ENDF already exists, reuse it and skip parse + perturbation +
     # write — this lets re-runs cheaply add ACE files at a new temperature.
-    # MF1 is enough to recover the ZAID; full parse only happens on the
-    # write path below.
+    # A targeted MF1 parse is enough to recover the ZAID; the full parse only
+    # happens on the write path below. That was the intent all along, but
+    # read_endf only set `mat` on the full-parse path, so `zaid` came back None
+    # and every sample landed in endf/unknown/ while stage B looked for it
+    # under endf/<zaid>/ and paired nothing.
     base, ext = os.path.splitext(os.path.basename(endf_file))
     sample_str = f"{sample_index+1:04d}"
     try:
@@ -1394,6 +1397,7 @@ def _apply_factors_to_mf4_legendre(
     verbose: bool = True,
     enforce_positivity: bool = False,
     positivity_check_points: int = 101,
+    mf3_magnitude_sink: Optional[Dict[Tuple[int, int, int], float]] = None,
 ) -> List[Tuple[int, float, float, float]]:
     """
     Apply perturbation factors to MF4 Legendre coefficient data with proper discontinuity handling.
@@ -1418,12 +1422,23 @@ def _apply_factors_to_mf4_legendre(
         Union energy grids for each parameter combination
     verbose : bool
         Whether to log details
-        
+    mf3_magnitude_sink : dict, optional
+        Dormant hook for a future joint MF3+MF4 (TMC) path.  In MF4 the
+        isotropic term a_0 is identically 1 — the cross-section *magnitude*
+        lives in MF3 sigma(E), not here — so an L=0 (magnitude) perturbation
+        factor cannot be applied to the Legendre coefficients.  When this dict
+        is provided, any L=0 entry in ``param_mapping`` is recorded as
+        ``{(isotope, mt, energy_bin): factor}`` for the caller to apply to the
+        MF3 cross section; when ``None`` (all current callers) L=0 entries are
+        skipped.  L>=1 (shape) factors are applied to MF4 exactly as before, so
+        this changes nothing for existing MF34-only callers (whose
+        ``param_mapping`` never contains L=0).
+
     Notes
     -----
     Key improvements implemented:
     - Uses union energy grids for consistent parameter mapping
-    - Tolerant boundary detection with np.isclose (atol=1e-10) 
+    - Tolerant boundary detection with np.isclose (atol=1e-10)
     - Prevents double-scaling at nearly-identical energies
     - Ensures discontinuities are inserted exactly once per boundary
     """
@@ -1497,13 +1512,27 @@ def _apply_factors_to_mf4_legendre(
             
         energy_low = energy_grid[energy_bin]
         energy_high = energy_grid[energy_bin + 1]
-        
+
+        # L=0 is the cross-section magnitude (a_0 ≡ 1 in MF4; the magnitude
+        # lives in MF3 sigma(E)).  It must never scale the Legendre shape
+        # coefficients.  Route it once per bin to the optional MF3 sink for a
+        # future joint MF3+MF4 (TMC) path; skip otherwise (current behavior).
+        if l_coeff == 0:
+            if mf3_magnitude_sink is not None:
+                mf3_magnitude_sink[(isotope, mt, energy_bin)] = float(factor)
+                if verbose and _get_logger():
+                    _get_logger().debug(
+                        f"  [INFO] [ENDF] MAGNITUDE MT{mt} L0 bin {energy_bin}: "
+                        f"factor {factor:.6f} routed to MF3 sink"
+                    )
+            continue
+
         # Apply factor to coefficients strictly inside this bin (not at boundaries)
         for energy_idx, energy in enumerate(mt_data._energies):
             if energy_low <= energy < energy_high and not _on_boundary(energy):
                 # Check if this L coefficient exists at this energy
                 coeff_index = l_coeff - 1  # Convert L=1,2,3... to 0-indexed
-                if (coeff_index >= 0 and energy_idx < len(mt_data._legendre_coeffs) and 
+                if (coeff_index >= 0 and energy_idx < len(mt_data._legendre_coeffs) and
                     coeff_index < len(mt_data._legendre_coeffs[energy_idx])):
                     
                     old_value = mt_data._legendre_coeffs[energy_idx][coeff_index]
@@ -1538,13 +1567,21 @@ def _apply_factors_to_mf4_legendre(
         for factor_idx, (isotope, mt, l_coeff, energy_bin) in enumerate(param_mapping):
             if mt != mt_data.number:
                 continue
-                
+
+            # L=0 is magnitude (MF3), not an MF4 shape order — it creates no
+            # angular-distribution discontinuity, so it must not enter the
+            # boundary factor sets (else an L=0-only boundary would insert a
+            # redundant energy point). It is routed to the MF3 sink in the
+            # interior pass above.
+            if l_coeff == 0:
+                continue
+
             triplet = (isotope, mt, l_coeff)
             energy_grid = energy_grids.get(triplet, [])
-            
+
             if len(energy_grid) < 2 or energy_bin >= len(energy_grid) - 1:
                 continue
-            
+
             factor = factors[factor_idx]
             energy_low = energy_grid[energy_bin]
             energy_high = energy_grid[energy_bin + 1]
@@ -1563,11 +1600,14 @@ def _apply_factors_to_mf4_legendre(
         coeffs_minus = baseline_coeffs[:]
         coeffs_plus = baseline_coeffs[:]
         
+        # L=0 (coeff_index == -1) is intentionally excluded by the guards below:
+        # magnitude creates no MF4 shape discontinuity and is handled in the
+        # interior pass via mf3_magnitude_sink.
         for l_coeff, factor in lower_factors.items():
             coeff_index = l_coeff - 1
             if 0 <= coeff_index < len(coeffs_minus):
                 coeffs_minus[coeff_index] *= factor
-        
+
         for l_coeff, factor in upper_factors.items():
             coeff_index = l_coeff - 1
             if 0 <= coeff_index < len(coeffs_plus):

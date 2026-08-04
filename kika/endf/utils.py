@@ -78,12 +78,69 @@ def format_endf_number(value: Union[int, float, None], width: int = 11) -> str:
 # Format constants for ENDF data types
 ENDF_FORMAT_FLOAT = 'float'       # Scientific notation (e.g., " 1.234567+5")
 ENDF_FORMAT_INT = 'int'           # Integer format (e.g., "         11")
-ENDF_FORMAT_INT_ZERO = 'int_zero' # Integer with zero rendered as 0 (not blank)
 ENDF_FORMAT_BLANK = 'blank'       # Blank field
 ENDF_FORMAT_PRESERVE = 'preserve' # Use value's own type to determine format
 
+#: Alias for :data:`ENDF_FORMAT_INT`, kept for the ~30 call sites that use it.
+#:
+#: It read "integer with zero rendered as 0 (not blank)", implying a contrast
+#: with ENDF_FORMAT_INT. There has never been one: ``format_endf_data_line``
+#: gave both constants the same branch, and neither has ever blanked a zero —
+#: blanking is what ENDF_FORMAT_BLANK does. Making it an alias states that
+#: outright, rather than leaving two names that look like a choice.
+#:
+#: Do not add the promised behaviour instead. Roughly forty call sites pass
+#: ENDF_FORMAT_INT for fields whose zeros must be written as 0, and giving the
+#: name real meaning would move every one of them.
+ENDF_FORMAT_INT_ZERO = ENDF_FORMAT_INT
 
-def format_endf_data_line(values: Sequence[Union[int, float, None]], 
+
+#: Field types of a termination record's data part.
+#:
+#: ENDF-6 types the first two fields of SEND/FEND/MEND/TEND as floats (C1, C2)
+#: and the remaining four as integers, so a terminator reads
+#: ``" 0.000000+0 0.000000+0          0          0          0          0"``.
+#: Nine emitters used to build this by hand with ``[ENDF_FORMAT_INT] * 6``,
+#: rendering the two float fields as right-aligned integer zeros.
+_TERMINATION_FORMATS = [
+    ENDF_FORMAT_FLOAT, ENDF_FORMAT_FLOAT,
+    ENDF_FORMAT_INT, ENDF_FORMAT_INT, ENDF_FORMAT_INT, ENDF_FORMAT_INT,
+]
+
+#: Sequence number ENDF-6 requires on a SEND record, verbatim.
+SEND_SEQUENCE_NUMBER = 99999
+
+
+def format_endf_send_record(mat: int, mf: int) -> str:
+    """The SEND record closing a section: MT=0, sequence number 99999."""
+    return format_endf_data_line(
+        [0.0, 0.0, 0, 0, 0, 0], mat, mf, 0, SEND_SEQUENCE_NUMBER,
+        formats=_TERMINATION_FORMATS,
+    )
+
+
+def format_endf_fend_record(mat: int) -> str:
+    """The FEND record closing a file: MF=0, MT=0, sequence number 0."""
+    return format_endf_data_line(
+        [0.0, 0.0, 0, 0, 0, 0], mat, 0, 0, 0, formats=_TERMINATION_FORMATS,
+    )
+
+
+def format_endf_mend_record() -> str:
+    """The MEND record closing a material: MAT=0."""
+    return format_endf_data_line(
+        [0.0, 0.0, 0, 0, 0, 0], 0, 0, 0, 0, formats=_TERMINATION_FORMATS,
+    )
+
+
+def format_endf_tend_record() -> str:
+    """The TEND record closing a tape: MAT=-1."""
+    return format_endf_data_line(
+        [0.0, 0.0, 0, 0, 0, 0], -1, 0, 0, 0, formats=_TERMINATION_FORMATS,
+    )
+
+
+def format_endf_data_line(values: Sequence[Union[int, float, None]],
                          mat: int, mf: int, mt: int, line_num: int = 0,
                          formats: Optional[List[str]] = None) -> str:
     """
@@ -111,8 +168,8 @@ def format_endf_data_line(values: Sequence[Union[int, float, None]],
 
         for value, fmt in zip(values, format_list):
             if fmt == ENDF_FORMAT_INT and value is not None:
-                parts.append(f"{int(value):11d}")
-            elif fmt == ENDF_FORMAT_INT_ZERO and value is not None:
+                # ENDF_FORMAT_INT_ZERO is an alias for this, so one branch
+                # serves both — as it always did, in two identical copies.
                 parts.append(f"{int(value):11d}")
             elif fmt == ENDF_FORMAT_BLANK or value is None:
                 parts.append("           ")

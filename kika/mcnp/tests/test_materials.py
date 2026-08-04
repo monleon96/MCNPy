@@ -404,14 +404,16 @@ def test_fraction_conversion_with_natural_elements():
 
 # ── Serpent material tests ──────────────────────────────────────────────────
 
-SERPENT_INPUT = "/share_snc/snc/JuanMonleon/serpent/PWRSphere.sss2"
+# The PWRSphere input is resolved by the root conftest through $KIKA_TAPES;
+# these three tests previously hardcoded its absolute path with no guard at
+# all, so they errored rather than skipped on a machine without the mount.
 
 
-def test_serpent_material_parsing():
+def test_serpent_material_parsing(serpent_input):
     """Test parsing materials from a Serpent input file."""
     from kika.materials import MaterialCollection
 
-    mc = MaterialCollection.from_serpent(SERPENT_INPUT)
+    mc = MaterialCollection.from_serpent(str(serpent_input))
 
     # Should find 3 materials
     assert len(mc) == 3
@@ -451,11 +453,11 @@ def test_serpent_material_parsing():
             assert nuclide.libs.get("nlib") == "06c"
 
 
-def test_serpent_roundtrip():
+def test_serpent_roundtrip(serpent_input):
     """Test parse → export → re-parse roundtrip."""
     from kika.materials import MaterialCollection, read_serpent_materials
 
-    mc1 = MaterialCollection.from_serpent(SERPENT_INPUT)
+    mc1 = MaterialCollection.from_serpent(str(serpent_input))
     text1 = mc1.to_serpent()
 
     # Re-parse from the exported text
@@ -479,11 +481,11 @@ def test_serpent_roundtrip():
             assert n1.fraction == pytest.approx(n2.fraction)
 
 
-def test_serpent_mcnp_interop():
+def test_serpent_mcnp_interop(serpent_input):
     """Test Serpent→MCNP export and fraction conversion."""
     from kika.materials import MaterialCollection
 
-    mc = MaterialCollection.from_serpent(SERPENT_INPUT)
+    mc = MaterialCollection.from_serpent(str(serpent_input))
 
     # MCNP export should work
     mcnp_text = mc.to_mcnp()

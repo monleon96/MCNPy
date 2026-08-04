@@ -1,0 +1,95 @@
+# Test fixture: a four-dataset uncertainty manifest.
+#
+# Not a trimmed copy of the production manifest. It is written so that the four
+# datasets in ``exfor_micro.db`` between them exercise every branch the
+# resolver in ``scripts/uncertainty_manifest.py`` has:
+#
+#   10886002  column + derive_stat_only + scalar correlated sys
+#             (verbatim from the production manifest — Smith 1980, the
+#             reclassified Case B entry)
+#   13606002  scalar stat + piecewise_E sys_dep
+#             (invented for this fixture. The only production dataset with a
+#             sys_dep block is Cierjacks 20743002, whose data blob is 1.6 MB —
+#             far too large to commit just to reach one code path)
+#   11300004  scalar stat given in absolute b/sr rather than per cent
+#   23059003  absent on purpose: falls through to the defaults block
+#
+# Point the resolver at this file with
+# ``KIKA_UNCERTAINTY_MANIFEST_PATH=scripts/tests/data/uncertainty_manifest_micro.yaml``.
+
+defaults:
+  stat:
+    source: column
+    column: best_available
+  sys:
+    source: scalar
+    value_pct: 5.0
+    correlated: true
+    rationale: |
+      Same default as the production manifest, kept identical on purpose: a
+      fixture that quietly used a different fallback would make the default
+      path untested rather than tested.
+
+datasets:
+
+  "10886002":
+    prose: >-
+      Verbatim from the production manifest. DATA-ERR is a flat declared total
+      per energy block, not a per-point counting-statistics column.
+    stat:
+      source: column
+      column: DATA-ERR
+      semantics: total_per_point
+      derive_stat_only: true
+    sys:
+      source: scalar
+      correlated: true
+      value_pct: 5.0
+      kind: combined_systematic
+    flag: curated
+    notes: |
+      The Case B decomposition: sigma_stat = sqrt(sigma_total^2 - sigma_sys^2)
+      per point, so the per-experiment MC factor layered on top reproduces
+      sigma_total^2 without counting the correlated systematic twice.
+
+  "13606002":
+    prose: >-
+      Invented for this fixture to reach the sys_dep branch. Do not read any
+      physics into these numbers.
+    stat:
+      source: scalar
+      value_pct: 4.0
+    sys:
+      source: scalar
+      correlated: true
+      value_pct: 3.0
+      kind: normalization_like_subset
+    sys_dep:
+      source: piecewise_E
+      correlated: false
+      kind: aggregate_energy_dependent_residual
+      covariance_role: diagonal_residual
+      total_error_spec:
+        - E_MeV_min: 0.5
+          E_MeV_max: 1.0
+          value_pct_lo: 11.0
+          value_pct_hi: 8.0
+        - E_MeV_min: 1.0
+          E_MeV_max: 5.0
+          value_pct: 8.0
+    flag: curated
+
+  "11300004":
+    prose: >-
+      Invented for this fixture: a stat spec given as an absolute
+      differential cross section rather than a percentage.
+    stat:
+      source: scalar
+      value_abs_b_per_sr: 0.02
+    sys:
+      source: scalar
+      correlated: true
+      value_pct: 8.0
+    flag: uncurated
+
+  # 23059003 is deliberately absent — it is the defaults-fallback case.

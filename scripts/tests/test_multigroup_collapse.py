@@ -225,3 +225,96 @@ class TestBackwardCompatibility:
         # Should still produce valid output
         eigenvalues = np.linalg.eigvalsh(result)
         assert np.min(eigenvalues) >= -1e-10
+
+
+# ---------------------------------------------------------------------------
+# MF33 single-block collapse
+# ---------------------------------------------------------------------------
+
+from scripts.multigroup_collapse import collapse_mf33_covariance_to_grid
+
+
+class TestMF33Collapse:
+    """Width-weighted collapse of a single MF33 square block."""
+
+    def test_identity_when_target_equals_native(self):
+        grid = np.array([1.0e6, 2.0e6, 3.0e6, 4.0e6])
+        cov = np.array([
+            [0.04, 0.01, 0.00],
+            [0.01, 0.05, 0.02],
+            [0.00, 0.02, 0.06],
+        ])
+        out = collapse_mf33_covariance_to_grid(
+            grid, cov, grid, native_means=np.array([10.0, 12.0, 9.0]),
+        )
+        np.testing.assert_allclose(out, cov, atol=1e-12)
+
+    def test_flatsigma_equals_congruence(self):
+        """No means → collapse equals M @ C @ M.T (flat-σ limit)."""
+        from kika.processing.multigroup import compute_rebin_operator
+        native = np.array([1.0e6, 2.0e6, 3.0e6, 4.0e6])
+        target = np.array([1.0e6, 3.0e6, 4.0e6])  # merge first two bins
+        cov = np.array([
+            [0.04, 0.01, 0.00],
+            [0.01, 0.05, 0.02],
+            [0.00, 0.02, 0.06],
+        ])
+        M = compute_rebin_operator(native, target)
+        expected = M @ cov @ M.T
+        out = collapse_mf33_covariance_to_grid(
+            native, cov, target, is_relative=True, native_means=None,
+        )
+        np.testing.assert_allclose(out, 0.5 * (expected + expected.T), atol=1e-12)
+
+    def test_relative_with_means_matches_manual(self):
+        from kika.processing.multigroup import (
+            compute_rebin_operator, collapse_covariance,
+            relative_to_absolute, absolute_to_relative,
+        )
+        native = np.array([1.0e6, 2.0e6, 3.0e6, 4.0e6])
+        target = np.array([1.0e6, 3.0e6, 4.0e6])
+        cov = np.array([
+            [0.04, 0.01, 0.00],
+            [0.01, 0.05, 0.02],
+            [0.00, 0.02, 0.06],
+        ])
+        means = np.array([10.0, 12.0, 9.0])
+        M = compute_rebin_operator(native, target)
+        C_abs = relative_to_absolute(cov, means, means)
+        C_tgt_abs = collapse_covariance(C_abs, M)
+        means_tgt = M @ means
+        expected = absolute_to_relative(C_tgt_abs, means_tgt, means_tgt)
+
+        out = collapse_mf33_covariance_to_grid(
+            native, cov, target, native_means=means,
+        )
+        np.testing.assert_allclose(out, 0.5 * (expected + expected.T), atol=1e-12)
+
+    def test_merge_identical_variance_bins(self):
+        """Two fully correlated identical-variance bins merge to the same variance."""
+        native = np.array([1.0e6, 2.0e6, 3.0e6])
+        v = 0.04
+        cov = np.array([[v, v], [v, v]])  # fully correlated
+        target = np.array([1.0e6, 3.0e6])  # one group
+        out = collapse_mf33_covariance_to_grid(
+            native, cov, target, native_means=np.array([10.0, 10.0]),
+        )
+        np.testing.assert_allclose(out[0, 0], v, atol=1e-12)
+
+    def test_shape_mismatch_raises(self):
+        grid = np.array([1.0e6, 2.0e6, 3.0e6])  # 2 intervals
+        cov = np.eye(3)
+        with pytest.raises(ValueError, match="doesn't match"):
+            collapse_mf33_covariance_to_grid(grid, cov, grid)
+
+    def test_non_psd_warns_only(self):
+        native = np.array([1.0e6, 2.0e6, 3.0e6])
+        # Symmetric but indefinite (negative eigenvalue).
+        cov = np.array([[0.01, 0.05], [0.05, 0.01]])
+        target = native
+        with pytest.warns(RuntimeWarning, match="not PSD"):
+            out = collapse_mf33_covariance_to_grid(
+                native, cov, target, is_relative=False,
+            )
+        # Warn-only: not repaired, so it stays indefinite.
+        assert np.linalg.eigvalsh(out).min() < 0

@@ -251,7 +251,14 @@ class MF1MT451:
             Multi-line string in ENDF format
         """
         # Import inside the method to avoid circular imports
-        from ...utils import format_endf_data_line, ENDF_FORMAT_FLOAT, ENDF_FORMAT_INT, ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_BLANK
+        from ...utils import (
+            format_endf_data_line,
+            format_endf_send_record,
+            ENDF_FORMAT_FLOAT,
+            ENDF_FORMAT_INT,
+            ENDF_FORMAT_INT_ZERO,
+            ENDF_FORMAT_BLANK,
+        )
 
         mat = self._mat if self._mat is not None else 0
         lines = []
@@ -266,11 +273,14 @@ class MF1MT451:
         lines.append(line1)
         
         # Format second line - numeric data
-        # ELIS as float, rest as integers with zeros printed
+        # ENDF-6 types record 2 as [ELIS, STA, LIS, LISO, 0, NFOR] with ELIS
+        # *and STA* as floats. STA was rendered through the integer format, so
+        # a stable nuclide came back as "          0" where the source has
+        # " 0.000000+0" — one changed line on every tape kika rewrites.
         line2 = format_endf_data_line(
             [self._elis, self._sta, self._lis, self._liso, 0, self._nfor],
             mat, 1, 451, 2,
-            formats=[ENDF_FORMAT_FLOAT, ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT_ZERO]
+            formats=[ENDF_FORMAT_FLOAT, ENDF_FORMAT_FLOAT, ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT_ZERO]
         )
         lines.append(line2)
         
@@ -350,12 +360,10 @@ class MF1MT451:
             lines.append(line)
             line_num += 1
         
-        # End of section marker - all zeros printed
-        end_line = format_endf_data_line(
-            [0, 0, 0, 0, 0, 0],
-            mat, 1, 0, line_num,  # Note MT=0 for end of section
-            formats=[ENDF_FORMAT_BLANK, ENDF_FORMAT_BLANK, ENDF_FORMAT_BLANK, ENDF_FORMAT_BLANK, ENDF_FORMAT_BLANK, ENDF_FORMAT_BLANK]
-        )
-        lines.append(end_line)
+        # SEND record. Two things were wrong here at once: the six fields were
+        # blanked, where ENDF-6 wants " 0.000000+0 0.000000+0" then four
+        # integer zeros, and the sequence number was the running line counter
+        # where the standard requires the literal 99999.
+        lines.append(format_endf_send_record(mat, 1))
         
         return "\n".join(lines)

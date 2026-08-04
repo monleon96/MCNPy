@@ -28,7 +28,12 @@ if str(_ROOT) not in sys.path:
 from numpy.polynomial.legendre import legval
 from kika.cov.legendre_covariance import LegendreCovariance
 
-from scripts.eval_covariance import build_mf34_block, build_mf33_block
+from scripts.eval_covariance import (
+    build_mf34_block,
+    build_mf33_block,
+    build_mf33_mf34_cross_block,
+    build_eval_cov_for_groups,
+)
 from scripts.chi2_metrics import (
     mahalanobis_chi2_per_experiment,
     whitened_residuals_per_experiment,
@@ -227,6 +232,89 @@ def test_mf33_block_diagonal_matches_diagonal_average():
     # rho = 0.5*0.5*0.04 + 0.5*0.5*0.09 + 0 + 0 = 0.0325
     expected = y_eval[0] ** 2 * 0.0325
     np.testing.assert_allclose(sigma[0, 0], expected, rtol=1e-12)
+
+
+# ── MF33 ↔ MF34 cross block ───────────────────────────────────────────────────
+
+def test_cross_block_none_is_zero():
+    """No cross input → zero block of the right shape (numbers unchanged)."""
+    e_mev = np.array([1.0, 2.0, 3.0])
+    mu = np.array([-0.2, 0.1, 0.6])
+    c0 = np.full(3, 0.7)
+    a_l = np.array([[0.5], [0.4], [0.3]])
+    y = np.array([0.6, 0.5, 0.4])
+    for cross in (None, [], ()):
+        sigma = build_mf33_mf34_cross_block(cross, e_mev, mu, c0, a_l, y)
+        assert sigma.shape == (3, 3)
+        assert np.array_equal(sigma, np.zeros((3, 3)))
+
+
+def test_cross_block_single_point_analytic():
+    """One point, one order: Σ_cross = 2 * y * C * (c0*(2L+1)*P_L * a_L)."""
+    mu = np.array([0.3])
+    c0 = np.array([0.7])
+    a_l = np.array([[0.5]])   # L=1
+    y = np.array([0.6])
+    e_mev = np.array([2.0])
+    c_val = 0.02
+    cross = [{
+        "l": 1,
+        "mag_grid_ev": np.array([1.0e6, 3.0e6]),
+        "shape_grid_ev": np.array([1.0e6, 3.0e6]),
+        "matrix": np.array([[c_val]]),
+        "is_relative": True,
+    }]
+    sigma = build_mf33_mf34_cross_block(cross, e_mev, mu, c0, a_l, y)
+    sens_L = c0[0] * (2 * 1 + 1) * mu[0] * a_l[0, 0]  # P_1(mu)=mu; relative → *a_L
+    expected = 2.0 * y[0] * c_val * sens_L
+    np.testing.assert_allclose(sigma[0, 0], expected, rtol=1e-12)
+
+
+def test_cross_block_symmetric_and_order_filtered():
+    """Block is symmetric; orders beyond L_max are ignored."""
+    e_mev = np.array([1.2, 2.7])
+    mu = np.array([-0.4, 0.5])
+    c0 = np.array([0.8, 0.6])
+    a_l = np.array([[0.5, 0.2], [0.4, 0.1]])  # L=1,2
+    y = np.array([0.7, 0.55])
+    grid = np.array([1.0e6, 2.0e6, 3.0e6])
+    cross = [
+        {"l": 1, "mag_grid_ev": grid, "shape_grid_ev": grid,
+         "matrix": np.array([[0.01, 0.002], [0.002, 0.02]]), "is_relative": True},
+        {"l": 9, "mag_grid_ev": grid, "shape_grid_ev": grid,  # beyond L_max=2
+         "matrix": np.array([[1.0, 1.0], [1.0, 1.0]]), "is_relative": True},
+    ]
+    sigma = build_mf33_mf34_cross_block(cross, e_mev, mu, c0, a_l, y)
+    assert np.allclose(sigma, sigma.T, atol=1e-15)
+    assert np.any(np.abs(sigma) > 0)  # L=1 block contributes
+
+
+def test_orchestrator_default_has_no_cross():
+    """Without the 'mf33_mf34_cross' key, Σ_eval == mf34 + mf33 (cross = 0)."""
+    grid_ev = np.array([0.5e6, 2.5e6, 4.5e6])
+    mf34 = _diagonal_mf34(grid_ev, [0.04, 0.05], l_order=1, is_relative=True)
+
+    df = pd.DataFrame({
+        "library": ["L", "L"],
+        "experiment_id": ["E", "E"],
+        "energy_mev": [1.0, 3.0],
+        "mu": [0.2, -0.3],
+        "c0": [0.7, 0.7],
+        "y_eval": [0.6, 0.5],
+    })
+
+    def a_l_lookup(lib_key, lib, e_mev):
+        return np.array([0.5])
+
+    libraries = {"L": {"mf34": mf34}}
+    out = build_eval_cov_for_groups(df, libraries, a_l_lookup, l_max=1)
+
+    e_mev = df["energy_mev"].to_numpy(float)
+    mu = df["mu"].to_numpy(float)
+    c0 = df["c0"].to_numpy(float)
+    a_l_per_pt = np.array([[0.5], [0.5]])
+    expected = build_mf34_block(mf34, e_mev, mu, c0, a_l_per_pt).astype(np.float32)
+    np.testing.assert_array_equal(out[("L", "E")], expected)
 
 
 if __name__ == "__main__":

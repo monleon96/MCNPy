@@ -82,7 +82,7 @@ MT_NUMBER = 2  # elastic scattering
 # ── Library ENDF files (one per evaluation compared in the chi^2 analysis) ──
 # This_work uses the pipeline's nominal ENDF written by
 # exfor_to_endf_sampling_v2.py into OUTPUT_DIR.
-THIS_WORK_DIR  = "/share_snc/snc/JuanMonleon/ENDF_samples/new_test_80"
+THIS_WORK_DIR  = "/share_snc/snc/JuanMonleon/ENDF_samples/new_test_82_mt1fix"
 THIS_WORK_FILE = f"{THIS_WORK_DIR}/26-Fe-56g_nominal_mg.endf"
 
 JEFF_FILE  = "/share_snc/snc/JuanMonleon/jeff40_with_MF4_from_jeff33/26-Fe-56g.txt"
@@ -110,7 +110,7 @@ E_MAX_MEV = 4.0
 L_MAX = 6
 
 # ── Output ──
-OUTPUT_PARQUET = "/share_snc/snc/JuanMonleon/chi2/chi2_data_library_c0_80.parquet"
+OUTPUT_PARQUET = "/share_snc/snc/JuanMonleon/chi2/chi2_data_library_c0_82.parquet"
 
 # ── NJOY-PENDF cache (only used to resolve MF33 NC LTY=0 sub-subsections, e.g.
 # JENDL). JEFF/This_work have no NC and skip NJOY entirely. ──

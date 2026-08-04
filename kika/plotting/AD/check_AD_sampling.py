@@ -33,7 +33,7 @@ SAMPLES_PER_FIGURE = 8
 TOTAL_SAMPLES = 1024
 
 # Nuclear masses (atomic mass units)
-M_NEUTRON = 1.008665    # neutron mass
+from kika._constants import NEUTRON_MASS_AMU as M_NEUTRON
 M_FE56 = 55.93494       # Fe-56 mass
 
 # Ensure output directory exists

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict, Any
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 
@@ -1170,6 +1170,7 @@ def perform_adaptive_multigroup_collapse(
     max_relative_std_cap: float = 1.0,
     forced_group_boundaries_mev: Optional[np.ndarray] = None,
     diagnostics_file: Optional[Path] = None,
+    valid_orders_fn: Optional[Callable[[Any, int], int]] = None,
 ) -> MultigroupResult:
     """
     Main entry point for adaptive multigroup covariance collapse.
@@ -1212,6 +1213,19 @@ def perform_adaptive_multigroup_collapse(
         ``variance_percentile_max`` (default 5.0).
     logger : optional
         Logger for diagnostics
+    valid_orders_fn : callable, optional
+        ``f(nominal_result, max_order) -> int`` returning how many leading
+        Legendre orders count as real parameters for that bin. Overrides the
+        legacy winner-take-all rule ``min(frozen_degree, max_order)``.
+
+        Defaults to ``None`` (legacy), so ``exfor_to_endf_sampling_v2.py`` is
+        bit-unchanged. The research fork passes ``bin_valid_orders``, which keys
+        on the inclusion probability ``q_l`` instead of the winning degree.
+
+        **This parameter exists because its absence silently confined Phase 3 to
+        the fine grid** — the fork had replaced the mask everywhere except here,
+        so the shipped multigroup MF34 kept the winner-take-all zero structure
+        while the fine one was fully populated. See the roadmap §8.4.
 
     Returns
     -------
@@ -1256,18 +1270,31 @@ def perform_adaptive_multigroup_collapse(
     valid_energy_bins = [energy_bins[i] for i in valid_indices]
     valid_nominal = [nominal_results[i] for i in valid_indices]
 
-    # Build valid_mask for the non-interpolated fine grid
-    # A parameter (bin i, order l) is valid iff frozen_degree >= l
+    # Build valid_mask for the non-interpolated fine grid.
+    #
+    # Legacy rule: a parameter (bin i, order l) is valid iff frozen_degree >= l,
+    # i.e. winner-take-all. `valid_orders_fn` overrides it with the caller's own
+    # rule (the research fork passes `bin_valid_orders`, keyed on the inclusion
+    # probability q_l). It defaults to None so v2 stays bit-identical.
+    #
+    # ⚠ THIS BLOCK IS WHY PHASE 3 NEVER REACHED THE MULTIGROUP PRODUCT.
+    # The fork replaced the mask on the *fine* path but this function rebuilt the
+    # legacy one from scratch, so run 85's mixture populated the fine MF34
+    # (dead parameters at l=6: 92.3% -> 1.0%) and left the multigroup MF34
+    # untouched (81.6% -> 81.7%). Measured 2026-08-03; see the roadmap §8.4.
+    _orders_of = valid_orders_fn or (lambda nr, mo: min(nr.frozen_degree, mo))
     valid_mask_mg = np.zeros(n_fine * max_order, dtype=bool)
     for i, nr in enumerate(valid_nominal):
-        for l in range(1, min(nr.frozen_degree, max_order) + 1):
+        for l in range(1, min(int(_orders_of(nr, max_order)), max_order) + 1):
             valid_mask_mg[idx(i, l, max_order)] = True
 
     n_fitted = int(valid_mask_mg.sum())
     n_total = n_fine * max_order
     if logger:
+        _rule = "caller-supplied" if valid_orders_fn else "legacy frozen_degree"
         logger.info(f"  Valid mask: {n_fitted}/{n_total} parameters fitted "
-                    f"({n_total - n_fitted} unfitted, {100*(n_total-n_fitted)/n_total:.1f}%)")
+                    f"({n_total - n_fitted} unfitted, {100*(n_total-n_fitted)/n_total:.1f}%)"
+                    f"  [rule: {_rule}]")
 
     # Extract arrays
     fine_energies_mev = np.array([eb.energy_mev for eb in valid_energy_bins])
@@ -1508,3 +1535,317 @@ def perform_adaptive_multigroup_collapse(
         valid_mask_grouped=_vmg,
         scale_factors=scale_factors,
     )
+
+
+# =============================================================================
+# MF33 (cross-section magnitude) single-block collapse
+# =============================================================================
+
+@dataclass
+class MF33MultigroupResult:
+    """Result of the scalar (c0 / magnitude) adaptive collapse."""
+    group_boundaries_mev: np.ndarray   # (N_groups + 1,)
+    group_boundaries_ev: np.ndarray    # same in eV
+    aggregation_matrix: np.ndarray     # A_0, (N_groups, N_fine), row-stochastic
+    cov_rel_grouped: np.ndarray        # (N_groups, N_groups) relative
+    cov_abs_grouped: np.ndarray        # (N_groups, N_groups) absolute
+    means_grouped: np.ndarray          # (N_groups,) width-weighted host central
+    groups: List[List[int]]
+    group_info: List[GroupInfo]
+
+
+def perform_mf33_multigroup_collapse(
+    cov_abs_fine: np.ndarray,
+    means_fine: np.ndarray,
+    energy_bins: List,          # List[EnergyBinInfo], one per fine bin, in order
+    *,
+    rho_min: float = 0.85,
+    sigma_ratio_max: Optional[float] = None,
+    logger=None,
+    diagnostics_file: Optional[Path] = None,
+    label: str = "MF33 MT2",
+) -> MF33MultigroupResult:
+    """Adaptive multigroup collapse for the scalar MF33 magnitude channel.
+
+    The MF34 collapse groups on the ``l=1`` correlation structure of a
+    ``(n_fine * L)`` matrix.  MF33 is a single square block over one scalar per
+    bin, so the very same machinery applies with ``max_order=1``: ``idx(i, 1, 1)``
+    is just ``i``, which makes :func:`find_adaptive_group_boundaries` and the
+    per-bin sigma/correlation diagnostics operate directly on the scalar matrix.
+
+    The grid this produces is **independent of the MF34 grid** — the magnitude
+    channel has its own correlation length, and ENDF lets every MF/MT section
+    carry its own boundaries.  Use :func:`collapse_mf33_covariance_to_grid`
+    instead when you deliberately want MF33 projected onto a *given* grid (the
+    MF34 one, say).
+
+    Collapse runs in **absolute** space and converts back with the collapsed
+    means, which is the rigorous order when the central varies across merged
+    bins:  ``C_abs_g = A0 C_abs A0^T``, ``m_g = A0 m``, ``C_rel_g = C_abs_g /
+    outer(m_g)``.
+
+    No percentile variance compensation is applied, matching what the pipeline
+    actually publishes for MF34 (it rebuilds the multigroup covariance from
+    ``A @ cov_abs @ A.T`` and never applies ``scale_factors``).
+
+    Parameters
+    ----------
+    cov_abs_fine : np.ndarray
+        ``(n_fine, n_fine)`` **absolute** covariance of the magnitude per bin.
+    means_fine : np.ndarray
+        ``(n_fine,)`` central value per bin, in the same units as the covariance
+        (e.g. the TOF-folded host ``sigma_el``, or ``c0`` — the relative result
+        is identical either way as long as both are consistent).
+    energy_bins : List[EnergyBinInfo]
+        One entry per row of ``cov_abs_fine``, in matching order.
+    rho_min, sigma_ratio_max
+        Merge gates, passed straight to :func:`find_adaptive_group_boundaries`.
+    diagnostics_file : Path, optional
+        Per-boundary merge decisions CSV (same schema as the MF34 one).
+
+    Returns
+    -------
+    MF33MultigroupResult
+    """
+    C_abs = np.asarray(cov_abs_fine, dtype=float)
+    means = np.asarray(means_fine, dtype=float)
+    n_fine = len(energy_bins)
+
+    if C_abs.shape != (n_fine, n_fine):
+        raise ValueError(
+            f"cov_abs_fine shape {C_abs.shape} doesn't match {n_fine} energy bins"
+        )
+    if means.shape != (n_fine,):
+        raise ValueError(
+            f"means_fine shape {means.shape} doesn't match {n_fine} energy bins"
+        )
+
+    fine_energies_mev = np.array([eb.energy_mev for eb in energy_bins], dtype=float)
+    sigma_E_mev = np.array([eb.sigma_E_mev for eb in energy_bins], dtype=float)
+    fine_bin_lower_mev = np.array([eb.bin_lower_mev for eb in energy_bins], dtype=float)
+    fine_bin_upper_mev = np.array([eb.bin_upper_mev for eb in energy_bins], dtype=float)
+    fine_bin_widths_mev = fine_bin_upper_mev - fine_bin_lower_mev
+
+    corr_fine = cov_to_corr(C_abs)
+
+    if logger:
+        adj = np.array([corr_fine[i, i + 1] for i in range(n_fine - 1)])
+        logger.info(
+            f"  [{label}] Adaptive grid: {n_fine} fine bins, adjacent c0 corr "
+            f"mean={np.mean(adj):.4f}, median={np.median(adj):.4f}, "
+            f"min={np.min(adj):.4f}, max={np.max(adj):.4f}"
+        )
+
+    # max_order=1 -> idx(i, 1, 1) == i, so the MF34 grouper reads the scalar
+    # matrix directly with no reshaping.
+    groups, group_info = find_adaptive_group_boundaries(
+        corr_matrix=corr_fine,
+        cov_matrix=C_abs,
+        fine_energies_mev=fine_energies_mev,
+        sigma_E_mev=sigma_E_mev,
+        fine_bin_widths_mev=fine_bin_widths_mev,
+        max_order=1,
+        rho_min=rho_min,
+        sigma_ratio_max=sigma_ratio_max,
+        logger=logger,
+        diagnostics_file=diagnostics_file,
+    )
+
+    A0 = build_l0_row_aggregator(
+        groups=groups,
+        fine_bin_widths_mev=fine_bin_widths_mev,
+        n_fine=n_fine,
+    )
+
+    cov_abs_grouped = collapse_covariance(C_abs, A0)
+    means_grouped = A0 @ means
+
+    good = np.isfinite(means_grouped) & (means_grouped > 0.0)
+    cov_rel_grouped = np.zeros_like(cov_abs_grouped)
+    if np.any(good):
+        block = np.ix_(good, good)
+        cov_rel_grouped[block] = (
+            cov_abs_grouped[block] / np.outer(means_grouped[good], means_grouped[good])
+        )
+    if not np.all(good) and logger:
+        logger.warning(
+            f"  [{label}] {int(np.count_nonzero(~good))} group(s) have a "
+            f"non-positive collapsed central; their relative rows are zeroed."
+        )
+
+    cov_rel_grouped = 0.5 * (cov_rel_grouped + cov_rel_grouped.T)
+    cov_rel_grouped, _ = check_positive_semidefinite(
+        cov_rel_grouped, name=f"{label} multigroup", logger=logger,
+        fix_if_needed=False,
+    )
+
+    group_boundaries_mev = construct_group_energy_boundaries(
+        groups=groups,
+        fine_bin_lower_mev=fine_bin_lower_mev,
+        fine_bin_upper_mev=fine_bin_upper_mev,
+    )
+
+    if logger:
+        logger.info(
+            f"  [{label}] Collapsed {n_fine} -> {len(groups)} groups "
+            f"({n_fine / max(1, len(groups)):.1f}x), "
+            f"[{group_boundaries_mev[0]:.4f}, {group_boundaries_mev[-1]:.4f}] MeV"
+        )
+
+    return MF33MultigroupResult(
+        group_boundaries_mev=group_boundaries_mev,
+        group_boundaries_ev=group_boundaries_mev * 1e6,
+        aggregation_matrix=A0,
+        cov_rel_grouped=cov_rel_grouped,
+        cov_abs_grouped=cov_abs_grouped,
+        means_grouped=means_grouped,
+        groups=groups,
+        group_info=group_info,
+    )
+
+
+def collapse_mf33_covariance_to_grid(
+    native_grid_ev: np.ndarray,
+    native_cov: np.ndarray,
+    target_grid_ev: np.ndarray,
+    *,
+    native_means: Optional[np.ndarray] = None,
+    is_relative: bool = True,
+    weighting: str = "width",
+    label: str = "MF33 MT2",
+    logger=None,
+) -> np.ndarray:
+    """Collapse a single-block MF33 covariance onto target (multigroup) bin edges.
+
+    MF33 is a single square self-block (one reaction, no Legendre triangle), so
+    this reuses the width-weighted piecewise-constant overlap operator that
+    ``kika.cov.cross_section_covariance.project_to_grid`` uses
+    (``kika.processing.multigroup.compute_rebin_operator`` +
+    ``collapse_covariance``) — the same MF34 multigroup boundaries can be passed
+    as ``target_grid_ev`` so the MF33 and MF34 outputs share one grid.
+
+    For a **relative** covariance the collapse is done in absolute space and
+    converted back to relative on the target grid (rigorous); this needs the
+    per-native-bin means (``native_means``, the σ per bin). Without means the
+    relative matrix is collapsed directly, which is exact only in the flat-σ
+    limit — documented, and logged when a logger is given.
+
+    The final matrix gets a **warn-only** PSD check (never repaired), matching
+    the pipeline's final-matrix PSD policy.
+
+    Parameters
+    ----------
+    native_grid_ev : np.ndarray
+        Native MF33 bin edges in eV (``N_native + 1``).
+    native_cov : np.ndarray
+        ``(N_native, N_native)`` covariance on the native grid.
+    target_grid_ev : np.ndarray
+        Target (multigroup) bin edges in eV (``N_target + 1``).
+    native_means : np.ndarray, optional
+        Per-native-bin σ (b). Required for a rigorous relative collapse.
+    is_relative : bool, default True
+        Whether ``native_cov`` is relative.
+    weighting : str, default "width"
+        Only ``"width"`` (piecewise-constant) is supported in Phase 1.
+    label : str
+        Name used in the PSD warning / log messages.
+    logger : optional
+        Logger for informational messages.
+
+    Returns
+    -------
+    np.ndarray
+        ``(N_target, N_target)`` collapsed covariance (relative if the input
+        was relative), symmetric.
+    """
+    import warnings
+    from kika.processing.multigroup import (
+        compute_rebin_operator,
+        collapse_covariance,
+        relative_to_absolute,
+        absolute_to_relative,
+    )
+
+    if weighting != "width":
+        raise ValueError(
+            f"weighting={weighting!r} not supported; only 'width' in Phase 1"
+        )
+
+    native_grid = np.asarray(native_grid_ev, dtype=float)
+    target_grid = np.asarray(target_grid_ev, dtype=float)
+    C = np.asarray(native_cov, dtype=float)
+
+    n_native = native_grid.size - 1
+    if C.shape != (n_native, n_native):
+        raise ValueError(
+            f"native_cov shape {C.shape} doesn't match native grid with "
+            f"{n_native} intervals"
+        )
+    if target_grid.size < 2:
+        raise ValueError("target_grid_ev must have at least 2 edges")
+
+    # Row-stochastic width-weighted overlap operator, shape (N_target, N_native).
+    M = compute_rebin_operator(native_grid, target_grid)
+
+    if is_relative and native_means is not None:
+        means = np.asarray(native_means, dtype=float)
+        if means.shape != (n_native,):
+            raise ValueError(
+                f"native_means shape {means.shape} doesn't match {n_native} "
+                f"native intervals"
+            )
+        C_abs = relative_to_absolute(C, means, means)
+        C_tgt_abs = collapse_covariance(C_abs, M)
+        means_tgt = M @ means  # width-weighted group σ
+
+        # A target group whose native means are all non-positive has no central
+        # value to be relative to.  ``absolute_to_relative`` flags that division
+        # with NaN by design; letting those rows through is what fed NaNs to
+        # ``np.linalg.eigvalsh`` in the ENDF writer and surfaced as the opaque
+        # "Eigenvalues did not converge".  Zero the affected rows/columns here
+        # and name the groups, instead of relying on a downstream sanitizer.
+        good = np.isfinite(means_tgt) & (means_tgt > 0.0)
+        C_tgt = np.zeros_like(C_tgt_abs)
+        if np.any(good):
+            block = np.ix_(good, good)
+            C_tgt[block] = absolute_to_relative(
+                C_tgt_abs[block], means_tgt[good], means_tgt[good],
+            )
+        n_dropped = int(np.count_nonzero(~good))
+        if n_dropped and logger:
+            spans = [
+                f"[{target_grid[i]:.6g}, {target_grid[i + 1]:.6g}]"
+                for i in np.flatnonzero(~good)
+            ]
+            shown = ", ".join(spans[:5]) + (" ..." if len(spans) > 5 else "")
+            logger.warning(
+                f"  {label}: {n_dropped}/{len(means_tgt)} target groups have a "
+                f"non-positive mean and cannot carry a relative covariance; "
+                f"their rows/columns are zeroed (eV): {shown}"
+            )
+    else:
+        if is_relative and native_means is None and logger:
+            logger.info(
+                f"  {label}: collapsing relative covariance without means "
+                f"(flat-σ limit; exact only if σ is constant across merged bins)"
+            )
+        C_tgt = collapse_covariance(C, M)
+
+    C_tgt = 0.5 * (C_tgt + C_tgt.T)
+
+    # Warn-only PSD check — never repair (final-matrix PSD policy).  Take the
+    # returned matrix: check_positive_semidefinite sanitizes non-finite entries
+    # on a copy, so discarding it (the historical ``_, was_psd = ...``) logged
+    # "replacing with 0" while handing the caller the unsanitized matrix.
+    C_tgt, was_psd = check_positive_semidefinite(
+        C_tgt, name=label, logger=logger, fix_if_needed=False,
+    )
+    if not was_psd:
+        warnings.warn(
+            f"{label}: collapsed MF33 covariance is not PSD (negative "
+            f"eigenvalue); left unrepaired per the warn-only policy.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    return C_tgt

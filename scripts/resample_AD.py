@@ -12,6 +12,8 @@ from scipy.stats import norm
 from scipy.linalg import cho_factor, cho_solve
 import matplotlib.pyplot as plt
 
+from kika.utils.energy_folding import tof_energy_resolution
+
 # Import from kika.exfor (new module)
 try:
     from kika.exfor.transforms import (
@@ -806,28 +808,25 @@ def compute_energy_resolution_tof(
     E_mev: float,
     delta_t_ns: float = 5.0,
     flight_path_m: float = 27.037,
+    delta_t_is_fwhm: bool = True,
 ) -> float:
     """
     Compute energy resolution σE from TOF parameters.
 
-    For neutrons measured by time-of-flight:
-      E = m_n * L² / (2 * t²)
-      δE/E = 2 * δt/t
-      t = L / v = L * sqrt(m_n / (2E))
-
-    Therefore:
-      σE = E * 2 * δt / t
-         = E * 2 * δt * v / L
-         = E * 2 * δt * sqrt(2E/m_n) / L
+    Thin adapter over :func:`kika.utils.energy_folding.tof_energy_resolution`,
+    which is the single definition of the formula.
 
     Parameters
     ----------
     E_mev : float
         Neutron energy in MeV
     delta_t_ns : float
-        Time resolution in nanoseconds (default: 10 ns)
+        Timing spread in nanoseconds; see ``delta_t_is_fwhm``.
     flight_path_m : float
         Flight path length in meters (default: 27.037 m)
+    delta_t_is_fwhm : bool, default True
+        Whether ``delta_t_ns`` is a FWHM (usual experimental convention) or
+        already a sigma.  The two differ by a factor 2.355 in the result.
 
     Returns
     -------
@@ -837,24 +836,12 @@ def compute_energy_resolution_tof(
     if E_mev <= 0:
         return 0.0
 
-    # Physical constants
-    m_n_kg = 1.674927e-27       # Neutron mass in kg
-    MeV_to_J = 1.602176634e-13  # MeV to Joules
-
-    E_J = E_mev * MeV_to_J      # Energy in Joules
-    delta_t_s = delta_t_ns * 1e-9  # Time resolution in seconds
-
-    # Velocity: v = sqrt(2E/m)
-    v = np.sqrt(2 * E_J / m_n_kg)  # m/s
-
-    # Time of flight: t = L/v
-    t = flight_path_m / v  # seconds
-
-    # Energy resolution: σE/E = 2 * δt/t
-    sigma_E_rel = 2 * delta_t_s / t
-    sigma_E_mev = E_mev * sigma_E_rel
-
-    return sigma_E_mev
+    return tof_energy_resolution(
+        E_mev,
+        flight_path_m=flight_path_m,
+        delta_t_ns=delta_t_ns,
+        delta_t_is_fwhm=delta_t_is_fwhm,
+    )
 
 
 def compute_energy_kernel_weights(
@@ -1694,7 +1681,7 @@ def sample_legendre_coefficients(
     fixed_c0_value: Optional[float] = None,
     # correlated normalization uncertainty (Improvement 1.3)
     sigma_norm: float = 0.0,
-    sigma_norm_elastic: float = 0.0,
+    sigma_norm_common_mode: float = 0.0,
     norm_group_cols: Tuple[str, ...] = ("entry",),
     norm_dist: Literal["lognormal", "normal"] = "lognormal",
     # freeze higher-order coefficients during MC sampling
@@ -1709,9 +1696,32 @@ def sample_legendre_coefficients(
     rerun_aicc_post_tau: bool = False,
     # Block-correlated GLS kernel for the IC model-selection scan, the
     # initial nominal fit, and the post-τ rescan. Reduces to diagonal WLS
-    # when σ_sys_indep = 0. τ-IRLS, freeze_c0 refit, and MC sampler always
-    # stay diagonal.
+    # when σ_sys_indep = 0. freeze_c0 refit and MC sampler always stay
+    # diagonal; the τ-IRLS refit follows ``tau_refit_use_gls``.
     use_gls_kernel: bool = False,
+    # Solver for the coefficient refit *inside* the τ-IRLS loop. The default
+    # (False) keeps the historical diagonal WLS refit, which folds σ_sys into
+    # the fit weights as if it were uncorrelated. That is inconsistent with
+    # the scan and the post-τ rescan, which both use the block-correlated GLS
+    # kernel when ``use_gls_kernel`` is on — so with the default the shipped
+    # coeffs0 and the AICc scores that selected its degree come from different
+    # noise models. Set True to run the τ refit under the same GLS kernel.
+    #
+    # ⚠ The GLS branch takes σ_eff (= τ·σ_stat) and carries σ_sys as rank-1
+    #   structure. It must NOT be handed ``sigma_refit`` (σ_sys already folded
+    #   into the diagonal) or σ_sys is counted twice.
+    #
+    # No-op unless ``use_gls_kernel`` is True and GLS inputs were supplied.
+    tau_refit_use_gls: bool = False,
+    # Phase-2 elastic magnitude channel. When True, record the closed-form
+    # fixed-shape c0 scale of every (perturbed) sample against the nominal
+    # bin curve into ``info["c0_samples"]`` — a read-only side channel that
+    # leaves ``coef_df`` and the shape fit untouched (default off → the info
+    # dict is unchanged). ``c0_scale_ref_coeffs`` is the shape to project onto
+    # (the pipeline nominal bin coeffs); when None the fit's own ``coeffs0``
+    # is used.
+    record_c0_scale: bool = False,
+    c0_scale_ref_coeffs: Optional[np.ndarray] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Fit Legendre coefficients c_l for y(mu) = sum c_l P_l(mu) and return samples.
@@ -2070,13 +2080,27 @@ def sample_legendre_coefficients(
                 np.sqrt(sigma_eff ** 2 + sigma_sys ** 2)
                 if sigma_sys is not None else sigma_eff
             )
-            coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
-                mu, y, sigma_refit, degree_use,
-                ridge_lambda=ridge_lambda,
-                ridge_power=ridge_power,
-                df_method=df_method,
-                external_weights=external_weights,
-            )
+            if (tau_refit_use_gls and use_gls_kernel
+                    and gls_indep_per_exp is not None):
+                # σ_eff (τ-inflated stat) on D; σ_sys stays rank-1 in U/V.
+                # Deliberately NOT sigma_refit — see tau_refit_use_gls above.
+                coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit_gls(
+                    mu, y, sigma_eff, gls_indep_per_exp, gls_exp_index,
+                    degree_use,
+                    sigma_sys_dep_per_row=gls_dep_per_row,
+                    ridge_lambda=ridge_lambda,
+                    ridge_power=ridge_power,
+                    df_method=df_method,
+                    external_weights=external_weights,
+                )
+            else:
+                coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
+                    mu, y, sigma_refit, degree_use,
+                    ridge_lambda=ridge_lambda,
+                    ridge_power=ridge_power,
+                    df_method=df_method,
+                    external_weights=external_weights,
+                )
             # Convergence: compare *raw* targets between consecutive iterations
             # (damping smooths the trajectory but we still want to see whether
             # the underlying estimator has settled).
@@ -2200,13 +2224,26 @@ def sample_legendre_coefficients(
                         np.sqrt(sigma_eff ** 2 + sigma_sys ** 2)
                         if sigma_sys is not None else sigma_eff
                     )
-                    coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
-                        mu, y, sigma_refit, degree_use,
-                        ridge_lambda=ridge_lambda,
-                        ridge_power=ridge_power,
-                        df_method=df_method,
-                        external_weights=external_weights,
-                    )
+                    if (tau_refit_use_gls and use_gls_kernel
+                            and gls_indep_per_exp is not None):
+                        # Same contract as the first τ-IRLS loop above.
+                        coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit_gls(
+                            mu, y, sigma_eff, gls_indep_per_exp,
+                            gls_exp_index, degree_use,
+                            sigma_sys_dep_per_row=gls_dep_per_row,
+                            ridge_lambda=ridge_lambda,
+                            ridge_power=ridge_power,
+                            df_method=df_method,
+                            external_weights=external_weights,
+                        )
+                    else:
+                        coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
+                            mu, y, sigma_refit, degree_use,
+                            ridge_lambda=ridge_lambda,
+                            ridge_power=ridge_power,
+                            df_method=df_method,
+                            external_weights=external_weights,
+                        )
                     tau_target_curr = {
                         b: float(tau_info.get(f'raw_{b[-1]}', tau_info[b]))
                         for b in ('tau_F', 'tau_M', 'tau_B')
@@ -2290,26 +2327,33 @@ def sample_legendre_coefficients(
             group_keys = list(group_indices.keys())
 
     # Sampling fits
+    # Perturbed data + σ captured for the optional fixed-shape c0 recording
+    # (Phase-2 magnitude channel); stays None on the default path.
+    c0_record_Y = None
+    c0_record_sigma = None
     if n_samples <= 1 and not stochastic:
         coef_mat = coeffs0[np.newaxis, :]
+        if record_c0_scale:
+            c0_record_Y = y[np.newaxis, :]
+            c0_record_sigma = sigma_for_fit
     else:
         n_draws = max(1, int(n_samples))
 
         # Generate all perturbed y vectors at once
         Y_perturbed = np.tile(y, (n_draws, 1))  # (n_draws, n)
 
-        # Global elastic-XS factor: one draw per sample, applied to all points
+        # Global common-mode normalization factor: one draw per sample, applied to all points
         # (models the shared monitor / reference XS uncertainty).
-        if sigma_norm_elastic > 0.0:
+        if sigma_norm_common_mode > 0.0:
             if norm_dist == "lognormal":
-                N_elastic = rng.lognormal(
-                    mean=-0.5 * sigma_norm_elastic ** 2,
-                    sigma=sigma_norm_elastic,
+                N_common_mode = rng.lognormal(
+                    mean=-0.5 * sigma_norm_common_mode ** 2,
+                    sigma=sigma_norm_common_mode,
                     size=n_draws,
                 )
             else:
-                N_elastic = 1.0 + rng.normal(0.0, sigma_norm_elastic, size=n_draws)
-            Y_perturbed *= N_elastic[:, np.newaxis]
+                N_common_mode = 1.0 + rng.normal(0.0, sigma_norm_common_mode, size=n_draws)
+            Y_perturbed *= N_common_mode[:, np.newaxis]
 
         # Apply correlated normalization uncertainty per experiment (Improvement 1.3).
         # Each group's sigma is taken from the manifest-derived
@@ -2363,7 +2407,26 @@ def sample_legendre_coefficients(
             fixed_c0=c0_fix,
             fixed_coeffs=fixed_high,
         )
+        if record_c0_scale:
+            c0_record_Y = Y_perturbed
+            c0_record_sigma = sigma_for_mc_fit
     coef_df = pd.DataFrame(coef_mat, columns=[f"c{l}" for l in range(degree_use + 1)])
+
+    # Optional fixed-shape c0 (elastic magnitude) recording. Projects each
+    # perturbed sample onto the frozen nominal shape using the same weights the
+    # fit used; read-only, so ``coef_df`` above is untouched.
+    c0_samples = None
+    if record_c0_scale and c0_record_Y is not None:
+        ref_coeffs = (
+            coeffs0 if c0_scale_ref_coeffs is None
+            else np.asarray(c0_scale_ref_coeffs, dtype=float)
+        )
+        _, c0_samples = fixed_shape_c0_scale(
+            c0_record_Y, mu, ref_coeffs,
+            external_weights=external_weights,
+            sigma_for_fit=c0_record_sigma,
+        )
+        c0_samples = np.atleast_1d(c0_samples)
 
     info = dict(
         n_points=n,
@@ -2396,6 +2459,10 @@ def sample_legendre_coefficients(
         all_degrees_info_pre_tau=all_degrees_info_pre_tau,
         post_tau_winner_changed=post_tau_winner_changed,
     )
+    # Magnitude side channel: only present when explicitly requested so the
+    # default info dict is byte-for-byte what every existing caller sees.
+    if record_c0_scale:
+        info["c0_samples"] = c0_samples
     return coef_df, info
 
 
@@ -2436,6 +2503,154 @@ def evaluate_legendre_series(mu: np.ndarray, c: np.ndarray) -> np.ndarray:
     mu = np.asarray(mu, dtype=float)
     c = np.asarray(c, dtype=float)
     return legval(mu, c)
+
+
+def fixed_shape_c0_scale(
+    Y: np.ndarray,
+    mu: np.ndarray,
+    nominal_coeffs: np.ndarray,
+    external_weights: Optional[np.ndarray] = None,
+    sigma_for_fit: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Closed-form "fit c0 with the shape frozen" magnitude scale.
+
+    The elastic magnitude channel (MF3 MT2 / MF33 MT2) of the EXFOR pipeline.
+    With the angular *shape* held at the nominal bin curve
+    ``y_nom(mu) = sum_l c_l^nom P_l(mu)``, the only free parameter of a
+    perturbed dataset ``Y`` is a single multiplicative scale ``s``.  The
+    weighted-least-squares estimate of that scale is the closed form::
+
+        s = sum(w * Y * y_nom) / sum(w * y_nom**2)          c0 = s * c0_nom
+
+    with the *same* fit weights the shape refit uses, ``w = external_weights /
+    sigma_for_fit**2`` (``external_weights`` = the kernel/ESS weights ``g``;
+    ``sigma_for_fit`` = the per-point σ the WLS observes, i.e. τ-inflated σ_stat
+    optionally combined in quadrature with σ_sys).  ``c0_nom = nominal_coeffs[0]``
+    and ``sigma_el = 4*pi*c0``.
+
+    Because this only *reads* the perturbed data ``Y`` and never re-solves the
+    shape fit, recording it alongside the frozen-c0 MF34 refits leaves MF4 and
+    MF34 bit-identical.
+
+    Parameters
+    ----------
+    Y : np.ndarray
+        Perturbed data values (barns/sr), either 1-D ``(n_points,)`` for a
+        single sample or 2-D ``(n_draws, n_points)`` for a batch of samples.
+    mu : np.ndarray
+        ``cos(theta)`` of each point, shape ``(n_points,)``.
+    nominal_coeffs : np.ndarray
+        Nominal Legendre coefficients ``[c0, c1, ...]`` defining the frozen
+        shape; ``nominal_coeffs[0]`` is ``c0_nom``.
+    external_weights : np.ndarray, optional
+        Per-point kernel/ESS weights ``g`` (shape ``(n_points,)``).  Defaults to
+        ones (unweighted) when omitted.
+    sigma_for_fit : np.ndarray, optional
+        Per-point σ the WLS uses (shape ``(n_points,)``).  Defaults to ones
+        (plain kernel-weighted) when omitted; points with non-finite or
+        non-positive σ are dropped.
+
+    Returns
+    -------
+    (s, c0) : Tuple[np.ndarray, np.ndarray]
+        The scale ``s`` and magnitude ``c0 = s * c0_nom``.  Both are 0-D arrays
+        for 1-D ``Y`` and shape ``(n_draws,)`` for 2-D ``Y``.
+    """
+    Y = np.asarray(Y, dtype=float)
+    mu = np.asarray(mu, dtype=float)
+    nominal_coeffs = np.asarray(nominal_coeffs, dtype=float)
+
+    y_nom = legval(mu, nominal_coeffs)
+
+    g = (
+        np.ones_like(mu)
+        if external_weights is None
+        else np.asarray(external_weights, dtype=float)
+    )
+    if sigma_for_fit is None:
+        w = g
+    else:
+        sigma = np.asarray(sigma_for_fit, dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            inv_var = np.where(np.isfinite(sigma) & (sigma > 0), 1.0 / sigma ** 2, 0.0)
+        w = g * inv_var
+
+    denom = float(np.sum(w * y_nom ** 2))
+    if not np.isfinite(denom) or denom <= 0.0:
+        raise ValueError(
+            "fixed_shape_c0_scale: sum(w * y_nom**2) is non-positive; the "
+            "nominal curve is zero over all weighted points."
+        )
+
+    # numer = sum_j w_j Y_j y_nom_j  — matmul broadcasts over the batch axis
+    # of a 2-D Y and reduces a 1-D Y to a scalar.
+    numer = Y @ (w * y_nom)
+    s = np.asarray(numer / denom)
+    c0 = s * float(nominal_coeffs[0])
+    return s, c0
+
+
+def combine_c0_covariance(
+    c0_pass1: np.ndarray,
+    c0_pass2: np.ndarray,
+    c0_nominal: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Congruence-combine the two-pass fixed-shape c0 samples into an MF33 block.
+
+    Mirrors the Legendre-vector combine used for MF34
+    (``cov = corr_pass1 * outer(std_pass2, std_pass2)``): cross-bin correlations
+    come from the Pass-1 shared-draw samples, marginal variances from the
+    Pass-2 independent-per-bin samples.  The result is the elastic **magnitude**
+    covariance — one square block over energy bins.
+
+    Parameters
+    ----------
+    c0_pass1 : np.ndarray
+        Pass-1 c0 samples, shape ``(n_samples_1, n_bins)`` (shared draws →
+        correlations).  Missing entries may be NaN; correlations use the
+        pairwise-complete observations.
+    c0_pass2 : np.ndarray
+        Pass-2 c0 samples, shape ``(n_samples_2, n_bins)`` (independent per-bin
+        draws → variances).  NaNs are ignored per column.
+    c0_nominal : np.ndarray
+        Nominal magnitude ``c0_nom`` per bin, shape ``(n_bins,)``.
+
+    Returns
+    -------
+    (rel_cov, cov_abs) : Tuple[np.ndarray, np.ndarray]
+        ``rel_cov`` is the **relative** covariance
+        ``Cov(c0_i, c0_j) / (c0_nom_i * c0_nom_j)`` (the MF33 writer input);
+        ``cov_abs`` is the absolute covariance in c0 units.  Both are
+        ``(n_bins, n_bins)`` symmetric.  Bins with a non-positive nominal get a
+        zero relative row/column.
+    """
+    c0_pass1 = np.asarray(c0_pass1, dtype=float)
+    c0_pass2 = np.asarray(c0_pass2, dtype=float)
+    c0_nominal = np.asarray(c0_nominal, dtype=float)
+    n_bins = c0_nominal.size
+
+    # Pass-1 correlations (pairwise-complete over shared-draw samples).
+    p1 = np.ma.masked_invalid(c0_pass1)
+    corr = np.ma.corrcoef(p1, rowvar=False)
+    corr = np.ma.filled(np.ma.asarray(corr), 0.0)
+    corr = np.atleast_2d(corr)
+    corr = np.clip(corr, -1.0, 1.0)
+    np.fill_diagonal(corr, 1.0)
+
+    # Pass-2 marginal std per bin.
+    std = np.nanstd(c0_pass2, axis=0, ddof=1)
+    std = np.nan_to_num(std, nan=0.0, posinf=0.0, neginf=0.0)
+
+    cov_abs = corr * np.outer(std, std)
+    np.fill_diagonal(cov_abs, std ** 2)
+    cov_abs = 0.5 * (cov_abs + cov_abs.T)
+
+    denom = np.outer(c0_nominal, c0_nominal)
+    rel_cov = np.divide(
+        cov_abs, denom, out=np.zeros((n_bins, n_bins)), where=denom > 0.0,
+    )
+    rel_cov = 0.5 * (rel_cov + rel_cov.T)
+    return rel_cov, cov_abs
 
 
 def plot_sampled_angular_distributions(

@@ -58,6 +58,7 @@ All knobs are configured in the CONFIGURATION block below — run with:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,14 +87,25 @@ import chi2_metrics
 
 # Run versioning. Outputs land in `<REPORT_DIR>/run_<RUN_ID>/`; bump this to
 # start a fresh run without overwriting earlier ones.
-RUN_ID: str = "080"
+#
+# Overridable from the environment so scoring a different pipeline run lands in
+# its own directory instead of overwriting run_082 — which the thesis rests on.
+RUN_ID: str = os.environ.get("KIKA_CHI2_RUN_ID", "082").strip()
 
 # Which methodologies to run. Any non-empty subset of the PATHS keys. Each entry
 # needs its parquet + .eval_cov.npz sidecar built first by the matching
 # scripts/precompute_chi2_*.py. The folded_al_c0_ns{1,3} entries are built by
 # scripts/precompute_chi2_folded_al_c0.py (set N_SIGMA=1.0 then 3.0 and rerun).
 # Original headline set: ["exfor_c0", "library_c0", "folded_c0"].
-METHODOLOGIES_TO_RUN: List[str] = ["folded_al_c0_ns1", "folded_al_c0_ns3"]
+METHODOLOGIES_TO_RUN: List[str] = ["predictive", "exfor_c0"]
+
+# Overridable from the environment so a sweep script (run_fold_sweep.sh) can
+# select a different set without editing this file. Comma-separated.
+if os.environ.get("KIKA_CHI2_METHODOLOGIES"):
+    METHODOLOGIES_TO_RUN = [
+        m.strip() for m in os.environ["KIKA_CHI2_METHODOLOGIES"].split(",")
+        if m.strip()
+    ]
 
 # Per-methodology I/O. The .npz sidecar is inferred as `<parquet>.eval_cov.npz`.
 #
@@ -108,14 +120,274 @@ METHODOLOGIES_TO_RUN: List[str] = ["folded_al_c0_ns1", "folded_al_c0_ns3"]
 # c₀ from the library's own MF3 (not fit per energy), so its 8% normalization is
 # a genuine global mode and stays None.
 PATHS: Dict[str, Dict[str, Optional[str]]] = {
+    # PRIMARY. Each library judged by what it ships: its own MF3 + MF4 forward-
+    # folded through each experiment's TOF resolution (product fold), covariance
+    # = its own MF34 + MF33. Written by scripts/precompute_chi2_predictive.py,
+    # which supersedes library_c0 / folded_c0 / folded_al_c0 (each a special
+    # case of it). c0 is a smooth function of energy, not a per-energy fit, so
+    # the normalization is a genuine experiment-wide mode → block col None.
+    "predictive": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_82.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — shipped MF3+MF4 resolution-folded, MF34+MF33 eval σ",
+        "systematic_block_col": None,
+    },
+    # ── The EN-RSL pair. Same code, same libraries, same everything as
+    # `predictive` above; they differ only in which σ_E the *fold* uses and
+    # which pipeline run supplies This_work.
+    #
+    # `predictive` itself was built 2026-07-28, before the declared EXFOR
+    # resolutions were read (scripts/tof_parameters.py, deployed 2026-07-30).
+    # σ_E is now ~3.5× wider for the 74 subentries that declare EN-RSL*, and the
+    # fold is part of the *scoring*, not just the evaluation — so every library,
+    # JEFF and JENDL included, scores differently now. That is why `predictive`
+    # cannot be compared against anything built after 2026-07-30, and why
+    # repr_mg failed its validation gate against it.
+    #
+    #   predictive_82_enrsl : run-82 evaluation, new σ_E  → isolates the effect
+    #                         of the fix on SCORING. Also the repaired reference
+    #                         the repr_* gate should be checked against.
+    #   predictive_83       : run-83 evaluation, new σ_E  → isolates the effect
+    #                         of the fix on the EVALUATION, read against
+    #                         predictive_82_enrsl.
+    #
+    # Two invariances make this pair self-checking. Run 83's nominal_fits.parquet
+    # is byte-identical to run 82's, so between these two entries:
+    #   • JEFF and JENDL must be identical in every variant (neither file moved);
+    #   • This_work V2 must be identical (V2 excludes σ_eval, and the MF4 central
+    #     values did not move).
+    # Only V4 should move — run 83 changed MF34 *correlations*, not variances.
+    # Anything else moving means an unintended knob moved with it.
+    "predictive_82_enrsl": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_82_enrsl.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-82 evaluation, declared EN-RSL σ_E in the fold",
+        "systematic_block_col": None,
+    },
+    "predictive_83": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_83.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-83 evaluation (EN-RSL), declared σ_E in the fold",
+        "systematic_block_col": None,
+    },
+    # Run 84 = run 83 re-evaluated with the τ-IRLS refit on the GLS kernel
+    # (TAU_REFIT_USE_GLS=True). Single-variable against predictive_83: same
+    # σ_E, same EN-RSL, and the runner pins DEGREE_WEIGHT_FLOOR=0.01 and
+    # MC_CAP_FROM_SUPPORT_ONLY=0 back to v2 so the fork's other two research
+    # knobs stay out of it. The τ-GLS solver is the ONLY difference.
+    #
+    # Unlike run 83 this DOES move the central values — median |Δa|/|a| ≈ 5 %
+    # at ℓ=1 and ≈ 13 % at ℓ=5, with frozen_degree changing in 12 % of bins —
+    # so V2 is expected to move here, and V2 is the variant that actually
+    # answers the question (it is the pure central-value metric; V4 mixes in
+    # the covariance, which the solver change also perturbs).
+    "predictive_84": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_84.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-84 evaluation (τ-IRLS on GLS), declared σ_E in the fold",
+        "systematic_block_col": None,
+    },
+    # Run 85 = run 84 + the Phase-3 mixture. Single-variable against
+    # predictive_84: they share the τ-GLS solver, σ_E, the manifest and
+    # DEGREE_WEIGHT_FLOOR=0.01. Verified on the parquets: run 85's `win_c_*` is
+    # bit-identical to run 84's `c_*` and `frozen_degree` moves in 0 % of bins,
+    # so the underlying fit is the same and only what is *shipped* differs.
+    #
+    # ⚠ READ V2 **AND** V4, and do NOT carry run 83's reading over. Run 83 left
+    # the centrals byte-identical, which made V2 an invariance gate there. Run 85
+    # moves both channels — MF4 ships the mixture mean (median |Δa|/|a| 2 % at
+    # ℓ=1 rising to 20 % at ℓ=5,6) and MF34 ships the mixture covariance — so:
+    #   V2 → did the mixture MEAN help the central value?
+    #   V4 → did the mixture COVARIANCE change the fit?
+    # Neither is a gate. JEFF and JENDL remain hard invariances.
+    "predictive_85": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_85.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-85 evaluation (τ-GLS + Phase-3 mixture), declared σ_E in the fold",
+        "systematic_block_col": None,
+    },
+    # Run 85 again, but scoring the FINE ENDF instead of the multigroup one.
+    # This is the first measurement of the Phase-3 mixture that is not empty.
+    #
+    # WHY IT IS NEEDED. `predictive_85` scored `_mg.endf`, and the mixture never
+    # reached that file: dead parameters at ℓ=6 go 92.3 % → 1.0 % on the fine
+    # grid and 81.6 % → 81.7 % on the multigroup one (roadmap §8.4). So run 85's
+    # V4 (−2.25 %) and its flat calibration measured the mixture's *absence*.
+    # The fine ENDF already carries it — no re-evaluation required.
+    #
+    # The two files carry the SAME MF4 centrals and the SAME MF33 (both ship the
+    # ungrouped 1738-group MF33), so `predictive_85_fine` vs `predictive_85` is a
+    # pure MF34-representation difference — the same clean contrast §3.1 relies
+    # on. Its own baseline is `repr_fine` from the representation sweep, which is
+    # the fine product without the mixture.
+    #
+    # Needs 300G: the fine MF34 is ~734 MB on disk, ~0.5 GB parsed.
+    "predictive_85_fine": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_85_fine.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-85 evaluation, FINE MF34 (τ-GLS + Phase-3 mixture), declared σ_E in the fold",
+        "systematic_block_col": None,
+    },
+    # Run 86 — the §8.4 fix, in the product we actually ship.
+    #
+    # Run 85 proved Phase 3 reached the fine MF34 and not the multigroup one,
+    # because `perform_adaptive_multigroup_collapse` rebuilt the legacy
+    # winner-take-all mask internally from `nr.frozen_degree`. That is now
+    # overridable via `valid_orders_fn` (default = legacy, so v2 stays
+    # bit-identical) and the fork passes its q_ℓ rule through. Run 86 is the
+    # re-evaluation that makes the fix take effect.
+    #
+    # Read it against `predictive_85_fine` (the mixture, fine grid — what the
+    # covariance does when it is present) and `predictive_85` (the mixture
+    # absent from the multigroup file — the bug). Run 86 should land near the
+    # former, not the latter.
+    #
+    # Also carries the first §9.4.2 [XCORR] measurement: Cov(c₀, a_ℓ) over the
+    # shared Pass-2 replicas. Diagnostic-only, so it cannot move any number in
+    # this table — read it from run 86's log, not from here.
+    #
+    # 100G suffices: this scores `_mg.endf` (~205 MB), not the fine file.
+    "predictive_86": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_86.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-86 evaluation (τ-GLS + Phase-3 mixture, multigroup mask fixed), declared σ_E in the fold",
+        "systematic_block_col": None,
+    },
+    # Run 87 — the SAME run-86 ENDF, scored with the measured MF33↔MF34 cross
+    # block switched on. No re-evaluation: the sidecars run 86 already wrote are
+    # fed to `build_mf33_mf34_cross_block`, which every run from 82 to 86 fed
+    # None. So `predictive_87` vs `predictive_86` isolates the cross term and
+    # nothing else — the MF4 centrals, the MF33 and the MF34 are the same file.
+    #
+    # V2 MUST NOT MOVE: it excludes Σ_eval entirely. JEFF and JENDL must not move
+    # either — they keep a zero cross block. Anything else is a knob that moved
+    # unintentionally. V1/V3 (diagonal Σ_eval) and V4 (dense) are the answer.
+    #
+    # What is being tested: run 86 measured Cov(c₀, a_ℓ) in PARAMETER space —
+    # median |ρ| = 0.594 at a₁, but sign-alternating in energy. Σ_cross carries
+    # P_ℓ(μ) on top of that, which alternates in ANGLE, so whether the net per
+    # datapoint inflates or deflates σ_eval cannot be read off ρ. This run is how
+    # that question gets an answer.
+    #
+    # ⚠ Read the [PSD] lines in the precompute log before trusting any number
+    # here. Σ^MF33 and Σ^MF34 come from the shipped (collapsed, guarded) file
+    # while Σ^cross comes from the raw MC, so the sum is not PSD by construction.
+    #
+    # 300G: the cross block is materialised densely per (experiment, order).
+    "predictive_87": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_87.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-86 evaluation + measured MF33↔MF34 cross block, declared σ_E in the fold",
+        "systematic_block_col": None,
+    },
+    # Damped cross block. Run 87 at full strength put 1005 of 46819 This_work
+    # points (2.15 %) at a NEGATIVE Σ_eval diagonal — Σ^MF33 and Σ^MF34 went
+    # through the multigroup collapse and the near-zero guard while Σ^cross came
+    # from the raw MC, so the per-point Cauchy–Schwarz bound is violable and it
+    # is violated. Those points lose their evaluated uncertainty in V1/V3 and
+    # make V4 indefinite, so run 87's headline numbers are a diagnostic, not a
+    # result.
+    #
+    # Σ_eval(s) = Σ^MF33 + Σ^MF34 + s·Σ^cross is EXACTLY LINEAR in s, so damping
+    # brackets the largest self-consistent cross term instead of guessing one.
+    # Two points, and the pair is a self-check as well as a scan: the s=0.25
+    # diagonal must equal the s=0.5 one linearly interpolated, or something other
+    # than the cross block moved.
+    #
+    # These runs carry `sigma_eval_var_diag` (the SIGNED, unclipped diagonal),
+    # which is what makes the exact PSD-safe scale computable offline from a
+    # 5 MB parquet rather than by further scanning.
+    "predictive_87_s050": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_87_s050.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-86 evaluation + MF33↔MF34 cross block damped to 0.50, declared σ_E in the fold",
+        "systematic_block_col": None,
+    },
+    "predictive_87_s025": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_87_s025.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-86 evaluation + MF33↔MF34 cross block damped to 0.25, declared σ_E in the fold",
+        "systematic_block_col": None,
+    },
+    # Run 88 — the COMPLETE cross block (roadmap §10.1.6). The first evaluation
+    # to ship Cov(c₀(E_i), a_ℓ(E_j)) with its cross-ENERGY structure instead of
+    # the within-bin diagonal.
+    #
+    # WHY THIS RUN EXISTS. Runs 87/87_s050/87_s025 all failed to produce a χ² at
+    # all: Σ_V4 was not positive definite and `chi2_metrics._solve` died on
+    # Cholesky. §10.1.4 measured the PSD-safe damping scale at ≤ 0.052 against a
+    # diagonal ceiling of 0.276, i.e. a token rather than a measurement, and
+    # §10.1.5 then proved damping and representation work are both dead ends:
+    # with Cx = 0 the joint parameter-space covariance is PSD at −1e-11, and
+    # enforcing Cauchy–Schwarz — which is exactly what a consistent collapse
+    # delivers — moves λ_min by 12 % in the best energy window and ~0.01 % in the
+    # rest. The defect was never the representation. It was that we shipped a
+    # PARTIAL Level A (within-bin only) against complete MF33/MF34 diagonals.
+    #
+    # Proved on run 81's paired replicas: the full joint sample covariance is PSD
+    # at −1e-18, and zeroing ONLY the cross-energy entries makes it non-PSD in
+    # every window, 13 orders worse, with those entries the same size as the ones
+    # kept and ~159× more numerous.
+    #
+    # ⚠ WHAT MUST NOT MOVE. Run 88 is a fresh evaluation, so unlike run 87 it is
+    # NOT an isolation of the cross term — the centrals, MF33 and MF34 are all
+    # rebuilt. JEFF and JENDL must still be identical (they keep a zero cross
+    # block); anything else moving in them is a knob that moved unintentionally.
+    # V2 vs run 86 measures whatever else changed in the evaluation, not the
+    # cross term, so do not read it as the cross term's cost.
+    #
+    # ⚠ READ THE [PSD] LINES FIRST. The joint is PSD by construction only in the
+    # raw MC; Σ^MF33 and Σ^MF34 still pass through the collapse and the near-zero
+    # guard, neither of which is a congruence. If the [PSD] lines are clean, the
+    # §10.1.3 theorem is back and this is the shippable file. If they are not,
+    # the residual is the representation term §10.1.5 priced at ~12 %.
+    #
+    # ⚠ AND CHECK `[XCROSS] form=full` IN THE PRECOMPUTE LOG. The loader falls
+    # back to the within-bin block with a RuntimeWarning when the full sidecar is
+    # absent, which would silently reproduce run 87.
+    "predictive_88": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_88.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-88 evaluation with the COMPLETE MF33↔MF34 cross block, declared σ_E in the fold",
+        "systematic_block_col": None,
+    },
+    # Fold-mode sweep. Identical to `predictive` in every respect except which
+    # part of the forward model is resolution-averaged (FOLD_MODE in
+    # precompute_chi2_predictive.py). Compare V2 across these to decide, over
+    # every bin in the database rather than a handful of hand-picked energies,
+    # whether the product fold is really the right convention.
+    "predictive_factors": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_82_factors.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive_factors",
+        "title":      "χ² analysis — predictive, factors averaged <σ>·F(<a_l>)",
+        "systematic_block_col": None,
+    },
+    "predictive_foldsigma": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_82_foldsigma.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive_foldsigma",
+        "title":      "χ² analysis — predictive, magnitude averaged only <σ>·F(a_l(E0))",
+        "systematic_block_col": None,
+    },
+    "predictive_foldal": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_82_foldal.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive_foldal",
+        "title":      "χ² analysis — predictive, Legendre shape averaged only σ(E0)·F(<a_l>)",
+        "systematic_block_col": None,
+    },
+    "predictive_nofold": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_82_nofold.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive_nofold",
+        "title":      "χ² analysis — predictive, no resolution model σ(E0)·F(a_l(E0))",
+        "systematic_block_col": None,
+    },
     "exfor_c0": {
-        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_exfor_c0_80.parquet",
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_exfor_c0_82.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_exfor_c0",
         "title":      "χ² analysis — c₀ from EXFOR Kinney/Smith fit, MF34 eval σ",
         "systematic_block_col": "energy_mev",
     },
     "library_c0": {
-        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_library_c0_80.parquet",
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_library_c0_82.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_library_c0",
         "title":      "χ² analysis — c₀ from library MF3, MF34+MF33 eval σ",
         "systematic_block_col": None,
@@ -126,7 +398,7 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
     # normalization is a genuine experiment-wide mode → systematic_block_col=None,
     # same as library_c0. Parquet written by scripts/precompute_chi2_folded_c0.py.
     "folded_c0": {
-        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_c0_80.parquet",
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_c0_82.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_folded_c0",
         "title":      "χ² analysis — c₀ from resolution-folded library MF3, MF34 eval σ",
         "systematic_block_col": None,
@@ -137,18 +409,55 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
     # scripts/precompute_chi2_folded_al_c0.py (edit N_SIGMA and rerun for each).
     # Same global-normalization reasoning as folded_c0 → systematic_block_col=None.
     "folded_al_c0_ns1": {
-        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_al_c0_80_ns1.parquet",
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_al_c0_82_ns1.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_folded_al_c0_ns1",
         "title":      "χ² analysis — c₀ and a_l resolution-folded (±1σ window), MF34 eval σ",
         "systematic_block_col": None,
     },
     "folded_al_c0_ns3": {
-        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_al_c0_80_ns3.parquet",
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_folded_al_c0_82_ns3.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_folded_al_c0_ns3",
         "title":      "χ² analysis — c₀ and a_l resolution-folded (±3σ window), MF34 eval σ",
         "systematic_block_col": None,
     },
 }
+
+# MF34 representation study — fine vs multigroup, and Legendre-order truncation.
+# Registered programmatically because the mode table lives in the precompute
+# script and duplicating a dozen near-identical dict literals here would
+# guarantee they drift apart. Written by
+# scripts/precompute_chi2_representation.py (REPR_MODE=<mode>); everything
+# except the This_work MF4/MF34 representation is identical to `predictive`,
+# so systematic_block_col matches it.
+#
+# Read the results as:
+#   repr_fine  vs repr_mg          -> what multigroup collapse costs (V4 only;
+#                                     the two files share MF4 and MF33)
+#   repr_fine  vs repr_fine_covN   -> what MF34 orders > N are worth (V4 only)
+#   repr_fine  vs repr_fine_evalN  -> what evaluating above order N is worth
+#                                     (V2 and V4)
+# repr_mg must reproduce `predictive` run 082. It is the validation gate, not
+# a result.
+_REPR_MODES = {
+    "fine":       "fine grid, L=6 — the reference",
+    "mg":         "multigroup grid, L=6 — must reproduce `predictive`",
+    "fine_cov3":  "fine grid, MF4 L=6, MF34 l<=3",
+    "fine_cov4":  "fine grid, MF4 L=6, MF34 l<=4",
+    "fine_cov5":  "fine grid, MF4 L=6, MF34 l<=5",
+    "mg_cov3":    "multigroup grid, MF4 L=6, MF34 l<=3",
+    "mg_cov4":    "multigroup grid, MF4 L=6, MF34 l<=4",
+    "mg_cov5":    "multigroup grid, MF4 L=6, MF34 l<=5",
+    "fine_eval3": "fine grid, MF4 and MF34 both l<=3",
+    "fine_eval4": "fine grid, MF4 and MF34 both l<=4",
+    "fine_eval5": "fine grid, MF4 and MF34 both l<=5",
+}
+for _mode, _desc in _REPR_MODES.items():
+    PATHS[f"repr_{_mode}"] = {
+        "parquet":    f"/share_snc/snc/JuanMonleon/chi2/chi2_data_repr_82_{_mode}.parquet",
+        "report_dir": f"/share_snc/snc/JuanMonleon/CHI_Figures/chi2_repr_{_mode}",
+        "title":      f"χ² analysis — MF34 representation: {_desc}",
+        "systematic_block_col": None,
+    }
 
 # Analysis window (MeV), K&S anchor experiment IDs, Cierjacks anchor IDs.
 E_MIN_MEV = 0.85
@@ -177,10 +486,35 @@ LIB_YEAR_OFFSETS = {"JEFF": -0.3, "JENDL": 0.0, "This_work": 0.3}
 # correlated systematics as independent noise.
 # - V1 textbook diag    : Σ = diag(σ_stat² + (σ_indep·y)² + (σ_dep·y)² + σ_eval_diag²)
 # - V2 rank-2 only      : Σ = D + u uᵀ + v vᵀ          (no eval cov)
-# - V3 rank-2 + diag    : Σ = (D + diag σ_eval_diag²) + u uᵀ + v vᵀ  (chapter headline)
-# - V4 rank-2 + dense   : Σ = D + u uᵀ + v vᵀ + Σ_eval_block  (diagnostic only;
-#                          MF34 block is rank-deficient by construction)
-VARIANTS: Tuple[str, ...] = ("V1", "V2", "V3", "V4")
+# - V3 rank-2 + diag    : Σ = (D + diag σ_eval_diag²) + u uᵀ + v vᵀ
+# - V4 rank-2 + dense   : Σ = D + u uᵀ + v vᵀ + Σ_eval_block
+#
+# REPORTED PAIR: V2 and V4. Chapter 3 ships chi2_V2.png (EXFOR-only budget) and
+# chi2_V4.png (full budget), and the per-experiment strip figure is V4. V1 and V3
+# are the diagonal approximations of V2 and V4 — they treat correlated
+# systematics (V1) or the evaluation's energy/order correlations (V3) as
+# independent noise — so they are kept as cross-checks and not reported.
+# Σ_eval being rank-deficient on its own is not a problem for V4: it enters only
+# as D + u uᵀ + v vᵀ + Σ_eval, and D is strictly positive.
+# NOTE: an earlier version of this comment called V3 the chapter headline and V4
+# "diagnostic only". That contradicts what the thesis actually ships; see
+# docs/thesis_chi2_review.md before acting on either claim.
+# Reported variants. V1 and V3 are DELIBERATELY OMITTED (Juan, 2026-08-03): the
+# two that carry the argument are V2 (rank-2 only — the pure central-value
+# metric, σ_eval excluded) and V4 (rank-2 + dense eval — the only one that sees
+# the off-diagonal structure Phase 3 actually adds). V1/V3 are diagonal
+# statistics that mostly restate the coverage table.
+#
+# ⚠ What this does and does not save. It halves the report tables and the
+# per-(subset × variant) figures — the bulk of the wall-clock in the reporting
+# stage. It does NOT save the χ² computation: the per-experiment chi2_v1..v4
+# columns are still built upstream, and the expensive one is V4's dense eval
+# blocks, which we keep. Add "V1"/"V3" back here to restore them; nothing else
+# needs changing.
+#
+# Coverage is unaffected: coverage_table() computes σ_total itself and never
+# reads VARIANTS, so |z|<1 stays even though its heading names V1's σ.
+VARIANTS: Tuple[str, ...] = ("V2", "V4")
 VARIANT_LABELS: Dict[str, str] = {
     "V1": "V1 textbook diag",
     "V2": "V2 rank-2 only",
@@ -193,7 +527,7 @@ VARIANT_LABELS: Dict[str, str] = {
 # and avoids the rank-1/rank-2 absorption artefact that lets libraries with
 # uniform multiplicative biases (e.g. JEFF vs Cierjacks) get a free pass.
 # V2/V3/V4 are still computed and tabulated for cross-check.
-PRIMARY_VARIANT: str = "V1"
+PRIMARY_VARIANT: str = "V4"
 
 # Subsets — six slices of the dataset. `no_Cierjacks` is the recommended
 # headline because Cierjacks 1978 contributes 61% of all points and is a
@@ -522,11 +856,12 @@ def per_experiment_win_tally(
             row[f"{variant} worst"] = worst
         rows.append(row)
     out = pd.DataFrame(rows)
-    n_v1 = n_total_per_v.get("V1", 0)
+    # Was hardcoded to V1, which now reports 0 whenever V1 is not in VARIANTS.
+    n_ref = n_total_per_v.get(PRIMARY_VARIANT, 0)
     report.append(
         f"\n**Per-experiment ranking, subset `{subset_key}`** "
         f"(count of experiments where each library has best/mid/worst χ²/N; "
-        f"N_experiments under V1 = {n_v1}):\n\n"
+        f"N_experiments under {PRIMARY_VARIANT} = {n_ref}):\n\n"
     )
     show_cols = ["Library"] + [
         f"{v} {kind}" for v in VARIANTS for kind in ("best", "mid", "worst")

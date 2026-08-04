@@ -514,6 +514,7 @@ def compute_energy_bins_with_tof_resolution(
     delta_t_ns: float = 5.0,
     flight_path_m: float = 27.037,
     reference_grid_ev: Optional[np.ndarray] = None,
+    delta_t_is_fwhm: bool = True,
 ) -> List[EnergyBinInfo]:
     """
     Compute energy bins with TOF-based energy resolution.
@@ -569,6 +570,7 @@ def compute_energy_bins_with_tof_resolution(
             E_mev=e_mev,
             delta_t_ns=delta_t_ns,
             flight_path_m=flight_path_m,
+            delta_t_is_fwhm=delta_t_is_fwhm,
         )
 
         # Compute bin boundaries (midpoints to neighbors)
@@ -1033,6 +1035,9 @@ def filter_exfor_with_energy_bin(
     sigma_norm: float = 0.05,                     # Normalization uncertainty for GLS-ESS weighting
     band_aware_ess: bool = False,                 # Split Kish budget by F/M/B bands
     max_experiment_weight_fraction: float = 1.0,  # 1.0 = disabled
+    # Membership window (see "Membership vs weighting" in the notes)
+    membership_k_sigma: float = 0.0,              # 0.0 = hard bin edges (default)
+    sigma_E_mev: Optional[float] = None,          # required when membership_k_sigma > 0
     logger=None,
 ) -> Tuple[pd.DataFrame, List[Dict], np.ndarray, KernelDiagnostics, Dict]:
     """
@@ -1080,6 +1085,25 @@ def filter_exfor_with_energy_bin(
         Maximum allowed weight fraction per experiment (default: 1.0 = disabled).
         If < 1.0, experiments exceeding this fraction are scaled down.
         Applied AFTER normalize_by_n_points if both are enabled.
+    membership_k_sigma : float, optional
+        Widens the window that decides WHICH datasets may constrain this bin,
+        to ``target_energy_mev +- membership_k_sigma * sigma_E_mev`` (unioned
+        with the bin edges, so data is never lost). Default 0.0 keeps the hard
+        bin edges.
+
+        This is deliberately a membership knob and not a weighting knob. The
+        analysis grid here is ~5x finer than any experiment's TOF resolution,
+        so a bin-width window renews almost the entire point set from one bin
+        to the next; widening it to the resolution scale makes the composition
+        vary slowly. The selected point per experiment is still the one nearest
+        the target and still carries weight 1.0 — no Gaussian overlap weighting
+        is applied. That distinction matters: every EXFOR datum is ALREADY
+        folded by its own resolution, so weighting the fit by an overlap kernel
+        of the same width would convolve a second time and hand back an
+        effective resolution of sqrt(2)*sigma_E. Widening membership does not.
+    sigma_E_mev : float, optional
+        The bin's TOF energy resolution. Required when membership_k_sigma > 0;
+        ignored otherwise.
 
     Returns
     -------
@@ -1109,9 +1133,20 @@ def filter_exfor_with_energy_bin(
     # experiment_candidates: {(entry, subentry): [(energy, df, meta), ...]}
     experiment_candidates: Dict[Tuple[str, str], List[Tuple[float, pd.DataFrame, Dict]]] = defaultdict(list)
 
+    # Membership window. Defaults to the bin edges; when membership_k_sigma > 0
+    # it is unioned with +-k*sigma_E about the target so an experiment whose
+    # resolution spans many bins can constrain all of them. Only membership is
+    # affected — dedupe still picks the point nearest target_energy_mev and the
+    # weight stays 1.0.
+    member_lower_mev, member_upper_mev = bin_lower_mev, bin_upper_mev
+    if membership_k_sigma > 0 and sigma_E_mev and sigma_E_mev > 0:
+        half_width = membership_k_sigma * sigma_E_mev
+        member_lower_mev = min(bin_lower_mev, target_energy_mev - half_width)
+        member_upper_mev = max(bin_upper_mev, target_energy_mev + half_width)
+
     for available_energy in sorted_energies:
         # Exact bin matching - include if within [lower, upper]
-        if available_energy < bin_lower_mev or available_energy > bin_upper_mev:
+        if available_energy < member_lower_mev or available_energy > member_upper_mev:
             continue
 
         entries = exfor_cache.get(available_energy, [])
@@ -1727,6 +1762,8 @@ def precompute_overlap_weights(
     tof_params_cache: Optional[Dict] = None,
     default_flight_path_m: float = 27.037,
     default_time_resolution_ns: float = 5.0,
+    default_delta_t_is_fwhm: bool = True,
+    logger=None,
 ) -> Dict[int, List[Tuple[Dict, float]]]:
     """Compute overlap weights from ALL datasets across all bins.
 
@@ -1762,6 +1799,8 @@ def precompute_overlap_weights(
     # Collect all unique datasets across all bins
     all_datasets = []
     seen = set()
+    # Which subentries resolved to which TOF convention, for the audit below.
+    _conv_seen: Dict[str, Any] = {}
     for nr in nominal_results:
         if not nr.has_data or nr.interpolated:
             continue
@@ -1803,9 +1842,11 @@ def precompute_overlap_weights(
                 tof_params = get_tof_parameters(
                     subentry_id, tof_params_cache,
                     default_flight_path_m, default_time_resolution_ns,
+                    default_delta_t_is_fwhm=default_delta_t_is_fwhm,
                 )
                 ds_sigma_E = compute_sigma_E(exfor_energy, tof_params)
                 ds_tof_source = tof_params.source
+                _conv_seen.setdefault(subentry_id, tof_params)
             else:
                 ds_sigma_E = None  # will use bin sigma_E as fallback
                 ds_tof_source = "bin_default"
@@ -1843,6 +1884,32 @@ def precompute_overlap_weights(
 
         overlap_weights[bin_info.index] = bin_datasets
 
+    # Audit the TOF convention actually applied per subentry. sigma_E scales by
+    # ~2.355 between the FWHM and sigma readings, and it decides how far each
+    # experimental point spreads across bins — so a silent fallback to the
+    # pipeline default is worth naming rather than assuming.
+    if logger is not None and _conv_seen:
+        from_file = sorted(
+            s for s, p in _conv_seen.items() if p.source == "file"
+        )
+        defaulted = sorted(
+            s for s, p in _conv_seen.items() if p.source != "file"
+        )
+        conv = "FWHM" if default_delta_t_is_fwhm else "sigma"
+        logger.info(
+            f"  TOF convention: delta_t read as {conv} by default; "
+            f"{len(from_file)} subentry(ies) had file parameters, "
+            f"{len(defaulted)} fell back to L={default_flight_path_m} m, "
+            f"dt={default_time_resolution_ns} ns"
+        )
+        if defaulted:
+            logger.warning(
+                f"  [TOF] No per-experiment parameters for: "
+                f"{', '.join(defaulted[:12])}"
+                f"{' ...' if len(defaulted) > 12 else ''} — these inherit the "
+                f"global delta_t and its {conv} reading."
+            )
+
     return overlap_weights
 
 
@@ -1879,7 +1946,7 @@ def _run_one_kw_sample(args_tuple):
         overlap_weights = sh['overlap_weights']
         energy_bins_data = sh['energy_bins_data']
         sigma_norm = sh['sigma_norm']
-        sigma_norm_elastic = sh.get('sigma_norm_elastic', 0.0)
+        sigma_norm_common_mode = sh.get('sigma_norm_common_mode', 0.0)
         norm_dist = sh['norm_dist']
         max_degree = sh['max_degree']
         ridge_lambda = sh['ridge_lambda']
@@ -1900,6 +1967,7 @@ def _run_one_kw_sample(args_tuple):
         tau_info_by_bin = sh['tau_info_by_bin']
         mc_order_cap_by_bin = sh['mc_order_cap_by_bin']
         band_aware_ess = sh.get('band_aware_ess', False)
+        record_c0_channel = sh.get('record_c0_channel', False)
     else:
         # Legacy path: full args tuple (sequential mode or old callers)
         (
@@ -1925,27 +1993,28 @@ def _run_one_kw_sample(args_tuple):
             tau_info_by_bin,
             mc_order_cap_by_bin,
         ) = args_tuple
-        sigma_norm_elastic = 0.0
+        sigma_norm_common_mode = 0.0
         band_aware_ess = False
         fix_c0_at_nominal = False
         sys_aware_mc_fit = False
+        record_c0_channel = False
 
     rng = np.random.default_rng(base_seed + s_idx)
 
-    # Step 0: Draw one global elastic-XS factor per MC sample.
-    # Models uncertainty in the shared elastic reference / monitor that all
+    # Step 0: Draw one global common-mode normalization factor per MC sample.
+    # Models uncertainty in the shared reference / monitor that all
     # experiments rely on. Applied to every data point regardless of which
     # experiment produced it; introduces a common-mode correlation across
     # all bins and all entries for this sample.
-    if sigma_norm_elastic > 0:
+    if sigma_norm_common_mode > 0:
         if norm_dist == "lognormal":
-            elastic_factor = float(rng.lognormal(
-                mean=-0.5 * sigma_norm_elastic ** 2, sigma=sigma_norm_elastic
+            common_mode_factor = float(rng.lognormal(
+                mean=-0.5 * sigma_norm_common_mode ** 2, sigma=sigma_norm_common_mode
             ))
         else:
-            elastic_factor = float(rng.normal(1.0, sigma_norm_elastic))
+            common_mode_factor = float(rng.normal(1.0, sigma_norm_common_mode))
     else:
-        elastic_factor = 1.0
+        common_mode_factor = 1.0
 
     # Step 1: Draw ONE shared standard-normal `z` per experiment per sample.
     # The same z is applied to every point of every dataset that experiment
@@ -2018,7 +2087,7 @@ def _run_one_kw_sample(args_tuple):
                 norm_per_pt = 1.0 + z * sigma_per_pt
             # Compose elastic (global, all experiments) with per-experiment
             # shared-direction per-point factor.
-            values = df['value'].to_numpy() * (elastic_factor * norm_per_pt)
+            values = df['value'].to_numpy() * (common_mode_factor * norm_per_pt)
             # Optional MF33 multiplicative factor (v3 hook). When the caller
             # passes mf33_dsigma_per_sample + mf33_c0_per_bin + a home-bin map,
             # apply (1 + δσ/c0_home) to this dataset on top of the per-experiment
@@ -2026,6 +2095,14 @@ def _run_one_kw_sample(args_tuple):
             # within a sample (drawn once from MF33's full covariance), so
             # bins inherit MF33-driven cross-bin correlation through the
             # per-dataset home-bin lookup. Default-off → exact v2 behavior.
+            #
+            # WARNING (MF33/MF34 roadmap, Phase 1): do NOT repurpose this hook to
+            # derive an MF33↔MF34 cross-covariance. It injects an *assumed* MF33
+            # draw into the DCS while c0 is pinned (fix_c0_at_nominal), so the
+            # resulting a_l = c_l/c0 correlation is manufactured from fit
+            # residuals, not measured. A genuine sigma↔a_l cross block must be
+            # estimated from a joint fit (roadmap Phase 3), never from this
+            # convenience factor. See kika-workspace/docs/mf3_mf33_roadmap.md.
             mf33_dsigma_per_sample = sh.get('mf33_dsigma_per_sample') if isinstance(args_tuple, int) else None
             if mf33_dsigma_per_sample is not None:
                 home_map = sh['mf33_home_bin_by_e_key']
@@ -2061,6 +2138,9 @@ def _run_one_kw_sample(args_tuple):
 
     # Step 3-4: For each bin, collect perturbed data, fit
     sample_coeffs = {}
+    # Phase-2 magnitude channel: fixed-shape c0 per bin for this sample. Stays
+    # empty (and is dropped from the return) unless recording is on.
+    sample_c0 = {} if record_c0_channel else None
     # Phase D audit follow-up: count bins where the per-bin coeffs needed a
     # positivity projection (only when projection is enabled). Surfaced via the
     # worker's return tuple so the orchestrator can aggregate across samples.
@@ -2289,7 +2369,7 @@ def _run_one_kw_sample(args_tuple):
             c0_fix_arg = float(nom_for_freeze_high[0])
 
         try:
-            coef_df, _ = sample_legendre_coefficients(
+            coef_df, fit_info = sample_legendre_coefficients(
                 fit_df,
                 value_col="value",
                 unc_col="unc",
@@ -2306,7 +2386,13 @@ def _run_one_kw_sample(args_tuple):
                 max_band_scale=max_band_scale,
                 freeze_c0=freeze_c0,
                 fixed_c0_value=c0_fix_arg,
+                record_c0_scale=record_c0_channel,
+                c0_scale_ref_coeffs=nom_for_freeze_high if record_c0_channel else None,
             )
+            # Fixed-shape c0 scale of this sample's (shared-draw) perturbed data
+            # against the frozen nominal shape — read-only, doesn't touch coeffs.
+            if record_c0_channel and fit_info.get("c0_samples") is not None:
+                sample_c0[bin_idx] = float(np.asarray(fit_info["c0_samples"]).ravel()[0])
             coeffs = coef_df.iloc[0].to_numpy()
             if len(coeffs) < max_degree + 1:
                 coeffs = np.pad(coeffs, (0, max_degree + 1 - len(coeffs)))
@@ -2343,7 +2429,13 @@ def _run_one_kw_sample(args_tuple):
             nom = nominal_coeffs_by_bin.get(bin_idx)
             if nom is not None:
                 sample_coeffs[bin_idx] = endf_normalize_legendre_coeffs(nom, include_a0=False)
+                if record_c0_channel and len(nom) > 0:
+                    # Fall back to the unperturbed magnitude so the c0 sample
+                    # matrix stays aligned with the coeff samples.
+                    sample_c0[bin_idx] = float(nom[0])
 
+    if record_c0_channel:
+        return s_idx, sample_coeffs, n_pos_violations, sample_c0
     return s_idx, sample_coeffs, n_pos_violations
 
 
@@ -2354,7 +2446,7 @@ def run_mc_with_kernel_weights(
     n_samples: int,
     n_workers: int,
     sigma_norm: float,
-    sigma_norm_elastic: float,
+    sigma_norm_common_mode: float,
     norm_dist: str,
     max_degree: int,
     ridge_lambda: float,
@@ -2376,6 +2468,7 @@ def run_mc_with_kernel_weights(
     mf33_home_bin_by_e_key: Optional[Dict[str, int]] = None,
     sampled_degrees_per_bin_sample: Optional[Dict[int, np.ndarray]] = None,
     nominal_coeffs_by_bin_by_degree: Optional[Dict[int, Dict[int, np.ndarray]]] = None,
+    record_c0_channel: bool = False,
     logger=None,
 ) -> Dict[int, Dict[int, np.ndarray]]:
     """Orchestrate kernel-weighted multi-bin MC sampling.
@@ -2396,10 +2489,10 @@ def run_mc_with_kernel_weights(
         Per-experiment systematic normalization uncertainty. Drives the MC
         perturbation amplitude per experiment AND the Kish ρ for ESS collapse
         (same physical parameter in both roles).
-    sigma_norm_elastic : float
+    sigma_norm_common_mode : float
         Global normalization uncertainty applied as a single multiplicative
         factor per MC sample to ALL data points across ALL experiments
-        (e.g. uncertainty in a shared elastic XS reference / monitor).
+        (e.g. uncertainty in a shared reference / monitor).
         Set to 0.0 to disable.
     norm_dist : str
         "lognormal" or "normal".
@@ -2449,7 +2542,7 @@ def run_mc_with_kernel_weights(
         'overlap_weights': overlap_weights,
         'energy_bins_data': energy_bins_data,
         'sigma_norm': sigma_norm,
-        'sigma_norm_elastic': sigma_norm_elastic,
+        'sigma_norm_common_mode': sigma_norm_common_mode,
         'norm_dist': norm_dist,
         'max_degree': max_degree,
         'ridge_lambda': ridge_lambda,
@@ -2491,6 +2584,10 @@ def run_mc_with_kernel_weights(
         # Default-off → exact v2 behavior.
         'sampled_degrees_per_bin_sample': sampled_degrees_per_bin_sample,
         'nominal_coeffs_by_bin_by_degree': nominal_coeffs_by_bin_by_degree,
+        # Phase-2 magnitude channel: when True the worker also records the
+        # fixed-shape c0 of each sample's perturbed data (read-only; the shape
+        # coeffs are untouched). Default False → v2/v3 return shape unchanged.
+        'record_c0_channel': record_c0_channel,
     }
 
     if n_workers > 1:
@@ -2507,8 +2604,15 @@ def run_mc_with_kernel_weights(
 
     # Assemble into expected format
     all_samples: Dict[int, Dict[int, np.ndarray]] = {s_idx: {} for s_idx in range(n_samples)}
+    c0_samples_kw: Dict[int, Dict[int, float]] = {} if record_c0_channel else None
     total_pos_violations = 0
-    for s_idx, sample_coeffs, n_pos_violations in results:
+    for res in results:
+        # Worker returns a 4-tuple (…, sample_c0) only when recording is on.
+        if record_c0_channel:
+            s_idx, sample_coeffs, n_pos_violations, sample_c0 = res
+            c0_samples_kw[s_idx] = sample_c0
+        else:
+            s_idx, sample_coeffs, n_pos_violations = res
         all_samples[s_idx] = sample_coeffs
         total_pos_violations += n_pos_violations
 
@@ -2523,6 +2627,8 @@ def run_mc_with_kernel_weights(
                 f"distributions projected ({pct:.2f}%)"
             )
 
+    if record_c0_channel:
+        return all_samples, c0_samples_kw
     return all_samples
 
 
@@ -2589,6 +2695,153 @@ def stack_samples_to_matrix(
             n = min(arr.shape[0], max_degree)
             row[k * max_degree:k * max_degree + n] = arr[:n]
     return out
+
+
+def stack_c0_samples(
+    c0_samples_by_idx: Dict[int, Dict[int, float]],
+    energy_indices: List[int],
+    n_samples: int,
+) -> np.ndarray:
+    """Flatten the fixed-shape c0 side channel ``{sample_idx -> {energy_idx ->
+    c0}}`` into an ``(n_samples, len(energy_indices))`` ndarray.
+
+    Missing (sample, bin) entries become NaN so the two-pass combine can treat
+    them as absent (pairwise-complete correlations, per-column variances) rather
+    than as a spurious zero magnitude.
+    """
+    n_bins = len(energy_indices)
+    out = np.full((n_samples, n_bins), np.nan, dtype=float)
+    for s in range(n_samples):
+        sd = c0_samples_by_idx.get(s)
+        if not sd:
+            continue
+        for k, e_idx in enumerate(energy_indices):
+            val = sd.get(int(e_idx))
+            if val is not None:
+                out[s, k] = float(val)
+    return out
+
+
+def build_mf33_channel(
+    c0_samples_pass1: Dict[int, Dict[int, float]],
+    c0_samples_pass2: Dict[int, Dict[int, float]],
+    energy_indices: List[int],
+    c0_nominal: np.ndarray,
+    n_samples: int,
+) -> Tuple[np.ndarray, np.ndarray, "pd.DataFrame"]:
+    """Assemble the fixed-shape c0 (MF33) channel from the two-pass samples.
+
+    Pure (no I/O): stacks the two per-sample c0 dicts into matrices, runs the
+    two-pass congruence combine, and builds a long-format sample frame for the
+    sidecar.  The pipeline wraps this with the ``np.save`` / ``to_parquet``
+    calls; keeping it separate makes the numeric path unit-testable without a
+    full run.
+
+    Returns
+    -------
+    (rel_cov, cov_abs, samples_df, diag)
+        ``rel_cov`` / ``cov_abs`` are ``(n_bins, n_bins)`` relative / absolute
+        c0 covariances aligned to ``energy_indices``; ``samples_df`` has columns
+        ``sample_idx, energy_index, pass, c0`` for both passes.  ``diag`` holds
+        completeness/PSD inspection numbers (warn-only material):
+        ``p1_finite_per_bin`` / ``p2_finite_per_bin`` (finite-sample counts per
+        bin) and ``corr_pass1_min_eig`` (min eigenvalue of the Pass-1
+        pairwise-complete correlation matrix, which is not guaranteed PSD).
+    """
+    from .resample_AD import combine_c0_covariance
+
+    c0_nominal = np.asarray(c0_nominal, dtype=float)
+    p1 = stack_c0_samples(c0_samples_pass1, energy_indices, n_samples)
+    p2 = stack_c0_samples(c0_samples_pass2, energy_indices, n_samples)
+    rel_cov, cov_abs = combine_c0_covariance(p1, p2, c0_nominal)
+
+    # Completeness + Pass-1 correlation PSD inspection (pairwise-complete
+    # np.ma.corrcoef can go indefinite when different sample pairs are missing
+    # in different bins).
+    p1_counts = np.sum(np.isfinite(p1), axis=0).astype(int)
+    p2_counts = np.sum(np.isfinite(p2), axis=0).astype(int)
+    corr_p1 = np.ma.corrcoef(np.ma.masked_invalid(p1), rowvar=False)
+    corr_p1 = np.asarray(np.ma.filled(corr_p1, 0.0), dtype=float)
+    np.fill_diagonal(corr_p1, 1.0)
+    corr_p1 = 0.5 * (corr_p1 + corr_p1.T)
+    diag = {
+        "p1_finite_per_bin": p1_counts,
+        "p2_finite_per_bin": p2_counts,
+        "corr_pass1_min_eig": float(np.min(np.linalg.eigvalsh(corr_p1))),
+    }
+
+    n_bins = len(energy_indices)
+    s_col = np.repeat(np.arange(n_samples), n_bins)
+    e_col = np.tile(np.asarray(energy_indices), n_samples)
+    samples_df = pd.concat([
+        pd.DataFrame({"sample_idx": s_col, "energy_index": e_col,
+                      "pass": "pass1", "c0": p1.ravel()}),
+        pd.DataFrame({"sample_idx": s_col, "energy_index": e_col,
+                      "pass": "pass2", "c0": p2.ravel()}),
+    ], ignore_index=True)
+    return rel_cov, cov_abs, samples_df, diag
+
+
+def recentre_relative_covariance(
+    cov_abs: np.ndarray, ref_means: np.ndarray
+) -> np.ndarray:
+    """Convert an absolute covariance to relative against reference means.
+
+    ``rel[i, j] = cov_abs[i, j] / (ref_means[i] * ref_means[j])`` — used to
+    recentre the DCS-derived absolute c0 covariance on the HOST MF3 bin means
+    (the shipped File-3 central), so the relative MF33 preserves the absolute
+    uncertainty claim when users multiply it by the host cross section.  Rows
+    and columns with a non-positive reference are zeroed.
+    """
+    cov_abs = np.asarray(cov_abs, dtype=float)
+    ref = np.asarray(ref_means, dtype=float)
+    rel = np.zeros_like(cov_abs)
+    pos = ref > 0
+    outer = np.outer(ref, ref)
+    rel[np.ix_(pos, pos)] = cov_abs[np.ix_(pos, pos)] / outer[np.ix_(pos, pos)]
+    return rel
+
+
+def contiguous_grid_from_bins(valid_bins, rtol: float = 1e-9) -> np.ndarray:
+    """Build the fine energy grid (eV) from has-data bins, asserting adjacency.
+
+    The MF33/MF34 fine writes represent the bins as one contiguous grid
+    (lower edges + last upper edge).  That is only correct when the bins are
+    adjacent — a quality gate leaving an internal gap would silently produce a
+    semantically wrong ENDF grid.  A gap is a structural bug, so this raises
+    (hard error, not the warn-only policy reserved for PSD-type judgement
+    calls).
+
+    Parameters
+    ----------
+    valid_bins : sequence
+        Bin objects exposing ``bin_lower_mev`` / ``bin_upper_mev``, in
+        ascending energy order.
+    rtol : float, default 1e-9
+        Relative tolerance on ``upper[i] == lower[i+1]``.
+
+    Returns
+    -------
+    np.ndarray
+        Energy boundaries in eV, ``len(valid_bins) + 1`` values.
+    """
+    if not valid_bins:
+        raise ValueError("contiguous_grid_from_bins: no bins given")
+    for i in range(len(valid_bins) - 1):
+        upper = float(valid_bins[i].bin_upper_mev)
+        lower_next = float(valid_bins[i + 1].bin_lower_mev)
+        if not np.isclose(upper, lower_next, rtol=rtol, atol=0.0):
+            raise ValueError(
+                f"contiguous_grid_from_bins: gap between bin {i} "
+                f"(upper {upper:.9g} MeV) and bin {i + 1} "
+                f"(lower {lower_next:.9g} MeV) — the fine-grid write assumes "
+                f"adjacent bins; refusing to build a wrong contiguous grid."
+            )
+    grid_ev = np.empty(len(valid_bins) + 1, dtype=float)
+    for k, b in enumerate(valid_bins):
+        grid_ev[k] = float(b.bin_lower_mev) * 1e6
+    grid_ev[-1] = float(valid_bins[-1].bin_upper_mev) * 1e6
+    return grid_ev
 
 
 # =============================================================================
@@ -2701,6 +2954,7 @@ def compute_covariance_from_samples(
     snr_threshold: float = 0.0,
     n_neighbors: int = 3,
     logger=None,
+    mixture_blocks: Optional[Dict[int, Dict[str, np.ndarray]]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]], np.ndarray, np.ndarray]:
     """
     Compute relative (fractional) covariance and correlation matrices from MC samples.
@@ -2716,6 +2970,24 @@ def compute_covariance_from_samples(
         List of energy indices (sorted)
     max_order : int
         Maximum Legendre order to include
+    mixture_blocks : Dict[int, Dict[str, np.ndarray]], optional
+        Phase-3 per-bin mixture moments, ``{energy_index: {'mean': (max_order,),
+        'cov': (max_order, max_order)}}``, in the same ENDF a-space and the same
+        absolute units as the samples.
+
+        When given, each listed bin's diagonal block of the ABSOLUTE covariance
+        and its slice of the mean vector are replaced before anything else
+        happens. Everything downstream — the ``valid_mask`` zeroing, the
+        relative conversion, the near-zero regularisation and the correlation
+        extraction — then runs on the mixture exactly as it would on a sample
+        covariance. That is deliberate: the near-zero guard is the only active
+        protection against relative-sigma blow-up, and routing the mixture
+        through this function is what keeps it applied rather than requiring a
+        second copy of it at the call site.
+
+        Bins not listed keep their sample estimates, so interpolated bins and
+        bins whose MC failed fall through untouched. **Cross-bin blocks are
+        never replaced** — they stay as estimated from the pooled samples.
 
     Returns
     -------
@@ -2755,6 +3027,35 @@ def compute_covariance_from_samples(
 
     # Compute absolute covariance
     cov_abs = np.cov(sample_matrix, rowvar=False)
+    mean_params = np.mean(sample_matrix, axis=0)
+
+    # Phase 3: substitute the analytic per-bin mixture moments for the sample
+    # estimates. Done here, before the mask and the relative conversion, so the
+    # mixture is subject to every guard the sampled path is subject to.
+    if mixture_blocks:
+        n_sub = 0
+        for k, e_idx in enumerate(energy_indices):
+            blk = mixture_blocks.get(e_idx)
+            if not blk:
+                continue
+            m = np.asarray(blk['mean'], dtype=float)
+            c = np.asarray(blk['cov'], dtype=float)
+            if m.shape != (max_order,) or c.shape != (max_order, max_order):
+                raise ValueError(
+                    f"mixture block for energy_index {e_idx} has mean{m.shape} "
+                    f"cov{c.shape}, expected ({max_order},) and "
+                    f"({max_order}, {max_order})"
+                )
+            s = k * max_order
+            e = s + max_order
+            cov_abs[s:e, s:e] = 0.5 * (c + c.T)
+            mean_params[s:e] = m
+            n_sub += 1
+        if logger:
+            logger.info(
+                f"  [MIX] per-bin mixture blocks substituted for {n_sub}/"
+                f"{n_energies} bins (cross-bin blocks left as sampled)"
+            )
 
     # Zero out rows/columns for parameters that were not actually fitted
     if valid_mask is not None:
@@ -2764,7 +3065,6 @@ def compute_covariance_from_samples(
 
     # Convert absolute covariance to relative (fractional) covariance
     # Cov_rel(i,j) = Cov_abs(i,j) / (mean_i * mean_j)
-    mean_params = np.mean(sample_matrix, axis=0)
     # Per-parameter safe test (|mean| > 1e-6, ~ENDF 6-sig-digit precision),
     # mirroring absolute_to_nominal_relative: the pairwise-product test
     # (|mean_i*mean_j| > threshold²) could zero a diagonal variance while
@@ -4939,12 +5239,114 @@ def build_pipeline_coeffs_for_splice(
     return energies, coeffs
 
 
+#: Half-width, in eV, of the band around the splice boundaries within which an
+#: original ENDF point counts as coincident with the requested range and is
+#: dropped in favour of the pipeline grid. Was an unnamed literal 1.0 in two
+#: places.
+SPLICE_KEEP_TOLERANCE_EV = 1.0
+
+
+def split_original_grid(
+    orig_energies,
+    orig_coeffs,
+    energy_min_ev: float,
+    energy_max_ev: float,
+) -> Tuple[List[float], List[List[float]], List[float], List[List[float]]]:
+    """The original points kept either side of the splice window.
+
+    Returns ``(left_e, left_c, right_e, right_c)``.
+    """
+    orig_e = np.asarray(orig_energies)
+    tol = SPLICE_KEEP_TOLERANCE_EV
+    keep = (orig_e < energy_min_ev - tol) | (orig_e > energy_max_ev + tol)
+
+    left_idx = np.where(keep & (orig_e < energy_min_ev))[0]
+    right_idx = np.where(keep & (orig_e > energy_max_ev))[0]
+
+    return (
+        [orig_e[i] for i in left_idx],
+        [list(orig_coeffs[i]) for i in left_idx],
+        [orig_e[i] for i in right_idx],
+        [list(orig_coeffs[i]) for i in right_idx],
+    )
+
+
+def merge_spliced_grid(
+    left_energies: List[float],
+    left_coeffs: List[List[float]],
+    pipeline_energies: List[float],
+    pipeline_coeffs: List[List[float]],
+    right_energies: List[float],
+    right_coeffs: List[List[float]],
+    logger=None,
+) -> Tuple[List[float], List[List[float]]]:
+    """Concatenate left + pipeline + right, and police the result.
+
+    Evaluated files may legitimately repeat an abscissa. JEFF-4.0 Fe-56 does:
+    MF4/MT2 carries two consecutive LIST subsections at 3.905 MeV with
+    byte-identical coefficients. Points outside the splice window are kept
+    verbatim, so both copies survived here and the old strict ``>`` check
+    rejected a grid that had come straight out of the input file.
+
+    Policy, in order:
+
+    * **Exact duplicate** — same energy *and* same coefficients. A redundant
+      record, carrying no information: the second copy is dropped and the
+      event logged.
+    * **Same energy, different coefficients** — a genuine ENDF discontinuity.
+      Both are kept and a warning names the energy. Note that the single
+      lin-lin region assigned by the callers cannot represent a repeated
+      abscissa; that is a separate hazard and is deliberately not papered over
+      here.
+    * **Out of order** — still an error. This is the check that has to survive,
+      and relaxing it to "non-decreasing" is what makes it meaningful again.
+    """
+    energies = list(left_energies) + list(pipeline_energies) + list(right_energies)
+    coeffs = (
+        [list(c) for c in left_coeffs]
+        + [list(c) for c in pipeline_coeffs]
+        + [list(c) for c in right_coeffs]
+    )
+
+    merged_e: List[float] = []
+    merged_c: List[List[float]] = []
+    n_dropped = 0
+    for energy, coefficient in zip(energies, coeffs):
+        if merged_e and energy < merged_e[-1]:
+            raise AssertionError(
+                f"Spliced grid out of order at index {len(merged_e)}: "
+                f"{merged_e[-1]:.1f} > {energy:.1f}"
+            )
+        if merged_e and energy == merged_e[-1]:
+            if coefficient == merged_c[-1]:
+                n_dropped += 1
+                if logger:
+                    logger.info(
+                        f"  [SPLICE] dropped a duplicate MF4 record at "
+                        f"E = {energy:.1f} eV (identical coefficients)"
+                    )
+                continue
+            if logger:
+                logger.warning(
+                    f"  [SPLICE] E = {energy:.1f} eV appears twice with "
+                    f"different coefficients; keeping both as a discontinuity"
+                )
+        merged_e.append(energy)
+        merged_c.append(coefficient)
+
+    if n_dropped and logger:
+        logger.info(f"  [SPLICE] dropped {n_dropped} duplicate MF4 record(s) in total")
+
+    return merged_e, merged_c
+
+
 def splice_legendre_grid(
     mt_data,                        # MF4MTLegendre or MF4MTMixed
     pipeline_energies_ev: List[float],
     pipeline_coeffs: List[List[float]],
     energy_min_ev: float,
     energy_max_ev: float,
+    logger=None,
 ) -> None:
     """
     Remove original ENDF energy points in [E_min, E_max] and insert pipeline
@@ -4952,32 +5354,16 @@ def splice_legendre_grid(
 
     Modifies mt_data in-place (_energies, _legendre_coeffs, _interpolation, _nr).
     """
-    orig_e = np.array(mt_data._energies)
-    orig_c = mt_data._legendre_coeffs
+    left_e, left_c, right_e, right_c = split_original_grid(
+        mt_data._energies, mt_data._legendre_coeffs, energy_min_ev, energy_max_ev
+    )
 
-    # Keep mask: outside the splice range (1 eV tolerance)
-    keep = (orig_e < energy_min_ev - 1.0) | (orig_e > energy_max_ev + 1.0)
-
-    # Split into left / right portions
-    left_idx = np.where(keep & (orig_e < energy_min_ev))[0]
-    right_idx = np.where(keep & (orig_e > energy_max_ev))[0]
-
-    left_energies = [orig_e[i] for i in left_idx]
-    left_coeffs = [list(orig_c[i]) for i in left_idx]
-
-    right_energies = [orig_e[i] for i in right_idx]
-    right_coeffs = [list(orig_c[i]) for i in right_idx]
-
-    # Concatenate: left + pipeline + right
-    new_energies = left_energies + list(pipeline_energies_ev) + right_energies
-    new_coeffs = left_coeffs + [list(c) for c in pipeline_coeffs] + right_coeffs
-
-    # Sanity: must be sorted
-    for i in range(1, len(new_energies)):
-        assert new_energies[i] > new_energies[i - 1], (
-            f"Spliced grid not sorted at index {i}: "
-            f"{new_energies[i-1]:.1f} >= {new_energies[i]:.1f}"
-        )
+    new_energies, new_coeffs = merge_spliced_grid(
+        left_e, left_c,
+        list(pipeline_energies_ev), [list(c) for c in pipeline_coeffs],
+        right_e, right_c,
+        logger=logger,
+    )
 
     # Assign back
     mt_data._energies = new_energies
@@ -5047,7 +5433,8 @@ def write_nominal_endf(
         energies, coeffs = build_pipeline_coeffs_for_splice(energy_bins, coeffs_by_index)
         e_min_ev = energy_range_mev[0] * 1e6
         e_max_ev = energy_range_mev[1] * 1e6
-        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev)
+        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev,
+                             logger=_logger)
     else:
         # Legacy in-place mode
         for nr in nominal_results:
@@ -5172,7 +5559,8 @@ def write_average_endf(
         energies, coeffs = build_pipeline_coeffs_for_splice(energy_bins, mc_mean_coeffs)
         e_min_ev = energy_range_mev[0] * 1e6
         e_max_ev = energy_range_mev[1] * 1e6
-        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev)
+        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev,
+                             logger=_logger)
     else:
         # Legacy in-place mode
         idx_to_endf = {}
@@ -5263,7 +5651,8 @@ def write_endf_sample(
         energies, coeffs = build_pipeline_coeffs_for_splice(energy_bins, sampled_coeffs_by_energy)
         e_min_ev = energy_range_mev[0] * 1e6
         e_max_ev = energy_range_mev[1] * 1e6
-        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev)
+        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev,
+                             logger=_logger)
     else:
         # Legacy in-place mode
         for energy_idx, new_coeffs in sampled_coeffs_by_energy.items():
@@ -5389,32 +5778,14 @@ def write_endf_samples_batch(
         e_max_ev = energy_range_mev[1] * 1e6
 
         # Compute left/right portions once (same for every sample)
-        orig_e = np.array(mt_data_template._energies)
-        orig_c = mt_data_template._legendre_coeffs
-        keep = (orig_e < e_min_ev - 1.0) | (orig_e > e_max_ev + 1.0)
-        left_idx = np.where(keep & (orig_e < e_min_ev))[0]
-        right_idx = np.where(keep & (orig_e > e_max_ev))[0]
-
-        left_energies = [orig_e[i] for i in left_idx]
-        left_coeffs = [list(orig_c[i]) for i in left_idx]
-        right_energies = [orig_e[i] for i in right_idx]
-        right_coeffs = [list(orig_c[i]) for i in right_idx]
+        left_energies, left_coeffs, right_energies, right_coeffs = split_original_grid(
+            mt_data_template._energies, mt_data_template._legendre_coeffs,
+            e_min_ev, e_max_ev,
+        )
 
         # Build pipeline energies once (same for every sample)
         sorted_bins = sorted(energy_bins, key=lambda b: b.energy_ev)
         pipeline_energies = [b.energy_ev for b in sorted_bins]
-
-        # Build the spliced energy grid (constant across samples)
-        spliced_energies = left_energies + pipeline_energies + right_energies
-        new_ne = len(spliced_energies)
-
-        # Set the fixed grid structure
-        mt_data_template._energies = spliced_energies
-        mt_data_template._interpolation = [(new_ne, 2)]
-        mt_data_template._nr = 1
-
-        n_left = len(left_coeffs)
-        n_pipeline = len(sorted_bins)
 
         for sample_idx in sorted(all_samples.keys()):
             # Build pipeline coefficients for this sample
@@ -5426,12 +5797,23 @@ def write_endf_samples_batch(
                 else:
                     pipeline_coeffs.append(list(b.original_coeffs))
 
-            # Assemble full coefficients: left + pipeline + right
-            mt_data_template._legendre_coeffs = (
-                [list(c) for c in left_coeffs]
-                + pipeline_coeffs
-                + [list(c) for c in right_coeffs]
+            # Assemble through the shared merge. This branch used to
+            # concatenate left + pipeline + right by hand, with no sortedness
+            # check at all — so where the parallel branch raised on a bad grid,
+            # this one wrote it to disk in silence. The grid it produces is the
+            # same for every sample (duplicates come from the constant
+            # left/right portions), so re-merging per sample costs nothing and
+            # buys one implementation instead of two.
+            merged_e, merged_c = merge_spliced_grid(
+                left_energies, left_coeffs,
+                pipeline_energies, pipeline_coeffs,
+                right_energies, right_coeffs,
+                logger=_logger if sample_idx == min(all_samples) else None,
             )
+            mt_data_template._energies = merged_e
+            mt_data_template._legendre_coeffs = merged_c
+            mt_data_template._interpolation = [(len(merged_e), 2)]
+            mt_data_template._nr = 1
 
             # Write output file
             sample_str = f"{sample_idx + 1:04d}"

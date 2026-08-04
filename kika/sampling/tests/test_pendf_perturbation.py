@@ -1,17 +1,12 @@
 """End-to-end integration tests for :func:`perturb_PENDF_files`.
 
-Skipped automatically when NJOY or the reference ENDF files are absent.
-Honours the same env vars as ``test_njoy_reconstruct.py``:
-
-- ``NJOY_EXECUTABLE`` — absolute path to a working NJOY binary.
-- ``KIKA_ENDF_FILES`` — directory holding ``Fe56_jeff4.0_n.endf`` (default
-  ``<repo>/files/endf``).
+Skipped automatically when NJOY or the reference ENDF tape are absent. The
+``njoy_exe`` and ``fe56_host_tape`` fixtures come from the root ``conftest.py``;
+see there for ``$KIKA_TAPES``, ``$NJOY_EXECUTABLE`` and ``--deep``.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pytest
@@ -20,45 +15,10 @@ from kika.endf import read_endf
 from kika.sampling.pendf_perturbation import perturb_PENDF_files
 
 
-_DEFAULT_ENDF_DIR = Path(__file__).resolve().parents[3] / "files" / "endf"
-_DEFAULT_NJOY_PATHS = [
-    Path(r"C:\Users\Usuario\BaradDur\Codes\NJOY2016\build\njoy.exe"),
-    Path("/usr/local/bin/njoy"),
-    Path("/opt/njoy2016/njoy"),
-]
-
-
-def _resolve_njoy() -> Optional[Path]:
-    env = os.environ.get("NJOY_EXECUTABLE")
-    if env:
-        p = Path(env)
-        return p if p.is_file() else None
-    for candidate in _DEFAULT_NJOY_PATHS:
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def _resolve_endf_dir() -> Path:
-    env = os.environ.get("KIKA_ENDF_FILES")
-    return Path(env) if env else _DEFAULT_ENDF_DIR
-
-
 @pytest.fixture(scope="module")
-def njoy_exe() -> Path:
-    exe = _resolve_njoy()
-    if exe is None:
-        pytest.skip("NJOY executable not found; set NJOY_EXECUTABLE to run")
-    return exe
-
-
-@pytest.fixture(scope="module")
-def fe56_endf() -> Path:
-    d = _resolve_endf_dir()
-    candidate = d / "Fe56_jeff4.0_n.endf"
-    if not candidate.is_file():
-        pytest.skip(f"Reference ENDF not found: {candidate}")
-    return candidate
+def fe56_endf(fe56_host_tape: Path) -> Path:
+    """Alias kept so the test bodies below read unchanged."""
+    return fe56_host_tape
 
 
 def test_pendf_only_smoke(tmp_path, njoy_exe, fe56_endf):

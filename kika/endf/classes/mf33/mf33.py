@@ -641,9 +641,9 @@ class MF33MT(MT):
         each coarse bin is computed with 1/E weighting (see
         :meth:`_bin_average_xs`). In the resolved-resonance region, callers
         should pass resonance-reconstructed cross sections (from
-        ``endf.reconstruct_xs()`` or ``njoy_reconstruct``) rather than the
-        raw MF3 background, otherwise the rel↔abs conversion is dominated by
-        the smooth component and underestimates variance.
+        ``kika.processing.njoy_reconstruct``) rather than the raw MF3
+        background, otherwise the rel↔abs conversion is dominated by the
+        smooth component and underestimates variance.
 
         Parameters
         ----------

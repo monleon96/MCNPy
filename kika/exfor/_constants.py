@@ -40,8 +40,12 @@ XS_TO_B_SR = {
 # Schema version for standardized JSON format
 SCHEMA_VERSION = "1.0.0"
 
-# Neutron mass in atomic mass units
-NEUTRON_MASS_AMU = 1.008665
+# Neutron mass in atomic mass units.
+# Re-exported from kika._constants so there is one definition; this used to
+# carry the rounded 1.008665, which differs from the CODATA value by 8e-7
+# relative. Callers that need the historical value should pass it explicitly
+# (the EXFOR pipeline does, via its M_PROJ_U config knob).
+from kika._constants import NEUTRON_MASS_AMU  # noqa: F401
 
 # Energy matching tolerance (MeV) for grouping data by energy
 ENERGY_MATCH_ABS_TOL = 1e-6

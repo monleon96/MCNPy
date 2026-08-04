@@ -169,20 +169,13 @@ def test_invalid_cross_correlation_mode_raises():
 
 # ── Real sample-file test ─────────────────────────────────────────────────────
 
-_COV_DIR = _ROOT / "files" / "cov"
-_NUBAR = _COV_DIR / "tape33_ENDF_U5_nubar_56"
-_BOXER = _COV_DIR / "tape33_U5_ENDF_Scale56.boxer"
-
-
-@pytest.mark.skipif(
-    not (_NUBAR.exists() and _BOXER.exists()),
-    reason="sample covariance files not available",
-)
-def test_real_nubar_into_boxer():
+# The two sample files are resolved by the root conftest; see the
+# ``u5_nubar_covfil_tape`` / ``u5_boxer_tape`` fixtures.
+def test_real_nubar_into_boxer(u5_nubar_covfil_tape, u5_boxer_tape):
     from kika.sampling.utils import load_covariance
 
-    src = load_covariance(str(_NUBAR))   # COVFIL, nubar 452/455/456
-    dst = load_covariance(str(_BOXER))   # BOXER, reactions + lumped 851/852
+    src = load_covariance(str(u5_nubar_covfil_tape))  # COVFIL, nubar 452/455/456
+    dst = load_covariance(str(u5_boxer_tape))         # BOXER, reactions + lumped 851/852
     assert np.allclose(np.asarray(src.energy_grid, float), np.asarray(dst.energy_grid, float))
 
     res = dst.transfer_reactions(src, [(U5, 452), (U5, 455), (U5, 456)])
