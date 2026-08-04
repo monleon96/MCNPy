@@ -442,18 +442,11 @@ def test_merge_without_host_mf33_falls_back(tmp_path):
     np.testing.assert_allclose(g, new_grid, rtol=1e-12)
 
 
-_REAL_HOST = "/share_snc/snc/JuanMonleon/jeff40_with_MF4_from_jeff33/26-Fe-56g.txt"
-
-
-@pytest.mark.skipif(
-    not __import__("pathlib").Path(_REAL_HOST).exists(),
-    reason="real JEFF-4.0 Fe-56 host tape not reachable",
-)
-def test_merge_against_real_host_structure(tmp_path):
+def test_merge_against_real_host_structure(tmp_path, fe56_host_tape):
     """Read-only structural check on the real JEFF-4.0 Fe-56 host MT2."""
     new_grid = np.array([0.9e6, 2.0e6, 4.0e6])
     new_cov = np.array([[0.0025, 0.001], [0.001, 0.0030]])
-    sec = merge_mf33_covariance_into_host(_REAL_HOST, new_cov, new_grid, mt=2)
+    sec = merge_mf33_covariance_into_host(str(fe56_host_tape), new_cov, new_grid, mt=2)
     m, g, is_rel = sec._self_covariance_matrix()
     m = np.asarray(m); g = np.asarray(g)
 

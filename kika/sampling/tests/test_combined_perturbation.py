@@ -4,15 +4,14 @@ Validation tests run without NJOY. The integration smoke test pairs MF34 ENDF
 with MF33 PENDF perturbation and runs NJOY ACER per pair. It is skipped when
 NJOY or the reference ENDF file are absent.
 
-Honours the same env vars as ``test_pendf_perturbation.py``:
-  - ``NJOY_EXECUTABLE`` — absolute path to a working NJOY binary.
-  - ``KIKA_ENDF_FILES`` — directory holding ``Fe56_jeff4.0_n.endf``.
+The ``njoy_exe`` and ``fe56_host_tape`` fixtures come from the root
+``conftest.py``; see there for ``$KIKA_TAPES``, ``$NJOY_EXECUTABLE`` and
+``--deep``.
 """
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
 
 import pytest
 
@@ -20,45 +19,10 @@ from kika.endf import read_endf
 from kika.sampling.combined_perturbation import perturb_ENDF_PENDF_combined
 
 
-_DEFAULT_ENDF_DIR = Path(__file__).resolve().parents[3] / "files" / "endf"
-_DEFAULT_NJOY_PATHS = [
-    Path("/home/MONLEON-JUAN/NJOY2016/build/njoy"),
-    Path("/usr/local/bin/njoy"),
-    Path("/opt/njoy2016/njoy"),
-]
-
-
-def _resolve_njoy() -> Optional[Path]:
-    env = os.environ.get("NJOY_EXECUTABLE")
-    if env:
-        p = Path(env)
-        return p if p.is_file() else None
-    for candidate in _DEFAULT_NJOY_PATHS:
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def _resolve_endf_dir() -> Path:
-    env = os.environ.get("KIKA_ENDF_FILES")
-    return Path(env) if env else _DEFAULT_ENDF_DIR
-
-
 @pytest.fixture(scope="module")
-def njoy_exe() -> Path:
-    exe = _resolve_njoy()
-    if exe is None:
-        pytest.skip("NJOY executable not found; set NJOY_EXECUTABLE to run")
-    return exe
-
-
-@pytest.fixture(scope="module")
-def fe56_endf() -> Path:
-    d = _resolve_endf_dir()
-    candidate = d / "Fe56_jeff4.0_n.endf"
-    if not candidate.is_file():
-        pytest.skip(f"Reference ENDF not found: {candidate}")
-    return candidate
+def fe56_endf(fe56_host_tape: Path) -> Path:
+    """Alias kept so the test bodies below read unchanged."""
+    return fe56_host_tape
 
 
 def test_combined_requires_njoy_when_generate_ace(tmp_path):
@@ -75,6 +39,22 @@ def test_combined_requires_njoy_when_generate_ace(tmp_path):
         )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Pre-existing defect, pinned by GNDS phase 0 and to be fixed in phase 1. "
+        "endf_perturbation.py:133 builds the output directory from "
+        "read_endf(f, mf_numbers=[1]).zaid, but a targeted MF1-only parse leaves "
+        "zaid=None (a full parse gives 26056), so Stage A.MF34 writes to "
+        "endf/unknown/<sample>/ while Stage B looks under endf/<zaid>/<sample>/ "
+        "(combined_perturbation.py:384) and pairs nothing — n_attempted is 0. "
+        "The comment at endf_perturbation.py:128 claims MF1 is enough to recover "
+        "the ZAID; it is not. This test never ran before the root conftest "
+        "resolved its tape, which is why the defect went unnoticed. "
+        "Separately, the artifact paths asserted below ('mf4/endf/...') do not "
+        "match what either stage uses."
+    ),
+)
 def test_combined_smoke(tmp_path, njoy_exe, fe56_endf):
     """End-to-end: produce 2 paired (ENDF, PENDF, ACE) samples."""
     output_dir = tmp_path / "combined_smoke"

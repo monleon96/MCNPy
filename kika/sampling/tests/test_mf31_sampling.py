@@ -21,10 +21,8 @@ from kika.sampling.mf31_sampling import (
     _nubar_as_tabulated,
 )
 
-JEFF40_DIR = "/share_snc/snc/JuanMonleon/jeff40-endf"
-U235 = os.path.join(JEFF40_DIR, "92-U-235g.txt")
-TH232 = os.path.join(JEFF40_DIR, "90-Th-232g.txt")
-PU241 = os.path.join(JEFF40_DIR, "94-Pu-241g.txt")
+# The U-235 / Th-232 / Pu-241 tapes are resolved by the root conftest through
+# $KIKA_TAPES; see the ``u235_tape`` / ``th232_tape`` / ``pu241_tape`` fixtures.
 
 # Shared synthetic grid: 3 covariance bins.
 BINS = [1.0e-5, 1.0e3, 1.0e6, 2.0e7]
@@ -159,8 +157,7 @@ def test_apply_lnu1_polynomial_reconstructed_to_tabulated():
 # Integration: real JEFF-4.0 tapes
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skipif(not os.path.exists(U235), reason="U-235 JEFF-4.0 tape not available")
-def test_build_from_object_matches_load_from_path():
+def test_build_from_object_matches_load_from_path(u235_tape):
     # The app endpoints call build_mf31_covariance() on an already-parsed object;
     # it must produce the same covariance as load_mf31_covariance() from a path.
     from kika.sampling.mf31_sampling import (
@@ -169,8 +166,8 @@ def test_build_from_object_matches_load_from_path():
     )
     from kika.endf.parsers.parse_endf import parse_endf_file
 
-    cov_p, _, grid_p, mts_p = load_mf31_covariance(U235)
-    cov_o, _, grid_o, mts_o = build_mf31_covariance(parse_endf_file(U235))
+    cov_p, _, grid_p, mts_p = load_mf31_covariance(str(u235_tape))
+    cov_o, _, grid_o, mts_o = build_mf31_covariance(parse_endf_file(str(u235_tape)))
     assert mts_p == mts_o
     np.testing.assert_allclose(grid_p, grid_o)
     assert len(cov_p.matrices) == len(cov_o.matrices)
@@ -178,10 +175,9 @@ def test_build_from_object_matches_load_from_path():
         np.testing.assert_allclose(a, b)
 
 
-@pytest.mark.skipif(not os.path.exists(U235), reason="U-235 JEFF-4.0 tape not available")
-def test_load_mf31_u235_prompt_block_is_psd():
+def test_load_mf31_u235_prompt_block_is_psd(u235_tape):
     from kika.sampling.mf31_sampling import load_mf31_covariance
-    cov, secs, grid, mts = load_mf31_covariance(U235)
+    cov, secs, grid, mts = load_mf31_covariance(str(u235_tape))
     assert mts == [456]
     assert {452, 455, 456}.issubset(set(secs))
     C = cov.covariance_matrix
@@ -192,14 +188,18 @@ def test_load_mf31_u235_prompt_block_is_psd():
     assert 0.002 < d.max() < 0.02  # ~0.5–1% prompt nu-bar uncertainty
 
 
-@pytest.mark.parametrize("tape,expected_mts", [
-    (U235, [456]),
-    (TH232, [452]),
-    (PU241, [452, 455, 456]),
+# The tape is picked per parameter with getfixturevalue, which the conftest's
+# fixture-derived auto-marking cannot see at collection time — so mark by hand.
+@pytest.mark.tape
+@pytest.mark.parametrize("tape_fixture,expected_mts", [
+    ("u235_tape", [456]),
+    ("th232_tape", [452]),
+    ("pu241_tape", [452, 455, 456]),
 ])
-def test_end_to_end_write_satisfies_sum_rule(tape, expected_mts, tmp_path):
-    if not os.path.exists(tape):
-        pytest.skip(f"{tape} not available")
+def test_end_to_end_write_satisfies_sum_rule(
+    tape_fixture, expected_mts, tmp_path, request,
+):
+    tape = str(request.getfixturevalue(tape_fixture))
     from kika.sampling.nubar_perturbation import perturb_nubar_files
     from kika.endf.parsers.parse_endf import parse_endf_file
 
