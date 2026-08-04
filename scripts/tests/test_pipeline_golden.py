@@ -365,23 +365,16 @@ def test_a_missing_directory_is_still_reported(tmp_path, micro_tape):
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Pre-existing defect, pinned by GNDS phase 0. Writing the perturbed "
-        "ENDF samples fails with 'Spliced grid not sorted at index N: "
-        "3905000.0 >= 3905000.0'. 3.905 MeV is the top energy of dataset "
-        "10886002 and it coincides exactly with a point already on the Fe-56 "
-        "MF4 grid, so the splice emits it twice and the sortedness assertion "
-        "rejects it. Reproduced in two different energy windows (1.8-3.0 and "
-        "4.5-5.5 MeV), and note that 3.905 MeV lies outside both — so the "
-        "splice is also pulling in energies from beyond the requested window, "
-        "which is worth understanding before fixing the duplicate. Until this "
-        "is resolved the golden above covers the pipeline only as far as the "
-        "Legendre covariance; the ENDF-writing stage is untested."
-    ),
-)
-def test_writing_endf_samples_succeeds(tmp_path, micro_tape):
+@pytest.mark.parametrize("window", ["single", "pair"])
+def test_writing_endf_samples_succeeds(tmp_path, micro_tape, window):
+    """The ENDF-writing stage, which the covariance goldens stop short of.
+
+    Both windows, because they exercise different halves of the splice. Under
+    ``single`` (1.7-4.0 MeV) the Fe-56 MF4 grid's repeated 3.905 MeV point
+    falls *inside* the window and is replaced by the pipeline grid. Under
+    ``pair`` (4.4-5.6) it falls outside, is kept verbatim as an original, and
+    is what used to trip the sortedness assertion.
+    """
     import scripts.exfor_to_endf_sampling_v2 as pipeline
 
     previous_tof = pipeline.TOF_PARAMETERS_FILE
@@ -393,16 +386,57 @@ def test_writing_endf_samples_succeeds(tmp_path, micro_tape):
             output_dir=str(tmp_path),
             exfor_db_path=str(MICRO_DB),
             generate_fitting_samples=True,
-            energy_min_mev=WINDOWS["single"][0],
-            energy_max_mev=WINDOWS["single"][1],
+            energy_min_mev=WINDOWS[window][0],
+            energy_max_mev=WINDOWS[window][1],
             **RUN,
         )
     finally:
         pipeline.TOF_PARAMETERS_FILE = previous_tof
         _restore_manifest(manifest_state)
 
-    written = sorted((tmp_path / "endf").rglob("*.endf"))
+    # The parallel branch writes to endf/, the sequential one to endf_direct/;
+    # RUN asks for n_procs=1, so this lands in the latter. The assertion used
+    # to name only endf/, which is why it reported "no samples written" for a
+    # run that had written four.
+    written = sorted(tmp_path.rglob("endf*/**/*.endf"))
     assert written, "no perturbed ENDF samples were written"
+    assert len(written) == RUN["n_samples"], [p.name for p in written]
+
+
+@pytest.mark.slow
+def test_a_repeated_mf4_energy_outside_the_window_survives(tmp_path, micro_tape):
+    """The pinned defect, isolated.
+
+    JEFF-4.0 Fe-56 gives MF4/MT2 two consecutive LIST subsections at 3.905 MeV
+    with byte-identical coefficients. The splice keeps out-of-window originals
+    verbatim, so both copies reached a strict ``>`` sortedness check and it
+    rejected a grid that had come straight out of the input file.
+
+    The pair window puts 3.905 MeV outside the splice range, which is the
+    configuration that reproduced it.
+    """
+    import scripts.exfor_to_endf_sampling_v2 as pipeline
+
+    previous_tof = pipeline.TOF_PARAMETERS_FILE
+    pipeline.TOF_PARAMETERS_FILE = str(MICRO_TOF)
+    manifest_state = _use_micro_manifest()
+    try:
+        pipeline.run_exfor_to_endf_sampling_v2(
+            endf_file=str(micro_tape),
+            output_dir=str(tmp_path),
+            exfor_db_path=str(MICRO_DB),
+            generate_fitting_samples=True,
+            generate_nominal_endf=True,
+            energy_min_mev=WINDOWS["pair"][0],
+            energy_max_mev=WINDOWS["pair"][1],
+            **RUN,
+        )
+    finally:
+        pipeline.TOF_PARAMETERS_FILE = previous_tof
+        _restore_manifest(manifest_state)
+
+    nominal = sorted(tmp_path.glob("*_nominal.endf"))
+    assert nominal, "the nominal ENDF was not written — the splice failed again"
 
 
 def test_manifest_env_var_is_honoured_after_import(monkeypatch):

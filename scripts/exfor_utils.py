@@ -5239,12 +5239,114 @@ def build_pipeline_coeffs_for_splice(
     return energies, coeffs
 
 
+#: Half-width, in eV, of the band around the splice boundaries within which an
+#: original ENDF point counts as coincident with the requested range and is
+#: dropped in favour of the pipeline grid. Was an unnamed literal 1.0 in two
+#: places.
+SPLICE_KEEP_TOLERANCE_EV = 1.0
+
+
+def split_original_grid(
+    orig_energies,
+    orig_coeffs,
+    energy_min_ev: float,
+    energy_max_ev: float,
+) -> Tuple[List[float], List[List[float]], List[float], List[List[float]]]:
+    """The original points kept either side of the splice window.
+
+    Returns ``(left_e, left_c, right_e, right_c)``.
+    """
+    orig_e = np.asarray(orig_energies)
+    tol = SPLICE_KEEP_TOLERANCE_EV
+    keep = (orig_e < energy_min_ev - tol) | (orig_e > energy_max_ev + tol)
+
+    left_idx = np.where(keep & (orig_e < energy_min_ev))[0]
+    right_idx = np.where(keep & (orig_e > energy_max_ev))[0]
+
+    return (
+        [orig_e[i] for i in left_idx],
+        [list(orig_coeffs[i]) for i in left_idx],
+        [orig_e[i] for i in right_idx],
+        [list(orig_coeffs[i]) for i in right_idx],
+    )
+
+
+def merge_spliced_grid(
+    left_energies: List[float],
+    left_coeffs: List[List[float]],
+    pipeline_energies: List[float],
+    pipeline_coeffs: List[List[float]],
+    right_energies: List[float],
+    right_coeffs: List[List[float]],
+    logger=None,
+) -> Tuple[List[float], List[List[float]]]:
+    """Concatenate left + pipeline + right, and police the result.
+
+    Evaluated files may legitimately repeat an abscissa. JEFF-4.0 Fe-56 does:
+    MF4/MT2 carries two consecutive LIST subsections at 3.905 MeV with
+    byte-identical coefficients. Points outside the splice window are kept
+    verbatim, so both copies survived here and the old strict ``>`` check
+    rejected a grid that had come straight out of the input file.
+
+    Policy, in order:
+
+    * **Exact duplicate** — same energy *and* same coefficients. A redundant
+      record, carrying no information: the second copy is dropped and the
+      event logged.
+    * **Same energy, different coefficients** — a genuine ENDF discontinuity.
+      Both are kept and a warning names the energy. Note that the single
+      lin-lin region assigned by the callers cannot represent a repeated
+      abscissa; that is a separate hazard and is deliberately not papered over
+      here.
+    * **Out of order** — still an error. This is the check that has to survive,
+      and relaxing it to "non-decreasing" is what makes it meaningful again.
+    """
+    energies = list(left_energies) + list(pipeline_energies) + list(right_energies)
+    coeffs = (
+        [list(c) for c in left_coeffs]
+        + [list(c) for c in pipeline_coeffs]
+        + [list(c) for c in right_coeffs]
+    )
+
+    merged_e: List[float] = []
+    merged_c: List[List[float]] = []
+    n_dropped = 0
+    for energy, coefficient in zip(energies, coeffs):
+        if merged_e and energy < merged_e[-1]:
+            raise AssertionError(
+                f"Spliced grid out of order at index {len(merged_e)}: "
+                f"{merged_e[-1]:.1f} > {energy:.1f}"
+            )
+        if merged_e and energy == merged_e[-1]:
+            if coefficient == merged_c[-1]:
+                n_dropped += 1
+                if logger:
+                    logger.info(
+                        f"  [SPLICE] dropped a duplicate MF4 record at "
+                        f"E = {energy:.1f} eV (identical coefficients)"
+                    )
+                continue
+            if logger:
+                logger.warning(
+                    f"  [SPLICE] E = {energy:.1f} eV appears twice with "
+                    f"different coefficients; keeping both as a discontinuity"
+                )
+        merged_e.append(energy)
+        merged_c.append(coefficient)
+
+    if n_dropped and logger:
+        logger.info(f"  [SPLICE] dropped {n_dropped} duplicate MF4 record(s) in total")
+
+    return merged_e, merged_c
+
+
 def splice_legendre_grid(
     mt_data,                        # MF4MTLegendre or MF4MTMixed
     pipeline_energies_ev: List[float],
     pipeline_coeffs: List[List[float]],
     energy_min_ev: float,
     energy_max_ev: float,
+    logger=None,
 ) -> None:
     """
     Remove original ENDF energy points in [E_min, E_max] and insert pipeline
@@ -5252,32 +5354,16 @@ def splice_legendre_grid(
 
     Modifies mt_data in-place (_energies, _legendre_coeffs, _interpolation, _nr).
     """
-    orig_e = np.array(mt_data._energies)
-    orig_c = mt_data._legendre_coeffs
+    left_e, left_c, right_e, right_c = split_original_grid(
+        mt_data._energies, mt_data._legendre_coeffs, energy_min_ev, energy_max_ev
+    )
 
-    # Keep mask: outside the splice range (1 eV tolerance)
-    keep = (orig_e < energy_min_ev - 1.0) | (orig_e > energy_max_ev + 1.0)
-
-    # Split into left / right portions
-    left_idx = np.where(keep & (orig_e < energy_min_ev))[0]
-    right_idx = np.where(keep & (orig_e > energy_max_ev))[0]
-
-    left_energies = [orig_e[i] for i in left_idx]
-    left_coeffs = [list(orig_c[i]) for i in left_idx]
-
-    right_energies = [orig_e[i] for i in right_idx]
-    right_coeffs = [list(orig_c[i]) for i in right_idx]
-
-    # Concatenate: left + pipeline + right
-    new_energies = left_energies + list(pipeline_energies_ev) + right_energies
-    new_coeffs = left_coeffs + [list(c) for c in pipeline_coeffs] + right_coeffs
-
-    # Sanity: must be sorted
-    for i in range(1, len(new_energies)):
-        assert new_energies[i] > new_energies[i - 1], (
-            f"Spliced grid not sorted at index {i}: "
-            f"{new_energies[i-1]:.1f} >= {new_energies[i]:.1f}"
-        )
+    new_energies, new_coeffs = merge_spliced_grid(
+        left_e, left_c,
+        list(pipeline_energies_ev), [list(c) for c in pipeline_coeffs],
+        right_e, right_c,
+        logger=logger,
+    )
 
     # Assign back
     mt_data._energies = new_energies
@@ -5347,7 +5433,8 @@ def write_nominal_endf(
         energies, coeffs = build_pipeline_coeffs_for_splice(energy_bins, coeffs_by_index)
         e_min_ev = energy_range_mev[0] * 1e6
         e_max_ev = energy_range_mev[1] * 1e6
-        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev)
+        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev,
+                             logger=_logger)
     else:
         # Legacy in-place mode
         for nr in nominal_results:
@@ -5472,7 +5559,8 @@ def write_average_endf(
         energies, coeffs = build_pipeline_coeffs_for_splice(energy_bins, mc_mean_coeffs)
         e_min_ev = energy_range_mev[0] * 1e6
         e_max_ev = energy_range_mev[1] * 1e6
-        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev)
+        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev,
+                             logger=_logger)
     else:
         # Legacy in-place mode
         idx_to_endf = {}
@@ -5563,7 +5651,8 @@ def write_endf_sample(
         energies, coeffs = build_pipeline_coeffs_for_splice(energy_bins, sampled_coeffs_by_energy)
         e_min_ev = energy_range_mev[0] * 1e6
         e_max_ev = energy_range_mev[1] * 1e6
-        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev)
+        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev,
+                             logger=_logger)
     else:
         # Legacy in-place mode
         for energy_idx, new_coeffs in sampled_coeffs_by_energy.items():
@@ -5689,32 +5778,14 @@ def write_endf_samples_batch(
         e_max_ev = energy_range_mev[1] * 1e6
 
         # Compute left/right portions once (same for every sample)
-        orig_e = np.array(mt_data_template._energies)
-        orig_c = mt_data_template._legendre_coeffs
-        keep = (orig_e < e_min_ev - 1.0) | (orig_e > e_max_ev + 1.0)
-        left_idx = np.where(keep & (orig_e < e_min_ev))[0]
-        right_idx = np.where(keep & (orig_e > e_max_ev))[0]
-
-        left_energies = [orig_e[i] for i in left_idx]
-        left_coeffs = [list(orig_c[i]) for i in left_idx]
-        right_energies = [orig_e[i] for i in right_idx]
-        right_coeffs = [list(orig_c[i]) for i in right_idx]
+        left_energies, left_coeffs, right_energies, right_coeffs = split_original_grid(
+            mt_data_template._energies, mt_data_template._legendre_coeffs,
+            e_min_ev, e_max_ev,
+        )
 
         # Build pipeline energies once (same for every sample)
         sorted_bins = sorted(energy_bins, key=lambda b: b.energy_ev)
         pipeline_energies = [b.energy_ev for b in sorted_bins]
-
-        # Build the spliced energy grid (constant across samples)
-        spliced_energies = left_energies + pipeline_energies + right_energies
-        new_ne = len(spliced_energies)
-
-        # Set the fixed grid structure
-        mt_data_template._energies = spliced_energies
-        mt_data_template._interpolation = [(new_ne, 2)]
-        mt_data_template._nr = 1
-
-        n_left = len(left_coeffs)
-        n_pipeline = len(sorted_bins)
 
         for sample_idx in sorted(all_samples.keys()):
             # Build pipeline coefficients for this sample
@@ -5726,12 +5797,23 @@ def write_endf_samples_batch(
                 else:
                     pipeline_coeffs.append(list(b.original_coeffs))
 
-            # Assemble full coefficients: left + pipeline + right
-            mt_data_template._legendre_coeffs = (
-                [list(c) for c in left_coeffs]
-                + pipeline_coeffs
-                + [list(c) for c in right_coeffs]
+            # Assemble through the shared merge. This branch used to
+            # concatenate left + pipeline + right by hand, with no sortedness
+            # check at all — so where the parallel branch raised on a bad grid,
+            # this one wrote it to disk in silence. The grid it produces is the
+            # same for every sample (duplicates come from the constant
+            # left/right portions), so re-merging per sample costs nothing and
+            # buys one implementation instead of two.
+            merged_e, merged_c = merge_spliced_grid(
+                left_energies, left_coeffs,
+                pipeline_energies, pipeline_coeffs,
+                right_energies, right_coeffs,
+                logger=_logger if sample_idx == min(all_samples) else None,
             )
+            mt_data_template._energies = merged_e
+            mt_data_template._legendre_coeffs = merged_c
+            mt_data_template._interpolation = [(len(merged_e), 2)]
+            mt_data_template._nr = 1
 
             # Write output file
             sample_str = f"{sample_idx + 1:04d}"

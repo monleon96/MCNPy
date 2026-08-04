@@ -4119,7 +4119,10 @@ def run_exfor_to_endf_sampling_v2(
             mt_number=mt_number,
             all_samples=all_samples_endf,
             output_dir=str(output_path),
-            n_procs=N_PROCS,
+            # Was N_PROCS, the module constant: asking this function for one
+            # worker still forked forty, and decided which of the two splice
+            # merge paths ran.
+            n_procs=n_procs,
             energy_bins=energy_bins if use_splice else None,
             energy_range_mev=splice_range,
         )
