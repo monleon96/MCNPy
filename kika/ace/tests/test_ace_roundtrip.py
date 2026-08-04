@@ -40,21 +40,15 @@ from kika.ace import read_ace
 from kika.ace.writers.write_ace import write_ace
 
 
-def _unwrap(value):
-    """Peel nested ``XssEntry`` wrappers down to the number.
-
-    ``write_ace`` wraps its input's ``xss_data`` in place, so an Ace object that
-    has been through the writer holds entries wrapping entries. Mirrors the
-    private helper in ``kika/ace/writers/write_ace.py``.
-    """
-    while hasattr(value, "value"):
-        value = value.value
-    return value
-
-
 def xss_array(ace) -> np.ndarray:
-    """The XSS block as plain floats, whatever wrapper it is stored in."""
-    return np.array([_unwrap(entry) for entry in ace.xss_data], dtype=float)
+    """The XSS block as plain floats.
+
+    Index 0 is the bare ``0`` ``read_xss`` seeds for FORTRAN 1-based indexing;
+    every entry after it is an ``XssEntry``.
+    """
+    return np.array(
+        [getattr(entry, "value", entry) for entry in ace.xss_data], dtype=float
+    )
 
 
 @pytest.fixture(scope="module")
@@ -69,9 +63,8 @@ def roundtripped(fe56_ace, tmp_path_factory):
 def test_xss_survives_the_roundtrip_bitwise(roundtripped, fe56_ace):
     """Every XSS entry comes back with the same bits. The gate.
 
-    Both sides are parsed from files. Comparing against the in-memory object
-    handed to the writer would be comparing it with itself, since the writer
-    mutates ``xss_data`` in place.
+    Both sides are parsed from files, which keeps this honest about what the
+    writer put on disk rather than about what it left in memory.
     """
     _, out = roundtripped
     before = xss_array(read_ace(str(fe56_ace)))
