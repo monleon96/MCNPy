@@ -187,19 +187,6 @@ def test_rebuilding_the_directory_of_a_real_tape_changes_nothing(
     assert digest(work) == before
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Pre-existing defect, pinned by GNDS phase 0. The MF2/151 parser keeps a "
-        "single scattering_radius (AP = 0.5444 for Fe-56 JEFF-4.0) and has nowhere "
-        "to put the l-dependent APL that each L-block header carries, so the L=1 "
-        "block's APL = 0.5002 is dropped and re-emitted as 0. That is a physical "
-        "parameter: it sets the p-wave hard-sphere phase shift, so a tape written "
-        "back through kika reconstructs different l=1 cross sections from the one "
-        "it was read from. Fixing it needs a per-L radius on the resonance range, "
-        "which is what the GNDS BreitWigner/RMatrix nodes provide in phase 3."
-    ),
-)
 def test_mf2_keeps_the_l_dependent_scattering_radius(micro_tape):
     source = data_lines(micro_tape.read_text(), 2, 151)
     got = rendered(read_endf(str(micro_tape)), 2, 151)
