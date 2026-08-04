@@ -253,6 +253,104 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
         "title":      "χ² analysis — run-86 evaluation (τ-GLS + Phase-3 mixture, multigroup mask fixed), declared σ_E in the fold",
         "systematic_block_col": None,
     },
+    # Run 87 — the SAME run-86 ENDF, scored with the measured MF33↔MF34 cross
+    # block switched on. No re-evaluation: the sidecars run 86 already wrote are
+    # fed to `build_mf33_mf34_cross_block`, which every run from 82 to 86 fed
+    # None. So `predictive_87` vs `predictive_86` isolates the cross term and
+    # nothing else — the MF4 centrals, the MF33 and the MF34 are the same file.
+    #
+    # V2 MUST NOT MOVE: it excludes Σ_eval entirely. JEFF and JENDL must not move
+    # either — they keep a zero cross block. Anything else is a knob that moved
+    # unintentionally. V1/V3 (diagonal Σ_eval) and V4 (dense) are the answer.
+    #
+    # What is being tested: run 86 measured Cov(c₀, a_ℓ) in PARAMETER space —
+    # median |ρ| = 0.594 at a₁, but sign-alternating in energy. Σ_cross carries
+    # P_ℓ(μ) on top of that, which alternates in ANGLE, so whether the net per
+    # datapoint inflates or deflates σ_eval cannot be read off ρ. This run is how
+    # that question gets an answer.
+    #
+    # ⚠ Read the [PSD] lines in the precompute log before trusting any number
+    # here. Σ^MF33 and Σ^MF34 come from the shipped (collapsed, guarded) file
+    # while Σ^cross comes from the raw MC, so the sum is not PSD by construction.
+    #
+    # 300G: the cross block is materialised densely per (experiment, order).
+    "predictive_87": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_87.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-86 evaluation + measured MF33↔MF34 cross block, declared σ_E in the fold",
+        "systematic_block_col": None,
+    },
+    # Damped cross block. Run 87 at full strength put 1005 of 46819 This_work
+    # points (2.15 %) at a NEGATIVE Σ_eval diagonal — Σ^MF33 and Σ^MF34 went
+    # through the multigroup collapse and the near-zero guard while Σ^cross came
+    # from the raw MC, so the per-point Cauchy–Schwarz bound is violable and it
+    # is violated. Those points lose their evaluated uncertainty in V1/V3 and
+    # make V4 indefinite, so run 87's headline numbers are a diagnostic, not a
+    # result.
+    #
+    # Σ_eval(s) = Σ^MF33 + Σ^MF34 + s·Σ^cross is EXACTLY LINEAR in s, so damping
+    # brackets the largest self-consistent cross term instead of guessing one.
+    # Two points, and the pair is a self-check as well as a scan: the s=0.25
+    # diagonal must equal the s=0.5 one linearly interpolated, or something other
+    # than the cross block moved.
+    #
+    # These runs carry `sigma_eval_var_diag` (the SIGNED, unclipped diagonal),
+    # which is what makes the exact PSD-safe scale computable offline from a
+    # 5 MB parquet rather than by further scanning.
+    "predictive_87_s050": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_87_s050.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-86 evaluation + MF33↔MF34 cross block damped to 0.50, declared σ_E in the fold",
+        "systematic_block_col": None,
+    },
+    "predictive_87_s025": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_87_s025.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-86 evaluation + MF33↔MF34 cross block damped to 0.25, declared σ_E in the fold",
+        "systematic_block_col": None,
+    },
+    # Run 88 — the COMPLETE cross block (roadmap §10.1.6). The first evaluation
+    # to ship Cov(c₀(E_i), a_ℓ(E_j)) with its cross-ENERGY structure instead of
+    # the within-bin diagonal.
+    #
+    # WHY THIS RUN EXISTS. Runs 87/87_s050/87_s025 all failed to produce a χ² at
+    # all: Σ_V4 was not positive definite and `chi2_metrics._solve` died on
+    # Cholesky. §10.1.4 measured the PSD-safe damping scale at ≤ 0.052 against a
+    # diagonal ceiling of 0.276, i.e. a token rather than a measurement, and
+    # §10.1.5 then proved damping and representation work are both dead ends:
+    # with Cx = 0 the joint parameter-space covariance is PSD at −1e-11, and
+    # enforcing Cauchy–Schwarz — which is exactly what a consistent collapse
+    # delivers — moves λ_min by 12 % in the best energy window and ~0.01 % in the
+    # rest. The defect was never the representation. It was that we shipped a
+    # PARTIAL Level A (within-bin only) against complete MF33/MF34 diagonals.
+    #
+    # Proved on run 81's paired replicas: the full joint sample covariance is PSD
+    # at −1e-18, and zeroing ONLY the cross-energy entries makes it non-PSD in
+    # every window, 13 orders worse, with those entries the same size as the ones
+    # kept and ~159× more numerous.
+    #
+    # ⚠ WHAT MUST NOT MOVE. Run 88 is a fresh evaluation, so unlike run 87 it is
+    # NOT an isolation of the cross term — the centrals, MF33 and MF34 are all
+    # rebuilt. JEFF and JENDL must still be identical (they keep a zero cross
+    # block); anything else moving in them is a knob that moved unintentionally.
+    # V2 vs run 86 measures whatever else changed in the evaluation, not the
+    # cross term, so do not read it as the cross term's cost.
+    #
+    # ⚠ READ THE [PSD] LINES FIRST. The joint is PSD by construction only in the
+    # raw MC; Σ^MF33 and Σ^MF34 still pass through the collapse and the near-zero
+    # guard, neither of which is a congruence. If the [PSD] lines are clean, the
+    # §10.1.3 theorem is back and this is the shippable file. If they are not,
+    # the residual is the representation term §10.1.5 priced at ~12 %.
+    #
+    # ⚠ AND CHECK `[XCROSS] form=full` IN THE PRECOMPUTE LOG. The loader falls
+    # back to the within-bin block with a RuntimeWarning when the full sidecar is
+    # absent, which would silently reproduce run 87.
+    "predictive_88": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_88.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-88 evaluation with the COMPLETE MF33↔MF34 cross block, declared σ_E in the fold",
+        "systematic_block_col": None,
+    },
     # Fold-mode sweep. Identical to `predictive` in every respect except which
     # part of the forward model is resolution-averaged (FOLD_MODE in
     # precompute_chi2_predictive.py). Compare V2 across these to decide, over

@@ -97,8 +97,9 @@ scripts/chi2_analysis_cluster.py under the `predictive` methodology key.
 """
 import os
 import sys
+import warnings
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -237,6 +238,33 @@ if FOLD_MODE not in _FOLD_SUFFIX:
 # changed σ_E (tag "82_enrsl") is a real use case — it isolates the effect of the
 # resolution fix on the *scoring* from its effect on the *evaluation*.
 RUN_TAG = os.environ.get("KIKA_RUN_TAG", "82").strip()
+
+# ── MF33 ↔ MF34 cross block (roadmap §9.4.3 / run 87) ────────────────────────
+# Σ_eval = Σ^MF34 + Σ^MF33 + Σ^cross. The third term has always been fed None,
+# i.e. exactly zero, because the evaluation splits one Monte Carlo into two
+# one-at-a-time channels (magnitude at frozen shape, shape at frozen c₀) and
+# that partition discards Cov(σ, a_ℓ) by construction.
+#
+# It is NOT zero. Run 86 measured it from the paired Pass-2 replicas
+# (`compute_mf33_mf34_cross`, diagnostic-only, no MC cost): median |ρ| = 0.594 at
+# a₁, 81 % of bins above |ρ| = 0.3 — but the sign alternates with energy, so the
+# median ρ is only −0.173 and the mean −0.009. Large per bin, cancelling in the
+# aggregate. Feeding it here is what turns that parameter-space measurement into
+# a per-datapoint effect, because Σ_cross carries P_ℓ(μ), which alternates in
+# ANGLE on top of ρ's alternation in ENERGY.
+#
+# Point this at the evaluation directory holding the sidecars:
+#     mf33_mf34_cross_covariance.npy   (n_bins, L)  absolute Cov(c₀, a_ℓ)
+#     mf33_energy_grid_ev.npy          (n_bins+1,)  bin edges, eV
+#     mf33_c0_host.npy                 (n_bins,)    host magnitude per bin
+# Unset ⇒ zero block ⇒ runs 82–86 stay byte-reproducible.
+MF33_MF34_CROSS_DIR = os.environ.get("KIKA_MF33_MF34_CROSS_DIR", "").strip()
+
+# Multiplies the whole cross block. 1.0 = as measured; 0.0 = off (equivalent to
+# not setting the directory, but keeps the provenance line in the log). Exists so
+# a PSD failure can be bracketed by damping rather than by rebuilding sidecars,
+# and so the ±1 Cauchy–Schwarz ends can be probed without a new evaluation.
+MF33_MF34_CROSS_SCALE = float(os.environ.get("KIKA_MF33_MF34_CROSS_SCALE", "1.0"))
 
 OUTPUT_PARQUET = (
     "/share_snc/snc/JuanMonleon/chi2/"
@@ -400,6 +428,202 @@ def build_rows_at_energy(
     return rows
 
 
+# ── MF33 ↔ MF34 cross block ───────────────────────────────────────────────────
+
+def load_mf33_mf34_cross(
+    run_dir: str, l_max: int = L_MAX, scale: float = 1.0,
+) -> Tuple[List[dict], dict]:
+    """Build the `mf33_mf34_cross` blocks from a pipeline run's sidecars.
+
+    Returns ``(blocks, info)`` in exactly the layout
+    :func:`scripts.eval_covariance.build_mf33_mf34_cross_block` expects.
+
+    THE UNIT CONVENTION, WHICH IS THE ONLY THING THAT CAN SILENTLY GO WRONG.
+    The builder's sensitivities are dy/dσ = ``y_eval`` on the magnitude side and
+    dy/da_ℓ = ``c₀(2ℓ+1)P_ℓ`` on the shape side (times a_ℓ when the block
+    declares itself relative). Using ``y_eval`` as the magnitude sensitivity
+    means the magnitude axis is **relative**, δσ/σ — the same currency
+    ``build_mf33_block`` consumes.
+
+    So the block must be Cov(δσ/σ, δa_ℓ), and the denominator has to be the one
+    the shipped MF33 already uses. Measured on run 86's sidecars, the shipped
+    relative MF33 is ``absolute / (c0_host ⊗ c0_host)`` **exactly** (max
+    difference 0.0), not ``c0_nominal`` — our own c₀ sits ~9.5 % above the
+    host's and the pipeline recentres onto the host. Dividing by the wrong one
+    would rescale the cross term by 1.095 against its own diagonals and break
+    Cauchy–Schwarz consistency with them. Hence ``c0_host``.
+
+    The shape axis is left ABSOLUTE (``is_relative=False``). The relative form
+    would divide by a_ℓ_nom, which passes through zero — the near-zero blow-up
+    ``REGULARIZE_NEAR_ZERO_REL_UNC`` exists to contain — and the builder applies
+    the correct absolute sensitivity itself.
+
+    WHAT IS AND IS NOT MEASURED — TWO CASES, AND THE DIFFERENCE IS THE WHOLE
+    POINT (roadmap §10.1.5/§10.1.6).
+
+    * ``mf33_mf34_cross_covariance_full.npy`` present (evaluations from the
+      2026-08-04 change onwards): the complete block Cov(c₀(E_i), a_ℓ(E_j)) over
+      one common replica set. **This is the only form that is a valid
+      covariance**, and it is preferred whenever it exists.
+    * only ``mf33_mf34_cross_covariance.npy`` (runs 86 and 87): within-bin
+      Cov(c₀(E_i), a_ℓ(E_i)) only, so the per-order matrix is diagonal. **This
+      form is known to be non-PSD against complete MF33/MF34 diagonals** — it is
+      what killed run 87 — and is kept ONLY so those runs stay reproducible.
+      Loading it emits a warning; do not ship a result built on it.
+
+    The cross-energy zero in the diagonal form is *absence of measurement, not
+    physics*: measured on run 81's paired replicas, the cross-energy entries are
+    the same size as the within-bin ones and ~159× more numerous.
+
+    Slots the MC could not define (orders restored from nominal) are NaN in the
+    sidecar and are set to zero here, counted and reported rather than filled.
+    """
+    d = Path(run_dir)
+    cov_path = d / "mf33_mf34_cross_covariance.npy"
+    grid_path = d / "mf33_energy_grid_ev.npy"
+    c0h_path = d / "mf33_c0_host.npy"
+    for p in (cov_path, grid_path, c0h_path):
+        if not p.exists():
+            raise SystemExit(
+                f"KIKA_MF33_MF34_CROSS_DIR={run_dir!r} is missing {p.name}. "
+                f"The cross sidecars are written only when the evaluation ran "
+                f"with COMPUTE_MF33_MF34_CROSS=True (run 86 onwards)."
+            )
+
+    cov = np.load(cov_path)                      # (n_bins, L) absolute Cov(c0, a_l)
+    grid_ev = np.load(grid_path).astype(float)   # (n_bins + 1,) edges
+    c0_host = np.load(c0h_path).astype(float)    # (n_bins,)
+
+    n_bins = cov.shape[0]
+    if grid_ev.size != n_bins + 1:
+        raise SystemExit(
+            f"Cross grid mismatch: {n_bins} bins but {grid_ev.size} edges in "
+            f"{grid_path.name}. These sidecars must come from the SAME run."
+        )
+    if c0_host.size != n_bins:
+        raise SystemExit(
+            f"Cross c0_host mismatch: {n_bins} bins but {c0_host.size} values."
+        )
+
+    # "Undefined" lives in the CORRELATION sidecar, not the covariance one.
+    # `compute_mf33_mf34_cross` leaves rho as NaN for orders restored from
+    # nominal (zero spread ⇒ rho genuinely undefined), while cov for those slots
+    # comes out numerically zero (~1e-31 on run 86) because a constant column has
+    # no covariance with anything. So zeroing them is exact rather than a choice
+    # — but the count has to be reported from rho, or the log claims the MC
+    # measured 10428 slots when it measured 10392.
+    rho_path = d / "mf33_mf34_cross_correlation.npy"
+    if rho_path.exists():
+        rho = np.load(rho_path)
+        n_undef = int(np.count_nonzero(~np.isfinite(rho[:, :l_max])))
+    else:
+        n_undef = int(np.count_nonzero(~np.isfinite(cov[:, :l_max])))
+    cov = np.nan_to_num(cov, nan=0.0, posinf=0.0, neginf=0.0)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cov_rel_mag = np.where(c0_host[:, None] > 0.0, cov / c0_host[:, None], 0.0)
+    cov_rel_mag = np.nan_to_num(cov_rel_mag, nan=0.0, posinf=0.0, neginf=0.0)
+    cov_rel_mag *= float(scale)
+
+    # The COMPLETE block when the run produced one, otherwise the legacy
+    # within-bin-only diagonal. `full[i, j, L-1]` = Cov(δσ/σ at E_i, a_L at E_j)
+    # and is deliberately NOT symmetric — row is magnitude, column is shape.
+    full_path = d / "mf33_mf34_cross_covariance_full.npy"
+    full = None
+    if full_path.exists():
+        full = np.load(full_path)
+        if full.shape[:2] != (n_bins, n_bins) or full.shape[2] < min(l_max, cov.shape[1]):
+            raise SystemExit(
+                f"Full cross block has shape {full.shape}, expected "
+                f"({n_bins}, {n_bins}, >={min(l_max, cov.shape[1])}). "
+                f"These sidecars must come from the SAME run."
+            )
+        full = np.nan_to_num(full, nan=0.0, posinf=0.0, neginf=0.0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            full = np.where(c0_host[:, None, None] > 0.0, full / c0_host[:, None, None], 0.0)
+        full = np.nan_to_num(full, nan=0.0, posinf=0.0, neginf=0.0) * float(scale)
+    else:
+        warnings.warn(
+            f"{run_dir}: no mf33_mf34_cross_covariance_full.npy — falling back to "
+            "the WITHIN-BIN-ONLY cross block. That form is not a valid covariance "
+            "against complete MF33/MF34 diagonals (roadmap §10.1.5: it is what made "
+            "run 87 non-PSD). Reproducibility only; do not ship a result on it.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    blocks: List[dict] = []
+    for L in range(1, min(l_max, cov.shape[1]) + 1):
+        blocks.append({
+            "l": L,
+            "mag_grid_ev": grid_ev,
+            "shape_grid_ev": grid_ev,
+            "matrix": full[:, :, L - 1] if full is not None
+                      else np.diag(cov_rel_mag[:, L - 1]),
+            "is_relative": False,
+        })
+
+    info = {
+        "n_bins": n_bins,
+        "n_orders": len(blocks),
+        "n_undefined_slots": n_undef,
+        "scale": float(scale),
+        # "full" is the only valid form; "within_bin_only" is runs 86/87 and is
+        # known non-PSD. The [XCROSS] banner prints this, so a run's own log says
+        # which one it used rather than leaving it to be inferred.
+        "form": "full" if full is not None else "within_bin_only",
+        "median_abs_rel_cov": {
+            L: float(np.median(np.abs(cov_rel_mag[:, L - 1]))) for L in
+            range(1, len(blocks) + 1)
+        },
+    }
+    return blocks, info
+
+
+def _min_eig_lanczos(block: np.ndarray, tol: float = 1e-6) -> Optional[float]:
+    """Smallest eigenvalue of a large dense symmetric block, or None if it fails.
+
+    WHY NOT `eigvalsh`. Cierjacks is 28631 x 28631; an exact decomposition is
+    O(N^3) ~ 2e13 flops and would dominate the whole job. But we do not need the
+    spectrum, only its bottom, and Lanczos reaches that in a few dozen matrix
+    -vector products (~0.8 GFLOP each here).
+
+    WHY THE SHIFT. ARPACK converges quickly for LARGEST-magnitude eigenvalues and
+    slowly for `which='SA'`. So take lam_max first, then the largest eigenvalue of
+    (lam_max*I - A), which is lam_max - lam_min. Two fast problems instead of one
+    slow one.
+
+    Kept in float32 deliberately: the block is stored float32 and upcasting
+    Cierjacks would allocate 6.5 GB for no accuracy that matters at this
+    tolerance. Returns None rather than raising — this is a diagnostic, and a
+    non-converged estimate must never be the reason a 12-hour job dies.
+    """
+    try:
+        from scipy.sparse.linalg import LinearOperator, eigsh
+    except Exception:
+        return None
+
+    n = block.shape[0]
+    A = np.asarray(block)
+
+    def _mv(x):
+        return (A @ np.asarray(x, dtype=A.dtype).ravel()).astype(np.float64)
+
+    op = LinearOperator((n, n), matvec=_mv, dtype=np.float64)
+    try:
+        lam_max = float(eigsh(op, k=1, which="LA", tol=tol,
+                              return_eigenvectors=False)[0])
+        shifted = LinearOperator(
+            (n, n), matvec=lambda x: lam_max * np.asarray(x, float).ravel() - _mv(x),
+            dtype=np.float64,
+        )
+        gap = float(eigsh(shifted, k=1, which="LA", tol=tol,
+                          return_eigenvectors=False)[0])
+        return lam_max - gap
+    except Exception:
+        return None
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -411,6 +635,30 @@ def main() -> None:
         "JENDL":     load_library_lib_c0(JENDL_FILE,      "JENDL-5"),
         "This_work": load_library_lib_c0(THIS_WORK_FILE,  "This work"),
     }
+
+    # Opt-in MF33↔MF34 cross block, This_work only. JEFF and JENDL ship no such
+    # measurement, and inventing one for them would make the comparison unfair in
+    # the opposite direction to the missing-MF33 warning below. Say so out loud.
+    if MF33_MF34_CROSS_DIR and MF33_MF34_CROSS_SCALE != 0.0:
+        cross_blocks, cross_info = load_mf33_mf34_cross(
+            MF33_MF34_CROSS_DIR, l_max=L_MAX, scale=MF33_MF34_CROSS_SCALE,
+        )
+        libraries["This_work"]["mf33_mf34_cross"] = cross_blocks
+        print(f"\n[XCROSS] MF33↔MF34 cross block ENABLED for This_work only.")
+        print(f"[XCROSS]   source : {MF33_MF34_CROSS_DIR}")
+        print(f"[XCROSS]   {cross_info['n_bins']} bins x {cross_info['n_orders']} "
+              f"orders, scale={cross_info['scale']:g}")
+        print(f"[XCROSS]   undefined slots set to zero: "
+              f"{cross_info['n_undefined_slots']}")
+        print(f"[XCROSS]   median |Cov(dsigma/sigma, a_l)| by order: " + ", ".join(
+            f"a_{L} {v:.3e}" for L, v in cross_info["median_abs_rel_cov"].items()))
+        print(f"[XCROSS]   cross-ENERGY magnitude<->shape covariance is zero — "
+              f"never sampled, not asserted to vanish.")
+        print(f"[XCROSS]   JEFF and JENDL keep a zero cross block; This_work "
+              f"therefore carries a term the others do not.")
+    else:
+        print(f"\n[XCROSS] MF33↔MF34 cross block OFF (zero) — "
+              f"Sigma_eval = Sigma^MF34 + Sigma^MF33, as in runs 82-86.")
 
     missing_mf33 = [k for k, v in libraries.items() if v.get("mf33_rel_cov") is None]
     if missing_mf33:
@@ -493,9 +741,67 @@ def main() -> None:
     # Diagonal of Sigma_eval per row, for diagnostic plots only — chi^2 itself
     # uses the full block. _eval_pos lets a consumer slice the block correctly
     # when df is later filtered to a subset.
+    # PSD accounting. With the cross block off this is a formality — a sum of two
+    # PSD sandwiches is PSD. With it on it is NOT: Σ^MF33 and Σ^MF34 come from the
+    # shipped file (collapsed, near-zero-guarded), while Σ^cross comes from the
+    # raw MC, so the three are no longer guaranteed mutually consistent and a
+    # negative eigenvalue is a real possibility rather than a rounding artifact.
+    # A non-PSD Σ_eval can hand a datapoint negative variance, so this is checked
+    # rather than assumed. Full eigendecomposition only for the small groups —
+    # Cierjacks alone is 28631² — plus a diagonal check everywhere, which is
+    # cheap and catches the failure mode that actually bites the χ².
+    _EIG_MAX_N = 2500
+    _cross_on = bool(MF33_MF34_CROSS_DIR) and MF33_MF34_CROSS_SCALE != 0.0
+    n_neg_diag_total = 0
+    worst_min_eig = (None, np.inf)
+    n_eig_checked = 0
+    n_lanczos = 0
+
     sigma_eval_diag = np.zeros(len(df), dtype=float)
+    # The SIGNED, UNCLIPPED diagonal. sigma_eval_diag below is sqrt(max(d, 0)),
+    # so a negative variance leaves no trace in the parquet at all — it becomes
+    # an exact zero, indistinguishable from a genuinely zero uncertainty. That
+    # cost a live run to notice.
+    #
+    # Keeping the raw value makes the whole damping question answerable offline:
+    # Sigma_eval(s) = Sigma^MF33 + Sigma^MF34 + s*Sigma^cross is EXACTLY LINEAR in
+    # the scale, so one run at any s0 fixes Sigma^cross's diagonal everywhere
+    # (c = (v(s0) - v(0))/s0) and hence the largest PSD-safe scale, with no
+    # further cluster time. Additive column: every existing consumer is
+    # unaffected, and no value already written changes.
+    eval_var_diag = np.zeros(len(df), dtype=float)
     eval_pos = np.full(len(df), -1, dtype=np.int32)
     for (lib_key, exp_id), block in eval_cov.items():
+        d = np.diag(block)
+        n_neg = int(np.count_nonzero(d < 0.0))
+        if n_neg:
+            n_neg_diag_total += n_neg
+            print(f"[PSD] negative Sigma_eval diagonal: ({lib_key}, {exp_id}) "
+                  f"{n_neg}/{d.size} points, min {d.min():.3e}")
+        if block.shape[0] <= _EIG_MAX_N and block.shape[0] > 0:
+            n_eig_checked += 1
+            lo = float(np.linalg.eigvalsh(block.astype(np.float64)).min())
+            scale_ = float(np.max(np.abs(d))) or 1.0
+            if lo / scale_ < worst_min_eig[1]:
+                worst_min_eig = ((lib_key, exp_id), lo / scale_)
+        elif _cross_on and block.shape[0] > _EIG_MAX_N:
+            # A positive diagonal does NOT make a matrix PSD, and the two groups
+            # this skips (Cierjacks 28631, K&S 13698) are 90 % of the points. An
+            # exact eigendecomposition is O(N^3) and out of the question, but the
+            # SMALLEST eigenvalue is reachable by Lanczos in a few dozen matvecs.
+            # Only worth it when the cross block is on — with it off the sum of
+            # two PSD sandwiches is PSD by construction.
+            lo = _min_eig_lanczos(block)
+            if lo is not None:
+                n_lanczos += 1
+                scale_ = float(np.max(np.abs(d))) or 1.0
+                if lo / scale_ < worst_min_eig[1]:
+                    worst_min_eig = ((lib_key, exp_id), lo / scale_)
+                print(f"[PSD] Lanczos min eigenvalue ({lib_key}, {exp_id}) "
+                      f"N={block.shape[0]}: {lo:.3e} (normalised {lo / scale_:.3e})")
+            else:
+                print(f"[PSD] Lanczos did NOT converge for ({lib_key}, {exp_id}) "
+                      f"N={block.shape[0]} — smallest eigenvalue unknown, not zero")
         mask = (df["library"].astype(str) == lib_key) & \
                (df["experiment_id"].astype(str) == exp_id)
         idx = np.flatnonzero(mask.to_numpy())
@@ -504,10 +810,24 @@ def main() -> None:
                 f"Row count mismatch for ({lib_key}, {exp_id}): "
                 f"{idx.size} parquet rows vs {block.shape[0]} cov rows"
             )
-        sigma_eval_diag[idx] = np.sqrt(np.maximum(np.diag(block), 0.0))
+        sigma_eval_diag[idx] = np.sqrt(np.maximum(d, 0.0))
+        eval_var_diag[idx] = d
         eval_pos[idx] = np.arange(idx.size, dtype=np.int32)
     df["sigma_eval_diag"] = sigma_eval_diag
+    df["sigma_eval_var_diag"] = eval_var_diag
     df["_eval_pos"] = eval_pos
+
+    print(f"\n[PSD] negative Sigma_eval diagonal entries: {n_neg_diag_total} "
+          f"(clipped to 0 in sigma_eval_diag; kept signed in sigma_eval_var_diag, "
+          f"which is what makes the damping scale solvable offline)")
+    if worst_min_eig[0] is not None:
+        print(f"[PSD] worst normalised min eigenvalue: {worst_min_eig[1]:.3e} "
+              f"at {worst_min_eig[0]}")
+        print(f"[PSD]   exact eigendecomposition on {n_eig_checked} groups of "
+              f"N <= {_EIG_MAX_N}; Lanczos on {n_lanczos} larger groups")
+        if not _cross_on:
+            print(f"[PSD]   large groups were NOT checked (cross block off ⇒ the sum "
+                  f"of two PSD sandwiches is PSD by construction)")
 
     df.to_parquet(OUTPUT_PARQUET, index=False)
     sidecar = OUTPUT_PARQUET + ".eval_cov.npz"

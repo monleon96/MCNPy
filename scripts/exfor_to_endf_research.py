@@ -772,12 +772,19 @@ COMPUTE_MF33_MF34_CROSS = True                   # Measure Cov(c0, a_l) across t
                                                   # already in memory at that point.
                                                   # Publishing it as an MF34 LB=6 (L=0,L1) block
                                                   # stays gated on mf3_mf33_roadmap Phase 3 / LTT=3.
-SAVE_MF33_C0_SAMPLES = False                     # mf33_c0_samples.parquet — the raw
+SAVE_MF33_C0_SAMPLES = True                      # mf33_c0_samples.parquet — the raw
                                                   # two-pass c0 draws (~300 MB at 10k
-                                                  # samples). Only needed for a
-                                                  # non-Gaussian TMC of the magnitude
-                                                  # channel; the covariance sidecars
-                                                  # carry the Gaussian summary.
+                                                  # samples).
+                                                  # TURNED ON 2026-08-04 (roadmap §10.1.6).
+                                                  # It was False through run 86, and that is
+                                                  # the ONLY reason run 86's cross-energy
+                                                  # magnitude<->shape structure cannot be
+                                                  # recovered offline. Without these draws a
+                                                  # complete cross block cannot be rebuilt
+                                                  # after the fact — the covariance sidecars
+                                                  # summarise each channel separately and
+                                                  # throw the pairing away. ~300 MB against a
+                                                  # share that sits near full: still worth it.
 
 # --- OUTPUT: Pipeline A (fitting) ------------------------------------------ #
 N_SAMPLES = int(os.environ.get("KIKA_N_SAMPLES", "10000"))
@@ -1252,6 +1259,7 @@ def compute_mf33_mf34_cross(
     energy_indices,
     max_order,
     min_samples=32,
+    compute_full=True,
 ):
     """Per-bin Cov(c0, a_l) over the shared Pass-2 MC replicas (roadmap §9.4.1).
 
@@ -1302,10 +1310,35 @@ def compute_mf33_mf34_cross(
     min_samples : int
         Bins with fewer paired replicas return NaN rather than a noisy rho.
 
+    THE CROSS-ENERGY BLOCK, AND WHY IT IS NOT OPTIONAL (roadmap §10.1.5/§10.1.6).
+    The within-bin numbers above are a *partial* Level A: Cov(c0(E_i), a_l(E_i))
+    only. Shipping that against complete MF33/MF34 diagonals is **not a valid
+    covariance**. Measured 2026-08-04 on run 81's paired replicas: the full joint
+    sample covariance is PSD at -1e-18, and zeroing ONLY the cross-energy entries
+    makes it non-PSD in every energy window, 13 orders of magnitude worse -- with
+    those discarded entries the same size as the ones kept (ratio 0.82-1.01) and
+    ~159x more numerous. That is what killed run 87. So ``cov_full`` is computed
+    here, as (n_bins, n_bins, max_order) = Cov(c0(E_i), a_l(E_j)).
+
+    IT IS NOT SYMMETRIC. Row = magnitude bin, column = shape bin; the two axes
+    are different quantities. Do not transpose it into place.
+
+    A COMMON REPLICA SET IS REQUIRED, and this is the one thing that would
+    silently reintroduce the original bug. A sample covariance is PSD *only* if
+    every entry is computed from the same replicas. Pairwise-complete covariance
+    -- intersecting per (i, j) as the within-bin loop does per bin -- carries no
+    PSD guarantee at all, which is precisely the failure mode this block exists
+    to fix. So ``cov_full`` uses the replicas complete in BOTH channels across
+    ALL bins, and reports how many that keeps in ``n_common``. The per-bin
+    ``cov``/``rho`` above keep their per-bin intersection and are unchanged, so
+    run 86's sidecars stay reproducible.
+
     Returns
     -------
     dict with 'cov', 'rho' (n_bins, max_order), 'std_c0' (n_bins,),
-    'std_a' (n_bins, max_order), 'n_pairs' (n_bins,).
+    'std_a' (n_bins, max_order), 'n_pairs' (n_bins,), and -- when
+    ``compute_full`` -- 'cov_full' (n_bins, n_bins, max_order) plus the scalar
+    'n_common'.
     """
     energy_indices = list(energy_indices)
     n_bins = len(energy_indices)
@@ -1361,7 +1394,72 @@ def compute_mf33_mf34_cross(
         good = (s_a > _eps * scale_a) & (s_c > _eps * scale_c)
         rho[row, good] = cov[row, good] / (s_c * s_a[good])
 
-    return dict(cov=cov, rho=rho, std_c0=std_c0, std_a=std_a, n_pairs=n_pairs)
+    out = dict(cov=cov, rho=rho, std_c0=std_c0, std_a=std_a, n_pairs=n_pairs)
+    if compute_full:
+        out.update(_cross_full(
+            all_samples_perbin, c0_samples_perbin, energy_indices, max_order,
+            min_samples=min_samples,
+        ))
+    return out
+
+
+def _cross_full(
+    all_samples_perbin,
+    c0_samples_perbin,
+    energy_indices,
+    max_order,
+    min_samples=32,
+):
+    """Cov(c0(E_i), a_l(E_j)) over ONE common replica set. See the caller's
+    docstring for why the common set is mandatory rather than convenient.
+
+    Returns {'cov_full': (n_bins, n_bins, max_order), 'n_common': int}.
+    ``cov_full`` is None when too few replicas are complete everywhere -- a
+    partial block is exactly what we are trying to stop shipping, so it is
+    withheld rather than filled.
+    """
+    energy_indices = list(energy_indices)
+    n_bins = len(energy_indices)
+
+    def _complete(s_idx):
+        """Does replica s_idx have finite c0 AND a_1..a_max in every bin?"""
+        c_bins = c0_samples_perbin.get(s_idx) or {}
+        a_bins = all_samples_perbin.get(s_idx) or {}
+        for e_idx in energy_indices:
+            if e_idx not in c_bins or not np.isfinite(float(c_bins[e_idx])):
+                return False
+            a = a_bins.get(e_idx)
+            if a is None:
+                return False
+            a = np.asarray(a, dtype=float)
+            if a.size < max_order or not np.all(np.isfinite(a[:max_order])):
+                return False
+        return True
+
+    common = sorted(s for s in c0_samples_perbin if _complete(s))
+    n = len(common)
+    if n < min_samples:
+        return dict(cov_full=None, n_common=n)
+
+    # Order-major so each A[l] is C-contiguous and the products below are plain
+    # BLAS GEMMs. An einsum over (r, i, j, l) is the obvious spelling and is
+    # several times slower here, which matters inside a ~6 h pipeline run.
+    C0 = np.empty((n, n_bins), dtype=float)
+    A = np.empty((max_order, n, n_bins), dtype=float)
+    for r, s_idx in enumerate(common):
+        c_bins = c0_samples_perbin[s_idx]
+        a_bins = all_samples_perbin[s_idx]
+        for col, e_idx in enumerate(energy_indices):
+            C0[r, col] = float(c_bins[e_idx])
+            A[:, r, col] = np.asarray(a_bins[e_idx], dtype=float)[:max_order]
+
+    C0 -= C0.mean(axis=0)
+    A -= A.mean(axis=1, keepdims=True)
+    # ddof=1, matching the per-bin path and np.cov's convention.
+    cov_full = np.empty((n_bins, n_bins, max_order), dtype=float)
+    for l in range(max_order):
+        cov_full[:, :, l] = (C0.T @ A[l]) / (n - 1)
+    return dict(cov_full=cov_full, n_common=n)
 
 
 def _mc_one_bin(args):
@@ -4147,6 +4245,32 @@ def run_exfor_to_endf_sampling_v2(
                             np.save(output_path / "mf33_mf34_cross_covariance.npy", _xc["cov"])
                             np.save(output_path / "mf33_mf34_cross_correlation.npy", _xc["rho"])
                             np.save(output_path / "mf33_mf34_cross_n_pairs.npy", _xc["n_pairs"])
+                            # The COMPLETE block, Cov(c0(E_i), a_l(E_j)) — roadmap
+                            # §10.1.6. This is the one the chi^2 must consume; the
+                            # within-bin sidecar above stays for continuity with
+                            # runs 86/87 and for the rho diagnostics.
+                            _xf = _xc.get("cov_full")
+                            if _xf is not None:
+                                np.save(
+                                    output_path / "mf33_mf34_cross_covariance_full.npy", _xf
+                                )
+                                _wb = np.abs(np.einsum("iil->il", _xf)).mean()
+                                _tot = np.abs(_xf).mean()
+                                _logger.info(
+                                    f"  [XCORR] FULL cross block written: {_xf.shape} "
+                                    f"over {_xc['n_common']} replicas complete in both "
+                                    f"channels across all bins "
+                                    f"({100.0 * _xc['n_common'] / max(len(c0_samples_perbin), 1):.1f} %). "
+                                    f"mean|within-bin|={_wb:.3e}, mean|all|={_tot:.3e}"
+                                )
+                            else:
+                                _logger.warning(
+                                    "  [XCORR] FULL cross block NOT written: only "
+                                    f"{_xc.get('n_common', 0)} replicas are complete in "
+                                    "both channels across every bin. A partial block is "
+                                    "what §10.1.5 showed is not a valid covariance, so "
+                                    "it is withheld rather than filled."
+                                )
                             _nb = _xc["rho"].shape[0]
                             _logger.info(
                                 f"  [XCORR] Cov(c0, a_l) over shared Pass-2 replicas: "

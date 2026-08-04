@@ -119,3 +119,137 @@ def test_shapes_and_bin_order_follow_energy_indices():
     assert out["rho"].shape == (3, MAX_ORDER)
     assert out["n_pairs"].shape == (3,)
     assert out["std_a"].shape == (3, MAX_ORDER)
+
+
+# ── The COMPLETE cross block: Cov(c0(E_i), a_l(E_j)) (roadmap §10.1.6) ───────
+#
+# The within-bin block above is a PARTIAL Level A, and shipping it against
+# complete MF33/MF34 diagonals is not a valid covariance -- that is what made
+# run 87 non-PSD, and §10.1.5 showed no representation work repairs it. These
+# tests pin the complete form and, above all, the ONE COMMON REPLICA SET that
+# makes it PSD. Pairwise-complete covariance (intersecting per entry, as the
+# per-bin path does per bin) has no PSD guarantee and would silently reinstate
+# the original defect.
+
+def _paired_samples(n_s, n_bins, max_order, seed=0, drop=(), corr_len=2.0):
+    """Correlated c0/a_l draws in the dict-of-dicts shape the pipeline uses.
+
+    `drop` lists (s_idx, e_idx) pairs to remove from the SHAPE channel only,
+    which is how an incomplete replica actually arises.
+
+    `corr_len` makes the latent field SMOOTH IN ENERGY, and that is not
+    decoration. With an iid latent (corr_len -> 0) both channels are
+    energy-uncorrelated, the transitivity argument of roadmap §10.1.3 has
+    nothing to bite on, and zeroing the cross-energy entries leaves the joint
+    matrix PSD -- verified while writing these tests. The real MF33 and MF34 are
+    strongly correlated across energy, which is exactly why the omission is
+    fatal there. A test built on an iid latent would pass while testing nothing.
+    """
+    rng = np.random.default_rng(seed)
+    idx = np.arange(n_bins)
+    K = np.exp(-0.5 * ((idx[:, None] - idx[None, :]) / corr_len) ** 2)
+    Lk = np.linalg.cholesky(K + 1e-10 * np.eye(n_bins))
+    latent = rng.normal(size=(n_s, n_bins)) @ Lk.T
+    c0, alls = {}, {}
+    for s in range(n_s):
+        c0[s] = {e: 0.2 + 0.01 * latent[s, e] for e in range(n_bins)}
+        alls[s] = {}
+        for e in range(n_bins):
+            if (s, e) in drop:
+                continue
+            base = 0.5 * latent[s, e] + 0.5 * rng.normal(size=max_order)
+            alls[s][e] = 0.01 * base
+    return alls, c0
+
+
+def test_full_block_has_the_within_bin_block_on_its_diagonal():
+    """Same estimator, so the diagonal must agree when nothing is dropped."""
+    n_s, n_bins, L = 400, 6, 3
+    alls, c0 = _paired_samples(n_s, n_bins, L, seed=1)
+    out = compute_mf33_mf34_cross(alls, c0, range(n_bins), L)
+    full = out["cov_full"]
+    assert out["n_common"] == n_s
+    np.testing.assert_allclose(
+        np.einsum("iil->il", full), out["cov"], rtol=1e-10, atol=0,
+    )
+
+
+def test_full_block_is_psd_as_a_joint_covariance():
+    """THE property the whole change exists for.
+
+    Assemble [[C33, Cx], [Cx^T, C34]] from the same replicas and require PSD.
+    This is what the within-bin-only block fails.
+    """
+    n_s, n_bins, L = 500, 5, 3
+    alls, c0 = _paired_samples(n_s, n_bins, L, seed=2)
+    out = compute_mf33_mf34_cross(alls, c0, range(n_bins), L)
+    full = out["cov_full"]
+
+    C = np.array([[c0[s][e] for e in range(n_bins)] for s in range(n_s)])
+    A = np.array([[alls[s][e] for e in range(n_bins)] for s in range(n_s)])
+    X = np.hstack([C, A.reshape(n_s, n_bins * L)])
+    Xc = X - X.mean(0)
+    S = (Xc.T @ Xc) / (n_s - 1)
+
+    # Rebuild the magnitude<->shape corner from cov_full and require it to match
+    # the direct sample covariance -- i.e. cov_full IS that corner.
+    corner = np.empty((n_bins, n_bins * L))
+    for e in range(n_bins):
+        for f in range(n_bins):
+            corner[e, f * L:(f + 1) * L] = full[e, f, :]
+    np.testing.assert_allclose(corner, S[:n_bins, n_bins:], rtol=1e-10, atol=1e-18)
+    assert np.linalg.eigvalsh(S)[0] > -1e-10 * np.max(np.abs(np.diag(S)))
+
+
+def test_zeroing_the_cross_energy_entries_destroys_psd():
+    """The measured claim of §10.1.6, pinned as a unit test: the discarded
+    entries are load-bearing, so a within-bin-only block is not a covariance."""
+    n_s, n_bins, L = 500, 5, 3
+    alls, c0 = _paired_samples(n_s, n_bins, L, seed=3)
+    C = np.array([[c0[s][e] for e in range(n_bins)] for s in range(n_s)])
+    A = np.array([[alls[s][e] for e in range(n_bins)] for s in range(n_s)])
+    X = np.hstack([C, A.reshape(n_s, n_bins * L)])
+    Xc = X - X.mean(0)
+    S = (Xc.T @ Xc) / (n_s - 1)
+    scale = float(np.max(np.abs(np.diag(S))))
+    assert np.linalg.eigvalsh(S)[0] > -1e-10 * scale          # full: PSD
+
+    S2 = S.copy()
+    blk = S[:n_bins, n_bins:].copy()
+    keep = np.zeros_like(blk, dtype=bool)
+    for e in range(n_bins):
+        keep[e, e * L:(e + 1) * L] = True
+    S2[:n_bins, n_bins:] = np.where(keep, blk, 0.0)
+    S2[n_bins:, :n_bins] = S2[:n_bins, n_bins:].T
+    assert np.linalg.eigvalsh(S2)[0] < -1e-8 * scale          # within-bin: NOT PSD
+
+
+def test_incomplete_replicas_are_excluded_not_pairwise_intersected():
+    """A replica missing ONE bin must leave the common set entirely, or the
+    block loses its PSD guarantee."""
+    n_s, n_bins, L = 300, 4, 2
+    alls, c0 = _paired_samples(n_s, n_bins, L, seed=4, drop={(0, 2), (1, 3)})
+    out = compute_mf33_mf34_cross(alls, c0, range(n_bins), L)
+    assert out["n_common"] == n_s - 2
+    # the per-bin path keeps its own per-bin intersection, so it sees more
+    assert out["n_pairs"][0] == n_s
+
+
+def test_full_block_is_withheld_when_too_few_replicas_are_complete():
+    """A partial block is exactly what we are trying to stop shipping."""
+    n_s, n_bins, L = 40, 3, 2
+    alls, c0 = _paired_samples(n_s, n_bins, L, seed=5)
+    out = compute_mf33_mf34_cross(alls, c0, range(n_bins), L, min_samples=100)
+    assert out["cov_full"] is None
+    assert out["n_common"] == n_s
+
+
+def test_compute_full_false_keeps_the_legacy_return():
+    """Runs 86/87 reproducibility: the per-bin outputs must not move."""
+    n_s, n_bins, L = 200, 4, 3
+    alls, c0 = _paired_samples(n_s, n_bins, L, seed=6)
+    a = compute_mf33_mf34_cross(alls, c0, range(n_bins), L, compute_full=False)
+    b = compute_mf33_mf34_cross(alls, c0, range(n_bins), L, compute_full=True)
+    assert "cov_full" not in a
+    for k in ("cov", "rho", "std_c0", "std_a", "n_pairs"):
+        np.testing.assert_array_equal(a[k], b[k])
