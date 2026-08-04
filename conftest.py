@@ -177,7 +177,7 @@ def _missing(request: pytest.FixtureRequest, what: str, detail: str):
 #: Fixtures whose presence means the test needs the shared data tree.
 _TAPE_FIXTURES = frozenset(
     {f"{name}_tape" for name in _TAPES}
-    | {"serpent_input", "fe56_ace", "endf_dir", "tape_root"}
+    | {"serpent_input", "fe56_ace", "tape_root"}
 )
 #: Fixtures whose presence means the test spawns NJOY.
 _NJOY_FIXTURES = frozenset({"njoy_exe"})
