@@ -23,11 +23,14 @@ different CPU running the CI job. Bit-exactness is the acceptance criterion for
 phase 2, where the code moves without being touched; here the code is merely
 frozen where it stands.
 
-**Deliberately included: a function documented as broken.**
-``ENDF.reconstruct_xs()`` raises a ``DeprecationWarning`` saying it "is not
-working correctly and should not be used", and is still called from four live
-sites. Phase 0 freezes its current output too. That is the point: when phase 1
-decides its fate, the diff will show exactly what changed.
+**Deliberately included: a reconstructor whose output is not trustworthy.**
+Phase 0 froze it through ``ENDF.reconstruct_xs()``, a wrapper documented as
+"not working correctly and should not be used" that four live sites called
+anyway. Phase 1 deleted the wrapper and made every caller name its own sigma
+source; the reconstructor underneath survives, so the pin moved one level down
+to ``kika.endf.processing.reconstruct`` and the golden did not change. Phase 3
+restructures the resonance code per formalism, and this is what will show what
+that moves.
 """
 from __future__ import annotations
 
@@ -246,35 +249,40 @@ def test_multigroup_collapse_golden():
 
 
 # ---------------------------------------------------------------------------
-# The broken reconstructor, frozen as it stands
+# The ENDF-typed reconstruction adapter, frozen as it stands
 # ---------------------------------------------------------------------------
 
-def test_deprecated_endf_reconstruct_xs_golden(micro_tape):
-    """``ENDF.reconstruct_xs()`` is documented as broken. Freeze it anyway.
+def test_endf_reconstruct_adapter_golden(micro_tape):
+    """``kika.endf.processing.reconstruct`` on a real MF2/MF3 pair.
 
-    Its own docstring says it "is not working correctly and should not be
-    used", and it raises a ``DeprecationWarning`` to say so — yet four live
-    call sites outside the class still use it. Phase 1 decides whether to route
-    them to the NJOY path and delete it, or fix it. Either way the diff against
-    this golden is what makes the consequence visible.
+    This is the ENDF-typed adapter: MF2/151 + MF3 in, ``{MT: MF3MT}`` out,
+    with ``kika.processing.reconstruct`` doing the physics in between and
+    ``CrossSection`` as the canonical form in the middle.
+
+    It used to be reached through ``ENDF.reconstruct_xs()``, a convenience
+    wrapper that also memoised onto ``endf._pendf``. That wrapper is gone — it
+    was documented as producing incorrect cross sections and four live call
+    sites used it anyway — but the reconstructor underneath is not, and phases
+    2 and 4 still move it. So the pin stays, pointed one level down at the code
+    that survived. Same numbers, same golden file: nothing about the arithmetic
+    changed, only who calls it — the file is renamed, its contents are not.
+
+    The output is still not trustworthy physics. It is frozen so that when the
+    resonance work in phase 3 restructures it per formalism, the diff is
+    visible.
     """
+    from kika.endf.processing.reconstruct import reconstruct as endf_reconstruct
+
     endf = read_endf(str(micro_tape))
-    with pytest.warns(DeprecationWarning, match="not working correctly"):
-        produced = endf.reconstruct_xs()
+    produced = endf_reconstruct(endf.mf[2].mt[151], endf.files.get(3))
 
-    assert produced, "reconstruct_xs returned nothing — its shape changed"
+    assert produced, "the adapter returned nothing — its shape changed"
 
-    # Note the return shape: this one hands back ENDF ``MF3MT`` sections, not
-    # the canonical ``CrossSection`` that ``kika.processing.reconstruct``
-    # returns. Two reconstructors, two return types — itself an argument for
-    # the canonical model.
-    #
     # Fingerprinted rather than stored in full. The output runs to hundreds of
-    # thousands of points per MT, and committing 3 MB to pin a function that
-    # phase 1 will either fix or delete is not a good trade. A digest cannot
-    # say *how* it moved, but for a wholesale fix or removal "it moved" is the
-    # entire message, and the summary statistics next to it give the shape of
-    # the change.
+    # thousands of points per MT, and committing 3 MB to pin it is not a good
+    # trade. A digest cannot say *how* it moved, but for a wholesale change
+    # "it moved" is the message, and the summary statistics next to it give
+    # the shape of the change.
     arrays: dict[str, np.ndarray] = {}
     for mt in sorted(produced):
         section = produced[mt]
@@ -288,4 +296,4 @@ def test_deprecated_endf_reconstruct_xs_golden(micro_tape):
         arrays[f"mt{mt}_digest"] = np.array(
             hashlib.sha256(energies.tobytes() + values.tobytes()).hexdigest()
         )
-    check_golden("endf_reconstruct_xs_deprecated", arrays)
+    check_golden("endf_reconstruct_adapter", arrays)

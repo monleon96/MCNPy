@@ -256,15 +256,17 @@ class ENDF:
         plot_data = None
 
         if reconstructed:
-            # Use cached pendf if available, otherwise reconstruct
+            # Consume what the caller supplied; never reconstruct behind their
+            # back. This used to call reconstruct_xs(), which produced numbers
+            # its own docstring said were wrong, and labelled the curve
+            # "(reconstructed)" without qualification.
             if self._pendf is None:
-                if 2 in self.files:
-                    self.reconstruct_xs(tolerance=tolerance)
-                else:
-                    warnings.warn(
-                        "MF2 not loaded — returning raw MF3 background. "
-                        "Load MF2 for full reconstructed cross sections."
-                    )
+                warnings.warn(
+                    "reconstructed=True but endf.pendf is not set — returning "
+                    "the raw MF3 background. Populate it first, e.g. "
+                    "endf.pendf = kika.processing.njoy_reconstruct(path, "
+                    "njoy_executable=...)."
+                )
 
             if self._pendf is not None and mt in self._pendf:
                 plot_data = self._pendf[mt].to_plot_data(**kwargs)
@@ -299,12 +301,11 @@ class ENDF:
                     if int(k) != mt
                 } if hasattr(self.files[33], 'sections') else None
 
-                # Auto-reconstruct from MF2 if available and not yet done
-                if self._pendf is None and 2 in self.files and 3 in self.files:
-                    try:
-                        self.reconstruct_xs()
-                    except Exception:
-                        pass  # reconstruction optional; raw MF3 used as fallback
+                # No auto-reconstruction: if the caller set endf.pendf it is
+                # overlaid below, otherwise the raw MF3 background is used.
+                # This used to call reconstruct_xs() inside a bare
+                # `except Exception: pass`, so a failure of a reconstructor
+                # already known to be wrong was invisible twice over.
 
                 # Build cross-section map: start with raw MF3, then overlay
                 # reconstructed (PENDF) data for MTs that need resonance
@@ -358,37 +359,28 @@ class ENDF:
     
     @property
     def pendf(self) -> Optional[Dict]:
-        """Reconstructed pointwise cross sections (populated by reconstruct_xs())."""
-        return self._pendf
+        """Reconstructed pointwise cross sections, or *None*.
 
-    def reconstruct_xs(self, tolerance: float = 1e-3) -> Dict:
-        """DEPRECATED / NOT WORKING — do not use.
+        Set this to give the resonance-reconstructed sigma(E) to whatever needs
+        it — plotting, MF33 NC LTY=0 resolution, the sigma-weighted MF34
+        multigroup collapse::
 
-        The in-Python resonance reconstructor is incomplete and produces
-        incorrect cross sections on real evaluations. Use NJOY reconr
-        instead via :func:`kika.processing.njoy_reconstruct` (or, for
-        MF33 NC LTY=0 sum-rule resolution, pass ``njoy_executable=...``
-        to :func:`kika.processing.resolve_derived_covariance`).
+            endf.pendf = njoy_reconstruct(path, njoy_executable=njoy)
 
-        Kept in-tree only so older notebooks import cleanly; may be
-        revisited in the future.
+        Nothing populates it on its own any more. ``ENDF.reconstruct_xs()``
+        used to, silently, using an in-Python reconstructor its own docstring
+        called "not working correctly" — so every consumer of ``pendf`` was
+        quietly weighted by numbers nobody trusted. Choosing the source is the
+        caller's, and it is now visible in their code.
+
+        Expects ``{MT: section}`` where each section exposes ``energies`` and
+        ``cross_sections``; both ``MF3MT`` and ``CrossSection`` qualify.
         """
-        import warnings
-
-        warnings.warn(
-            "endf.reconstruct_xs() is not working correctly and should "
-            "not be used. Use kika.processing.njoy_reconstruct or "
-            "kika.processing.resolve_derived_covariance(..., "
-            "njoy_executable=...) instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        from ..processing.reconstruct import reconstruct
-
-        mf2 = self.mf[2].mt[151]
-        mf3 = self.files.get(3)
-        self._pendf = reconstruct(mf2, mf3, tolerance=tolerance)
         return self._pendf
+
+    @pendf.setter
+    def pendf(self, sections: Optional[Dict]) -> None:
+        self._pendf = sections
 
     def __repr__(self):
         return f"ENDF({len(self.files)} files)"

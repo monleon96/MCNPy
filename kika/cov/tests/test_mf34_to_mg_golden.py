@@ -76,14 +76,38 @@ def _check_golden(name: str, produced: dict) -> None:
 
 @pytest.fixture(scope="module")
 def collapsed(micro_tape):
-    """MF34/MT2 collapsed onto GRID_EV, with whatever sigma the code uses."""
+    """MF34/MT2 collapsed onto GRID_EV, weighted by a sigma stated here.
+
+    ``endf.pendf`` is populated explicitly with the in-Python reconstruction,
+    which is what ``MF34_to_MG`` used to reach for on its own. Naming it makes
+    this a test of the *collapse* at a fixed sigma, instead of a test of the
+    collapse and an unaccountable weight together — so a future change to
+    either one is attributable.
+
+    NJOY would be the better sigma and is what production should pass, but it
+    is not available in CI and would put this golden behind the njoy marker.
+    """
+    from kika.endf.processing.reconstruct import reconstruct as endf_reconstruct
+
     endf = read_endf(str(micro_tape))
-    with warnings.catch_warnings():
-        # The reconstructor this depends on warns that it is broken. That is
-        # the fact this file exists to pin, not a reason to fail collection.
-        warnings.simplefilter("ignore", DeprecationWarning)
-        result = MF34_to_MG(endf, energy_grid=GRID_EV, mt=2)
+    endf.pendf = endf_reconstruct(endf.mf[2].mt[151], endf.files.get(3))
+    result = MF34_to_MG(endf, energy_grid=GRID_EV, mt=2)
     return endf, result
+
+
+def test_it_refuses_to_guess_a_sigma(micro_tape):
+    """No pendf, no collapse. The defect this file was written around.
+
+    MF34_to_MG used to fill pendf in silently, by calling a reconstructor
+    documented as producing incorrect cross sections — no try/except, no test.
+    Every collapsed matrix in the thesis carried that weight and nothing said
+    so. Refusing loudly is the point.
+    """
+    endf = read_endf(str(micro_tape))
+    assert endf.pendf is None
+
+    with pytest.raises(ValueError, match="pendf"):
+        MF34_to_MG(endf, energy_grid=GRID_EV, mt=2)
 
 
 def _arrays(result) -> dict:

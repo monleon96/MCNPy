@@ -226,43 +226,43 @@ class CrossSection:
         cls,
         endf: "ENDF",
         mt: int,
-        reconstruct: bool = True,
-        tolerance: float = 1e-3,
+        use_reconstructed: bool = True,
     ) -> "CrossSection":
-        """Create a ``CrossSection`` from an ENDF object, optionally reconstructing
-        resonance cross sections from MF2 parameters.
+        """Create a ``CrossSection`` from an ENDF object.
 
         Parameters
         ----------
         endf : ENDF
-            Parsed ENDF file (must have MF3; MF2 needed for reconstruction).
+            Parsed ENDF file (must have MF3).
         mt : int
             Reaction MT number.
-        reconstruct : bool
-            If True and MF2 data is available, reconstruct pointwise cross
-            sections via ``endf.reconstruct_xs()``.  Reconstructed data
-            includes resonance contributions added to the MF3 background.
-        tolerance : float
-            Linearization tolerance passed to ``reconstruct_xs()``.
+        use_reconstructed : bool
+            Prefer ``endf.pendf[mt]`` when the caller has populated it, which
+            is what carries resonance contributions on top of the MF3
+            background. Falls back to raw MF3 when it is absent — for a
+            threshold reaction the two are the same thing.
 
         Returns
         -------
         CrossSection
+
+        Notes
+        -----
+        This used to reconstruct on demand, via an in-Python reconstructor
+        documented as producing incorrect cross sections. It now only consumes
+        what the caller chose::
+
+            endf.pendf = kika.processing.njoy_reconstruct(path, njoy_executable=...)
         """
-        if reconstruct and 2 in endf.files:
-            if endf.pendf is None:
-                endf.reconstruct_xs(tolerance=tolerance)
-            if mt in endf.pendf:
-                return cls.from_endf(endf.pendf[mt])
-        # Fall back to raw MF3 (threshold reactions, or reconstruct=False)
+        if use_reconstructed and endf.pendf and mt in endf.pendf:
+            return cls.from_endf(endf.pendf[mt])
         return cls.from_endf(endf.mf[3].mt[mt])
 
     @classmethod
     def all_from_endf_file(
         cls,
         endf: "ENDF",
-        reconstruct: bool = True,
-        tolerance: float = 1e-3,
+        use_reconstructed: bool = True,
     ) -> Dict[int, "CrossSection"]:
         """Extract all available cross sections from an ENDF file.
 
@@ -270,27 +270,26 @@ class CrossSection:
         ----------
         endf : ENDF
             Parsed ENDF file.
-        reconstruct : bool
-            If True, reconstruct resonance cross sections from MF2.
-        tolerance : float
-            Linearization tolerance for reconstruction.
+        use_reconstructed : bool
+            Prefer ``endf.pendf`` per MT where the caller has populated it.
 
         Returns
         -------
         Dict[int, CrossSection]
-            Mapping of MT number to ``CrossSection``.
+            Mapping of MT number to ``CrossSection``. An MT whose MF3 section
+            cannot be converted is skipped.
         """
-        if reconstruct and 2 in endf.files:
-            if endf.pendf is None:
-                endf.reconstruct_xs(tolerance=tolerance)
-
         result: Dict[int, "CrossSection"] = {}
         for mt_num in endf.mf[3].mt:
             try:
                 result[mt_num] = cls.from_endf_file(
-                    endf, mt_num, reconstruct=reconstruct, tolerance=tolerance
+                    endf, mt_num, use_reconstructed=use_reconstructed
                 )
-            except Exception:
+            except (KeyError, AttributeError, ValueError, TypeError):
+                # A section this converter cannot read, not a reason to lose
+                # the rest. Narrower than the bare `except Exception` this
+                # replaced, which also swallowed KeyboardInterrupt-adjacent
+                # bugs in from_endf itself.
                 continue
         return result
 
