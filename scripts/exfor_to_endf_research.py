@@ -940,16 +940,18 @@ def _write_run_metadata(output_dir: str) -> Dict[str, Any]:
     # Resolve manifest path. Importing the module here avoids hard-coding the
     # path; if the manifest module isn't importable, build_exfor_cache_from_objects
     # will raise loudly anyway, so a None here is safe metadata.
+    # Call the resolver rather than reading a module constant, so the path
+    # logged here is the one load_manifest() will actually open.
     manifest_path: Optional[str] = None
     manifest_sha256: Optional[str] = None
     manifest_path_reachable: Optional[bool] = None
     try:
-        from scripts.uncertainty_manifest import _MANIFEST_PATH as _mp
-        manifest_path = str(_mp)
+        from scripts.uncertainty_manifest import manifest_path as _resolve_manifest_path
+        manifest_path = str(_resolve_manifest_path())
     except Exception:
         try:
-            from uncertainty_manifest import _MANIFEST_PATH as _mp
-            manifest_path = str(_mp)
+            from uncertainty_manifest import manifest_path as _resolve_manifest_path
+            manifest_path = str(_resolve_manifest_path())
         except Exception:
             manifest_path = None
     if manifest_path is not None:

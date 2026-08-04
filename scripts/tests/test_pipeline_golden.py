@@ -94,41 +94,33 @@ WINDOWS = {
 # ---------------------------------------------------------------------------
 # Pointing the resolver at the fixture manifest
 # ---------------------------------------------------------------------------
-# $KIKA_UNCERTAINTY_MANIFEST_PATH alone is not enough. uncertainty_manifest.py
-# reads it once, at import, into the module-level _MANIFEST_PATH, and caches
-# the parsed YAML in _manifest_cache. Any earlier test that imports the module
-# — test_deploy_smoke.py imports every script — freezes the production path
-# before this file gets a chance to set the variable. Setting the env var and
-# nothing else made the "pair" golden pass in isolation and fail in a full run,
-# silently resolving against the production manifest instead of the fixture.
-# See test_manifest_env_var_is_honoured_after_import for the pinned defect.
+# The env var is now enough on its own: uncertainty_manifest.manifest_path()
+# resolves it per call and the cache is keyed on the resolved path. This used
+# to need three pieces of state set by hand, because the path was bound once at
+# import — so whichever test imported the module first (test_deploy_smoke.py
+# imports every script) froze the production path for the whole session, and
+# the "pair" golden passed in isolation while silently resolving against the
+# production manifest in a full run.
 
 
 def _use_micro_manifest():
     """Force the resolver onto the fixture manifest. Returns state to restore."""
     import scripts.uncertainty_manifest as resolver
 
-    state = (
-        os.environ.get("KIKA_UNCERTAINTY_MANIFEST_PATH"),
-        resolver._MANIFEST_PATH,
-        resolver._manifest_cache,
-    )
+    state = os.environ.get("KIKA_UNCERTAINTY_MANIFEST_PATH")
     os.environ["KIKA_UNCERTAINTY_MANIFEST_PATH"] = str(MICRO_MANIFEST)
-    resolver._MANIFEST_PATH = MICRO_MANIFEST
-    resolver._manifest_cache = None
+    resolver._manifest_cache.clear()
     return state
 
 
 def _restore_manifest(state) -> None:
     import scripts.uncertainty_manifest as resolver
 
-    previous_env, previous_path, previous_cache = state
-    if previous_env is None:
+    if state is None:
         os.environ.pop("KIKA_UNCERTAINTY_MANIFEST_PATH", None)
     else:
-        os.environ["KIKA_UNCERTAINTY_MANIFEST_PATH"] = previous_env
-    resolver._MANIFEST_PATH = previous_path
-    resolver._manifest_cache = previous_cache
+        os.environ["KIKA_UNCERTAINTY_MANIFEST_PATH"] = state
+    resolver._manifest_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -376,23 +368,41 @@ def test_writing_endf_samples_succeeds(tmp_path, micro_tape):
     assert written, "no perturbed ENDF samples were written"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Pre-existing fragility, pinned by GNDS phase 0. "
-        "uncertainty_manifest.py:64 reads $KIKA_UNCERTAINTY_MANIFEST_PATH once, "
-        "at import, into the module-level _MANIFEST_PATH, and load_manifest "
-        "caches the parsed YAML in _manifest_cache. Setting the variable after "
-        "the module has been imported therefore does nothing. On the cluster "
-        "the sbatch script exports it before python starts, so the toggle works "
-        "there and the fragility is invisible; in-process it is a trap, and it "
-        "cost this file a golden that passed alone and failed in a full run. "
-        "Reading the variable inside load_manifest would fix it."
-    ),
-)
 def test_manifest_env_var_is_honoured_after_import(monkeypatch):
+    """The env var must work in-process, not only when exported before python.
+
+    This module has been imported long before this test runs — the smoke test
+    imports every script — which is exactly the case that used to fail.
+    """
     import scripts.uncertainty_manifest as resolver
 
     monkeypatch.setenv("KIKA_UNCERTAINTY_MANIFEST_PATH", str(MICRO_MANIFEST))
+    assert resolver.manifest_path() == MICRO_MANIFEST
     loaded = resolver.load_manifest()
     assert set(loaded["datasets"]) == {"10886002", "11300004", "13606002"}
+
+
+def test_the_cache_does_not_outlive_a_change_of_manifest(monkeypatch, tmp_path):
+    """Caching is per path, so a second manifest is not served the first one.
+
+    A single-slot cache made the first manifest read in a process the only one
+    anybody could get afterwards.
+    """
+    import scripts.uncertainty_manifest as resolver
+
+    other = tmp_path / "other_manifest.yaml"
+    other.write_text("datasets:\n  99999999:\n    flag: synthetic\n")
+
+    monkeypatch.setenv("KIKA_UNCERTAINTY_MANIFEST_PATH", str(MICRO_MANIFEST))
+    first = resolver.load_manifest()
+    assert set(first["datasets"]) == {"10886002", "11300004", "13606002"}
+
+    monkeypatch.setenv("KIKA_UNCERTAINTY_MANIFEST_PATH", str(other))
+    second = resolver.load_manifest()
+    assert set(second["datasets"]) == {99999999}
+
+    # And back — the first one is still correct, from cache this time.
+    monkeypatch.setenv("KIKA_UNCERTAINTY_MANIFEST_PATH", str(MICRO_MANIFEST))
+    assert set(resolver.load_manifest()["datasets"]) == {
+        "10886002", "11300004", "13606002"
+    }
