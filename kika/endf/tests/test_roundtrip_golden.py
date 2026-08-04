@@ -196,13 +196,16 @@ def test_mf2_keeps_the_l_dependent_scattering_radius(micro_tape):
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "Pre-existing divergence, pinned by GNDS phase 0. JEFF-4.0 Fe-56 carries "
-        "two slightly different AWR values on consecutive MF4/MT2 records "
-        "(5.545443+1 then 5.545440+1). kika parses one and re-emits it on both, so "
-        "the rewritten tape is self-consistent but is not the source byte for "
-        "byte. Whether to preserve the source's inconsistency or keep normalising "
-        "it is a phase-3 question, once AWR lives on the model rather than on "
-        "each ENDF record."
+        "Deferred to phase 3 by decision, 2026-08-04, after the phase-1 defect "
+        "burn-down cleared the other eight pins. JEFF-4.0 Fe-56 carries two "
+        "slightly different AWR values on consecutive MF4/MT2 records "
+        "(5.545443+1 then 5.545440+1). kika parses one and re-emits it on both, "
+        "so the rewritten tape is self-consistent but is not the source byte "
+        "for byte. Preserving the source's own inconsistency means carrying AWR "
+        "per record, which is a model change, not a formatting fix — it belongs "
+        "with the GNDS hierarchy in phase 3, where AWR lives on the model "
+        "rather than on each ENDF record. Left pinned so that phase 3 has to "
+        "decide rather than drift."
     ),
 )
 def test_mf4_reproduces_every_awr_field_as_written(micro_tape):

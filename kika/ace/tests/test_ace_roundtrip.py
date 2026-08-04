@@ -93,15 +93,22 @@ def test_roundtrip_preserves_the_line_count(roundtripped):
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "Pre-existing divergence, pinned by GNDS phase 0. ACE stores MT numbers, "
-        "block lengths, pointers and cross sections in one untyped REAL array, so "
-        "kika cannot tell which entries the source spelled as integers and writes "
-        "them all as floats: '                  11' comes back as "
+        "Deferred to phase 3 by decision, 2026-08-04, after the phase-1 defect "
+        "burn-down cleared the other eight pins. ACE stores MT numbers, block "
+        "lengths, pointers and cross sections in one untyped REAL array, so "
+        "kika cannot tell which entries the source spelled as integers and "
+        "writes them all as floats: '                  11' comes back as "
         "'   1.10000000000E+01'. 6 903 of 205 430 lines differ this way on the "
-        "TENDL Fe-56 file. The values are unaffected — the companion test proves "
-        "the XSS is bitwise identical — and MCNP's list-directed reads accept "
-        "both spellings, which is why it went unnoticed. Recording how a number "
-        "was written is a job for the canonical model in phase 3."
+        "TENDL Fe-56 file. Deferred rather than fixed because the cost is "
+        "real and the consequence is not: the values are unaffected (the "
+        "companion test proves the XSS is bitwise identical) and MCNP's "
+        "list-directed reads accept both spellings, while a fix needs a "
+        "per-entry spelling flag on XssEntry and gives up the np.savetxt fast "
+        "path over 820 000 entries, in a pipeline that writes one ACE per "
+        "sample per temperature. Recording how a number was written is a job "
+        "for the canonical model in phase 3. The mirror-image defect on the "
+        "ENDF side — float fields rendered as integers — was fixed in phase 1, "
+        "because there it cost nothing."
     ),
 )
 def test_ace_roundtrip_is_byte_identical(roundtripped):
