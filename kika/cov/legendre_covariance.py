@@ -80,17 +80,15 @@ class LegendreCovariance:
     is_relative: List[bool] = field(default_factory=list)
     frame: List[str] = field(default_factory=list)
     energy_unit: str = 'eV'  # Energy unit: 'eV' or 'MeV'
-    # File-level scalar metadata propagated by I/O routines (COVFIL, COVERX, …).
-    # Well-known keys: 'awr' (atomic weight ratio), 'temperature' (K).
-    # New fields can be added without changing the class.
+    # Whole-object metadata: file-level scalars propagated by the I/O routines
+    # (COVFIL, COVERX, …) alongside format-specific extras. Well-known keys:
+    # 'awr' (atomic weight ratio), 'temperature' (K), 'source_format',
+    # 'source_path'. See the class docstring for the conventional set. New
+    # keys can be added without changing the class.
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     # Nominal Legendre coefficients keyed by (isotope, reaction_mt, l_order)
     legendre_coefficients: Dict[Tuple[int, int, int], np.ndarray] = field(default_factory=dict)
-
-    # Whole-object format-specific extras (e.g. ``source_format``,
-    # ``source_path``).  See class docstring for conventional keys.
-    metadata: Dict[str, Any] = field(default_factory=dict)
 
     # Per-(isotope, reaction_mt) MF34 header data so a LegendreCovariance
     # loaded from ENDF can be written back via :meth:`to_mf34`.
