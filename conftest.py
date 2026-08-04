@@ -199,24 +199,14 @@ def pytest_collection_modifyitems(
             item.add_marker(pytest.mark.njoy)
 
 
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
-    """Catch-all for ``--deep``.
-
-    The fixtures above fail loudly on their own, but a module-level
-    ``@pytest.mark.skipif`` never reaches a fixture. This turns any skip on a
-    ``tape``/``njoy``-marked test into a failure when ``--deep`` is on, so the
-    guarantee holds regardless of how the skip was expressed.
-    """
-    outcome = yield
-    report = outcome.get_result()
-    if not _deep(item.config) or report.outcome != "skipped":
-        return
-    if not (item.get_closest_marker("tape") or item.get_closest_marker("njoy")):
-        return
-    reason = report.longrepr[2] if isinstance(report.longrepr, tuple) else report.longrepr
-    report.outcome = "failed"
-    report.longrepr = f"--deep: test skipped but external data was required ({reason})"
+# ``--deep`` is enforced in :func:`_missing`, which every fixture below goes
+# through, and nowhere else. An earlier version added a
+# ``pytest_runtest_makereport`` wrapper that promoted *any* skip on a
+# ``tape``/``njoy`` test to a failure, as a catch-all for module-level
+# ``skipif``. It was wrong twice over: pytest reports an ``xfail`` as a skip, so
+# it turned all five pinned defects into failures, and it also caught opt-in
+# skips like ``REGEN_MICRO_TAPES``. The catch-all is not needed either — every
+# test that reads external data now asks a fixture for it.
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
