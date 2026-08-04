@@ -645,16 +645,18 @@ def _write_run_metadata(output_dir: str) -> Dict[str, Any]:
     # Resolve manifest path. Importing the module here avoids hard-coding the
     # path; if the manifest module isn't importable, build_exfor_cache_from_objects
     # will raise loudly anyway, so a None here is safe metadata.
+    # Call the resolver rather than reading a module constant, so the path
+    # logged here is the one load_manifest() will actually open.
     manifest_path: Optional[str] = None
     manifest_sha256: Optional[str] = None
     manifest_path_reachable: Optional[bool] = None
     try:
-        from scripts.uncertainty_manifest import _MANIFEST_PATH as _mp
-        manifest_path = str(_mp)
+        from scripts.uncertainty_manifest import manifest_path as _resolve_manifest_path
+        manifest_path = str(_resolve_manifest_path())
     except Exception:
         try:
-            from uncertainty_manifest import _MANIFEST_PATH as _mp
-            manifest_path = str(_mp)
+            from uncertainty_manifest import manifest_path as _resolve_manifest_path
+            manifest_path = str(_resolve_manifest_path())
         except Exception:
             manifest_path = None
     if manifest_path is not None:
@@ -2187,6 +2189,10 @@ def run_exfor_to_endf_sampling_v2(
     use_model_averaging: bool = True,
     min_degree_for_averaging: int = 3,
     n_eff_warning_threshold: float = 5.0,
+    # Every parallel step reads this argument. Five of them used to read the
+    # N_PROCS module constant instead, so asking for one worker still forked
+    # forty. Production is unaffected: the __main__ block passes N_PROCS here
+    # explicitly, which is what the constant is for.
     n_procs: int = 1,
     base_seed: int = 42,
     generate_nominal_endf: bool = True,
@@ -2554,7 +2560,18 @@ def run_exfor_to_endf_sampling_v2(
         _logger.error(f"[ERROR] [ENDF] File not found: {endf_file}", console=True)
         return
 
-    if not os.path.isdir(exfor_directory):
+    # The JSON directory is only read when the source asks for JSON, and only
+    # exfor_source='json' cannot do without it — read_all_exfor treats it as
+    # optional for 'auto' and 'both' (kika/exfor/io.py: `if directory is not
+    # None`). Checking it unconditionally meant exfor_source='database', which
+    # never touches it, died on os.path.isdir(None) inside genericpath instead
+    # of reaching any of the error handling here.
+    if exfor_source == "json" and not exfor_directory:
+        _logger.error(
+            "[ERROR] [EXFOR] exfor_source='json' reads JSON files, but no "
+            "exfor_directory was given", console=True)
+        return
+    if exfor_directory and not os.path.isdir(exfor_directory):
         _logger.error(f"[ERROR] [EXFOR] Directory not found: {exfor_directory}", console=True)
         return
 
@@ -2898,8 +2915,8 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info("  " + "=" * 60)
         _logger.info("  Method: Gaussian decay correlation + Cholesky resampling")
         _logger.info("  " + "=" * 60)
-        if N_PROCS > 1:
-            _logger.info(f"  Using {N_PROCS} parallel processes over bins")
+        if n_procs > 1:
+            _logger.info(f"  Using {n_procs} parallel processes over bins")
 
         bin_args_list = []
         for nr in nominal_results:
@@ -2936,8 +2953,8 @@ def run_exfor_to_endf_sampling_v2(
                 nr.mc_order_cap,
             ))
 
-        if N_PROCS > 1:
-            with Pool(N_PROCS) as pool:
+        if n_procs > 1:
+            with Pool(n_procs) as pool:
                 bin_results = pool.map(_mc_one_bin, bin_args_list)
         else:
             bin_results = [_mc_one_bin(a) for a in bin_args_list]
@@ -3058,7 +3075,7 @@ def run_exfor_to_endf_sampling_v2(
             energy_bins=energy_bins,
             overlap_weights=overlap_weights,
             n_samples=n_samples,
-            n_workers=N_PROCS,
+            n_workers=n_procs,
             sigma_norm=sigma_norm_systematic,
             sigma_norm_common_mode=sigma_norm_common_mode,
             norm_dist=NORM_DIST,
@@ -3137,8 +3154,8 @@ def run_exfor_to_endf_sampling_v2(
                     record_c0_channel,
                 ))
 
-            if N_PROCS > 1:
-                with Pool(N_PROCS) as pool:
+            if n_procs > 1:
+                with Pool(n_procs) as pool:
                     bin_results = pool.map(_mc_one_bin, bin_args_list)
             else:
                 bin_results = [_mc_one_bin(a) for a in bin_args_list]
@@ -4106,7 +4123,7 @@ def run_exfor_to_endf_sampling_v2(
             mt_number=mt_number,
             all_samples=all_samples_endf,
             output_dir=str(output_path),
-            n_procs=N_PROCS,
+            n_procs=n_procs,
             energy_bins=energy_bins if use_splice else None,
             energy_range_mev=splice_range,
         )

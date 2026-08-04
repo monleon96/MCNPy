@@ -286,10 +286,18 @@ def _parse_l_value_block(
     idx += 1
 
     awri = cont.get("C1", 0.0)
+    # C2 and C4 were dropped entirely, and the writer re-emitted both as 0.
+    # C2 is APL under LRF=3 (Reich-Moore) — the l-dependent scattering radius,
+    # 0.5002 fm on the L=1 block of JEFF-4.0 Fe-56 against AP = 0.5444 — and QX,
+    # the competitive-reaction Q, under LRF=1/2. C4 is LRX. Both are kept raw
+    # here because their meaning depends on the parent range's LRF, which this
+    # function does not see; ResolvedResonanceRange resolves it.
+    apl_or_qx = cont.get("C2", 0.0)
     l = int(cont.get("C3", 0) or 0)
+    lrx = int(cont.get("C4", 0) or 0)
     nrs = int(cont.get("C6", 0) or 0)
 
-    logger.debug(f"        l={l}, NRS={nrs}, AWRI={awri}")
+    logger.debug(f"        l={l}, NRS={nrs}, AWRI={awri}, C2={apl_or_qx}, LRX={lrx}")
 
     resonances: List[Resonance] = []
     for _ in range(nrs):
@@ -309,6 +317,8 @@ def _parse_l_value_block(
         l=l,
         num_resonances=nrs,
         resonances=resonances,
+        apl_or_qx=apl_or_qx,
+        lrx=lrx,
     ), idx
 
 

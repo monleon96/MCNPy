@@ -5,16 +5,12 @@ They skip gracefully when NJOY (or the reference ENDF files) are not
 available, which keeps CI green on machines without NJOY while still
 guarding the wrapper on development workstations.
 
-Environment variables honoured:
-
-- ``NJOY_EXECUTABLE`` — absolute path to a working NJOY binary.
-- ``KIKA_ENDF_FILES`` — directory containing the reference ENDF files
-  (``Fe56_jeff4.0_n.endf``, ``U238_jeff4.0_n.endf``).  Defaults to
-  ``<repo>/files/endf``.
+The ``njoy_exe``, ``fe56_host_tape`` and ``u238_tape`` fixtures come from the
+root ``conftest.py``; see there for ``$KIKA_TAPES``, ``$NJOY_EXECUTABLE`` and
+the ``--deep`` flag.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import numpy as np
@@ -25,45 +21,6 @@ from kika.processing.njoy_reconstruct import (
     njoy_reconstruct,
     njoy_reconstruct_stream,
 )
-
-_DEFAULT_ENDF_DIR = Path(__file__).resolve().parents[3] / "files" / "endf"
-_DEFAULT_NJOY_PATHS = [
-    Path(r"C:\Users\Usuario\BaradDur\Codes\NJOY2016\build\njoy.exe"),
-    Path("/usr/local/bin/njoy"),
-    Path("/opt/njoy2016/njoy"),
-]
-
-
-def _resolve_njoy() -> Path | None:
-    env = os.environ.get("NJOY_EXECUTABLE")
-    if env:
-        p = Path(env)
-        return p if p.is_file() else None
-    for candidate in _DEFAULT_NJOY_PATHS:
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def _resolve_endf_dir() -> Path:
-    env = os.environ.get("KIKA_ENDF_FILES")
-    return Path(env) if env else _DEFAULT_ENDF_DIR
-
-
-@pytest.fixture(scope="module")
-def njoy_exe() -> Path:
-    exe = _resolve_njoy()
-    if exe is None:
-        pytest.skip("NJOY executable not found; set NJOY_EXECUTABLE to run")
-    return exe
-
-
-@pytest.fixture(scope="module")
-def endf_dir() -> Path:
-    d = _resolve_endf_dir()
-    if not d.is_dir():
-        pytest.skip(f"ENDF reference directory not found: {d}")
-    return d
 
 
 def _assert_reasonable_xs(result, expected_mts):
@@ -85,13 +42,9 @@ def _interp(xs, E: float) -> float:
     return float(np.interp(E, xs.energies, xs.values))
 
 
-def test_fe56_reconstruction(njoy_exe: Path, endf_dir: Path) -> None:
+def test_fe56_reconstruction(njoy_exe: Path, fe56_host_tape: Path) -> None:
     """Fe-56 JEFF-4.0: reconr auto-relaxes tolerance on ill-behaved threshold."""
-    endf = endf_dir / "Fe56_jeff4.0_n.endf"
-    if not endf.is_file():
-        pytest.skip(f"{endf.name} not available")
-
-    result = njoy_reconstruct(endf, njoy_exe, tolerance=1e-3)
+    result = njoy_reconstruct(fe56_host_tape, njoy_exe, tolerance=1e-3)
 
     _assert_reasonable_xs(result, expected_mts=(1, 2, 102))
 
@@ -100,13 +53,9 @@ def test_fe56_reconstruction(njoy_exe: Path, endf_dir: Path) -> None:
     assert 1.0 < thermal_cap < 5.0, f"Fe-56 thermal σ_γ unreasonable: {thermal_cap} b"
 
 
-def test_u238_reconstruction(njoy_exe: Path, endf_dir: Path) -> None:
+def test_u238_reconstruction(njoy_exe: Path, u238_tape: Path) -> None:
     """U-238 JEFF-4.0: the motivating regression test."""
-    endf = endf_dir / "U238_jeff4.0_n.endf"
-    if not endf.is_file():
-        pytest.skip(f"{endf.name} not available")
-
-    result = njoy_reconstruct(endf, njoy_exe, tolerance=1e-3)
+    result = njoy_reconstruct(u238_tape, njoy_exe, tolerance=1e-3)
 
     _assert_reasonable_xs(result, expected_mts=(1, 2, 18, 102))
 
@@ -120,14 +69,10 @@ def test_u238_reconstruction(njoy_exe: Path, endf_dir: Path) -> None:
     assert peak > 1.0e4, f"U-238 6.674 eV capture peak missing/too small: {peak} b"
 
 
-def test_missing_njoy_executable(endf_dir: Path) -> None:
+def test_missing_njoy_executable(fe56_host_tape: Path) -> None:
     """Graceful error when the NJOY path is wrong."""
-    endf = endf_dir / "Fe56_jeff4.0_n.endf"
-    if not endf.is_file():
-        pytest.skip(f"{endf.name} not available")
-
     with pytest.raises(NjoyReconstructError) as excinfo:
-        njoy_reconstruct(endf, "/nonexistent/path/njoy", tolerance=1e-3)
+        njoy_reconstruct(fe56_host_tape, "/nonexistent/path/njoy", tolerance=1e-3)
     assert "not found" in str(excinfo.value).lower()
 
 
@@ -137,12 +82,9 @@ def test_missing_endf(njoy_exe: Path) -> None:
         njoy_reconstruct("/no/such/file.endf", njoy_exe, tolerance=1e-3)
 
 
-def test_fe56_streaming(njoy_exe: Path, endf_dir: Path) -> None:
+def test_fe56_streaming(njoy_exe: Path, fe56_host_tape: Path) -> None:
     """Streaming variant emits log lines before the final result event."""
-    endf = endf_dir / "Fe56_jeff4.0_n.endf"
-    if not endf.is_file():
-        pytest.skip(f"{endf.name} not available")
-
+    endf = fe56_host_tape
     log_lines: list[str] = []
     result_payload = None
     pendf_path_seen = None

@@ -61,10 +61,25 @@ import os
 _DEFAULT_MANIFEST_PATH = (
     "/share_snc/snc/JuanMonleon/EXFOR/uncertainty_manifest_diagonal_cierjacks.yaml"
 )
-_MANIFEST_PATH = Path(os.environ.get(
-    "KIKA_UNCERTAINTY_MANIFEST_PATH", _DEFAULT_MANIFEST_PATH
-))
-_manifest_cache: Optional[dict] = None
+
+def manifest_path() -> Path:
+    """The manifest this process should read, resolved *now*.
+
+    Deliberately a function. This used to be a module-level constant assigned
+    at import, which made ``KIKA_UNCERTAINTY_MANIFEST_PATH`` a cluster-only
+    toggle: the sbatch script exports it before python starts, so it worked
+    there, while setting it in-process after any module had imported this one
+    silently did nothing.
+    """
+    return Path(os.environ.get(
+        "KIKA_UNCERTAINTY_MANIFEST_PATH", _DEFAULT_MANIFEST_PATH
+    ))
+
+
+# Parsed manifests, keyed on the path they came from. Keying on the path is
+# what lets the cache survive a change of manifest mid-process instead of
+# serving the first one read to every later caller.
+_manifest_cache: Dict[Path, dict] = {}
 
 # Minimum statistical (uncorrelated) uncertainty as fraction of |value|.
 # Applied at the resolver when ``derive_stat_only`` decomposes a loaded total
@@ -83,16 +98,20 @@ SIGMA_STAT_MIN_REL = 0.01
 
 
 def load_manifest(path: Optional[str] = None, force_reload: bool = False) -> dict:
-    """Load the YAML manifest. Cached after first call."""
-    global _manifest_cache
-    if _manifest_cache is None or force_reload or path is not None:
-        p = Path(path) if path else _MANIFEST_PATH
+    """Load the YAML manifest. Cached per resolved path.
+
+    Parameters
+    ----------
+    path : str, optional
+        Read this file rather than the one ``manifest_path()`` resolves.
+    force_reload : bool
+        Re-read from disk even if this path is already cached.
+    """
+    p = Path(path) if path else manifest_path()
+    if force_reload or p not in _manifest_cache:
         with open(p) as f:
-            data = yaml.safe_load(f)
-        if path is None:
-            _manifest_cache = data
-        return data
-    return _manifest_cache
+            _manifest_cache[p] = yaml.safe_load(f)
+    return _manifest_cache[p]
 
 
 # =============================================================================

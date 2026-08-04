@@ -35,6 +35,36 @@ MF_PARSERS = {
 }
 
 
+def scan_mat_number(lines: List[str]) -> Optional[int]:
+    """The MAT number of a tape, from the first data line that carries one.
+
+    MAT lives in columns 67-70 of every ENDF record, so any data line will do;
+    header and comment lines are skipped by requiring MF > 0 in columns 71-72.
+
+    Extracted from :func:`parse_endf_file` so the targeted-parse path in
+    :func:`kika.endf.read_endf.read_endf` can use it too. Without it a
+    ``read_endf(f, mf_numbers=[1])`` produced an ENDF whose ``mat`` — and so
+    whose ``zaid`` — was None, while a full parse of the same file gave 2631.
+    Two parse paths, two answers, for a property of the file itself.
+    """
+    for line in lines:
+        if len(line) < 72:
+            continue
+        try:
+            mf_str = line[70:72].strip()
+            if not mf_str or int(mf_str) <= 0:
+                continue
+            mat_str = line[66:70].strip()
+            if not mat_str:
+                continue
+            mat_candidate = int(mat_str)
+            if mat_candidate > 0:  # Valid MAT numbers are positive
+                return mat_candidate
+        except ValueError:
+            continue
+    return None
+
+
 def parse_endf_file(filepath: str) -> ENDF:
     """
     Parse a complete ENDF file.
@@ -52,31 +82,13 @@ def parse_endf_file(filepath: str) -> ENDF:
         lines = f.readlines()
         logger.debug(f"Read {len(lines)} lines from file")
         
-        # Extract MAT number from the first valid data line (columns 67-70, 1-indexed)
-        # Skip header/comment lines and look for actual data lines with MF > 0
-        mat_number = None
-        for line in lines:
-            if len(line) >= 72:
-                try:
-                    # Check if this is a data line (MF > 0)
-                    mf_str = line[70:72].strip()
-                    if mf_str and int(mf_str) > 0:
-                        # MAT is in columns 67-70 (1-indexed), so 66:70 in 0-indexed
-                        mat_str = line[66:70].strip()
-                        if mat_str:  # Check if not empty after stripping
-                            mat_candidate = int(mat_str)
-                            if mat_candidate > 0:  # Valid MAT numbers are positive
-                                mat_number = mat_candidate
-                                break
-                except ValueError:
-                    continue
-        
+        mat_number = scan_mat_number(lines)
         if mat_number is not None:
             endf.mat = mat_number
             logger.debug(f"Extracted MAT number: {mat_number}")
         else:
             logger.debug("Could not extract MAT number from file")
-        
+
         # First, scan the file to identify available MF sections
         available_mf_numbers = _scan_available_mf(lines)
         logger.debug(f"Found MF sections: {available_mf_numbers}")

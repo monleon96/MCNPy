@@ -18,7 +18,13 @@ from kika.endf.writers.mf33_writer import (
 from kika.endf.writers._records import populate_lb5_record, populate_lb6_record
 from kika.endf.classes.mf33.mf33 import NISubSubsectionRecord
 from kika.endf.parsers.parse_mf33 import parse_mf33_mt
-from kika.endf.utils import format_endf_data_line, ENDF_FORMAT_INT
+from kika.endf.utils import (
+    ENDF_FORMAT_INT,
+    format_endf_data_line,
+    format_endf_fend_record,
+    format_endf_mend_record,
+    format_endf_send_record,
+)
 
 
 ZA, AWR, MAT, MT = 26056.0, 55.454, 2631, 2
@@ -138,9 +144,9 @@ def _minimal_template(path):
         )
     lines = [
         line([26056, 0, 0, 0, 0, 0], MAT, 3, MT),   # MF3/MT2 stub
-        line([0, 0, 0, 0, 0, 0], MAT, 3, 0),          # SEND
-        line([0, 0, 0, 0, 0, 0], MAT, 0, 0),          # FEND
-        line([0, 0, 0, 0, 0, 0], 0, 0, 0),            # MEND
+        format_endf_send_record(MAT, 3),
+        format_endf_fend_record(MAT),
+        format_endf_mend_record(),
     ]
     path.write_text("\n".join(lines) + "\n")
     return path
@@ -442,18 +448,11 @@ def test_merge_without_host_mf33_falls_back(tmp_path):
     np.testing.assert_allclose(g, new_grid, rtol=1e-12)
 
 
-_REAL_HOST = "/share_snc/snc/JuanMonleon/jeff40_with_MF4_from_jeff33/26-Fe-56g.txt"
-
-
-@pytest.mark.skipif(
-    not __import__("pathlib").Path(_REAL_HOST).exists(),
-    reason="real JEFF-4.0 Fe-56 host tape not reachable",
-)
-def test_merge_against_real_host_structure(tmp_path):
+def test_merge_against_real_host_structure(tmp_path, fe56_host_tape):
     """Read-only structural check on the real JEFF-4.0 Fe-56 host MT2."""
     new_grid = np.array([0.9e6, 2.0e6, 4.0e6])
     new_cov = np.array([[0.0025, 0.001], [0.001, 0.0030]])
-    sec = merge_mf33_covariance_into_host(_REAL_HOST, new_cov, new_grid, mt=2)
+    sec = merge_mf33_covariance_into_host(str(fe56_host_tape), new_cov, new_grid, mt=2)
     m, g, is_rel = sec._self_covariance_matrix()
     m = np.asarray(m); g = np.asarray(g)
 

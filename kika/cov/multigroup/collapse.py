@@ -728,8 +728,14 @@ def MF34_to_MG(endf_object,
     procedure outlined in the specifications.
 
     Cross-section weighting (sigma(E)*phi(E)) is always applied, matching the
-    NJOY ERRORR methodology. If ``endf_object.pendf`` is not populated, it is
-    automatically reconstructed via ``endf_object.reconstruct_xs()``.
+    NJOY ERRORR methodology. ``endf_object.pendf`` must therefore be populated
+    before calling this — with the sigma(E) the groups should be weighted by::
+
+        endf.pendf = kika.processing.njoy_reconstruct(path, njoy_executable=...)
+
+    A ``ValueError`` is raised if it is not. It used to be filled in silently
+    by an in-Python reconstructor documented as producing incorrect cross
+    sections, which made the weight both wrong and invisible.
 
     Parameters
     ----------
@@ -834,9 +840,21 @@ def MF34_to_MG(endf_object,
     if phi_antiderivative is None and weight_desc == "custom":
         raise NotImplementedError(f"Custom weighting functions require providing the antiderivative")
 
-    # Auto-reconstruct PENDF if not present (sigma-weighting is always applied)
+    # Sigma-weighting is always applied, so a sigma(E) is mandatory. This used
+    # to call endf_object.reconstruct_xs() — no try/except, no test — which
+    # meant every collapsed matrix was weighted by a reconstructor documented
+    # as producing incorrect cross sections, with nothing to say so. Refusing
+    # is the point: a wrong weight is invisible, a raise is not.
     if not hasattr(endf_object, 'pendf') or endf_object.pendf is None:
-        endf_object.reconstruct_xs()
+        raise ValueError(
+            "sigma-weighted MF34 collapse needs reconstructed cross sections, "
+            "and endf_object.pendf is not set. Populate it with the sigma(E) "
+            "you want the groups weighted by, e.g.\n"
+            "    endf.pendf = kika.processing.njoy_reconstruct(\n"
+            "        path, njoy_executable=...)\n"
+            "This used to happen implicitly, via an in-Python reconstructor "
+            "whose own docstring called it not working correctly."
+        )
     _base_phi_func = phi_func
     _base_phi_antiderivative = phi_antiderivative
     weight_desc += " (sigma-weighted)"

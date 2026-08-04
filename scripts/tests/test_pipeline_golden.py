@@ -1,0 +1,479 @@
+"""Tier-3 golden: the thesis pipeline, on committed data.
+
+``exfor_to_endf_sampling_v2.py`` is the evaluation pipeline the thesis rests
+on. It runs on the ASNR cluster against 139 EXFOR datasets and a 27 MB Fe-56
+tape, which is why nothing has ever tested it end to end. This runs it here,
+on four committed datasets and the committed Fe-56 slice, with a fixed seed.
+
+No production code was changed to make this possible.
+``run_exfor_to_endf_sampling_v2`` already takes every knob as a keyword
+argument with the module constant as its default, so a test just calls it. The
+one exception is ``TOF_PARAMETERS_FILE``, read from module scope, which is
+monkeypatched; and the manifest, which is already redirectable through
+``$KIKA_UNCERTAINTY_MANIFEST_PATH``.
+
+**Fixtures.** ``exfor_micro.db`` (94 KB) holds four real datasets chosen so
+that between them they reach every branch of the uncertainty resolver;
+``uncertainty_manifest_micro.yaml`` is written for them, not trimmed from
+production, because the only production dataset with a ``sys_dep`` block is
+Cierjacks 20743002 and its data blob alone is 1.6 MB. See the header of the
+YAML for which dataset covers which branch.
+
+**What is covered.** EXFOR loading, the per-point uncertainty resolution, the
+nominal GLS Legendre fits, the Monte-Carlo sampling and the Legendre
+covariance — everything the pipeline produces up to and including
+``legendre_covariance.npy``. Two energy windows are frozen: one holding a
+single experiment, one holding two, because the between-experiment Kish
+weighting and discrepancy treatment only come into play in the second. The
+denser covariance it produces (144 non-zero entries against 49) is that
+machinery showing up.
+
+**What is not.** The final ENDF-writing stage. It fails on this data, in every
+window tried, on a duplicated point in the spliced energy grid. That is
+recorded below as a pinned defect, not worked around: an untested stage that is
+*known* untested is a smaller problem than one silently skipped.
+
+**How thin it is.** Four datasets over two windows give two fitted energy bins
+each, so the frozen covariance is 16x16. That is enough to catch a change in
+the fit, the weighting or the sampling, and it is not enough to be called
+coverage of the evaluation. Widening it means committing more EXFOR data.
+"""
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+DATA = Path(__file__).resolve().parent / "data"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+MICRO_DB = DATA / "exfor_micro.db"
+MICRO_TOF = DATA / "tof_parameters_micro.json"
+MICRO_MANIFEST = DATA / "uncertainty_manifest_micro.yaml"
+
+REGEN = bool(os.environ.get("REGEN_PIPELINE_GOLDEN"))
+
+#: The four datasets in the fixture database.
+FIXTURE_DATASETS = ["10886002", "11300004", "13606002", "23059003"]
+
+#: Fixed run configuration, minus the energy window. Every one of these is part
+#: of the golden: change any of them and the answer changes, legitimately.
+RUN = dict(
+    n_samples=4,
+    base_seed=42,
+    n_procs=1,
+    target_zaid=[26000, 26056],
+    exfor_source="database",
+    generate_fitting_ace=False,
+    save_covariance_files=True,
+    verbose_diagnostics=False,
+)
+
+#: Two windows, for two different things.
+#:
+#: ``single`` spans all of dataset 10886002 (1.684-3.905 MeV, 47 energies) and
+#: nothing else, so the fit sees one experiment and the between-experiment
+#: machinery stays out of the way.
+#:
+#: ``pair`` puts 11300004 (one energy, 5 MeV) and 13606002 (4.5-9.99 MeV) in
+#: the same window, which is what exercises the Kish weighting and the
+#: between-experiment discrepancy — the part of the method that a
+#: single-experiment window cannot reach.
+WINDOWS = {
+    "single": (1.7, 4.0),
+    "pair": (4.4, 5.6),
+}
+
+
+# ---------------------------------------------------------------------------
+# Pointing the resolver at the fixture manifest
+# ---------------------------------------------------------------------------
+# The env var is now enough on its own: uncertainty_manifest.manifest_path()
+# resolves it per call and the cache is keyed on the resolved path. This used
+# to need three pieces of state set by hand, because the path was bound once at
+# import — so whichever test imported the module first (test_deploy_smoke.py
+# imports every script) froze the production path for the whole session, and
+# the "pair" golden passed in isolation while silently resolving against the
+# production manifest in a full run.
+
+
+def _use_micro_manifest():
+    """Force the resolver onto the fixture manifest. Returns state to restore."""
+    import scripts.uncertainty_manifest as resolver
+
+    state = os.environ.get("KIKA_UNCERTAINTY_MANIFEST_PATH")
+    os.environ["KIKA_UNCERTAINTY_MANIFEST_PATH"] = str(MICRO_MANIFEST)
+    resolver._manifest_cache.clear()
+    return state
+
+
+def _restore_manifest(state) -> None:
+    import scripts.uncertainty_manifest as resolver
+
+    if state is None:
+        os.environ.pop("KIKA_UNCERTAINTY_MANIFEST_PATH", None)
+    else:
+        os.environ["KIKA_UNCERTAINTY_MANIFEST_PATH"] = state
+    resolver._manifest_cache.clear()
+
+
+# ---------------------------------------------------------------------------
+# EXFOR loading and uncertainty resolution
+# ---------------------------------------------------------------------------
+
+def test_the_fixture_database_holds_what_the_manifest_describes():
+    """Fixture and manifest must not drift apart."""
+    import yaml
+
+    from kika.exfor import read_all_exfor
+
+    loaded = read_all_exfor(
+        source="database", db_path=str(MICRO_DB),
+        target=["Fe-0", "Fe-56"], group_by_energy=False,
+    )
+    assert sorted(loaded) == FIXTURE_DATASETS
+
+    manifest = yaml.safe_load(MICRO_MANIFEST.read_text())
+    described = set(manifest["datasets"])
+    assert described < set(FIXTURE_DATASETS), (
+        "the manifest describes a dataset the fixture database does not hold"
+    )
+    # 23059003 is absent on purpose: it is the defaults-fallback case.
+    assert set(FIXTURE_DATASETS) - described == {"23059003"}
+
+
+def test_fixture_datasets_keep_their_energy_coverage():
+    """The windows in RUN only mean something if the data is where we think."""
+    from kika.exfor import read_all_exfor
+
+    loaded = read_all_exfor(
+        source="database", db_path=str(MICRO_DB),
+        target=["Fe-0", "Fe-56"], group_by_energy=False,
+    )
+    coverage = {
+        did: (float(ds.energies().min()), float(ds.energies().max()))
+        for did, ds in loaded.items()
+    }
+    assert coverage["10886002"] == pytest.approx((1.684, 3.905), rel=1e-6)
+    assert coverage["11300004"] == pytest.approx((5.0, 5.0), rel=1e-6)
+    assert coverage["13606002"] == pytest.approx((4.5, 9.99), rel=1e-6)
+    assert coverage["23059003"] == pytest.approx((96.0, 96.0), rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# The run
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module", params=sorted(WINDOWS), ids=sorted(WINDOWS))
+def pipeline_run(request, tmp_path_factory, micro_tape):
+    """Run the pipeline once per window, up to the covariance."""
+    import scripts.exfor_to_endf_sampling_v2 as pipeline
+
+    window = request.param
+    energy_min_mev, energy_max_mev = WINDOWS[window]
+    out = tmp_path_factory.mktemp(f"pipeline_{window}")
+
+    previous_tof = pipeline.TOF_PARAMETERS_FILE
+    pipeline.TOF_PARAMETERS_FILE = str(MICRO_TOF)
+    manifest_state = _use_micro_manifest()
+    try:
+        pipeline.run_exfor_to_endf_sampling_v2(
+            endf_file=str(micro_tape),
+            output_dir=str(out),
+            exfor_db_path=str(MICRO_DB),
+            # The ENDF-writing stage fails on this data; the golden stops at
+            # the covariance. See test_writing_endf_samples_succeeds below.
+            generate_fitting_samples=False,
+            generate_nominal_endf=False,
+            generate_mc_mean_endf=False,
+            energy_min_mev=energy_min_mev,
+            energy_max_mev=energy_max_mev,
+            **RUN,
+        )
+    finally:
+        pipeline.TOF_PARAMETERS_FILE = previous_tof
+        _restore_manifest(manifest_state)
+    return window, out
+
+
+@pytest.mark.slow
+def test_pipeline_produces_its_expected_artifacts(pipeline_run):
+    """The run wrote what a run is supposed to write."""
+    _, output_dir = pipeline_run
+    for name in (
+        "nominal_fits.parquet",
+        "legendre_samples_tmc.parquet",
+        "legendre_covariance.npy",
+        "run_metadata.json",
+    ):
+        assert (output_dir / name).is_file(), f"{name} was not produced"
+
+
+@pytest.mark.slow
+def test_pipeline_golden(pipeline_run):
+    """Freeze the numbers: the nominal fits and the Legendre covariance.
+
+    Same fixture data, same seed, same answer. This is the only test in the
+    repository that would notice if a change to the fitting, the uncertainty
+    resolution or the Monte-Carlo sampling moved the evaluation.
+    """
+    import pandas as pd
+
+    window, output_dir = pipeline_run
+    covariance = np.load(output_dir / "legendre_covariance.npy")
+    fits = pd.read_parquet(output_dir / "nominal_fits.parquet")
+
+    numeric = fits.select_dtypes(include=[np.number]).reindex(
+        sorted(fits.select_dtypes(include=[np.number]).columns), axis=1
+    )
+
+    produced = {
+        "covariance": covariance,
+        "fits_numeric": numeric.to_numpy(dtype=float),
+        "fits_columns": np.array(sorted(fits.columns)),
+        "fits_shape": np.array(fits.shape),
+    }
+
+    golden_path = DATA / f"pipeline_golden_{window}.npz"
+
+    if REGEN:
+        np.savez_compressed(golden_path, **produced)
+        pytest.skip("golden regenerated")
+
+    if not golden_path.is_file():
+        pytest.fail(
+            f"{golden_path.name} is missing — generate it with "
+            "REGEN_PIPELINE_GOLDEN=1 and commit it"
+        )
+
+    with np.load(golden_path, allow_pickle=False) as golden:
+        assert sorted(golden.files) == sorted(produced)
+        for key in sorted(produced):
+            want, have = golden[key], np.asarray(produced[key])
+            assert have.shape == want.shape, f"{key}: {want.shape} -> {have.shape}"
+            if want.dtype.kind in "US":
+                assert list(have) == list(want), f"{key} changed"
+                continue
+            np.testing.assert_allclose(
+                have, want, rtol=1e-10, atol=0.0, err_msg=f"{key} moved"
+            )
+
+
+@pytest.mark.slow
+def test_covariance_is_symmetric_and_positive_semidefinite(pipeline_run):
+    """Structural facts, checked as well as frozen.
+
+    A golden says "the same as last time". These say "and still meaningful".
+    """
+    _, output_dir = pipeline_run
+    covariance = np.load(output_dir / "legendre_covariance.npy")
+    assert covariance.ndim == 2 and covariance.shape[0] == covariance.shape[1]
+    np.testing.assert_allclose(covariance, covariance.T, rtol=1e-10, atol=1e-30)
+
+    eigenvalues = np.linalg.eigvalsh(covariance)
+    scale = max(abs(eigenvalues[-1]), 1e-300)
+    assert eigenvalues[0] / scale > -1e-8, (
+        f"covariance is not PSD: lambda_min/lambda_max = {eigenvalues[0] / scale:.3e}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pinned defects
+# ---------------------------------------------------------------------------
+
+def test_database_source_does_not_need_a_json_directory(tmp_path, micro_tape):
+    """With exfor_source='database' the JSON directory is never read.
+
+    It used to be validated anyway, ahead of the branch that decides whether
+    JSON is used, so omitting it died on os.path.isdir(None). Every golden
+    above had to create a throwaway directory to get past that line; they no
+    longer do, which is the other half of the proof.
+    """
+    import scripts.exfor_to_endf_sampling_v2 as pipeline
+
+    pipeline.run_exfor_to_endf_sampling_v2(
+        endf_file=str(micro_tape),
+        output_dir=str(tmp_path),
+        exfor_db_path=str(MICRO_DB),
+        exfor_source="database",
+        target_zaid=[26000, 26056],
+        n_samples=2,
+        energy_min_mev=1.8,
+        energy_max_mev=3.0,
+        base_seed=42,
+        n_procs=1,
+        generate_fitting_samples=False,
+        generate_nominal_endf=False,
+        generate_mc_mean_endf=False,
+    )
+
+
+def test_json_source_without_a_directory_fails_gracefully(tmp_path, micro_tape):
+    """The one source that genuinely needs the directory says so and returns.
+
+    'auto' and 'both' treat it as optional — read_all_exfor skips the JSON leg
+    when it is absent — so only 'json' is an error.
+    """
+    import scripts.exfor_to_endf_sampling_v2 as pipeline
+
+    pipeline.run_exfor_to_endf_sampling_v2(
+        endf_file=str(micro_tape),
+        output_dir=str(tmp_path),
+        exfor_db_path=str(MICRO_DB),
+        exfor_source="json",
+        target_zaid=[26000, 26056],
+        n_samples=2,
+        energy_min_mev=1.8,
+        energy_max_mev=3.0,
+        base_seed=42,
+        n_procs=1,
+        generate_fitting_samples=False,
+        generate_nominal_endf=False,
+        generate_mc_mean_endf=False,
+    )
+
+
+def test_a_missing_directory_is_still_reported(tmp_path, micro_tape):
+    """A path that was given but does not exist stays an error."""
+    import scripts.exfor_to_endf_sampling_v2 as pipeline
+
+    pipeline.run_exfor_to_endf_sampling_v2(
+        endf_file=str(micro_tape),
+        output_dir=str(tmp_path),
+        exfor_directory=str(tmp_path / "does_not_exist"),
+        exfor_db_path=str(MICRO_DB),
+        exfor_source="database",
+        target_zaid=[26000, 26056],
+        n_samples=2,
+        energy_min_mev=1.8,
+        energy_max_mev=3.0,
+        base_seed=42,
+        n_procs=1,
+        generate_fitting_samples=False,
+        generate_nominal_endf=False,
+        generate_mc_mean_endf=False,
+    )
+    assert not (tmp_path / "endf").exists(), (
+        "the run continued past a missing exfor_directory"
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("window", ["single", "pair"])
+def test_writing_endf_samples_succeeds(tmp_path, micro_tape, window):
+    """The ENDF-writing stage, which the covariance goldens stop short of.
+
+    Both windows, because they exercise different halves of the splice. Under
+    ``single`` (1.7-4.0 MeV) the Fe-56 MF4 grid's repeated 3.905 MeV point
+    falls *inside* the window and is replaced by the pipeline grid. Under
+    ``pair`` (4.4-5.6) it falls outside, is kept verbatim as an original, and
+    is what used to trip the sortedness assertion.
+    """
+    import scripts.exfor_to_endf_sampling_v2 as pipeline
+
+    previous_tof = pipeline.TOF_PARAMETERS_FILE
+    pipeline.TOF_PARAMETERS_FILE = str(MICRO_TOF)
+    manifest_state = _use_micro_manifest()
+    try:
+        pipeline.run_exfor_to_endf_sampling_v2(
+            endf_file=str(micro_tape),
+            output_dir=str(tmp_path),
+            exfor_db_path=str(MICRO_DB),
+            generate_fitting_samples=True,
+            energy_min_mev=WINDOWS[window][0],
+            energy_max_mev=WINDOWS[window][1],
+            **RUN,
+        )
+    finally:
+        pipeline.TOF_PARAMETERS_FILE = previous_tof
+        _restore_manifest(manifest_state)
+
+    # The parallel branch writes to endf/, the sequential one to endf_direct/;
+    # RUN asks for n_procs=1, so this lands in the latter. The assertion used
+    # to name only endf/, which is why it reported "no samples written" for a
+    # run that had written four.
+    written = sorted(tmp_path.rglob("endf*/**/*.endf"))
+    assert written, "no perturbed ENDF samples were written"
+    assert len(written) == RUN["n_samples"], [p.name for p in written]
+
+
+@pytest.mark.slow
+def test_a_repeated_mf4_energy_outside_the_window_survives(tmp_path, micro_tape):
+    """The pinned defect, isolated.
+
+    JEFF-4.0 Fe-56 gives MF4/MT2 two consecutive LIST subsections at 3.905 MeV
+    with byte-identical coefficients. The splice keeps out-of-window originals
+    verbatim, so both copies reached a strict ``>`` sortedness check and it
+    rejected a grid that had come straight out of the input file.
+
+    The pair window puts 3.905 MeV outside the splice range, which is the
+    configuration that reproduced it.
+    """
+    import scripts.exfor_to_endf_sampling_v2 as pipeline
+
+    previous_tof = pipeline.TOF_PARAMETERS_FILE
+    pipeline.TOF_PARAMETERS_FILE = str(MICRO_TOF)
+    manifest_state = _use_micro_manifest()
+    try:
+        pipeline.run_exfor_to_endf_sampling_v2(
+            endf_file=str(micro_tape),
+            output_dir=str(tmp_path),
+            exfor_db_path=str(MICRO_DB),
+            generate_fitting_samples=True,
+            generate_nominal_endf=True,
+            energy_min_mev=WINDOWS["pair"][0],
+            energy_max_mev=WINDOWS["pair"][1],
+            **RUN,
+        )
+    finally:
+        pipeline.TOF_PARAMETERS_FILE = previous_tof
+        _restore_manifest(manifest_state)
+
+    nominal = sorted(tmp_path.glob("*_nominal.endf"))
+    assert nominal, "the nominal ENDF was not written — the splice failed again"
+
+
+def test_manifest_env_var_is_honoured_after_import(monkeypatch):
+    """The env var must work in-process, not only when exported before python.
+
+    This module has been imported long before this test runs — the smoke test
+    imports every script — which is exactly the case that used to fail.
+    """
+    import scripts.uncertainty_manifest as resolver
+
+    monkeypatch.setenv("KIKA_UNCERTAINTY_MANIFEST_PATH", str(MICRO_MANIFEST))
+    assert resolver.manifest_path() == MICRO_MANIFEST
+    loaded = resolver.load_manifest()
+    assert set(loaded["datasets"]) == {"10886002", "11300004", "13606002"}
+
+
+def test_the_cache_does_not_outlive_a_change_of_manifest(monkeypatch, tmp_path):
+    """Caching is per path, so a second manifest is not served the first one.
+
+    A single-slot cache made the first manifest read in a process the only one
+    anybody could get afterwards.
+    """
+    import scripts.uncertainty_manifest as resolver
+
+    other = tmp_path / "other_manifest.yaml"
+    other.write_text("datasets:\n  99999999:\n    flag: synthetic\n")
+
+    monkeypatch.setenv("KIKA_UNCERTAINTY_MANIFEST_PATH", str(MICRO_MANIFEST))
+    first = resolver.load_manifest()
+    assert set(first["datasets"]) == {"10886002", "11300004", "13606002"}
+
+    monkeypatch.setenv("KIKA_UNCERTAINTY_MANIFEST_PATH", str(other))
+    second = resolver.load_manifest()
+    assert set(second["datasets"]) == {99999999}
+
+    # And back — the first one is still correct, from cache this time.
+    monkeypatch.setenv("KIKA_UNCERTAINTY_MANIFEST_PATH", str(MICRO_MANIFEST))
+    assert set(resolver.load_manifest()["datasets"]) == {
+        "10886002", "11300004", "13606002"
+    }

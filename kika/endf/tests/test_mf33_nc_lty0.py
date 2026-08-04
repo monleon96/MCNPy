@@ -229,18 +229,15 @@ def test_sumrule_offdiagonal_propagates():
 
 
 # ---------------------------------------------------------------------------
-# Fe-56 JENDL-5 regression (opt-in — requires the 64 MB ENDF file)
+# Fe-56 JENDL-5 regression (needs the real tape — see the root conftest)
 # ---------------------------------------------------------------------------
 
-FE56 = Path(__file__).resolve().parents[3] / "files" / "endf" / "Fe56_jendl5_n.endf"
 
-
-@pytest.mark.skipif(not FE56.is_file(), reason="Fe56 JENDL-5 file not present")
-def test_fe56_mt2_is_full_matrix_not_diagonal():
+def test_fe56_mt2_is_full_matrix_not_diagonal(fe56_jendl_tape):
     """The pre-fix behaviour returned ``np.diag(...)`` — guard against regression."""
     from kika.processing import resolve_derived_covariance
 
-    cov = resolve_derived_covariance(str(FE56), mt=2)
+    cov = resolve_derived_covariance(str(fe56_jendl_tape), mt=2)
     M = np.asarray(cov.matrices[0])
 
     # Shape + symmetry
@@ -259,14 +256,13 @@ def test_fe56_mt2_is_full_matrix_not_diagonal():
     assert np.abs(off).max() < 10 * np.abs(np.diag(M)).max()
 
 
-@pytest.mark.skipif(not FE56.is_file(), reason="Fe56 JENDL-5 file not present")
-def test_fe56_mt2_output_grid_is_union_not_subdivided():
+def test_fe56_mt2_output_grid_is_union_not_subdivided(fe56_jendl_tape):
     """The rewrite drops the ~10/decade fine subdivision — output must match
     the union of the contributing MTs' coarse MF33 grids."""
     from kika.endf.read_endf import read_endf
     from kika.processing import resolve_derived_covariance
 
-    endf = read_endf(str(FE56))
+    endf = read_endf(str(fe56_jendl_tape))
     mf33 = endf.files[33].sections
 
     # Expected union: every bin edge that appears in any contributor's own
@@ -301,7 +297,7 @@ def test_fe56_mt2_output_grid_is_union_not_subdivided():
             if ni.lb in (0, 1, 2, 8, 9):
                 expected_union.update(ni.e_table_k)
 
-    cov = resolve_derived_covariance(str(FE56), mt=2)
+    cov = resolve_derived_covariance(str(fe56_jendl_tape), mt=2)
     got = set(cov.energy_grids[0])
 
     # The native grid should be a subset of what we'd accumulate from all

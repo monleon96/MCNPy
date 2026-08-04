@@ -34,7 +34,13 @@ from kika.endf.writers.mf33_writer import (  # noqa: E402
     write_mf33_to_file,
 )
 from kika.endf.parsers.parse_mf33 import parse_mf33_mt  # noqa: E402
-from kika.endf.utils import format_endf_data_line, ENDF_FORMAT_INT  # noqa: E402
+from kika.endf.utils import (  # noqa: E402
+    ENDF_FORMAT_INT,
+    format_endf_data_line,
+    format_endf_fend_record,
+    format_endf_mend_record,
+    format_endf_send_record,
+)
 
 
 NOMINAL = np.array([2.5, 0.4, 0.15])  # c0=2.5, c1, c2
@@ -292,9 +298,9 @@ def _mf33_template(path):
         return format_endf_data_line(vals, mat, mf, mt, 0, formats=[ENDF_FORMAT_INT] * 6)
     lines = [
         line([26056, 0, 0, 0, 0, 0], MAT, 3, MT),
-        line([0, 0, 0, 0, 0, 0], MAT, 3, 0),
-        line([0, 0, 0, 0, 0, 0], MAT, 0, 0),
-        line([0, 0, 0, 0, 0, 0], 0, 0, 0),
+        format_endf_send_record(MAT, 3),
+        format_endf_fend_record(MAT),
+        format_endf_mend_record(),
     ]
     path.write_text("\n".join(lines) + "\n")
     return path

@@ -1,0 +1,20 @@
+{
+ "10886002": {
+  "author": "Smith",
+  "details": {
+   "flight_path": {
+    "total": {
+     "max": {
+      "unit": "m",
+      "value": 5.5
+     },
+     "min": {
+      "unit": "m",
+      "value": 5.0
+     }
+    }
+   }
+  },
+  "year": 1980
+ }
+}

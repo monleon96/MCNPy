@@ -64,3 +64,14 @@ sphinx-rtd-theme = "^3.0.2"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+# Tests are co-located per package: kika/<pkg>/tests/ and scripts/tests/.
+# There is no root tests/ dir; kika/tests/ holds repo-wide invariants only.
+testpaths = ["kika", "scripts"]
+markers = [
+    "tape: needs a real ENDF/ACE tape from the shared data tree ($KIKA_TAPES)",
+    "njoy: spawns the NJOY executable",
+    "gnds: needs a GNDS fixture or reader",
+    "slow: takes more than a few seconds",
+]

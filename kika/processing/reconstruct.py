@@ -135,9 +135,20 @@ def reconstruct(
                 for lg in rp.l_groups:
                     l_val = lg.l
                     awr_l = lg.awri if lg.awri > 0 else rp.metadata.get("awr", 0.0)
+                    # Per-l scattering radius where the evaluation gives one
+                    # (ENDF's APL); the range-level AP otherwise. Every l used
+                    # to get the range value, which for JEFF-4.0 Fe-56 meant
+                    # the l=1 hard-sphere phase shift was computed from
+                    # AP = 0.5444 fm instead of APL = 0.5002 fm.
+                    #
+                    # An energy-dependent AP table (NRO=1) still wins, inside
+                    # the formula functions: it is a property of the range and
+                    # ENDF gives no per-l version of it, so overriding it with
+                    # a scalar would change NRO=1 tapes for the worse.
+                    ap_l = lg.ap if lg.ap is not None else rp.scattering_radius
                     sel, scap, sfis = formula(
                         E_in, lg.resonances, l_val, rp.spin,
-                        rp.scattering_radius, awr_l,
+                        ap_l, awr_l,
                         ap_table=rp.scattering_radius_table,
                     )
                     sig_el[mask] += sel

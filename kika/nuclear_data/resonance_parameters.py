@@ -62,6 +62,11 @@ class LGroup:
     awri: float  # Isotope mass ratio
     l: int  # Orbital angular momentum
     resonances: List[ResonanceRecord] = field(default_factory=list)
+    #: Scattering radius for this *l* alone, in fm, when the evaluation gives
+    #: one (ENDF's APL, Reich-Moore only). *None* means "use the range-level
+    #: radius". Already resolved against the formalism by the adapter, so
+    #: unlike ``LValueBlock.apl_or_qx`` this is never a Q value.
+    ap: Optional[float] = None
 
 
 @dataclass
@@ -160,8 +165,19 @@ class ResonanceParameters:
                         )
                         for r in lv.resonances
                     ]
+                    # er.scattering_radius_for_l knows the LRF, so it returns a
+                    # radius only where C2 actually is one; under LRF=1/2 that
+                    # field is QX and must not be read as a radius. It falls
+                    # back to the range AP, so only record a per-l value when
+                    # it genuinely differs.
+                    ap_l = er.scattering_radius_for_l(lv.l)
                     l_groups.append(
-                        LGroup(awri=lv.awri, l=lv.l, resonances=records)
+                        LGroup(
+                            awri=lv.awri,
+                            l=lv.l,
+                            resonances=records,
+                            ap=ap_l if ap_l != params.ap else None,
+                        )
                     )
 
                 # Energy-dependent scattering radius (NRO=1)
