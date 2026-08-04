@@ -22,6 +22,7 @@ from typing import List, Tuple, Optional
 
 from ..mt import MT
 from ...utils import (
+    format_endf_send_record,
     format_endf_data_line,
     format_tab1,
     format_tab2,
@@ -208,11 +209,7 @@ class MF1MT455(MT):
             lines.extend(tab1_lines)
 
         # SEND
-        send = format_endf_data_line(
-            [0, 0, 0, 0, 0, 0],
-            mat, mf, 0, 99999,
-            formats=[ENDF_FORMAT_INT] * 6,
-        )
+        send = format_endf_send_record(mat, mf)
         lines.append(send)
 
         return "\n".join(lines)

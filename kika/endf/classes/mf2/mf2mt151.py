@@ -8,6 +8,7 @@ import numpy as np
 
 from ..mt import MT
 from ...utils import (
+    format_endf_send_record,
     format_endf_data_line,
     format_data_values,
     format_tab1,
@@ -708,11 +709,7 @@ class MF2MT151(MT):
                     ln = _serialize_rml(er.parameters, lines, mat, mf, mt, ln)
 
         # SEND record
-        lines.append(format_endf_data_line(
-            [0, 0, 0, 0, 0, 0],
-            mat, mf, 0, 99999,
-            formats=[ENDF_FORMAT_INT] * 6,
-        ))
+        lines.append(format_endf_send_record(mat, mf))
 
         return "\n".join(lines)
 

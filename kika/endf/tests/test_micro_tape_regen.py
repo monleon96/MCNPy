@@ -38,7 +38,14 @@ import numpy as np
 import pytest
 
 from kika.endf import read_endf
-from kika.endf.utils import ENDF_FORMAT_INT, format_endf_data_line, parse_endf_id
+from kika.endf.utils import (
+    ENDF_FORMAT_INT,
+    format_endf_data_line,
+    format_endf_fend_record,
+    format_endf_mend_record,
+    format_endf_send_record,
+    parse_endf_id,
+)
 from kika.endf.writers import (
     create_mf33_from_covariance,
     create_mf34_from_covariance,
@@ -128,11 +135,14 @@ def build_cov(dest: Path) -> None:
 
     # A host with just enough structure for the covariance writers to splice
     # into: one MF3/MT2 stub, its SEND, the MF FEND and the tape MEND.
+    # The terminators go through the shared emitters: writing them by hand with
+    # six integer formats is the defect this fixture would otherwise re-bake
+    # into itself on every regeneration.
     stub = "\n".join([
         _line([int(ZA), 0, 0, 0, 0, 0], MAT, 3, MT),
-        _line([0, 0, 0, 0, 0, 0], MAT, 3, 0),
-        _line([0, 0, 0, 0, 0, 0], MAT, 0, 0),
-        _line([0, 0, 0, 0, 0, 0], 0, 0, 0),
+        format_endf_send_record(MAT, 3),
+        format_endf_fend_record(MAT),
+        format_endf_mend_record(),
     ]) + "\n"
 
     tmp_host = dest.with_suffix(".host.tmp")

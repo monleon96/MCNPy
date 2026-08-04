@@ -18,7 +18,13 @@ from kika.endf.writers.mf33_writer import (
 from kika.endf.writers._records import populate_lb5_record, populate_lb6_record
 from kika.endf.classes.mf33.mf33 import NISubSubsectionRecord
 from kika.endf.parsers.parse_mf33 import parse_mf33_mt
-from kika.endf.utils import format_endf_data_line, ENDF_FORMAT_INT
+from kika.endf.utils import (
+    ENDF_FORMAT_INT,
+    format_endf_data_line,
+    format_endf_fend_record,
+    format_endf_mend_record,
+    format_endf_send_record,
+)
 
 
 ZA, AWR, MAT, MT = 26056.0, 55.454, 2631, 2
@@ -138,9 +144,9 @@ def _minimal_template(path):
         )
     lines = [
         line([26056, 0, 0, 0, 0, 0], MAT, 3, MT),   # MF3/MT2 stub
-        line([0, 0, 0, 0, 0, 0], MAT, 3, 0),          # SEND
-        line([0, 0, 0, 0, 0, 0], MAT, 0, 0),          # FEND
-        line([0, 0, 0, 0, 0, 0], 0, 0, 0),            # MEND
+        format_endf_send_record(MAT, 3),
+        format_endf_fend_record(MAT),
+        format_endf_mend_record(),
     ]
     path.write_text("\n".join(lines) + "\n")
     return path

@@ -179,12 +179,9 @@ def write_mf_section_to_file(
             new_lines = lines[:insert_idx] + section_lines + lines[insert_idx:]
     else:
         # No block for this MF yet: insert section + fresh FEND before MEND.
-        from ..utils import format_endf_data_line, ENDF_FORMAT_INT
+        from ..utils import format_endf_fend_record
         mat_num = section._mat or 0
-        fend_line = format_endf_data_line(
-            [0, 0, 0, 0, 0, 0], mat_num, 0, 0, 0,
-            formats=[ENDF_FORMAT_INT] * 6
-        ) + '\n'
+        fend_line = format_endf_fend_record(mat_num) + '\n'
         insert_idx = _find_mend_marker(lines)
         new_lines = (
             lines[:insert_idx] + section_lines + [fend_line] + lines[insert_idx:]

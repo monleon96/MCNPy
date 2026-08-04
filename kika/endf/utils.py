@@ -95,7 +95,52 @@ ENDF_FORMAT_PRESERVE = 'preserve' # Use value's own type to determine format
 ENDF_FORMAT_INT_ZERO = ENDF_FORMAT_INT
 
 
-def format_endf_data_line(values: Sequence[Union[int, float, None]], 
+#: Field types of a termination record's data part.
+#:
+#: ENDF-6 types the first two fields of SEND/FEND/MEND/TEND as floats (C1, C2)
+#: and the remaining four as integers, so a terminator reads
+#: ``" 0.000000+0 0.000000+0          0          0          0          0"``.
+#: Nine emitters used to build this by hand with ``[ENDF_FORMAT_INT] * 6``,
+#: rendering the two float fields as right-aligned integer zeros.
+_TERMINATION_FORMATS = [
+    ENDF_FORMAT_FLOAT, ENDF_FORMAT_FLOAT,
+    ENDF_FORMAT_INT, ENDF_FORMAT_INT, ENDF_FORMAT_INT, ENDF_FORMAT_INT,
+]
+
+#: Sequence number ENDF-6 requires on a SEND record, verbatim.
+SEND_SEQUENCE_NUMBER = 99999
+
+
+def format_endf_send_record(mat: int, mf: int) -> str:
+    """The SEND record closing a section: MT=0, sequence number 99999."""
+    return format_endf_data_line(
+        [0.0, 0.0, 0, 0, 0, 0], mat, mf, 0, SEND_SEQUENCE_NUMBER,
+        formats=_TERMINATION_FORMATS,
+    )
+
+
+def format_endf_fend_record(mat: int) -> str:
+    """The FEND record closing a file: MF=0, MT=0, sequence number 0."""
+    return format_endf_data_line(
+        [0.0, 0.0, 0, 0, 0, 0], mat, 0, 0, 0, formats=_TERMINATION_FORMATS,
+    )
+
+
+def format_endf_mend_record() -> str:
+    """The MEND record closing a material: MAT=0."""
+    return format_endf_data_line(
+        [0.0, 0.0, 0, 0, 0, 0], 0, 0, 0, 0, formats=_TERMINATION_FORMATS,
+    )
+
+
+def format_endf_tend_record() -> str:
+    """The TEND record closing a tape: MAT=-1."""
+    return format_endf_data_line(
+        [0.0, 0.0, 0, 0, 0, 0], -1, 0, 0, 0, formats=_TERMINATION_FORMATS,
+    )
+
+
+def format_endf_data_line(values: Sequence[Union[int, float, None]],
                          mat: int, mf: int, mt: int, line_num: int = 0,
                          formats: Optional[List[str]] = None) -> str:
     """

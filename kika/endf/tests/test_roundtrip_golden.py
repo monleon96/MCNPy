@@ -143,18 +143,6 @@ def test_mf34_roundtrip_matches_except_the_sequence_number_field(micro_tape):
 # Pinned defects
 # ---------------------------------------------------------------------------
 
-_ZERO_AS_INT = (
-    "Pre-existing defect, pinned by GNDS phase 0. kika renders an ENDF "
-    "floating-point field as an integer when its value is zero: a SEND record "
-    "that reads ' 0.000000+0' six times in the source comes back as "
-    "'          0' six times, and the STA field of the second MF1/451 record "
-    "does the same. ENDF-6 types those fields as floats. Both readings are "
-    "accepted by tolerant parsers, which is why it went unnoticed, but it means "
-    "no tape kika touches is byte-identical to its source."
-)
-
-
-@pytest.mark.xfail(strict=True, reason=_ZERO_AS_INT)
 def test_replace_mt_section_with_itself_changes_nothing(micro_tape, tmp_path):
     """The splice path the pipeline actually uses must be a no-op when fed back.
 
@@ -176,7 +164,6 @@ def test_replace_mt_section_with_itself_changes_nothing(micro_tape, tmp_path):
     assert digest(work) == before
 
 
-@pytest.mark.xfail(strict=True, reason=_ZERO_AS_INT)
 def test_mf1_451_roundtrip_is_byte_identical(fe56_host_tape):
     """The STA field of record 2 comes back as an integer zero.
 
@@ -190,16 +177,6 @@ def test_mf1_451_roundtrip_is_byte_identical(fe56_host_tape):
     assert not first_difference(source, rendered(endf, 1, 451))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Pre-existing spec deviation, pinned by GNDS phase 0. ENDF-6 requires "
-        "the sequence-number field of a SEND record to be the literal 99999. "
-        "update_mf1_directory writes its own running line number there instead "
-        "(2631 1  0  911 where the source has 2631 1  099999), so rebuilding the "
-        "directory of an untouched tape changes it."
-    ),
-)
 def test_rebuilding_the_directory_of_a_real_tape_changes_nothing(
     fe56_host_tape, tmp_path,
 ):
