@@ -178,7 +178,6 @@ def pipeline_run(request, tmp_path_factory, micro_tape):
     window = request.param
     energy_min_mev, energy_max_mev = WINDOWS[window]
     out = tmp_path_factory.mktemp(f"pipeline_{window}")
-    (out / "empty_json").mkdir()
 
     previous_tof = pipeline.TOF_PARAMETERS_FILE
     pipeline.TOF_PARAMETERS_FILE = str(MICRO_TOF)
@@ -187,9 +186,6 @@ def pipeline_run(request, tmp_path_factory, micro_tape):
         pipeline.run_exfor_to_endf_sampling_v2(
             endf_file=str(micro_tape),
             output_dir=str(out),
-            # Required even though nothing reads it — see the pinned defect
-            # test at the end of this file.
-            exfor_directory=str(out / "empty_json"),
             exfor_db_path=str(MICRO_DB),
             # The ENDF-writing stage fails on this data; the golden stops at
             # the covariance. See test_writing_endf_samples_succeeds below.
@@ -291,21 +287,14 @@ def test_covariance_is_symmetric_and_positive_semidefinite(pipeline_run):
 # Pinned defects
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Pre-existing defect, pinned by GNDS phase 0. "
-        "exfor_to_endf_sampling_v2.py:2557 runs os.path.isdir(exfor_directory) "
-        "unconditionally, before the branch that decides whether JSON files are "
-        "read at all. With exfor_source='database' the directory is never used, "
-        "yet omitting it raises TypeError from genericpath rather than the "
-        "graceful error the surrounding code is written to give. Production "
-        "never hits it because the __main__ block always passes the module "
-        "constant. Every test above has to create an empty directory to get "
-        "past this line."
-    ),
-)
 def test_database_source_does_not_need_a_json_directory(tmp_path, micro_tape):
+    """With exfor_source='database' the JSON directory is never read.
+
+    It used to be validated anyway, ahead of the branch that decides whether
+    JSON is used, so omitting it died on os.path.isdir(None). Every golden
+    above had to create a throwaway directory to get past that line; they no
+    longer do, which is the other half of the proof.
+    """
     import scripts.exfor_to_endf_sampling_v2 as pipeline
 
     pipeline.run_exfor_to_endf_sampling_v2(
@@ -322,6 +311,56 @@ def test_database_source_does_not_need_a_json_directory(tmp_path, micro_tape):
         generate_fitting_samples=False,
         generate_nominal_endf=False,
         generate_mc_mean_endf=False,
+    )
+
+
+def test_json_source_without_a_directory_fails_gracefully(tmp_path, micro_tape):
+    """The one source that genuinely needs the directory says so and returns.
+
+    'auto' and 'both' treat it as optional — read_all_exfor skips the JSON leg
+    when it is absent — so only 'json' is an error.
+    """
+    import scripts.exfor_to_endf_sampling_v2 as pipeline
+
+    pipeline.run_exfor_to_endf_sampling_v2(
+        endf_file=str(micro_tape),
+        output_dir=str(tmp_path),
+        exfor_db_path=str(MICRO_DB),
+        exfor_source="json",
+        target_zaid=[26000, 26056],
+        n_samples=2,
+        energy_min_mev=1.8,
+        energy_max_mev=3.0,
+        base_seed=42,
+        n_procs=1,
+        generate_fitting_samples=False,
+        generate_nominal_endf=False,
+        generate_mc_mean_endf=False,
+    )
+
+
+def test_a_missing_directory_is_still_reported(tmp_path, micro_tape):
+    """A path that was given but does not exist stays an error."""
+    import scripts.exfor_to_endf_sampling_v2 as pipeline
+
+    pipeline.run_exfor_to_endf_sampling_v2(
+        endf_file=str(micro_tape),
+        output_dir=str(tmp_path),
+        exfor_directory=str(tmp_path / "does_not_exist"),
+        exfor_db_path=str(MICRO_DB),
+        exfor_source="database",
+        target_zaid=[26000, 26056],
+        n_samples=2,
+        energy_min_mev=1.8,
+        energy_max_mev=3.0,
+        base_seed=42,
+        n_procs=1,
+        generate_fitting_samples=False,
+        generate_nominal_endf=False,
+        generate_mc_mean_endf=False,
+    )
+    assert not (tmp_path / "endf").exists(), (
+        "the run continued past a missing exfor_directory"
     )
 
 
@@ -345,7 +384,6 @@ def test_database_source_does_not_need_a_json_directory(tmp_path, micro_tape):
 def test_writing_endf_samples_succeeds(tmp_path, micro_tape):
     import scripts.exfor_to_endf_sampling_v2 as pipeline
 
-    (tmp_path / "empty_json").mkdir()
     previous_tof = pipeline.TOF_PARAMETERS_FILE
     pipeline.TOF_PARAMETERS_FILE = str(MICRO_TOF)
     manifest_state = _use_micro_manifest()
@@ -353,7 +391,6 @@ def test_writing_endf_samples_succeeds(tmp_path, micro_tape):
         pipeline.run_exfor_to_endf_sampling_v2(
             endf_file=str(micro_tape),
             output_dir=str(tmp_path),
-            exfor_directory=str(tmp_path / "empty_json"),
             exfor_db_path=str(MICRO_DB),
             generate_fitting_samples=True,
             energy_min_mev=WINDOWS["single"][0],

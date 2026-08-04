@@ -2556,7 +2556,18 @@ def run_exfor_to_endf_sampling_v2(
         _logger.error(f"[ERROR] [ENDF] File not found: {endf_file}", console=True)
         return
 
-    if not os.path.isdir(exfor_directory):
+    # The JSON directory is only read when the source asks for JSON, and only
+    # exfor_source='json' cannot do without it — read_all_exfor treats it as
+    # optional for 'auto' and 'both' (kika/exfor/io.py: `if directory is not
+    # None`). Checking it unconditionally meant exfor_source='database', which
+    # never touches it, died on os.path.isdir(None) inside genericpath instead
+    # of reaching any of the error handling here.
+    if exfor_source == "json" and not exfor_directory:
+        _logger.error(
+            "[ERROR] [EXFOR] exfor_source='json' reads JSON files, but no "
+            "exfor_directory was given", console=True)
+        return
+    if exfor_directory and not os.path.isdir(exfor_directory):
         _logger.error(f"[ERROR] [EXFOR] Directory not found: {exfor_directory}", console=True)
         return
 
