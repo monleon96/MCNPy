@@ -86,7 +86,14 @@ _TAPES: Dict[str, Sequence[str]] = {
     "pu241": ("jeff40-endf/94-Pu-241g.txt", "94-Pu-241g.txt"),
     "u238": ("jeff40-endf/92-U-238g.txt", "U238_jeff4.0_n.endf"),
     "serpent_input": ("serpent/PWRSphere.sss2", "PWRSphere.sss2"),
-    "fe56_ace": ("ACE_samples/26056.06c", "26056.06c"),
+    # Smallest real Fe-56 ACE on the share (16 MB) is preferred over the
+    # 112 MB JEFF one: the round-trip gate reads and rewrites the whole XSS,
+    # and the format exercised is the same.
+    "fe56_ace": (
+        "ACE_samples/n-Fe056-ace.tendl.02c",
+        "ACE_samples/26056.06c",
+        "26056.06c",
+    ),
     # Sample covariance files for the reaction-transfer test. Not on the shared
     # tree at present; the repo-local `files/cov/` root is where they belong.
     "u5_nubar_covfil": ("cov/tape33_ENDF_U5_nubar_56", "COV/tape33_ENDF_U5_nubar_56"),
