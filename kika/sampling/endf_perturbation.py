@@ -125,8 +125,11 @@ def _process_sample(
     # Compute the expected output path before doing any heavy work. If the
     # perturbed ENDF already exists, reuse it and skip parse + perturbation +
     # write — this lets re-runs cheaply add ACE files at a new temperature.
-    # MF1 is enough to recover the ZAID; full parse only happens on the
-    # write path below.
+    # A targeted MF1 parse is enough to recover the ZAID; the full parse only
+    # happens on the write path below. That was the intent all along, but
+    # read_endf only set `mat` on the full-parse path, so `zaid` came back None
+    # and every sample landed in endf/unknown/ while stage B looked for it
+    # under endf/<zaid>/ and paired nothing.
     base, ext = os.path.splitext(os.path.basename(endf_file))
     sample_str = f"{sample_index+1:04d}"
     try:

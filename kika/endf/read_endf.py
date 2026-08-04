@@ -5,7 +5,12 @@ import os
 from typing import List, Optional, Union
 
 from .classes.endf import ENDF
-from .parsers.parse_endf import parse_endf_file, parse_mf_from_file, MF_PARSERS
+from .parsers.parse_endf import (
+    parse_endf_file,
+    parse_mf_from_file,
+    scan_mat_number,
+    MF_PARSERS,
+)
 from .classes.mf1.mf1mt451 import MF1MT451
 from .classes.mf2.mf2mt151 import MF2MT151
 from .classes.mf3.mf3mt import MF3MT
@@ -52,16 +57,25 @@ def read_endf(filepath: str, mf_numbers: Optional[Union[int, List[int]]] = None)
     
     # Create empty ENDF object
     endf = ENDF()
-    
+
+    # MAT is a property of the tape, not of the sections asked for, so a
+    # targeted parse must report the same one a full parse does. It did not:
+    # only parse_endf_file set it, so read_endf(f, mf_numbers=[1]).zaid was
+    # None while read_endf(f).zaid was 26056 — and kika/sampling built its
+    # output directory from the former, writing perturbed samples under
+    # endf/unknown/ where the pairing stage looked under endf/26056/.
+    with open(filepath, 'r') as f:
+        endf.mat = scan_mat_number(f.readlines())
+
     # Parse each requested MF section
     for mf_number in mf_numbers:
         mf = parse_mf_from_file(filepath, mf_number)
         if mf is None:
             continue
-        
+
         # Add the MF to the ENDF object
         endf.add_file(mf)
-    
+
     return endf
 
 

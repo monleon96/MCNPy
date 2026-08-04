@@ -39,22 +39,6 @@ def test_combined_requires_njoy_when_generate_ace(tmp_path):
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Pre-existing defect, pinned by GNDS phase 0 and to be fixed in phase 1. "
-        "endf_perturbation.py:133 builds the output directory from "
-        "read_endf(f, mf_numbers=[1]).zaid, but a targeted MF1-only parse leaves "
-        "zaid=None (a full parse gives 26056), so Stage A.MF34 writes to "
-        "endf/unknown/<sample>/ while Stage B looks under endf/<zaid>/<sample>/ "
-        "(combined_perturbation.py:384) and pairs nothing — n_attempted is 0. "
-        "The comment at endf_perturbation.py:128 claims MF1 is enough to recover "
-        "the ZAID; it is not. This test never ran before the root conftest "
-        "resolved its tape, which is why the defect went unnoticed. "
-        "Separately, the artifact paths asserted below ('mf4/endf/...') do not "
-        "match what either stage uses."
-    ),
-)
 def test_combined_smoke(tmp_path, njoy_exe, fe56_endf):
     """End-to-end: produce 2 paired (ENDF, PENDF, ACE) samples."""
     output_dir = tmp_path / "combined_smoke"
@@ -80,15 +64,25 @@ def test_combined_smoke(tmp_path, njoy_exe, fe56_endf):
     assert iso_summary["n_attempted"] == 2
     assert iso_summary["n_ace_ok"] >= 1, summary
 
-    # Verify intermediate artifacts exist
+    # Verify intermediate artifacts exist, at the flat layout the module
+    # docstring documents: output_dir/{endf,pendf}/<zaid>/<NNNN>/. The paths
+    # asserted here used to be output_dir/mf4/endf/... and output_dir/mf3/
+    # pendf/..., which match neither stage — they never ran, because the tape
+    # was unreachable until the root conftest resolved it.
     zaid = int(read_endf(str(fe56_endf)).zaid)
     base, ext = os.path.splitext(os.path.basename(str(fe56_endf)))
     for s in (1, 2):
         sample_str = f"{s:04d}"
-        endf_path = output_dir / "mf4" / "endf" / str(zaid) / sample_str / f"{base}_{sample_str}{ext}"
-        pendf_path = output_dir / "mf3" / "pendf" / str(zaid) / sample_str / f"{base}_{sample_str}.pendf"
+        endf_path = output_dir / "endf" / str(zaid) / sample_str / f"{base}_{sample_str}{ext}"
+        pendf_path = output_dir / "pendf" / str(zaid) / sample_str / f"{base}_{sample_str}.pendf"
         assert endf_path.exists(), f"missing perturbed ENDF: {endf_path}"
         assert pendf_path.exists(), f"missing perturbed PENDF: {pendf_path}"
+
+    # The defect this test was pinned for: stage A must not write to
+    # endf/unknown/, which is what a zaid of None produced.
+    assert not (output_dir / "endf" / "unknown").exists(), (
+        "stage A fell back to endf/unknown/ — the targeted parse lost its MAT again"
+    )
 
     # ACE landed under output_dir/ace/<library>/<TK>/
     ace_glob = list((output_dir / "ace").rglob("*.*c"))
