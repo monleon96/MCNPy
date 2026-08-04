@@ -92,6 +92,46 @@ WINDOWS = {
 
 
 # ---------------------------------------------------------------------------
+# Pointing the resolver at the fixture manifest
+# ---------------------------------------------------------------------------
+# $KIKA_UNCERTAINTY_MANIFEST_PATH alone is not enough. uncertainty_manifest.py
+# reads it once, at import, into the module-level _MANIFEST_PATH, and caches
+# the parsed YAML in _manifest_cache. Any earlier test that imports the module
+# — test_deploy_smoke.py imports every script — freezes the production path
+# before this file gets a chance to set the variable. Setting the env var and
+# nothing else made the "pair" golden pass in isolation and fail in a full run,
+# silently resolving against the production manifest instead of the fixture.
+# See test_manifest_env_var_is_honoured_after_import for the pinned defect.
+
+
+def _use_micro_manifest():
+    """Force the resolver onto the fixture manifest. Returns state to restore."""
+    import scripts.uncertainty_manifest as resolver
+
+    state = (
+        os.environ.get("KIKA_UNCERTAINTY_MANIFEST_PATH"),
+        resolver._MANIFEST_PATH,
+        resolver._manifest_cache,
+    )
+    os.environ["KIKA_UNCERTAINTY_MANIFEST_PATH"] = str(MICRO_MANIFEST)
+    resolver._MANIFEST_PATH = MICRO_MANIFEST
+    resolver._manifest_cache = None
+    return state
+
+
+def _restore_manifest(state) -> None:
+    import scripts.uncertainty_manifest as resolver
+
+    previous_env, previous_path, previous_cache = state
+    if previous_env is None:
+        os.environ.pop("KIKA_UNCERTAINTY_MANIFEST_PATH", None)
+    else:
+        os.environ["KIKA_UNCERTAINTY_MANIFEST_PATH"] = previous_env
+    resolver._MANIFEST_PATH = previous_path
+    resolver._manifest_cache = previous_cache
+
+
+# ---------------------------------------------------------------------------
 # EXFOR loading and uncertainty resolution
 # ---------------------------------------------------------------------------
 
@@ -148,10 +188,9 @@ def pipeline_run(request, tmp_path_factory, micro_tape):
     out = tmp_path_factory.mktemp(f"pipeline_{window}")
     (out / "empty_json").mkdir()
 
-    previous_manifest = os.environ.get("KIKA_UNCERTAINTY_MANIFEST_PATH")
     previous_tof = pipeline.TOF_PARAMETERS_FILE
-    os.environ["KIKA_UNCERTAINTY_MANIFEST_PATH"] = str(MICRO_MANIFEST)
     pipeline.TOF_PARAMETERS_FILE = str(MICRO_TOF)
+    manifest_state = _use_micro_manifest()
     try:
         pipeline.run_exfor_to_endf_sampling_v2(
             endf_file=str(micro_tape),
@@ -171,10 +210,7 @@ def pipeline_run(request, tmp_path_factory, micro_tape):
         )
     finally:
         pipeline.TOF_PARAMETERS_FILE = previous_tof
-        if previous_manifest is None:
-            os.environ.pop("KIKA_UNCERTAINTY_MANIFEST_PATH", None)
-        else:
-            os.environ["KIKA_UNCERTAINTY_MANIFEST_PATH"] = previous_manifest
+        _restore_manifest(manifest_state)
     return window, out
 
 
@@ -319,8 +355,8 @@ def test_writing_endf_samples_succeeds(tmp_path, micro_tape):
 
     (tmp_path / "empty_json").mkdir()
     previous_tof = pipeline.TOF_PARAMETERS_FILE
-    os.environ["KIKA_UNCERTAINTY_MANIFEST_PATH"] = str(MICRO_MANIFEST)
     pipeline.TOF_PARAMETERS_FILE = str(MICRO_TOF)
+    manifest_state = _use_micro_manifest()
     try:
         pipeline.run_exfor_to_endf_sampling_v2(
             endf_file=str(micro_tape),
@@ -334,7 +370,29 @@ def test_writing_endf_samples_succeeds(tmp_path, micro_tape):
         )
     finally:
         pipeline.TOF_PARAMETERS_FILE = previous_tof
-        os.environ.pop("KIKA_UNCERTAINTY_MANIFEST_PATH", None)
+        _restore_manifest(manifest_state)
 
     written = sorted((tmp_path / "endf").rglob("*.endf"))
     assert written, "no perturbed ENDF samples were written"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Pre-existing fragility, pinned by GNDS phase 0. "
+        "uncertainty_manifest.py:64 reads $KIKA_UNCERTAINTY_MANIFEST_PATH once, "
+        "at import, into the module-level _MANIFEST_PATH, and load_manifest "
+        "caches the parsed YAML in _manifest_cache. Setting the variable after "
+        "the module has been imported therefore does nothing. On the cluster "
+        "the sbatch script exports it before python starts, so the toggle works "
+        "there and the fragility is invisible; in-process it is a trap, and it "
+        "cost this file a golden that passed alone and failed in a full run. "
+        "Reading the variable inside load_manifest would fix it."
+    ),
+)
+def test_manifest_env_var_is_honoured_after_import(monkeypatch):
+    import scripts.uncertainty_manifest as resolver
+
+    monkeypatch.setenv("KIKA_UNCERTAINTY_MANIFEST_PATH", str(MICRO_MANIFEST))
+    loaded = resolver.load_manifest()
+    assert set(loaded["datasets"]) == {"10886002", "11300004", "13606002"}
