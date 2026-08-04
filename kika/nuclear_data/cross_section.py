@@ -36,6 +36,33 @@ _ENDF_INTERP_TO_NAME = {
 _NAME_TO_ENDF_INTERP = {v: k for k, v in _ENDF_INTERP_TO_NAME.items()}
 
 
+def _dominant_interpolation(regions: List[Tuple[int, int]]) -> str:
+    """The scheme covering the most points, as a simplified name.
+
+    ``regions`` is the raw ENDF ``(NBT, INT)`` list, where NBT is the 1-based
+    index of the *last* point of the region — cumulative, not a per-region
+    count (see ``_regionize`` in ``kika/endf/utils.py``). Region *i* therefore
+    spans ``NBT[i] - NBT[i-1]`` points, with ``NBT[-1] = 0``.
+
+    Taking ``max`` on NBT directly, as this used to, always picked the last
+    region: NBT increases by construction. On a grid that is 99% lin-lin with
+    a two-point histogram tail, that returned ``histogram``.
+
+    Ties go to the earlier region. An empty list gives ``linlin``.
+    """
+    if not regions:
+        return "linlin"
+
+    widest_int, widest_span, previous_nbt = regions[0][1], -1, 0
+    for nbt, int_code in regions:
+        span = nbt - previous_nbt
+        if span > widest_span:
+            widest_span, widest_int = span, int_code
+        previous_nbt = nbt
+
+    return _ENDF_INTERP_TO_NAME.get(widest_int, "linlin")
+
+
 @dataclass
 class CrossSection:
     """Format-agnostic pointwise cross section σ(E).
@@ -91,14 +118,11 @@ class CrossSection:
         energies = np.asarray(mf3mt.energies, dtype=float)
         values = np.asarray(mf3mt.cross_sections, dtype=float)
 
-        # Determine dominant interpolation scheme
+        # Single scheme standing in for the whole grid, used only when the
+        # per-region detail is unavailable — the regions themselves survive in
+        # metadata below and win wherever they are present.
         interp_regions: List[Tuple[int, int]] = list(mf3mt.energy_interpolation)
-        if interp_regions:
-            # Use the scheme that covers the most points
-            dominant_int = max(interp_regions, key=lambda x: x[0])[1]
-            interp_name = _ENDF_INTERP_TO_NAME.get(dominant_int, "linlin")
-        else:
-            interp_name = "linlin"
+        interp_name = _dominant_interpolation(interp_regions)
 
         return cls(
             energies=energies,
