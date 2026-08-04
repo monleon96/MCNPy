@@ -1,0 +1,78 @@
+name: test
+
+# The fast lane only. Everything marked `tape` or `njoy` needs the ASNR shared
+# data tree or a local NJOY build, neither of which exists on a GitHub runner;
+# those run on the workstation with `pytest --deep`. See conftest.py.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install the project and its test dependencies
+        run: poetry install --with dev
+
+      - name: Run the fast lane
+        # KIKA_TAPES points nowhere on purpose: the marker filter should
+        # already exclude every test that needs it, and if one slips through
+        # unmarked it must skip loudly rather than pick up a stray file.
+        env:
+          KIKA_TAPES: /nonexistent
+        run: poetry run pytest -m "not tape and not njoy and not gnds" -q
+
+  wheel:
+    # Guards the `exclude` list in pyproject.toml. Test fixtures — including
+    # the 2 MB micro-tape — must stay out of the distribution, and every
+    # module that `import kika` needs must stay in it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Build the wheel
+        run: poetry build
+
+      - name: Install it into a clean environment and import it
+        run: |
+          python -m venv /tmp/wheel-check
+          /tmp/wheel-check/bin/pip install --quiet dist/*.whl
+          /tmp/wheel-check/bin/python -c "import kika; print(kika.__version__)"
+
+      - name: No test files or fixtures in the distribution
+        run: |
+          set -o pipefail
+          leaked=$(python -m zipfile -l dist/*.whl \
+            | grep -E "tests/|test_.*\.py|\.endf$|\.ipynb$" || true)
+          if [ -n "$leaked" ]; then
+            echo "these should not ship:"
+            echo "$leaked"
+            exit 1
+          fi
