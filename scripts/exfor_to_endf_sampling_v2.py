@@ -2189,6 +2189,10 @@ def run_exfor_to_endf_sampling_v2(
     use_model_averaging: bool = True,
     min_degree_for_averaging: int = 3,
     n_eff_warning_threshold: float = 5.0,
+    # Every parallel step reads this argument. Five of them used to read the
+    # N_PROCS module constant instead, so asking for one worker still forked
+    # forty. Production is unaffected: the __main__ block passes N_PROCS here
+    # explicitly, which is what the constant is for.
     n_procs: int = 1,
     base_seed: int = 42,
     generate_nominal_endf: bool = True,
@@ -2911,8 +2915,8 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info("  " + "=" * 60)
         _logger.info("  Method: Gaussian decay correlation + Cholesky resampling")
         _logger.info("  " + "=" * 60)
-        if N_PROCS > 1:
-            _logger.info(f"  Using {N_PROCS} parallel processes over bins")
+        if n_procs > 1:
+            _logger.info(f"  Using {n_procs} parallel processes over bins")
 
         bin_args_list = []
         for nr in nominal_results:
@@ -2949,8 +2953,8 @@ def run_exfor_to_endf_sampling_v2(
                 nr.mc_order_cap,
             ))
 
-        if N_PROCS > 1:
-            with Pool(N_PROCS) as pool:
+        if n_procs > 1:
+            with Pool(n_procs) as pool:
                 bin_results = pool.map(_mc_one_bin, bin_args_list)
         else:
             bin_results = [_mc_one_bin(a) for a in bin_args_list]
@@ -3071,7 +3075,7 @@ def run_exfor_to_endf_sampling_v2(
             energy_bins=energy_bins,
             overlap_weights=overlap_weights,
             n_samples=n_samples,
-            n_workers=N_PROCS,
+            n_workers=n_procs,
             sigma_norm=sigma_norm_systematic,
             sigma_norm_common_mode=sigma_norm_common_mode,
             norm_dist=NORM_DIST,
@@ -3150,8 +3154,8 @@ def run_exfor_to_endf_sampling_v2(
                     record_c0_channel,
                 ))
 
-            if N_PROCS > 1:
-                with Pool(N_PROCS) as pool:
+            if n_procs > 1:
+                with Pool(n_procs) as pool:
                     bin_results = pool.map(_mc_one_bin, bin_args_list)
             else:
                 bin_results = [_mc_one_bin(a) for a in bin_args_list]
@@ -4119,9 +4123,6 @@ def run_exfor_to_endf_sampling_v2(
             mt_number=mt_number,
             all_samples=all_samples_endf,
             output_dir=str(output_path),
-            # Was N_PROCS, the module constant: asking this function for one
-            # worker still forked forty, and decided which of the two splice
-            # merge paths ran.
             n_procs=n_procs,
             energy_bins=energy_bins if use_splice else None,
             energy_range_mev=splice_range,
