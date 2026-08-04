@@ -140,25 +140,62 @@ class CrossSection:
             },
         )
 
-    def to_endf(self, mat: Optional[int] = None) -> "MF3MT":
+    def to_endf(
+        self,
+        mat: Optional[int] = None,
+        *,
+        qm: Optional[float] = None,
+        qi: Optional[float] = None,
+        lr: Optional[int] = None,
+    ) -> "MF3MT":
         """Convert back to an ENDF ``MF3MT`` object.
 
         Parameters
         ----------
         mat : int, optional
             MAT number.  If *None*, uses value from ``metadata``.
+        qm, qi : float, optional
+            Mass-difference and reaction Q values, in eV. Override
+            ``metadata``. Required when ``metadata`` carries neither.
+        lr : int, optional
+            Complex-breakup flag. Overrides ``metadata``.
 
         Returns
         -------
         MF3MT
+
+        Raises
+        ------
+        ValueError
+            If ``qm``/``qi``/``lr`` are neither given nor in ``metadata``.
+            ACE records no reaction Q values, so a section built by
+            :meth:`from_ace` always lands here — it used to default them to
+            zero instead, writing a physically wrong MF3 header for every
+            threshold reaction without saying so.
         """
         from kika.endf.classes.mf3.mf3mt import MF3MT
 
         mat = mat if mat is not None else self.metadata.get("mat")
-        awr = self.metadata.get("awr", 0.0)
-        qm = self.metadata.get("qm", 0.0)
-        qi = self.metadata.get("qi", 0.0)
-        lr = self.metadata.get("lr", 0)
+        awr = self.metadata.get("awr", 0.0)  # ACE does carry this one
+
+        overrides = {"qm": qm, "qi": qi, "lr": lr}
+        missing = [
+            key for key, value in overrides.items()
+            if value is None and key not in self.metadata
+        ]
+        if missing:
+            source = self.metadata.get("source_format", "unknown")
+            raise ValueError(
+                f"CrossSection for MT{self.reaction} (source_format={source!r}) "
+                f"carries no {'/'.join(missing)}, so an ENDF MF3 header cannot "
+                f"be written for it. ACE stores no reaction Q values. Pass them "
+                f"explicitly — to_endf(qm=..., qi=..., lr=...) — or build the "
+                f"section from ENDF, where they come from the file."
+            )
+        qm = qm if qm is not None else self.metadata["qm"]
+        qi = qi if qi is not None else self.metadata["qi"]
+        lr = lr if lr is not None else self.metadata["lr"]
+
         interp_regions = self.metadata.get("interpolation_regions")
 
         if not interp_regions:
