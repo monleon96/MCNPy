@@ -12,9 +12,10 @@ Pattern follows ``kika.cov.CrossSectionCovariance``: concrete dataclass with
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 if TYPE_CHECKING:
     from kika.ace.classes.ace import Ace
@@ -380,7 +381,7 @@ class CrossSection:
 
     def get_cross_section(
         self,
-        energy: Union[float, "ArrayLike"],
+        energy: Union[float, ArrayLike],
         out_of_range: str = "zero",
     ) -> Union[float, np.ndarray]:
         """Interpolate σ(E) at one or more energies.
