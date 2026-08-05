@@ -313,3 +313,109 @@ def test_missing_full_sidecar_warns_and_still_loads(run_dir):
     with pytest.warns(RuntimeWarning, match="WITHIN-BIN-ONLY"):
         _blocks, info = load_mf33_mf34_cross(str(d), l_max=L_MAX)
     assert info["form"] == "within_bin_only"
+
+
+# ---------------------------------------------------------------------------
+# The group-space form (roadmap §10.1.8-J)
+# ---------------------------------------------------------------------------
+
+N_MAG, N_SHAPE = 4, 9
+
+
+@pytest.fixture()
+def group_run_dir(run_dir):
+    """A run dir that ALSO carries the group-space sidecars.
+
+    Built on top of `run_dir` on purpose: the fine sidecars stay present, so
+    these tests pin that the group form *wins* rather than merely working when
+    it is the only option.
+    """
+    d, _cov, grid, _c0h = run_dir
+    rng = np.random.default_rng(7)
+    grp = rng.normal(scale=1e-3, size=(N_MAG, N_SHAPE, 6))
+    mag_ev = np.linspace(grid[0], grid[-1], N_MAG + 1)
+    shape_ev = np.linspace(grid[0], grid[-1], N_SHAPE + 1)
+    np.save(d / "mf33_mf34_cross_group_covariance.npy", grp)
+    np.save(d / "mf33_mf34_cross_group_mag_grid_ev.npy", mag_ev)
+    np.save(d / "mf33_mf34_cross_group_shape_grid_ev.npy", shape_ev)
+    return d, grp, mag_ev, shape_ev
+
+
+def test_group_form_wins_over_the_fine_sidecars(group_run_dir):
+    """Runs 87/88's fine block is non-PSD; if both exist the group one must win."""
+    d, _grp, _m, _s = group_run_dir
+    _blocks, info = load_mf33_mf34_cross(str(d), l_max=L_MAX)
+    assert info["form"] == "group"
+
+
+def test_group_block_is_not_divided_by_c0_host_again(group_run_dir):
+    """It is built against the shipped RELATIVE MF33, so it is already relative.
+
+    Dividing by c0_host a second time is the exact failure this pins: it would
+    rescale the term by 1/0.2 here and look perfectly plausible downstream.
+    """
+    d, grp, _m, _s = group_run_dir
+    blocks, _ = load_mf33_mf34_cross(str(d), l_max=L_MAX)
+    for blk in blocks:
+        np.testing.assert_allclose(
+            blk["matrix"], grp[:, :, blk["l"] - 1], rtol=0, atol=0,
+        )
+
+
+def test_group_block_carries_its_two_DIFFERENT_grids(group_run_dir):
+    """The magnitude and shape axes are on the run's own adaptive grids.
+
+    They are not the same grid and neither is the fine one, so passing a single
+    `grid_ev` for both -- which is what the fine path does -- would silently
+    mis-bin every point on one axis.
+    """
+    d, grp, mag_ev, shape_ev = group_run_dir
+    blocks, info = load_mf33_mf34_cross(str(d), l_max=L_MAX)
+    assert info["n_bins"] == N_MAG
+    for blk in blocks:
+        np.testing.assert_array_equal(blk["mag_grid_ev"], mag_ev)
+        np.testing.assert_array_equal(blk["shape_grid_ev"], shape_ev)
+        assert blk["matrix"].shape == (N_MAG, N_SHAPE)
+        assert blk["is_relative"] is False
+
+
+def test_group_scale_is_applied(group_run_dir):
+    d, grp, _m, _s = group_run_dir
+    b1, _ = load_mf33_mf34_cross(str(d), l_max=L_MAX, scale=1.0)
+    b2, _ = load_mf33_mf34_cross(str(d), l_max=L_MAX, scale=0.25)
+    for x, y in zip(b1, b2):
+        np.testing.assert_allclose(y["matrix"], 0.25 * x["matrix"])
+
+
+def test_group_block_without_its_grids_is_refused(group_run_dir):
+    """A block whose axes are unknown is worse than no block at all."""
+    d, _grp, _m, _s = group_run_dir
+    (d / "mf33_mf34_cross_group_shape_grid_ev.npy").unlink()
+    with pytest.raises(SystemExit, match="group_shape_grid"):
+        load_mf33_mf34_cross(str(d), l_max=L_MAX)
+
+
+def test_group_block_reaches_sigma_eval_with_both_axes_binned(group_run_dir):
+    """End-to-end: two different grids must bin independently, not collapse.
+
+    With 4 magnitude groups and 9 shape groups over the same energy span, points
+    in one magnitude group span several shape groups. If the builder used one
+    grid for both, Sigma_eval would be piecewise-constant in blocks it should
+    resolve -- so assert the assembled matrix actually varies within a magnitude
+    group.
+    """
+    d, _grp, _m, _s = group_run_dir
+    blocks, _ = load_mf33_mf34_cross(str(d), l_max=L_MAX)
+    e_mev = np.linspace(0.9, 3.9, 12)
+    mu = np.linspace(-0.9, 0.9, 12)
+    c0 = np.full(12, 0.2)
+    a_l = np.tile(np.array([0.3, 0.1, 0.05]), (12, 1))
+    sigma = build_mf33_mf34_cross_block(
+        blocks, e_mev, mu, c0, a_l, y_eval=np.full(12, 0.2),
+    )
+    assert sigma.shape == (12, 12)
+    np.testing.assert_allclose(sigma, sigma.T, rtol=0, atol=1e-18)
+    assert np.count_nonzero(sigma) > 0
+    # Two points inside the SAME magnitude group but different shape groups must
+    # not receive identical rows.
+    assert not np.allclose(sigma[0], sigma[1])

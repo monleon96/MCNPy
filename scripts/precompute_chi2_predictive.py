@@ -505,6 +505,75 @@ def load_mf33_mf34_cross(
             f"Cross c0_host mismatch: {n_bins} bins but {c0_host.size} values."
         )
 
+    # PREFERRED FORM (roadmap §10.1.8-J): the block built in the pipeline's own
+    # adaptive group space from PASS-1 replicas, by `scripts/build_group_cross.py`.
+    #
+    # Why it supersedes the fine-grid form below rather than sitting beside it.
+    # The fine block was estimated by pairing replica s across energies in PASS 2,
+    # whose RNG is seeded per BIN (`exfor_to_endf_research.py:1535`), while every
+    # correlation in the shipped MF33/MF34 comes from PASS 1, seeded per REPLICA
+    # (`exfor_utils.py:2002`). Measured: the Pass-2 cross-energy correlation
+    # equals its own permutation null exactly, so that block carried no
+    # information -- and gluing it to Pass-1 marginals is what made runs 87 and 88
+    # non-PSD. The group-space block is built from one common Pass-1 replica set
+    # with the two-pass sigma rescaling applied AFTER the collapse, which makes it
+    # a single positive diagonal congruence on the whole joint: lam_min/scale =
+    # -2.8e-17 against -0.26 for run 88's, with the published sigmas reproduced to
+    # 3e-17.
+    #
+    # UNITS. Already relative on the magnitude axis (it is built against the
+    # shipped relative MF33), so unlike the fine sidecars it must NOT be divided
+    # by c0_host again. The shape axis is absolute, as before.
+    #
+    # GRIDS. Its two axes are the run's OWN adaptive grids and they differ from
+    # each other (MF33 magnitude ~188 groups, MF34 shape ~703). That is why the
+    # block dict carries `mag_grid_ev` and `shape_grid_ev` separately;
+    # `build_mf33_mf34_cross_block` bins each axis independently.
+    grp_path = d / "mf33_mf34_cross_group_covariance.npy"
+    grp_mag_path = d / "mf33_mf34_cross_group_mag_grid_ev.npy"
+    grp_shape_path = d / "mf33_mf34_cross_group_shape_grid_ev.npy"
+    if grp_path.exists():
+        missing = [p.name for p in (grp_mag_path, grp_shape_path) if not p.exists()]
+        if missing:
+            raise SystemExit(
+                f"{run_dir}: {grp_path.name} is present but {missing} are not. "
+                f"The group block is meaningless without its own grids — rerun "
+                f"scripts/build_group_cross.py --write on this run."
+            )
+        grp = np.load(grp_path)                       # (n_mag, n_shape, L)
+        mag_ev = np.load(grp_mag_path).astype(float)
+        shape_ev = np.load(grp_shape_path).astype(float)
+        if grp.ndim != 3:
+            raise SystemExit(f"{grp_path.name} has shape {grp.shape}, expected 3-D")
+        n_mag, n_shape, n_l = grp.shape
+        if mag_ev.size != n_mag + 1 or shape_ev.size != n_shape + 1:
+            raise SystemExit(
+                f"Group cross grid mismatch: block is {n_mag}x{n_shape} but the "
+                f"grids have {mag_ev.size} and {shape_ev.size} edges."
+            )
+        n_undef = int(np.count_nonzero(~np.isfinite(grp[:, :, :l_max])))
+        grp = np.nan_to_num(grp, nan=0.0, posinf=0.0, neginf=0.0) * float(scale)
+
+        blocks = [{
+            "l": L,
+            "mag_grid_ev": mag_ev,
+            "shape_grid_ev": shape_ev,
+            "matrix": grp[:, :, L - 1],
+            "is_relative": False,
+        } for L in range(1, min(l_max, n_l) + 1)]
+        info = {
+            "n_bins": n_mag,
+            "n_orders": len(blocks),
+            "n_undefined_slots": n_undef,
+            "scale": float(scale),
+            "form": "group",
+            "median_abs_rel_cov": {
+                L: float(np.median(np.abs(grp[:, :, L - 1])))
+                for L in range(1, len(blocks) + 1)
+            },
+        }
+        return blocks, info
+
     # "Undefined" lives in the CORRELATION sidecar, not the covariance one.
     # `compute_mf33_mf34_cross` leaves rho as NaN for orders restored from
     # nominal (zero spread ⇒ rho genuinely undefined), while cov for those slots
@@ -652,8 +721,19 @@ def main() -> None:
               f"{cross_info['n_undefined_slots']}")
         print(f"[XCROSS]   median |Cov(dsigma/sigma, a_l)| by order: " + ", ".join(
             f"a_{L} {v:.3e}" for L, v in cross_info["median_abs_rel_cov"].items()))
-        print(f"[XCROSS]   cross-ENERGY magnitude<->shape covariance is zero — "
-              f"never sampled, not asserted to vanish.")
+        # This line used to print unconditionally and so contradicted itself on
+        # run 88, which DID ship a complete block (roadmap §10.1.7-B). It now
+        # reports the form the loader actually chose.
+        _form = cross_info.get("form")
+        if _form == "group":
+            print(f"[XCROSS]   form: GROUP space, Pass-1 replicas, sigma rescaled "
+                  f"AFTER the collapse — PSD by congruence (roadmap §10.1.8-J).")
+        elif _form == "full":
+            print(f"[XCROSS]   form: complete cross-ENERGY block on the FINE grid, "
+                  f"Pass-2 replica pairing — known non-PSD (roadmap §10.1.8-A).")
+        else:
+            print(f"[XCROSS]   form: WITHIN-BIN only; cross-ENERGY covariance is "
+                  f"zero — never sampled, not asserted to vanish.")
         print(f"[XCROSS]   JEFF and JENDL keep a zero cross block; This_work "
               f"therefore carries a term the others do not.")
     else:
