@@ -19,6 +19,28 @@ applyTo: "**/*.py,**/*.pyi"
 - Variables, parameters, and attributes: `lower_snake_case`.
 - Module-level constants: `UPPER_SNAKE_CASE`.
 
+### Exception — `kika/nuclear_data/model/` and the format adapters that name its nodes
+
+Inside the canonical model, names are **GNDS's, verbatim**. Classes take the
+GNDS node name with its first letter capitalised (`ReactionSuite`, `XYs1d`,
+`Regions1d`, `BreitWigner`, `CovarianceSection`); attributes and child accessors
+keep the specification's spelling exactly (`outerDomainValue`, `derivedFrom`,
+`ENDF_MT`, `crossSection`, `outputChannel`, `rowData`, `domainValue`,
+`domainMin`); enumerated values keep their hyphens (`'lin-lin'`,
+`'charged-particle'`).
+
+**Do not "fix" these to snake_case, and do not add a snake_case alias beside
+one.** The GNDS reader and writer resolve nodes by introspection on these exact
+names, so a rename produces a reader that silently stops finding a node, and an
+alias forks the vocabulary so that introspection picks whichever it meets first.
+
+Local variables and private helpers inside the model are still
+`lower_snake_case`; only the node and attribute vocabulary is GNDS's. Everything
+outside that directory is PEP 8 as above.
+
+Enforced by `kika/nuclear_data/model/tests/test_gnds_naming.py`. Rationale and
+the list of declared divergences: `kika/nuclear_data/model/NAMING.md`.
+
 ## Docstrings
 - Use **numpydoc-style docstrings** for all public classes, functions, and methods.
 - First line: short summary sentence.
