@@ -110,12 +110,23 @@ class ResonanceParameters:
     def from_endf(cls, mf2: "MF2MT151") -> List[Union["ResonanceParameters", "UnresolvedResonanceParameters"]]:
         """Create ``ResonanceParameters`` from an ENDF ``MF2MT151``.
 
-        Returns a *list* because MF2 may contain multiple isotopes and
-        energy ranges, each with a different formalism.  For the common
-        case of a single resolved range the list has one element.
+        **Phase 3d: this reads the file through the GNDS model.** The section is
+        decoded once, into ``BreitWigner``/``RMatrix``/``TabulatedWidths`` nodes
+        by formalism, and ``model.interop`` projects each region back into the
+        fields this class has always had. Same fields, same order, same
+        defaults; ``test_flat_class_surface.py`` is the proof and
+        ``test_facade_reproduces_the_old_bodies.py`` compares the values.
 
-        Unresolved resonance ranges (LRU=2) are returned as
-        ``UnresolvedResonanceParameters`` entries in the same list.
+        **LRF=7 still yields nothing, and still warns.** ``ResonanceRecord`` has
+        four width columns; an R-Matrix-Limited spin group has one width per
+        *channel*, five of them for Fe-57 in JEFF-4.0. There is nothing to
+        project into, so the range is omitted — but loudly, which is the half of
+        ``docs/library-gaps.md`` D3 that is fixed. The model keeps the region;
+        ask ``kika.endf.model_adapter.decodeMF2MT151`` for it.
+
+        Returns a *list* because MF2 may contain multiple isotopes and energy
+        ranges, each with a different formalism. Unresolved ranges (LRU=2) come
+        back as ``UnresolvedResonanceParameters`` entries in the same list.
 
         Parameters
         ----------
@@ -127,111 +138,46 @@ class ResonanceParameters:
         List[Union[ResonanceParameters, UnresolvedResonanceParameters]]
             One entry per (isotope, energy range) combination.
         """
-        from kika.endf.classes.mf2.mf2mt151 import ResolvedResonanceRange
+        from kika.endf.model_adapter import decodeMF2MT151
+        from kika.nuclear_data.model.interop import (
+            flatResonanceParameters, flatUnresolvedResonanceParameters,
+        )
+
+        resonances, provenance, _ = decodeMF2MT151(mf2)
+        regions = provenance.headerFields.get("regions", [])
+        resolved = iter(resonances.resolved)
 
         results: List[Union[ResonanceParameters, UnresolvedResonanceParameters]] = []
-        za = int(mf2.zaid) if mf2.zaid is not None else 0
-        awr = mf2.atomic_weight_ratio
-        mat = getattr(mf2, "_mat", None)
-
-        for iso in mf2.isotopes:
-            for er in iso.energy_ranges:
-                if er.lru == 0:
-                    continue  # Scattering radius only
-                if er.lru == 2:
-                    # Unresolved resonance range
-                    urr_result = _urr_from_endf(er, za, awr, mat, iso.abn)
-                    if urr_result is not None:
-                        results.append(urr_result)
+        for fields in regions:
+            if fields["kind"] == "unresolved":
+                if resonances.unresolved is None:
                     continue
-                # er.lru == 1: resolved range
-                if not isinstance(er.parameters, ResolvedResonanceRange):
-                    # LRF=7 (R-Matrix Limited) parses into `RMatrixLimited`, which
-                    # is not a `ResolvedResonanceRange`, so it lands here. It cannot
-                    # be represented at all: `ResonanceRecord` has four width
-                    # columns and an RML spin group has one width *per channel* —
-                    # five of them for Fe-57 in JEFF-4.0. Returning an empty list
-                    # is therefore honest, but it used to be *silent*, which made
-                    # "this nuclide has no resolved resonances" indistinguishable
-                    # from "this format is not supported". Say so.
-                    warnings.warn(
-                        f"MF2/151 LRU=1 LRF={er.lrf}: this resolved range uses a "
-                        f"formalism ResonanceParameters cannot represent "
-                        f"({type(er.parameters).__name__}), so it is omitted and the "
-                        f"result describes a nuclide with fewer resonance regions "
-                        f"than the file has. Use kika.endf.model_adapter.decodeMF2MT151 "
-                        f"for LRF=7.",
-                        UserWarning,
-                        stacklevel=2,
-                    )
-                    continue
+                results.append(UnresolvedResonanceParameters(
+                    **_urr_groups(flatUnresolvedResonanceParameters(
+                        resonances.unresolved, fields, provenance))
+                ))
+                continue
 
-                params = er.parameters
-                formalism = _LRF_TO_NAME.get(er.lrf)
-                if formalism is None:
-                    warnings.warn(
-                        f"MF2/151 LRU=1 LRF={er.lrf} is not a formalism this class "
-                        f"names; the range is omitted",
-                        UserWarning,
-                        stacklevel=2,
-                    )
-                    continue
-
-                l_groups: List[LGroup] = []
-                for lv in params.l_values:
-                    records = [
-                        ResonanceRecord(
-                            energy=r.energy,
-                            spin=r.spin,
-                            c3=r.c3,
-                            c4=r.c4,
-                            c5=r.c5,
-                            c6=r.c6,
-                        )
-                        for r in lv.resonances
-                    ]
-                    # er.scattering_radius_for_l knows the LRF, so it returns a
-                    # radius only where C2 actually is one; under LRF=1/2 that
-                    # field is QX and must not be read as a radius. It falls
-                    # back to the range AP, so only record a per-l value when
-                    # it genuinely differs.
-                    ap_l = er.scattering_radius_for_l(lv.l)
-                    l_groups.append(
-                        LGroup(
-                            awri=lv.awri,
-                            l=lv.l,
-                            resonances=records,
-                            ap=ap_l if ap_l != params.ap else None,
-                        )
-                    )
-
-                # Energy-dependent scattering radius (NRO=1)
-                ap_table = None
-                if er.nro == 1 and er.ap_e is not None:
-                    ap_table = (
-                        np.asarray(er.ap_e.energies, dtype=float),
-                        np.asarray(er.ap_e.ap_values, dtype=float),
-                        list(er.ap_e.interpolation),
-                    )
-
-                results.append(
-                    cls(
-                        nuclide_id=za,
-                        spin=params.spi,
-                        scattering_radius=params.ap,
-                        formalism=formalism,
-                        energy_range=(er.el, er.eh),
-                        l_groups=l_groups,
-                        metadata={
-                            "mat": mat,
-                            "awr": awr,
-                            "lrf": er.lrf,
-                            "nlsc": params.nlsc,
-                            "abundance": iso.abn,
-                        },
-                        scattering_radius_table=ap_table,
-                    )
+            region = next(resolved, None)
+            if region is None:
+                continue
+            projected = flatResonanceParameters(region, fields, provenance)
+            if projected is None:
+                warnings.warn(
+                    f"MF2/151 LRU=1 LRF={fields.get('lrf')}: this resolved range "
+                    f"uses a formalism ResonanceParameters cannot represent, so it "
+                    f"is omitted and the result describes a nuclide with fewer "
+                    f"resonance regions than the file has. Use "
+                    f"kika.endf.model_adapter.decodeMF2MT151 for LRF=7.",
+                    UserWarning, stacklevel=2,
                 )
+                continue
+            projected["l_groups"] = [
+                LGroup(awri=g["awri"], l=g["l"], ap=g["ap"],
+                       resonances=[ResonanceRecord(*record) for record in g["records"]])
+                for g in projected["l_groups"]
+            ]
+            results.append(cls(**projected))
 
         return results
 
@@ -301,6 +247,23 @@ class UnresolvedResonanceParameters:
             f"LSSF={self.lssf}, "
             f"E=[{self.energy_range[0]:.4g}, {self.energy_range[1]:.4g}] eV)"
         )
+
+
+def _urr_groups(projected: Dict) -> Dict:
+    """Turn ``interop``'s plain dicts into ``URR_LGroup``/``URR_JGroup``.
+
+    ``model.interop`` may not import these classes — it is below them — so it
+    returns dicts and the conversion happens here, where they are in scope.
+    """
+    projected = dict(projected)
+    projected["l_groups"] = [
+        URR_LGroup(
+            awri=group["awri"], l=group["l"],
+            j_groups=[URR_JGroup(**state) for state in group["j_groups"]],
+        )
+        for group in projected["l_groups"]
+    ]
+    return projected
 
 
 # ======================================================================

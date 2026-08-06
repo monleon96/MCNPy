@@ -79,6 +79,26 @@ class AngularDistribution:
     def from_endf(cls, mf4mt: "MF4MT") -> "AngularDistribution":
         """Create from an ENDF ``MF4MT`` (any subclass).
 
+        **Phase 3d: this reads the file through the GNDS model.** The section is
+        decoded into an ``angularTwoBody`` (or ``isotropic2d``) and projected
+        back into the same eleven fields. The fields, their order and their
+        defaults are unchanged; ``test_flat_class_surface.py`` is the proof.
+
+        Two ``metadata`` keys are **new**, and they are what makes
+        :meth:`to_endf` able to write an LTT=3 section back — the
+        ``library-gaps.md`` D2 defect:
+
+        ``nm``
+            The evaluation's declared highest Legendre order. LTT=3 writes it in
+            the second CONT record and this class had nowhere to keep it, so
+            ``to_endf`` used to leave the field blank.
+        ``legendre_orders``
+            Each energy's own NL. ``coefficients`` is a dense
+            ``{order: array}`` padded to the section's maximum, so a trailing
+            zero the evaluator *wrote* was indistinguishable from padding and
+            ``to_endf`` trimmed it — changing NL on 70 of the committed slice's
+            3960 energies.
+
         Parameters
         ----------
         mf4mt : MF4MT
@@ -87,6 +107,50 @@ class AngularDistribution:
         Returns
         -------
         AngularDistribution
+        """
+        from kika.endf.model_adapter import decodeMF4MT
+        from kika.nuclear_data.model.interop import flatAngularDistribution
+
+        distribution, provenance, _ = decodeMF4MT(mf4mt)
+        if distribution is not None:
+            return cls(**flatAngularDistribution(distribution, provenance, mf4mt.number))
+        return cls._from_endf_unknown_ltt(mf4mt)
+
+    @classmethod
+    def _from_endf_unknown_ltt(cls, mf4mt: "MF4MT") -> "AngularDistribution":
+        """The fallback for an LTT the decoder refuses, kept from the old body.
+
+        It produces an object with the energies and nothing else, which is what
+        this class did for any unrecognised subclass before phase 3d. Reached
+        only for an LTT outside 0-3; the decoder reports it.
+        """
+        za = int(round(float(mf4mt.zaid))) if mf4mt.zaid is not None else 0
+        energies_list = getattr(mf4mt, "_energies", [])
+        return cls(
+            energies=(np.asarray(energies_list, dtype=float)
+                      if energies_list else np.array([], dtype=float)),
+            coefficients={},
+            reaction=mf4mt.number,
+            nuclide_id=za,
+            frame=mf4mt.frame,
+            representation="mixed",
+            metadata={
+                "mat": getattr(mf4mt, "_mat", None),
+                "awr": mf4mt.atomic_weight_ratio,
+                "ltt": mf4mt._ltt,
+                "li": mf4mt._li,
+                "lct": mf4mt._lct,
+            },
+        )
+
+    @classmethod
+    def _from_endf_pre_3d(cls, mf4mt: "MF4MT") -> "AngularDistribution":
+        """The pre-phase-3d body, kept so the two can be compared directly.
+
+        Not dead code: ``test_facade_reproduces_the_old_bodies.py`` asserts that
+        this and :meth:`from_endf` agree field for field on every MF4 section of
+        every tape, which is how "only the body changed" stops being a claim and
+        becomes a measurement. Delete it with the class.
         """
         from kika.endf.classes.mf4.isotropic import MF4MTIsotropic
         from kika.endf.classes.mf4.polynomial import MF4MTLegendre
@@ -656,8 +720,55 @@ class AngularDistribution:
     # ENDF export
     # ------------------------------------------------------------------
 
+    def _legendre_rows(self, count: int) -> List[List[float]]:
+        """``[a_1 .. a_NL]`` per energy, with NL as the evaluation declared it.
+
+        **This is the D2 fix.** ``coefficients`` is a dense rectangle padded to
+        the section's highest order, so the old body rebuilt each row and then
+        trimmed trailing zeros — which cannot distinguish padding this class
+        added from a zero the evaluator wrote. ``metadata['legendre_orders']``
+        records the real NL per energy, so no trimming is needed.
+
+        The trim survives as the fallback, for an object built by hand or by
+        ``project_to_legendre`` rather than read from a file. That path is still
+        lossy in the same way, and there is nothing better available: the
+        information is genuinely absent.
+        """
+        orders = self.metadata.get("legendre_orders")
+        max_order = max(self.coefficients.keys()) if self.coefficients else 0
+        rows: List[List[float]] = []
+        for i in range(count):
+            if orders is not None and i < len(orders):
+                row = [
+                    float(self.coefficients[l][i]) if l in self.coefficients else 0.0
+                    for l in range(1, int(orders[i]) + 1)
+                ]
+                rows.append(row)
+                continue
+            row = [
+                float(self.coefficients[l][i]) if l in self.coefficients else 0.0
+                for l in range(1, max_order + 1)
+            ]
+            while row and abs(row[-1]) < 1e-30:
+                row.pop()
+            rows.append(row)
+        return rows
+
     def to_endf(self, mat: Optional[int] = None) -> "MF4MT":
         """Convert back to an ENDF ``MF4MT`` subclass.
+
+        **Written from the flat fields, not from the model.** ``from_endf``
+        reads through the model; this does not, and the asymmetry is deliberate:
+        the flat fields are the source of truth for the flat API, so an object
+        whose ``coefficients`` a caller has edited must write out the edit. A
+        stashed model would silently ignore it, which would be a worse defect
+        than the one phase 3d is fixing here.
+
+        What it does take from ``from_endf`` is the two ``metadata`` keys the
+        fields cannot hold — ``nm`` and ``legendre_orders``. With them, an LTT=3
+        section round-trips byte for byte; without them (a hand-built object)
+        the old, lossy behaviour is unchanged, because the information is not
+        there to use.
 
         Parameters
         ----------
@@ -699,22 +810,7 @@ class AngularDistribution:
             obj._interpolation = list(interp) if interp else [(len(self.energies), 2)]
             obj._nr = len(obj._interpolation)
 
-            # Reconstruct coefficient rows (a_1, a_2, ...) per energy
-            max_order = max(self.coefficients.keys()) if self.coefficients else 0
-            n_e = len(self.energies)
-            rows = []
-            for i in range(n_e):
-                row = []
-                for l in range(1, max_order + 1):
-                    if l in self.coefficients:
-                        row.append(float(self.coefficients[l][i]))
-                    else:
-                        row.append(0.0)
-                # Trim trailing zeros
-                while row and abs(row[-1]) < 1e-30:
-                    row.pop()
-                rows.append(row)
-            obj._legendre_coeffs = rows
+            obj._legendre_coeffs = self._legendre_rows(len(self.energies))
 
             return obj
 
@@ -750,26 +846,14 @@ class AngularDistribution:
 
             # Legendre part
             leg_energies = self.tabulated_data.get("legendre_energies", [])
+            obj._nm = self.metadata.get("nm")
             obj._energies = list(leg_energies)
             obj._ne1 = len(leg_energies)
+            obj._ne = len(leg_energies) + len(self.tabulated_data.get("tabulated_energies", []))
             obj._interpolation = list(interp) if interp else []
             obj._nr = len(obj._interpolation)
 
-            # Reconstruct coefficient rows
-            max_order = max(self.coefficients.keys()) if self.coefficients else 0
-            n_leg = len(leg_energies)
-            rows = []
-            for i in range(n_leg):
-                row = []
-                for l in range(1, max_order + 1):
-                    if l in self.coefficients:
-                        row.append(float(self.coefficients[l][i]))
-                    else:
-                        row.append(0.0)
-                while row and abs(row[-1]) < 1e-30:
-                    row.pop()
-                rows.append(row)
-            obj._legendre_coeffs = rows
+            obj._legendre_coeffs = self._legendre_rows(len(leg_energies))
 
             # Tabulated part
             tab_energies = self.tabulated_data.get("tabulated_energies", [])

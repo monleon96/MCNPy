@@ -55,8 +55,20 @@ class RMatrixSpinGroup:
     channels: List[Channel] = field(default_factory=list)
     energies: List[float] = field(default_factory=list)
     widths: List[List[float]] = field(default_factory=list)
+    #: Per-resonance J. In a true R-matrix spin group every resonance shares the
+    #: group's ``spin``, and this is empty. **ENDF's LRF=3 is not that shape**:
+    #: it groups by *l*, not by J, and writes AJ on every resonance record. The
+    #: first version of the decoder kept only energies and widths, which dropped
+    #: AJ silently — caught when the phase 3d façade tried to project back to
+    #: ``ResonanceRecord.spin`` and had nothing to read.
+    spins: List[float] = field(default_factory=list)
+    atomicWeightRatio: Optional[float] = None
 
     def __post_init__(self) -> None:
+        if self.spins and len(self.spins) != len(self.energies):
+            raise ValueError(
+                f"{len(self.spins)} spins for {len(self.energies)} resonances"
+            )
         if self.widths and len(self.widths) != len(self.energies):
             raise ValueError(
                 f"{len(self.widths)} width rows for {len(self.energies)} resonances"

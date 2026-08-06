@@ -4,9 +4,10 @@ Everywhere else in phase 3c the gate is "the model reproduces what the flat
 class produces", because the flat class is the code being replaced. MF4 is the
 one place that gate would be *weaker* than the truth:
 ``AngularDistribution.to_endf()`` cannot reproduce an LTT=3 section, so matching
-it would mean reproducing its losses. Both losses are pinned below, as xfails,
-so that when phase 3d reimplements the flat bodies over the model they turn into
-XPASS and the suite tells someone to delete them.
+it would have meant reproducing its losses. **Phase 3d then fixed them**, by
+routing ``from_endf`` through this decoder and keeping NM and the per-energy NL
+in ``metadata`` -- so the two xfails that used to live here are gone and the
+flat path is asserted byte-exact alongside the model.
 
 The four representations behind one MT — LTT=0/1/2/3 — are all exercised: the
 committed slice carries LTT=3, and under ``--deep`` the real tapes bring the
@@ -128,36 +129,19 @@ def test_a_trailing_zero_coefficient_is_not_trimmed(mf4):
 
 
 # ---------------------------------------------------------------------------
-# The flat path's two losses, pinned
+# The flat path used to be lossy here; phase 3d fixed it
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason=(
-    "AngularDistribution.to_endf() cannot reproduce an LTT=3 section: metadata "
-    "has no home for NM, so the second CONT record's N2 is written as 0, and "
-    "the coefficient rows are rebuilt from a dense {order: array} then trimmed "
-    "of trailing zeros, which lowers NL. Phase 3d reimplements these bodies "
-    "over the model, at which point this XPASSes and should be deleted."
-))
-def test_the_flat_path_round_trips_mf4(mf4):
+def test_the_flat_path_now_round_trips_mf4_too(mf4):
+    """This was a strict xfail until phase 3d, and the XPASS is why it changed.
+
+    ``AngularDistribution.to_endf()`` could not reproduce an LTT=3 section: it
+    had no home for NM, and it trimmed trailing zero coefficients so NL dropped
+    on 70 of this tape's 3960 energies -- 141 differing lines. The façade reads
+    through this decoder and keeps both in ``metadata``, so the flat path is now
+    byte-exact as well. See ``docs/library-gaps.md`` D2.
+    """
     assert str(AngularDistribution.from_endf(mf4).to_endf()) == str(mf4)
-
-
-def test_the_flat_losses_are_exactly_the_two_described(mf4):
-    """Pins *what* is lost, so the xfail above is a claim and not a shrug."""
-    rebuilt = str(AngularDistribution.from_endf(mf4).to_endf()).split("\n")
-    original = str(mf4).split("\n")
-    differing = [i for i, (a, b) in enumerate(zip(original, rebuilt)) if a != b]
-
-    # NM, in the second CONT record's N2 field (columns 56-66).
-    assert 1 in differing
-    assert mf4._nm is not None and int(original[1][55:66]) == mf4._nm
-    assert rebuilt[1][55:66].strip() == "", (
-        "expected the rebuilt section to have lost NM entirely, leaving the "
-        "field blank; it wrote something instead"
-    )
-
-    # And every other difference is an NL, or a coefficient line under one.
-    assert len(differing) > 1
 
 
 # ---------------------------------------------------------------------------

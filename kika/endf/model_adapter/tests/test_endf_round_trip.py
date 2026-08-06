@@ -81,13 +81,17 @@ def test_the_same_holds_on_real_tapes(request, tape):
         assert str(viaModel) == str(section), f"{tape} MT{mt} differs from the file"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "CrossSection.nuclide_id truncates ZA instead of rounding it, so every "
-    "Th-232 MF3 section comes back naming ZA 90231. Phase 3d reimplements "
-    "from_endf over the model, at which point this XPASSes and should go."
-))
-def test_the_flat_path_round_trips_a_tape_whose_za_does_not_parse_exactly(th232_tape):
+def test_the_flat_path_now_round_trips_a_tape_whose_za_does_not_parse_exactly(th232_tape):
+    """This was a strict xfail until phase 3d, and the XPASS is why it changed.
+
+    ``CrossSection.nuclide_id`` truncated ZA, so all 57 Th-232 MF3 sections came
+    back naming ZA 90231 — Ac-231. The façade rounds. See
+    ``docs/library-gaps.md`` D1.
+    """
     endf = read_endf(str(th232_tape))
+    assert int(float(endf.mf[3].mt[2].zaid)) != round(float(endf.mf[3].mt[2].zaid)), (
+        "Th-232's ZA now parses exactly, so this test no longer measures anything"
+    )
     for mt in sorted(endf.mf[3].mt):
         section = endf.mf[3].mt[mt]
         assert str(CrossSection.from_endf(section).to_endf()) == str(section)

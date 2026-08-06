@@ -143,16 +143,23 @@ def decodeMF1MT451(mt451, report: Optional[ConversionReport] = None):
             ("elis", "_elis"), ("sta", "_sta"), ("lis", "_lis"), ("liso", "_liso"),
             ("nfor", "_nfor"), ("awi", "_awi"), ("emax", "_emax"), ("lrel", "_lrel"),
             ("nsub", "_nsub"), ("nver", "_nver"), ("ldrv", "_ldrv"),
+            # TEMP is physics rather than bookkeeping, but MF1/451 is the only
+            # place ENDF states the target temperature and the encoder has to
+            # write it back, so it travels with the rest of the header.
+            ("temp", "_temp"),
         )
     }
+    # Read through the **public properties**, not through guessed private names.
+    # The first version of this guessed `_laboratory`, `_authors`, `_eval_date`
+    # and four more from the property names; the real fields are `_alab`,
+    # `_auth`, `_edate`, `_ref`, `_ddate`, `_rdate`, `_zsymam`. `getattr(..., None)`
+    # meant every one silently returned "", so every reactionSuite decoded since
+    # P6 has had an empty evaluationInfo and an empty `evaluation`. Nothing
+    # caught it until P9 compared the façade against the body it replaced.
     evaluationInfo = {
-        name: getattr(mt451, attr, None) or ""
-        for name, attr in (
-            ("laboratory", "_laboratory"), ("authors", "_authors"),
-            ("eval_date", "_eval_date"), ("reference", "_reference"),
-            ("dist_date", "_dist_date"), ("revision_date", "_revision_date"),
-            ("material_id", "_material_id"),
-        )
+        name: getattr(mt451, name, None) or ""
+        for name in ("laboratory", "authors", "eval_date", "reference",
+                     "dist_date", "revision_date", "material_id")
     }
 
     provenance = EndfProvenance(
@@ -218,7 +225,7 @@ def decodeReactionSuite(endf, report: Optional[ConversionReport] = None):
 
     mf2 = endf.mf.get(2) if hasattr(endf, "mf") else None
     if mf2 is not None and 151 in getattr(mf2, "mt", {}):
-        suite.resonances, report = decodeMF2MT151(mf2.mt[151], report)
+        suite.resonances, _, report = decodeMF2MT151(mf2.mt[151], report)
 
     mf4 = endf.mf.get(4) if hasattr(endf, "mf") else None
     if mf4 is not None:

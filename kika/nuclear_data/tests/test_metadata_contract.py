@@ -62,6 +62,15 @@ ENDF_METADATA: dict[str, dict[str, str]] = {
         "lct": INT,
         "energy_interpolation": LIST,
         "tab_interpolation": LIST,
+        # Added by phase 3d, deliberately, and the only two keys this contract
+        # has ever gained. They are what lets `to_endf` write an LTT=3 section
+        # back byte for byte -- `docs/library-gaps.md` D2. `nm` is the
+        # evaluation's declared highest Legendre order, which had nowhere to
+        # live; `legendre_orders` is each energy's own NL, without which a
+        # trailing zero the evaluator wrote is indistinguishable from the
+        # padding `coefficients` adds, and was trimmed on the way out.
+        "nm": INT,
+        "legendre_orders": LIST,
     },
     "ResonanceParameters": {
         "mat": INT,

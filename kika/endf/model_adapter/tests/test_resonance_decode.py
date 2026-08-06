@@ -39,7 +39,8 @@ def mf2(micro_tape):
 
 @pytest.fixture(scope="module")
 def decoded(mf2):
-    return decodeMF2MT151(mf2)
+    resonances, _, report = decodeMF2MT151(mf2)
+    return resonances, report
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +133,7 @@ def test_real_tapes_decode_every_resolved_range_the_file_carries(request, tape):
     pass by agreeing that Fe-57 has no resonances.
     """
     mf2 = read_endf(str(request.getfixturevalue(tape))).mf[2].mt[151]
-    resonances, report = decodeMF2MT151(mf2)
+    resonances, _, report = decodeMF2MT151(mf2)
 
     inFile = [er for iso in mf2.isotopes for er in iso.energy_ranges if er.lru == 1]
     assert len(resonances.resolved) == len(inFile)
@@ -148,7 +149,7 @@ def test_real_tapes_decode_every_resolved_range_the_file_carries(request, tape):
 def test_real_tapes_reproduce_the_flat_path_where_it_produces_anything(request, tape):
     """Every number ``ResonanceParameters.from_endf`` extracts is reproduced."""
     mf2 = read_endf(str(request.getfixturevalue(tape))).mf[2].mt[151]
-    resonances, _ = decodeMF2MT151(mf2)
+    resonances, _, _ = decodeMF2MT151(mf2)
     flat = ResonanceParameters.from_endf(mf2)
 
     resolved = [f for f in flat if isinstance(f, ResonanceParameters)]
@@ -189,7 +190,7 @@ def test_an_lrf7_evaluation_keeps_its_resonances(fe57_host_tape):
             "D3 entry in docs/library-gaps.md"
         )
 
-    resonances, report = decodeMF2MT151(mf2)
+    resonances, _, report = decodeMF2MT151(mf2)
     assert len(resonances.resolved) == 1
     formalism = resonances.resolved[0].formalism
     assert isinstance(formalism, RMatrix)
@@ -252,7 +253,7 @@ def _breitWignerSection(lrf: int, qx: float = 0.0, lrx: int = 0):
 ])
 def test_slbw_and_mlbw_get_named_widths(lrf, approximation):
     """``c3..c6`` under LRF=1/2 are ``GT, GN, GG, GF``, and here they have names."""
-    resonances, report = decodeMF2MT151(_breitWignerSection(lrf))
+    resonances, _, report = decodeMF2MT151(_breitWignerSection(lrf))
     formalism = resonances.resolved[0].formalism
 
     assert isinstance(formalism, BreitWigner)
@@ -270,7 +271,7 @@ def test_qx_is_not_read_as_a_scattering_radius():
     Reading it as a radius would put a Q value in fm into the hard-sphere phase
     shift, which is the kind of error that produces plausible cross sections.
     """
-    resonances, report = decodeMF2MT151(_breitWignerSection(2, qx=-1.5e6, lrx=1))
+    resonances, _, report = decodeMF2MT151(_breitWignerSection(2, qx=-1.5e6, lrx=1))
     group = resonances.resolved[0].formalism.resonanceParameters.spinGroups[0]
     assert group.scatteringRadius is None
     assert any("QX" in entry for entry in report.losses), (
@@ -280,7 +281,7 @@ def test_qx_is_not_read_as_a_scattering_radius():
 
 def test_an_unsupported_lrf_is_declared_and_the_range_is_not_invented():
     section = _breitWignerSection(4)
-    resonances, report = decodeMF2MT151(section)
+    resonances, _, report = decodeMF2MT151(section)
     assert resonances.resolved == []
     assert any("LRF=4" in entry for entry in report.unsupported)
 
@@ -290,7 +291,7 @@ def test_a_section_with_no_ranges_says_so():
 
     section = MF2MT151(number=151)
     section._isotopes = []
-    resonances, report = decodeMF2MT151(section)
+    resonances, _, report = decodeMF2MT151(section)
     assert resonances.domain is None
     assert any("no resonance region" in entry for entry in report.losses)
 
@@ -307,7 +308,7 @@ def test_an_energy_dependent_radius_wins_over_the_constant(mf2):
         interpolation=[(2, 2)], energies=[1e-5, 1e6], ap_values=[0.54, 0.55]
     )
 
-    resonances, _ = decodeMF2MT151(section)
+    resonances, _, _ = decodeMF2MT151(section)
     radius = resonances.scatteringRadius
     assert radius.isEnergyDependent
     np.testing.assert_array_equal(radius.values, np.array([0.54, 0.55]))

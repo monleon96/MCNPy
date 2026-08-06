@@ -6,14 +6,20 @@ scope, then ``read_endf`` and ``read_ace`` — which the cluster pipeline, the
 desktop app and every notebook call — start building the model on every parse,
 and ``import kika`` gets slower for everyone to no purpose.
 
-There is a second, sharper reason. Both packages are deliberately **absent**
-from kika-app's PyInstaller ``hiddenimports``. A lazy import of either from an
-app-reachable code path would therefore raise ``ModuleNotFoundError`` in the
-frozen binary and nowhere else — dev, tests and CI all green. That is the exact
-failure nine other modules were found in during P2, and the spec's own comment
-records it having happened before.
+There is a second, sharper reason, and phase 3d ran into it. A lazy import from
+an app-reachable code path is invisible to PyInstaller's modulegraph, so a
+package missing from kika-app's ``hiddenimports`` raises ``ModuleNotFoundError``
+in the frozen binary and nowhere else — dev, tests and CI all green. That is the
+exact failure nine other modules were found in during P2. When the flat classes
+became façades, ``kika.endf.model_adapter`` and ``kika.nuclear_data.model`` were
+still absent from that list, and the desktop app would have broken the first
+time it read a cross section. They are in the spec now; keep them there.
 
-This file lives under the ENDF adapter's tests and covers both, rather than
+So this file is no longer "nothing imports the adapter" — it is "only these four
+modules do", which is a scoreboard for a deprecation rather than a prohibition.
+It empties when the flat classes go in 1.0.
+
+It lives under the ENDF adapter's tests and covers both adapters, rather than
 being copied into each: one place to add the third adapter to.
 """
 from __future__ import annotations
@@ -27,6 +33,27 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 ADAPTERS = ("kika.endf.model_adapter", "kika.ace.model_adapter")
+
+#: The only modules allowed to import an adapter, and why.
+#:
+#: **Phase 3d added these, and it is a real cost rather than a formality.** The
+#: flat classes are façades over the model now, so their ``from_endf`` reaches
+#: the adapter — inside the method, never at module scope, so ``read_endf`` is
+#: still untouched and the dormancy test below still holds.
+#:
+#: What it does cost is the frozen build. ``kika.endf.model_adapter`` and
+#: ``kika.nuclear_data.model`` were absent from kika-app's PyInstaller
+#: ``hiddenimports``, and modulegraph cannot see a function-scope import — so
+#: the first version of the façade would have raised ``ModuleNotFoundError``
+#: the first time the desktop app read a cross section, with dev, tests and CI
+#: all green. They are in the spec now. **Adding a module here means checking
+#: that spec.**
+ALLOWED_IMPORTERS = {
+    "kika/nuclear_data/cross_section.py",
+    "kika/nuclear_data/angular_distribution.py",
+    "kika/nuclear_data/resonance_parameters.py",
+    "kika/nuclear_data/nuclide_info.py",
+}
 
 
 def _importers(adapter: str, root: Path | None = None) -> list[str]:
@@ -49,13 +76,37 @@ def _importers(adapter: str, root: Path | None = None) -> list[str]:
 
 
 @pytest.mark.parametrize("adapter", ADAPTERS)
-def test_nothing_in_the_library_imports_the_adapter(adapter):
-    importers = _importers(adapter)
-    assert not importers, (
-        f"{adapter} is imported outside its own package:\n  "
-        + "\n  ".join(importers)
-        + "\n\nIt pulls in the whole GNDS model. Keep it reachable only from its "
-          "own tests and from code that deliberately asks for the model."
+def test_only_the_deprecated_flat_classes_import_the_adapter(adapter):
+    unexpected = [
+        entry for entry in _importers(adapter)
+        if entry.rsplit(":", 1)[0] not in ALLOWED_IMPORTERS
+    ]
+    assert not unexpected, (
+        f"{adapter} is imported by a module that is not one of the four flat "
+        f"classes:\n  " + "\n  ".join(unexpected)
+        + "\n\nIt pulls in the whole GNDS model. Code that wants the model should "
+          "ask the adapter for it directly, not reach it through kika.nuclear_data. "
+          "If this really is a new façade, add it to ALLOWED_IMPORTERS *and* to "
+          "kika-app/kika-api.spec's hiddenimports -- a function-scope import is "
+          "invisible to PyInstaller."
+    )
+
+
+def test_the_allowlist_has_no_stale_entries():
+    """A module that stopped importing the adapter must leave the list.
+
+    Same shape as ``test_layering.py``'s ratchet: the list is a scoreboard for a
+    deprecation, and it should only ever shrink. When the flat classes go in 1.0
+    it empties and this file goes back to asserting *nothing* imports them.
+    """
+    importing = {
+        entry.rsplit(":", 1)[0]
+        for adapter in ADAPTERS for entry in _importers(adapter)
+    }
+    stale = sorted(ALLOWED_IMPORTERS - importing)
+    assert not stale, (
+        f"these no longer import an adapter and should be removed from "
+        f"ALLOWED_IMPORTERS: {stale}"
     )
 
 
@@ -114,4 +165,6 @@ def test_the_check_would_notice_an_importer(tmp_path, adapter):
     (fake / "innocent.py").write_text("import numpy\n")
     (fake / "guilty.py").write_text(f"from {adapter}.decode import somethingOrOther\n")
 
-    assert _importers(adapter, root=tmp_path) == ["kika/endf/guilty.py:1"]
+    found = _importers(adapter, root=tmp_path)
+    assert found == ["kika/endf/guilty.py:1"]
+    assert found[0].rsplit(":", 1)[0] not in ALLOWED_IMPORTERS

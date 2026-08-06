@@ -36,6 +36,7 @@ import numpy as np
 
 from kika.nuclear_data.model import (
     BreitWigner,
+    EndfProvenance,
     BreitWignerApproximation,
     ConversionReport,
     Resonances,
@@ -75,14 +76,21 @@ KRM_TO_APPROXIMATION = {
 
 
 def decodeMF2MT151(mf2mt151, report: Optional[ConversionReport] = None):
-    """One MF2/151 section → ``(Resonances, report)``.
+    """One MF2/151 section → ``(Resonances, EndfProvenance, report)``.
 
     Every isotope's every energy range becomes a region. A file with more than
     one isotope gets one flat list of regions and a warning, because GNDS puts
     each isotope in its own ``reactionSuite`` and this decoder produces one.
+
+    The provenance's ``headerFields['regions']`` is a list parallel to the
+    decoded regions, holding the per-range ENDF bookkeeping GNDS has no node
+    for — ``lrf``, ``nlsc``, ``abn``, and the range's own ``spi``/``ap``. It is
+    what lets the phase 3d ``ResonanceParameters`` façade rebuild its
+    ``metadata`` without re-reading the section.
     """
     report = report if report is not None else ConversionReport()
     resonances = Resonances()
+    regions: List[dict] = []
 
     isotopes = list(getattr(mf2mt151, "isotopes", []) or [])
     if len(isotopes) > 1:
@@ -94,14 +102,36 @@ def decodeMF2MT151(mf2mt151, report: Optional[ConversionReport] = None):
 
     for isotope in isotopes:
         for energyRange in isotope.energy_ranges:
-            _decodeRange(energyRange, resonances, report)
+            _decodeRange(energyRange, resonances, report, regions, isotope)
 
     if not resonances.resolved and resonances.unresolved is None:
         report.lost("MF2/151 yielded no resonance region")
-    return resonances, report
+
+    provenance = EndfProvenance(
+        mat=getattr(mf2mt151, "_mat", None),
+        awr=getattr(mf2mt151, "atomic_weight_ratio", None),
+        za=(int(round(float(mf2mt151.zaid))) if mf2mt151.zaid is not None else None),
+        headerFields={"regions": regions},
+    )
+    return resonances, provenance, report
 
 
-def _decodeRange(energyRange, resonances: Resonances, report: ConversionReport) -> None:
+def _rangeFields(energyRange, isotope) -> dict:
+    parameters = energyRange.parameters
+    return {
+        "lru": energyRange.lru,
+        "lrf": energyRange.lrf,
+        "nro": energyRange.nro,
+        "naps": energyRange.naps,
+        "spi": getattr(parameters, "spi", None),
+        "ap": getattr(parameters, "ap", None),
+        "nlsc": getattr(parameters, "nlsc", None),
+        "abn": getattr(isotope, "abn", None),
+    }
+
+
+def _decodeRange(energyRange, resonances: Resonances, report: ConversionReport,
+                 regions: Optional[List[dict]] = None, isotope=None) -> None:
     lru, lrf = energyRange.lru, energyRange.lrf
     parameters = energyRange.parameters
 
@@ -128,6 +158,8 @@ def _decodeRange(energyRange, resonances: Resonances, report: ConversionReport) 
             domainMax=energyRange.eh,
             tabulatedWidths=_decodeUnresolved(parameters, report),
         )
+        if regions is not None:
+            regions.append({**_rangeFields(energyRange, isotope), "kind": "unresolved"})
         return
 
     if lru != 1:
@@ -155,6 +187,15 @@ def _decodeRange(energyRange, resonances: Resonances, report: ConversionReport) 
         domainMax=energyRange.eh,
         formalism=formalism,
     ))
+    if regions is not None:
+        fields = {**_rangeFields(energyRange, isotope), "kind": "resolved"}
+        if energyRange.nro == 1 and energyRange.ap_e is not None:
+            fields["radius_table"] = (
+                np.asarray(energyRange.ap_e.energies, dtype=float),
+                np.asarray(energyRange.ap_e.ap_values, dtype=float),
+                list(energyRange.ap_e.interpolation),
+            )
+        regions.append(fields)
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +288,11 @@ def _decodeReichMoore(energyRange, parameters, report: ConversionReport) -> Opti
             label=f"L{block.l}",
             channels=channels,
             energies=[r.energy for r in block.resonances],
+            # ENDF's LRF=3 groups by l and writes AJ per resonance, so the J
+            # belongs to the record and not to the group.
+            spins=[r.spin for r in block.resonances],
             widths=[[r.c3, r.c4, r.c5, r.c6] for r in block.resonances],
+            atomicWeightRatio=block.awri,
         ))
 
     return RMatrix(

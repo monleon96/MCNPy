@@ -62,9 +62,19 @@ FORBIDDEN_ROOTS = ("kika.endf", "kika.ace")
 #: time — that mattered, because while it did, nothing in ``kika.endf`` could
 #: import from ``kika.processing`` at module scope, and ``interpolate_1d``
 #: could not move down at all.
+#:
+#: **Phase 3d makes this figure go up, on purpose.** The flat classes become
+#: façades whose ``from_endf``/``to_endf`` route through
+#: ``kika.endf.model_adapter``, so each gains an import of it. That is a worse
+#: layering number and a better library: the alternative is two decoders for the
+#: same file, which is how the ZA truncation and the LTT=3 losses came to differ
+#: between them in the first place. These entries go to **zero** when the flat
+#: classes are removed in 1.0 — they are the deprecation's cost, held visibly
+#: rather than hidden. No *new* module may join the list.
 RUNTIME_ALLOWLIST: dict[str, int] = {
-    "kika/nuclear_data/angular_distribution.py": 12,
-    "kika/nuclear_data/cross_section.py": 1,
+    "kika/nuclear_data/angular_distribution.py": 13,
+    "kika/nuclear_data/cross_section.py": 2,
+    "kika/nuclear_data/nuclide_info.py": 1,
     "kika/nuclear_data/resonance_parameters.py": 2,
     "kika/processing/derived_covariance.py": 1,
     "kika/processing/njoy_pendf_cache.py": 1,
