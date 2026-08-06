@@ -234,6 +234,34 @@ def valid_and_collapsed(run_dir, n_fine, ids, g_shape, widths, n_gs):
 # shipped MF34 on the base group grid
 # --------------------------------------------------------------------------
 
+def assemble_c34_rel(c34_post, a_flat, c34_rel_ship, null_fill="zero"):
+    """The RELATIVE MF34 the writer emits. One definition, used by both paths.
+
+    Rebuilt as `c34_post / outer(a, a)` wherever a_l is nonzero. What goes in
+    the ~37 % of slots where a_l is EXACTLY zero -- the (group, order) pairs
+    `row_aggregator` never populated, where c34_post is identically zero and the
+    quotient is 0/0 -- is the open question this switch exists to settle:
+
+      "zero"  the parameter is dead, so it carries no covariance. Gives a true
+              null row/column, which is harmless for PSD.
+      "ship"  keep the file's own declared value. Preserves the published
+              relative sigma, but INJECTS the old construction into precisely
+              the softest directions of the new one; measured in run 90 and it
+              reproduces run 89 almost exactly (Sec. 10.1.8-L11).
+
+    `--check` diagnoses this same array, so the PSD row is what the file would
+    say rather than a re-derivation of it -- the mistake that produced runs 89
+    and 90 was diagnosing one object and shipping another.
+    """
+    if null_fill not in ("zero", "ship"):
+        raise SystemExit(f"unknown null_fill {null_fill!r}; use zero or ship")
+    live = np.abs(a_flat) >= np.finfo(float).tiny
+    both = np.outer(live, live)
+    base = (np.array(c34_rel_ship, float) if null_fill == "ship"
+            else np.zeros_like(c34_post))
+    return np.divide(c34_post, np.outer(a_flat, a_flat), out=base, where=both)
+
+
 def shipped_c34_rel_on_base(blocks, base_ev):
     """Shipped RELATIVE MF34 expanded onto the base group grid.
 
@@ -327,6 +355,7 @@ def _za_awr_mat_from_endf(path: Path):
 
 def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
                           a_nom_group, shape_ev, mag_ev, c34_rel_ship,
+                          null_fill="zero",
                           cross_emin_ev=None, cross_emax_ev=None):
     """Emit the _mg.endf whose MF34 *is* the joint that was just diagnosed.
 
@@ -383,15 +412,22 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
     # FITTED coefficients approaching the serialisation floor, a different
     # population from parameters the aggregator never populated at all.
     #
-    # DECISION (Juan, 2026-08-06): rewrite only where the Pass-1 covariance has
-    # support, and carry the shipped file's own relative values through
-    # untouched at the null slots. The rebuild has nothing to say about a
-    # direction it does not span, and the alternative -- writing zero -- would
-    # DELETE declared uncertainty at 1542 parameters (the file publishes up to
-    # 7.6 relative variance there), which would make "run 90 moves correlations
-    # only" false. Absolute space is zero under either choice, so the chi2, the
-    # PSD verdict and Sigma_eval are all unaffected: a consumer converting back
-    # multiplies by a_l = 0 and annihilates whatever is written.
+    # ⚠⚠ THE ORIGINAL JUSTIFICATION FOR PRESERVING THEM WAS WRONG, AND RUN 90
+    # MEASURED IT (Sec. 10.1.8-L11). The argument was "free in absolute space --
+    # a consumer converting back multiplies by a_l = 0 and annihilates whatever
+    # is written". That is true only for a consumer using OUR a_l. The chi2 does
+    # not: `eval_covariance._mf34_sigma` scales a relative block by
+    # `a_l_per_pt`, the coefficients interpolated from the file's own MF4 onto
+    # each EXFOR energy, and those are NONZERO here -- what is empty at these
+    # slots is the MC validity mask, not the coefficient. So the preserved
+    # values (up to 7.6 relative variance) enter at full weight, and they enter
+    # in exactly the directions where c34_post has zero variance, i.e. the
+    # softest ones, which whitening amplifies by lambda^-1/2. Run 90 came out
+    # indistinguishable from run 89: worst normalised lambda_min -37.94 vs
+    # -38.15, and 22.8 % of points bit-identical.
+    #
+    # `NULL_FILL` selects the behaviour so the alternatives can be measured
+    # against each other rather than argued about. See `assemble_c34_rel`.
     live = np.abs(a_flat) >= np.finfo(float).tiny
     both_live = np.outer(live, live)
 
@@ -425,9 +461,7 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
     _check_null_block(cx_post, ~live[None, :], "cx_post",
                       extra=" Same inconsistency, on the cross block.")
 
-    denom = np.outer(a_flat, a_flat)
-    c34_rel = np.divide(c34_post, denom, out=np.array(c34_rel_ship, float),
-                        where=both_live)
+    c34_rel = assemble_c34_rel(c34_post, a_flat, c34_rel_ship, null_fill)
     # The cross blocks are NEW, so there is no shipped value to preserve and
     # nothing to decide: a parameter with no variance has no covariance either,
     # and zero is the correct entry.
@@ -435,10 +469,13 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
                        where=live[None, :])
     n_null = int((~live).sum())
     print(f"\n  null parameters: {n_null} of {a_flat.size} group-mean a_l are "
-          f"exactly zero")
+          f"exactly zero  [--null-fill {null_fill}]")
     if n_null:
-        print(f"    shape blocks there: shipped relative values PRESERVED "
-              f"(max |rel| {np.abs(c34_rel_ship[~both_live]).max():.4g})")
+        kept = np.abs(c34_rel[~both_live]).max()
+        print(f"    shape blocks there: "
+              + ("shipped relative values PRESERVED"
+                 if null_fill == "ship" else "written ZERO")
+              + f" (max |rel| {kept:.4g})")
         print(f"    cross blocks there: written ZERO")
 
     for name, arr in (("c34_rel", c34_rel), ("cx_rel", cx_rel)):
@@ -526,6 +563,16 @@ def main():
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--write", action="store_true")
+    ap.add_argument(
+        "--null-fill", choices=["zero", "ship"], default="zero",
+        help="What the rewritten MF34 puts where a_l is exactly zero (~37 %% of "
+             "slots). 'zero': the dead parameter carries no covariance -- a true "
+             "null direction, PSD-safe. 'ship': keep the file's declared value, "
+             "which preserves the published relative sigma but injects the old "
+             "construction into the softest directions of the new one and "
+             "reproduced run 89 almost exactly (roadmap Sec. 10.1.8-L11). "
+             "Default zero.",
+    )
     mode.add_argument(
         "--write-endf", metavar="OUT",
         help="Also emit a _mg.endf whose MF34 IS the consistent joint: shape "
@@ -587,6 +634,44 @@ def main():
     a_nom_group = np.stack(
         [A_shape[l] @ a_nom_fine[:, l] for l in range(L_MAX)], axis=-1)
 
+    # THE DENOMINATOR THE CONSUMER ACTUALLY USES. `a_nom_group` is masked to the
+    # valid bins, so it is exactly zero at ~37 % of slots -- fine for building
+    # the joint, useless for asking what the chi2 sees, because the chi2 scales
+    # a relative MF34 block by `a_l_per_pt`, the MF4 coefficients interpolated
+    # onto each EXFOR energy, which are NOT zero there (what is empty at those
+    # slots is the MC validity mask, not the coefficient).
+    #
+    # ⚠ NOT a width-weighted mean over the bins the group contains. That was the
+    # first attempt and it is exactly zero in the 39 shape groups that contain
+    # NO fine bin at all -- the MF34 grid spans 0-20 MeV while the fine grid only
+    # covers 0.8468-4.075, and nine more are sub-keV slivers between adjacent
+    # fine bins (0.9995-1.0000 MeV and friends). Those groups are not empty to
+    # the consumer: 178 of 46819 EXFOR points bin into them, measured on run
+    # 90's parquet. Dropping them would hide 0.38 % of the data.
+    #
+    # So use the consumer's OWN convention: the coefficient in the fine bin
+    # containing the group centre, nearest-bin with clamping, which is what
+    # `eval_covariance._mf34_sigma` does to place each data point
+    # (`searchsorted(grid, e) - 1`). Non-zero everywhere the fine grid has a
+    # value, so the congruence diag(I, diag(a_pt)) is invertible and a PSD
+    # verdict in relative-shape space transfers exactly to the absolute space
+    # the chi2 folds -- which the verdict against `a_nom_group` does NOT, since
+    # that one annihilates the null slots and hides whatever lives in them.
+    cen = 0.5 * (shape_ev[:-1] + shape_ev[1:])
+    bin_at = np.clip(np.searchsorted(fine_ev, cen, side="right") - 1,
+                     0, n_fine - 1)
+    a_pt = a_nom_fine[bin_at].reshape(-1)
+    zero_pt = np.abs(a_pt) < np.finfo(float).tiny
+    print(f"  consumer-convention group coefficients a_pt: "
+          f"{int(zero_pt.sum())} exact zeros of {a_pt.size}")
+    if zero_pt.any():
+        # A handful at most (the fine grid has one exactly-zero c_6). Excluding
+        # them IS exact: the consumer multiplies those directions by zero too,
+        # so they cannot contribute to Sigma_eval either way.
+        print(f"    excluded from the second table; the consumer annihilates "
+              f"them as well, so this is exact, not a truncation")
+    keep_pt = ~zero_pt
+
     keep = np.isfinite(c0_g).all(1) & np.isfinite(a_g).all((1, 2))
     c0_g, a_g = c0_g[keep], a_g[keep]
     n = int(keep.sum())
@@ -604,8 +689,9 @@ def main():
     # relative form is what the rewrite falls back on at null parameters. Two
     # separate mappings would be two chances to disagree about the grids.
     c34_rel_ship = shipped_c34_rel_on_base(blocks, shape_ev)
-    _a = a_nom_group.reshape(-1)
-    c34_ship = c34_rel_ship * np.outer(_a, _a)
+    # NB `a_flat` is the REPLICA array (n x n_gs*L_MAX); this is the nominal.
+    a_flat_nom = a_nom_group.reshape(-1)
+    c34_ship = c34_rel_ship * np.outer(a_flat_nom, a_flat_nom)
     c34_ship = 0.5 * (c34_ship + c34_ship.T)
 
     # The two-pass rescaling, done AFTER the collapse: one positive diagonal
@@ -640,12 +726,66 @@ def main():
         diagnose("LEGACY (run 89): shipped marginals + cx_post",
                  c33_ship, c34_ship, cx_post),
     ]
-    print("\n=== PSD on the run's own adaptive grids ===")
+    print("\n=== PSD on the run's own adaptive grids (a_nom space) ===")
     print(pd.DataFrame(rows).set_index("case").to_string())
     print(f"\n  ||Cx||_F = {np.linalg.norm(cx_post):.4g}")
-    print("\n  Read the CANDIDATE row against the LEGACY row: the cross block is\n"
-          "  only a covariance next to the marginals it was built with. Shipping\n"
-          "  it therefore means shipping c34_post as MF34 too (--write-endf).")
+    print("\n  ⚠ EVERY ROW ABOVE IS TAKEN AGAINST a_nom, WHICH IS ZERO AT "
+          f"{int((np.abs(a_flat_nom) < np.finfo(float).tiny).sum())} OF "
+          f"{a_flat_nom.size} SLOTS.\n"
+          "  That congruence is SINGULAR, so it annihilates the null directions "
+          "and cannot\n  see anything living in them. Run 90 passed here and "
+          "still died in the chi2.\n  The table below is the one that "
+          "corresponds to what the chi2 folds.")
+
+    # ── THE TABLE THAT MATCHES WHAT THE CHI2 ACTUALLY BUILDS ────────────────
+    # Same joint, expressed the way the file publishes it and the consumer reads
+    # it: MF34 RELATIVE on the shape axis, scaled at fold time by a_l_per_pt.
+    # `a_pt` stands in for that under the consumer's own nearest-bin convention,
+    # so this congruence is invertible and the verdict transfers exactly --
+    # unlike the a_nom table above.
+    #
+    # The cross block's shape axis is ABSOLUTE in the sidecar, so it must be
+    # divided by the SAME a_pt the MF34 leg will be multiplied by, or the two
+    # legs are not in the same space.
+    K = keep_pt
+    cxA = (cx_post / a_pt[None, :])[:, K]
+    rel_post = assemble_c34_rel(c34_post, a_flat_nom, c34_rel_ship, "zero")
+    rel_ship_fill = assemble_c34_rel(c34_post, a_flat_nom, c34_rel_ship, "ship")
+    KK = np.ix_(K, K)
+    rel_ship_K, rel_post_K = c34_rel_ship[KK], rel_post[KK]
+    rel_shipfill_K = rel_ship_fill[KK]
+
+    rows2 = [
+        diagnose("A  shipped MF34, Cx = 0   (the run-86 baseline)",
+                 c33_ship, rel_ship_K, np.zeros_like(cxA)),
+        # What run 89 shipped, in the space that can see it.
+        diagnose("B  shipped MF34 + Cx      (run 89)",
+                 c33_ship, rel_ship_K, cxA),
+        # What run 90 shipped: rebuilt where live, SHIPPED at the null slots.
+        diagnose("C  rebuilt + null=ship    (RUN 90, AS SHIPPED)",
+                 c33_ship, rel_shipfill_K, cxA),
+        # The proposed repair: rebuilt where live, ZERO at the null slots.
+        diagnose("D  rebuilt + null=zero    (the proposed fix)",
+                 c33_ship, rel_post_K, cxA),
+        # Isolates the OTHER gap: MF33 is still the shipped one in every row
+        # above, but the triple certified PSD used c33_post. If D is still bad
+        # while E is clean, rebuilding MF34 alone can never be enough and MF33
+        # has to be rewritten too.
+        diagnose("E  rebuilt + null=zero + c33_post (MF33 rebuilt too)",
+                 c33_post, rel_post_K, cxA),
+    ]
+    print("\n=== PSD in the space the chi2 folds (relative MF34, a_pt) ===")
+    print(pd.DataFrame(rows2).set_index("case").to_string())
+    n_null_nom = int((np.abs(a_flat_nom) < np.finfo(float).tiny).sum())
+    n_seen = int((np.abs(a_flat_nom) < np.finfo(float).tiny)[K].sum())
+    print(f"\n  a_nom is zero at {n_null_nom} slots; {n_seen} of them survive "
+          f"into this table,\n  i.e. the consumer does NOT annihilate them and "
+          f"whatever the fill puts there is real.")
+    print("\n  How to read it:\n"
+          "    C ~ B          -> the null-slot fill is the problem; D is the fix.\n"
+          "    C and D both bad, E clean -> MF33 is the problem, not MF34.\n"
+          "    D and E both bad          -> neither; the cross block itself does\n"
+          "                                 not belong next to these marginals.")
 
     if args.check:
         print("\n--check: nothing written.")
@@ -669,6 +809,7 @@ def main():
             source_endf=source_endf,
             c34_post=c34_post, cx_post=cx_post, a_nom_group=a_nom_group,
             shape_ev=shape_ev, mag_ev=mag_ev, c34_rel_ship=c34_rel_ship,
+            null_fill=args.null_fill,
             cross_emin_ev=args.cross_emin_ev, cross_emax_ev=args.cross_emax_ev,
         )
     return 0

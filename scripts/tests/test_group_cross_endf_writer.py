@@ -242,18 +242,23 @@ def test_no_mg_endf_is_refused(tmp_path):
         shipped_mg_endf(tmp_path)
 
 
-def test_null_parameters_keep_the_shipped_relative_value(written, tmp_path):
-    """a_l = 0 makes the round trip 0/0, and the file's own value is kept.
+@pytest.mark.parametrize("null_fill,expected", [("zero", 0.0), ("ship", 0.25)])
+def test_null_parameter_fill_is_selectable(written, tmp_path, null_fill, expected):
+    """a_l = 0 makes the round trip 0/0, and BOTH answers must be reachable.
 
     `row_aggregator` zeroes a whole (group, order) row when no fine bin in the
     group is valid at that order — 1542 of 4218 slots in production. There the
     collapsed replicas are identically zero, so `c34_post` is zero too and the
     relative form is genuinely undefined rather than merely ill-conditioned.
-    The rebuild spans no such direction, so it must not overwrite what the file
-    already declares; writing zero instead would DELETE published uncertainty.
 
-    Absolute space is zero under either choice, which is why this is free: a
-    consumer converting back multiplies by a_l = 0.
+    ⚠ "ship" was adopted first on the argument that it was free, because a
+    consumer converting back multiplies by a_l = 0. That is false for the chi2,
+    which scales relative MF34 blocks by `a_l_per_pt` — the MF4 coefficients
+    interpolated onto each EXFOR energy, which are NOT zero here. Run 90 then
+    reproduced run 89 almost exactly (roadmap Sec. 10.1.8-L11). "zero" is the
+    default because a dead parameter with no covariance is a true null
+    direction and cannot break PSD; "ship" is kept so the two can be measured
+    against each other rather than argued about.
     """
     a_nom_group, a_flat, c34_post, cx_post = _inputs()
     a_nom_group[2, 3] = 0.0                      # kill one (group, order) slot
@@ -263,14 +268,15 @@ def test_null_parameters_keep_the_shipped_relative_value(written, tmp_path):
     c34_post[:, dead] = 0.0
     cx_post[:, dead] = 0.0
 
-    out = tmp_path / "null_param_mg.endf"
+    out = tmp_path / f"null_{null_fill}_mg.endf"
     write_consistent_mf34(out, written["src"], c34_post, cx_post, a_nom_group,
-                          SHAPE_EV, MAG_EV, _rel_ship(0.25))
+                          SHAPE_EV, MAG_EV, _rel_ship(0.25),
+                          null_fill=null_fill)
     blocks = _read_blocks(out)
 
-    # The dead slot is group 2 at order 4: its shape diagonal keeps 0.25 ...
-    assert blocks[(4, 4)][0][2, 2] == pytest.approx(0.25)
-    # ... while a live slot in the same block is the rebuilt value.
+    # The dead slot is group 2 at order 4.
+    assert blocks[(4, 4)][0][2, 2] == pytest.approx(expected)
+    # ... while a live slot in the same block is the rebuilt value either way.
     live_rel = c34_post[3 * L_MAX + 3, 3 * L_MAX + 3] / a_flat[3 * L_MAX + 3] ** 2
     assert blocks[(4, 4)][0][3, 3] == pytest.approx(live_rel, rel=1e-5)
     # The cross block is new, so a dead parameter gets zero, not 0.25. Compare
@@ -300,3 +306,49 @@ def test_nonzero_covariance_on_a_zero_mean_parameter_is_rejected(written):
         write_consistent_mf34(Path("unused.endf"), written["src"], c34_post,
                               cx_post, a_nom_group, SHAPE_EV, MAG_EV,
                               _rel_ship())
+
+
+def test_assemble_c34_rel_is_the_one_definition():
+    """`--check` and the writer must build the SAME array, not two like ones.
+
+    Diagnosing one object and shipping another is what produced runs 89 and 90,
+    so the diagnostic rows call this function rather than re-deriving the
+    quotient. Live slots are the rebuilt value under both fills; only the null
+    slots differ, and only in the way the flag names.
+    """
+    from scripts.build_group_cross import assemble_c34_rel
+
+    a = np.array([2.0, 0.0, 4.0])
+    c34 = np.array([[8.0, 0.0, 8.0], [0.0, 0.0, 0.0], [8.0, 0.0, 32.0]])
+    ship = np.full((3, 3), 0.5)
+
+    z = assemble_c34_rel(c34, a, ship, "zero")
+    s = assemble_c34_rel(c34, a, ship, "ship")
+
+    live = np.ix_([0, 2], [0, 2])
+    want_live = np.array([[2.0, 1.0], [1.0, 2.0]])
+    np.testing.assert_allclose(z[live], want_live)
+    np.testing.assert_allclose(s[live], want_live)
+
+    assert np.allclose(z[1, :], 0.0) and np.allclose(z[:, 1], 0.0)
+    assert np.allclose(s[1, :], 0.5) and np.allclose(s[:, 1], 0.5)
+
+    with pytest.raises(SystemExit, match="unknown null_fill"):
+        assemble_c34_rel(c34, a, ship, "keep")
+
+
+def test_assemble_does_not_mutate_the_shipped_matrix():
+    """`out=` aliasing would silently corrupt c34_rel_ship for later callers.
+
+    main() reuses the same array for the absolute diagnosis AND both fills, so
+    an in-place write would make the second call see the first call's output.
+    """
+    from scripts.build_group_cross import assemble_c34_rel
+
+    a = np.array([2.0, 0.0])
+    c34 = np.array([[8.0, 0.0], [0.0, 0.0]])
+    ship = np.full((2, 2), 0.5)
+    before = ship.copy()
+    assemble_c34_rel(c34, a, ship, "ship")
+    assemble_c34_rel(c34, a, ship, "zero")
+    np.testing.assert_array_equal(ship, before)
