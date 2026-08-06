@@ -24,9 +24,11 @@ runtime or under ``TYPE_CHECKING``. ``kika/tests/test_layering.py`` scans this
 directory automatically via ``rglob``, and no allowlist entry may ever be added
 for it.
 
-What exists so far is §2-7 — units, quantities, enumerations, axes, values and
-the one-dimensional functional containers. The ``reactionSuite`` hierarchy
-(§9-25) is phase 3b.
+What exists is §2-7 (units, quantities, enumerations, axes, values, the
+one-dimensional functional containers) and the §9-25 hierarchy — ``styles``,
+``reactionSuite`` and its children, resonances split by formalism, and the
+``covarianceSuite``. The containers are structurally complete and mostly empty:
+nothing decodes an ENDF file into them yet, which is phase 3c.
 """
 from __future__ import annotations
 
@@ -54,8 +56,79 @@ from .functions import (
     XYs3d,
     Ys1d,
 )
+from .covariances import (
+    CovarianceMatrix,
+    CovarianceSection,
+    CovarianceSuite,
+    DataLink,
+    Mixed,
+    Slice,
+    Slices,
+    Sum,
+)
+from .cross_section_forms import (
+    EVAL_LABEL,
+    CoulombPlusNuclearElastic,
+    CrossSection,
+    Reference,
+    ResonancesWithBackground,
+    ThermalNeutronScatteringLaw1d,
+    URR_probabilityTables1d,
+)
+from .distributions import (
+    NOT_IMPLEMENTED_DISTRIBUTIONS,
+    AngularEnergy,
+    AngularTwoBody,
+    Distribution,
+    EnergyAngular,
+    KalbachMann,
+    NBodyPhaseSpace,
+    Recoil,
+    Uncorrelated,
+    Unspecified,
+)
+from .output_channel import Multiplicity, OutputChannel, Product, Products, Q
+from .pops import Nuclide, Particle, PoPs
 from .quantities import PhysicalQuantity
 from .quantities import Uncertainty as ScalarUncertainty
+from .reaction_id import ReactionId
+from .reactions import (
+    FissionComponents,
+    IncompleteReactions,
+    OrphanProducts,
+    Productions,
+    Reaction,
+    Reactions,
+    Sums,
+)
+from .resonances import (
+    BreitWigner,
+    BreitWignerApproximation,
+    Channel,
+    Resonance,
+    ResolvedRegion,
+    Resonances,
+    RMatrix,
+    RMatrixSpinGroup,
+    ScatteringRadius,
+    SpinGroup,
+    TabulatedWidths,
+    UnresolvedRegion,
+)
+from .styles import (
+    AngularDistributionReconstructed,
+    CrossSectionReconstructed,
+    Evaluated,
+    GriddedCrossSection,
+    Heated,
+    HeatedMultiGroup,
+    Realization,
+    Style,
+    StyleError,
+    Styles,
+    URR_probabilityTables,
+)
+from .suite import ApplicationData, ExternalFile, ExternalFiles, ReactionSuite
 from .uncertainties import Covariance, ListOfCovariances, Uncertainty
 from .units import Unit, UnitError, check_mass_unit, conversion_factor, parse_unit
 from .values import Values
@@ -76,4 +149,30 @@ __all__ = [
     "XYs2d", "XYs3d", "Regions2d", "Regions3d",
     # §7
     "Uncertainty", "Covariance", "ListOfCovariances",
+    # §9-10 styles
+    "Style", "Styles", "StyleError", "Evaluated", "Realization",
+    "CrossSectionReconstructed", "AngularDistributionReconstructed",
+    "Heated", "HeatedMultiGroup", "GriddedCrossSection", "URR_probabilityTables",
+    # §12 PoPs
+    "PoPs", "Particle", "Nuclide",
+    # §14 the root
+    "ReactionSuite", "ExternalFile", "ExternalFiles", "ApplicationData",
+    # §15-16 reactions and their cross sections
+    "Reaction", "Reactions", "Sums", "OrphanProducts", "FissionComponents",
+    "Productions", "IncompleteReactions", "ReactionId",
+    "CrossSection", "EVAL_LABEL", "ResonancesWithBackground", "Reference",
+    "CoulombPlusNuclearElastic", "ThermalNeutronScatteringLaw1d",
+    "URR_probabilityTables1d",
+    # §17-18 output channels and distributions
+    "OutputChannel", "Product", "Products", "Multiplicity", "Q",
+    "Distribution", "AngularTwoBody", "Unspecified", "Uncorrelated",
+    "EnergyAngular", "AngularEnergy", "KalbachMann", "NBodyPhaseSpace",
+    "Recoil", "NOT_IMPLEMENTED_DISTRIBUTIONS",
+    # §19 resonances, by formalism
+    "Resonances", "ResolvedRegion", "UnresolvedRegion", "ScatteringRadius",
+    "BreitWigner", "BreitWignerApproximation", "Resonance", "SpinGroup",
+    "RMatrix", "RMatrixSpinGroup", "Channel", "TabulatedWidths",
+    # §25 covariances
+    "CovarianceSuite", "CovarianceSection", "DataLink", "CovarianceMatrix",
+    "Mixed", "Sum", "Slice", "Slices",
 ]
