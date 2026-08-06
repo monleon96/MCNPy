@@ -34,7 +34,6 @@ import logging
 from pathlib import Path
 from typing import Dict, Optional, Union
 
-from kika.endf.read_endf import read_endf
 
 _log = logging.getLogger(__name__)
 
@@ -145,6 +144,13 @@ def resolve_derived_covariance(
     """
     if isinstance(endf_or_path, (str, Path)):
         endf_path: Optional[Path] = Path(endf_or_path)
+        # Deferred on purpose: kika/processing must not pull kika.endf in at
+        # *import* time. A module-level import here makes kika.processing's
+        # __init__ depend on kika.endf, and then nothing in kika.endf can import
+        # from kika.processing at module scope -- which is what blocked moving
+        # interpolate_1d down in phase 2. Reading a PENDF tape genuinely needs
+        # the parser, so the dependency stays; only its timing changes.
+        from kika.endf.read_endf import read_endf
         endf = read_endf(str(endf_path))
     else:
         endf_path = None

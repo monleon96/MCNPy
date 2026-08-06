@@ -464,14 +464,14 @@ class CrossSection:
         float or np.ndarray
             Cross section(s) in barns.
         """
-        from kika.endf.utils import interpolate_1d_endf  # local import: avoid cycle
+        from kika.processing.interpolation import interpolate_1d  # local import: avoid cycle
 
         target = np.asarray(energy, dtype=float)
         scalar_input = np.ndim(target) == 0
 
         regions = self.metadata.get("interpolation_regions") if self.metadata else None
         if regions:
-            result = interpolate_1d_endf(
+            result = interpolate_1d(
                 list(self.energies),
                 list(self.values),
                 list(regions),

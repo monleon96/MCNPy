@@ -25,11 +25,32 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from kika.endf.read_endf import read_endf
-from kika.njoy.launcher import build_njoy_command, is_wsl_unc_path
+# Deferred with the read_endf import below, and for the same reason:
+# kika.njoy imports kika.endf at module scope, so importing it here
+# would put kika.endf on kika.processing's import path and re-create
+# the cycle that blocks moving interpolate_1d down.
 from kika.nuclear_data.cross_section import CrossSection
 
 _log = logging.getLogger(__name__)
+
+def _read_endf(path: str):
+    """Parse an ENDF/PENDF tape, importing the parser only when actually used.
+
+    ``kika/processing`` must not pull ``kika.endf`` in at *import* time: a
+    module-level import here puts ``kika.endf`` on ``kika.processing``'s import
+    path, and then nothing in ``kika.endf`` can import from ``kika.processing``
+    at module scope -- which is precisely what blocked moving ``interpolate_1d``
+    down in phase 2 of the GNDS roadmap.
+
+    Reading a PENDF tape genuinely needs the parser, so the dependency stays and
+    only its timing changes. One function rather than an import at each call
+    site, so the layering ratchet keeps counting one violation and not two.
+    """
+    from kika.endf.read_endf import read_endf
+
+    return read_endf(path)
+
+
 
 
 class NjoyReconstructError(RuntimeError):
@@ -172,13 +193,20 @@ def njoy_reconstruct_stream(
     # via SMB; is_file() still works there.  We only skip the check entirely
     # for those cases where Windows can't see the share (e.g. WSL stopped) —
     # in that case wsl.exe will fail with a clearer error than os.stat.
+    from kika.njoy.launcher import build_njoy_command, is_wsl_unc_path
     if not is_wsl_unc_path(njoy_executable) and not njoy_executable.is_file():
         raise NjoyReconstructError(
             f"NJOY executable not found: {njoy_executable}. "
             "Set the NJOY path in app Settings."
         )
 
-    endf = read_endf(str(endf_path))
+    # Deferred on purpose: kika/processing must not pull kika.endf in at
+    # *import* time. A module-level import here makes kika.processing's
+    # __init__ depend on kika.endf, and then nothing in kika.endf can import
+    # from kika.processing at module scope -- which is what blocked moving
+    # interpolate_1d down in phase 2. Reading a PENDF tape genuinely needs
+    # the parser, so the dependency stays; only its timing changes.
+    endf = _read_endf(str(endf_path))
     if endf.mat is None:
         raise NjoyReconstructError(
             f"Could not determine MAT number from {endf_path.name}"
@@ -277,6 +305,7 @@ def _run_reconr_once_stream(
         }
         env.update(forward_env)
 
+        from kika.njoy.launcher import build_njoy_command, is_wsl_unc_path
         cmd = build_njoy_command(njoy_executable, forward_env=forward_env)
 
         try:
@@ -382,7 +411,13 @@ def _run_reconr_once_stream(
             )
 
         try:
-            pendf = read_endf(str(pendf_tape))
+            # Deferred on purpose: kika/processing must not pull kika.endf in at
+            # *import* time. A module-level import here makes kika.processing's
+            # __init__ depend on kika.endf, and then nothing in kika.endf can import
+            # from kika.processing at module scope -- which is what blocked moving
+            # interpolate_1d down in phase 2. Reading a PENDF tape genuinely needs
+            # the parser, so the dependency stays; only its timing changes.
+            pendf = _read_endf(str(pendf_tape))
         except Exception as e:
             raise NjoyReconstructError(
                 f"Failed to parse PENDF output: {e}",
