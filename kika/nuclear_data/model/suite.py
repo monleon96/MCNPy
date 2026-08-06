@@ -144,6 +144,20 @@ class ReactionSuite:
                 continue
         raise KeyError(f"no reaction with ENDF_MT {mt} anywhere in this suite")
 
+    def findReactionByENDF_MT(self, mt: int) -> Optional[Reaction]:
+        """The same look-up, returning ``None`` instead of raising.
+
+        Two callers, two meanings. An encoder asking for the MT it is about
+        wants :meth:`reactionByENDF_MT`, because its absence is a bug. A decoder
+        asking "is there a reaction to hang this MF4 section on?" is asking a
+        question with a legitimate *no* — an ENDF file may carry an MF4/MT with
+        no MF3/MT — and should not have to catch ``KeyError`` to find out.
+        """
+        try:
+            return self.reactionByENDF_MT(mt)
+        except KeyError:
+            return None
+
     @property
     def hasResonances(self) -> bool:
         return self.resonances is not None

@@ -177,10 +177,17 @@ def test_an_lrf7_evaluation_keeps_its_resonances(fe57_host_tape):
     """
     mf2 = read_endf(str(fe57_host_tape)).mf[2].mt[151]
     assert [er.lrf for iso in mf2.isotopes for er in iso.energy_ranges] == [7]
-    assert ResonanceParameters.from_endf(mf2) == [], (
-        "the flat path has started keeping LRF=7; update this test and the "
-        "roadmap finding it records"
-    )
+
+    # It still returns nothing — `ResonanceRecord` has four width columns and an
+    # RML spin group has one per channel, five of them here, so there is nothing
+    # to return into. But as of the `library-gaps.md` D3 fix it is no longer
+    # silent about it, which is the difference between an unsupported format and
+    # a wrong answer.
+    with pytest.warns(UserWarning, match="LRF=7"):
+        assert ResonanceParameters.from_endf(mf2) == [], (
+            "the flat path has started keeping LRF=7; update this test and the "
+            "D3 entry in docs/library-gaps.md"
+        )
 
     resonances, report = decodeMF2MT151(mf2)
     assert len(resonances.resolved) == 1

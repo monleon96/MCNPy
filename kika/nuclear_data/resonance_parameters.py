@@ -13,6 +13,7 @@ formula functions work with either type via duck typing.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
@@ -145,11 +146,35 @@ class ResonanceParameters:
                     continue
                 # er.lru == 1: resolved range
                 if not isinstance(er.parameters, ResolvedResonanceRange):
+                    # LRF=7 (R-Matrix Limited) parses into `RMatrixLimited`, which
+                    # is not a `ResolvedResonanceRange`, so it lands here. It cannot
+                    # be represented at all: `ResonanceRecord` has four width
+                    # columns and an RML spin group has one width *per channel* —
+                    # five of them for Fe-57 in JEFF-4.0. Returning an empty list
+                    # is therefore honest, but it used to be *silent*, which made
+                    # "this nuclide has no resolved resonances" indistinguishable
+                    # from "this format is not supported". Say so.
+                    warnings.warn(
+                        f"MF2/151 LRU=1 LRF={er.lrf}: this resolved range uses a "
+                        f"formalism ResonanceParameters cannot represent "
+                        f"({type(er.parameters).__name__}), so it is omitted and the "
+                        f"result describes a nuclide with fewer resonance regions "
+                        f"than the file has. Use kika.endf.model_adapter.decodeMF2MT151 "
+                        f"for LRF=7.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
                     continue
 
                 params = er.parameters
                 formalism = _LRF_TO_NAME.get(er.lrf)
                 if formalism is None:
+                    warnings.warn(
+                        f"MF2/151 LRU=1 LRF={er.lrf} is not a formalism this class "
+                        f"names; the range is omitted",
+                        UserWarning,
+                        stacklevel=2,
+                    )
                     continue
 
                 l_groups: List[LGroup] = []

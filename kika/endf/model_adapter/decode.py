@@ -251,7 +251,11 @@ def _attachAngularDistribution(suite: ReactionSuite, mf4mt, mt: int,
     """
     from .angular import decodeMF4MT
 
-    reaction = suite.reactionByENDF_MT(mt)
+    # `findReaction...`, not `reactionByENDF_MT`: the strict one raises, so the
+    # branch below was unreachable when this was written. It never fired because
+    # every MF4/MT on the tapes tested has an MF3/MT, which is exactly the sort
+    # of thing that stays hidden until the one tape where it is not true.
+    reaction = suite.findReactionByENDF_MT(mt)
     if reaction is None:
         report.lost(
             f"MF4/MT{mt} has no MF3/MT{mt} to hang from; GNDS attaches a "
