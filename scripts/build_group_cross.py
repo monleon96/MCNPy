@@ -324,6 +324,20 @@ def whiten(A, tol=NULL_TOL):
 
 
 def diagnose(name, c33, c34, cx):
+    """PSD diagnostics for the joint [[c33, cx], [cx.T, c34]].
+
+    ⚠ `lam_min_norm` IS NOT COMPARABLE ACROSS ROWS THAT DIFFER IN THEIR
+    DIAGONAL, which is why `scale` and the raw `lam_min` are both reported now
+    (roadmap Sec. 10.1.8-L12). The normaliser is `max|diag(J)|`, and in the
+    relative-space table that maximum is a NULL-SLOT relative variance: the
+    shipped file reaches 7.6 there, so the `null=ship` row is divided by 7.6 and
+    the `null=zero` row is not. Read that way, -3.462 -> -26.45 is a factor 7.64
+    against a removed diagonal of 7.6 -- i.e. the violation did not move at all,
+    and the scale-free `sigma_max(K)` column agrees (1544.7 -> 1561.5, 1 %).
+
+    Compare `sigma_max(K)` across rows. Compare `lam_min_norm` only against rows
+    with the same `scale`.
+    """
     w33, p33, r33 = whiten(c33)
     w34, p34, r34 = whiten(c34)
     nx = float(np.linalg.norm(cx, "fro"))
@@ -334,6 +348,8 @@ def diagnose(name, c33, c34, cx):
             "rank34": f"{r34}/{c34.shape[0]}",
             "sigma_max(K)": float(np.linalg.norm(w33 @ cx @ w34, 2)) if nx else 0.0,
             "leak_null34": float(np.linalg.norm(cx @ p34, "fro")) / nx if nx else 0.0,
+            "lam_min": lam,
+            "scale": sc,
             "lam_min_norm": lam / sc if sc > 0 else np.nan}
 
 
@@ -416,7 +432,7 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
     # MEASURED IT (Sec. 10.1.8-L11). The argument was "free in absolute space --
     # a consumer converting back multiplies by a_l = 0 and annihilates whatever
     # is written". That is true only for a consumer using OUR a_l. The chi2 does
-    # not: `eval_covariance._mf34_sigma` scales a relative block by
+    # not: `eval_covariance.build_mf34_block` scales a relative block by
     # `a_l_per_pt`, the coefficients interpolated from the file's own MF4 onto
     # each EXFOR energy, and those are NONZERO here -- what is empty at these
     # slots is the MC validity mask, not the coefficient. So the preserved
@@ -564,6 +580,13 @@ def main():
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--write", action="store_true")
     ap.add_argument(
+        "--write-null-mask", metavar="OUT.npz",
+        help="Emit the (n_shape_groups, L_MAX) boolean mask of (group, order) "
+             "slots the MC never populated, with the shape grid and a_nom_group. "
+             "Works in --check too. Consumed by null_slot_exposure.py "
+             "(roadmap §10.6-1).",
+    )
+    ap.add_argument(
         "--null-fill", choices=["zero", "ship"], default="zero",
         help="What the rewritten MF34 puts where a_l is exactly zero (~37 %% of "
              "slots). 'zero': the dead parameter carries no covariance -- a true "
@@ -634,6 +657,33 @@ def main():
     a_nom_group = np.stack(
         [A_shape[l] @ a_nom_fine[:, l] for l in range(L_MAX)], axis=-1)
 
+    # THE UNSUPPORTED-PARAMETER MASK, emitted so other tools do not re-derive it.
+    # True where `row_aggregator` never populated the (group, order): no fine bin
+    # in that group carries a valid a_l, so the MC constrains nothing there.
+    #
+    # WHY IT LEAVES THIS SCRIPT. Roadmap Sec. 10.6-1. The shipped MF34 declares
+    # nonzero RELATIVE variance at ~95 % of these -- up to 7.6, sigma_rel ~ 276 %
+    # -- and Sec. 10.1.8-L11 established the chi2 folds them at FULL weight,
+    # because it scales the relative block by a_l interpolated from the file's own
+    # MF4 and that is not zero here. Run 86 folds the same file, so the BASELINE
+    # every chi2 in that document is quoted against may carry variance from
+    # parameters the fit never determined. `null_slot_exposure.py` measures it,
+    # and it needs this exact mask rather than the frozen_degree approximation
+    # (which gives 1412 against this one's 1542 -- same object, not same array).
+    #
+    # Written on request in EITHER mode: `--check` still writes no COVARIANCE, and
+    # the diagnosis this feeds should not need a 40-minute --write to run.
+    if args.write_null_mask:
+        mask = np.abs(a_nom_group) < np.finfo(float).tiny
+        outm = Path(args.write_null_mask)
+        np.savez(outm, null_mask=mask, shape_grid_ev=shape_ev,
+                 a_nom_group=a_nom_group)
+        print(f"\n  wrote {outm.name}: {int(mask.sum())} of {mask.size} "
+              f"(group, order) slots unsupported")
+        print("    by order: " + "  ".join(
+            f"a_{l+1} {int(mask[:, l].sum())}/{mask.shape[0]}"
+            for l in range(L_MAX)))
+
     # THE DENOMINATOR THE CONSUMER ACTUALLY USES. `a_nom_group` is masked to the
     # valid bins, so it is exactly zero at ~37 % of slots -- fine for building
     # the joint, useless for asking what the chi2 sees, because the chi2 scales
@@ -651,7 +701,7 @@ def main():
     #
     # So use the consumer's OWN convention: the coefficient in the fine bin
     # containing the group centre, nearest-bin with clamping, which is what
-    # `eval_covariance._mf34_sigma` does to place each data point
+    # `eval_covariance.build_mf34_block` does to place each data point
     # (`searchsorted(grid, e) - 1`). Non-zero everywhere the fine grid has a
     # value, so the congruence diag(I, diag(a_pt)) is invertible and a PSD
     # verdict in relative-shape space transfers exactly to the absolute space
@@ -781,11 +831,21 @@ def main():
     print(f"\n  a_nom is zero at {n_null_nom} slots; {n_seen} of them survive "
           f"into this table,\n  i.e. the consumer does NOT annihilate them and "
           f"whatever the fill puts there is real.")
+    print("\n  ⚠ COMPARE `sigma_max(K)`, NOT `lam_min_norm`. The normaliser is\n"
+          "  max|diag(J)|, and rows C and D differ in exactly that diagonal --\n"
+          "  the shipped null-slot relative variance, up to 7.6 -- so their\n"
+          "  lam_min_norm are divided by different numbers and cannot be read\n"
+          "  against each other. sigma_max(K) is free of it. Sec. 10.1.8-L12.")
     print("\n  How to read it:\n"
-          "    C ~ B          -> the null-slot fill is the problem; D is the fix.\n"
-          "    C and D both bad, E clean -> MF33 is the problem, not MF34.\n"
-          "    D and E both bad          -> neither; the cross block itself does\n"
-          "                                 not belong next to these marginals.")
+          "    C ~ B          -> the null-slot fill is what made the rebuild\n"
+          "                      invisible; it is not by itself the fix.\n"
+          "    C ~ D on sigma_max -> the null fill is not the lever either way.\n"
+          "    E << D on sigma_max -> rebuilding MF33 helps; how much is the\n"
+          "                      number, and 1.57x was not enough.\n"
+          "    all rows >> 1  -> the violation is in the FOLD, not in any block:\n"
+          "                      MF34 is folded relative (x a_l(E_j)) and Cx\n"
+          "                      absolute, so the two legs differ by a factor\n"
+          "                      that crosses zero. Sec. 10.1.8-L13.")
 
     if args.check:
         print("\n--check: nothing written.")
