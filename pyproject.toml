@@ -2,7 +2,7 @@
 name = "kika-nd"
 version = "0.2.8"
 description = "A comprehensive Python toolkit for nuclear data analysis, including MCNP input/output processing, sensitivity analysis, covariance handling, ACE file parsing, and ENDF data manipulation."
-authors = ["Juan Antonio Monleon de la Lluvia <juanjuanmonleon@gmail.com>"]
+authors = ["Juan Antonio Monleon de la Lluvia <juanmonleon96@gmail.com>"]
 license = "BSD-3-Clause"
 homepage = "https://github.com/juanmonleon/kika"
 repository = "https://github.com/juanmonleon/kika"
