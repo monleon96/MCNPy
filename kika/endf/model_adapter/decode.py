@@ -31,12 +31,14 @@ from kika.nuclear_data.model import (
     Axes,
     ConversionReport,
     CrossSection,
+    Distribution,
     EndfProvenance,
     Evaluated,
     Frame,
     Nuclide,
     OutputChannel,
     PoPs,
+    Product,
     Q,
     Reaction,
     ReactionId,
@@ -44,6 +46,8 @@ from kika.nuclear_data.model import (
     Regions1d,
     crossSectionAxes,
 )
+
+from .resonances import decodeMF2MT151
 
 __all__ = ["decodeMF3MT", "decodeMF1MT451", "decodeReactionSuite"]
 
@@ -53,10 +57,16 @@ SUPPORTED_MF = (1, 2, 3, 4, 31, 33, 34)
 
 
 def _za(section) -> int:
+    """ZA, **rounded** rather than truncated.
+
+    ENDF's fixed-format floats do not round-trip exactly: Th-232's
+    ``9.023200+4`` reads back as ``90231.99999999999``, and ``int()`` on that
+    names Ac-231. See :func:`kika.nuclear_data.model.provenance._asEndfInt`.
+    """
     value = getattr(section, "zaid", None)
     if value is None:
         value = getattr(section, "_za", None)
-    return int(value) if value is not None else 0
+    return int(round(float(value))) if value is not None else 0
 
 
 def decodeMF3MT(mf3mt, report: Optional[ConversionReport] = None) -> Tuple[Reaction, ConversionReport]:
@@ -170,8 +180,11 @@ def decodeMF1MT451(mt451, report: Optional[ConversionReport] = None):
 def decodeReactionSuite(endf, report: Optional[ConversionReport] = None):
     """A parsed ``ENDF`` object → a :class:`ReactionSuite`, plus the report.
 
-    Only MF1, MF2 and MF3 are read here; MF4 and the covariances are P7. Every
-    MF present in the file that this decoder does not read is **declared**
+    MF1, MF2, MF3 and MF4 are read. The covariances are **not** part of a
+    ``reactionSuite``: §25.1.1 makes ``covarianceSuite`` a root node in its own
+    right, linked through ``externalFiles``, so MF31/33/34 go through
+    :func:`~kika.endf.model_adapter.covariances.decodeCovarianceSuite` instead.
+    Every MF present in the file that neither decoder reads is **declared**
     unsupported, which is the whole reason the report exists.
     """
     report = report if report is not None else ConversionReport()
@@ -203,16 +216,57 @@ def decodeReactionSuite(endf, report: Optional[ConversionReport] = None):
     else:
         report.lost("no MF3: the evaluation carries no cross sections")
 
+    mf2 = endf.mf.get(2) if hasattr(endf, "mf") else None
+    if mf2 is not None and 151 in getattr(mf2, "mt", {}):
+        suite.resonances, report = decodeMF2MT151(mf2.mt[151], report)
+
+    mf4 = endf.mf.get(4) if hasattr(endf, "mf") else None
+    if mf4 is not None:
+        for mt in sorted(getattr(mf4, "mt", {})):
+            report = _attachAngularDistribution(suite, mf4.mt[mt], mt, report)
+
     present = set(getattr(endf, "mf", {}))
     for mf in sorted(present - set(SUPPORTED_MF)):
         report.unsupportedNode(
             f"MF{mf} is present in the file and kika's parser registry does not "
             f"cover it; it is absent from this reactionSuite"
         )
-    for mf in sorted((present & set(SUPPORTED_MF)) - {1, 3}):
+    for mf in sorted((present & set(SUPPORTED_MF)) - {1, 2, 3, 4}):
         report.unsupportedNode(
-            f"MF{mf} is present and parsed, but this decoder covers MF1 and MF3 "
-            f"only (MF2 resonances and MF4/33/34 are later increments)"
+            f"MF{mf} is present and parsed; it is a covariance file, so it "
+            f"belongs to the covarianceSuite (§25.1.1) and not to this "
+            f"reactionSuite. Call decodeCovarianceSuite for it."
         )
 
     return suite, report
+
+
+def _attachAngularDistribution(suite: ReactionSuite, mf4mt, mt: int,
+                               report: ConversionReport) -> ConversionReport:
+    """Hang one MF4 section on the neutron product of its reaction.
+
+    GNDS puts a distribution on a *product* of an output channel, not on the
+    reaction — which is why an MF4 section with no MF3 counterpart has nowhere
+    to go, and is reported rather than dropped into an invented reaction.
+    """
+    from .angular import decodeMF4MT
+
+    reaction = suite.reactionByENDF_MT(mt)
+    if reaction is None:
+        report.lost(
+            f"MF4/MT{mt} has no MF3/MT{mt} to hang from; GNDS attaches a "
+            f"distribution to a product of a reaction, and there is no reaction"
+        )
+        return report
+
+    distribution, provenance, report = decodeMF4MT(mf4mt, report)
+    if distribution is None:
+        return report
+
+    channel = reaction.outputChannel
+    channel.genre = "twoBody"
+    product = Product(pid="n", label="n", provenance=provenance,
+                      distribution=Distribution())
+    product.distribution[EVAL_LABEL] = distribution
+    channel.products.products.append(product)
+    return report

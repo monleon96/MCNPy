@@ -22,6 +22,11 @@ class Channel:
     L: Optional[int] = None
     channelSpin: Optional[float] = None
     columnIndex: Optional[int] = None
+    #: §19.3.4 lets a channel carry its own radius. This is where ENDF's APL
+    #: lands: under Reich-Moore the radius is per l-block, which is per spin
+    #: group here, so every channel of that group gets it. Phase 1 found this
+    #: value was being dropped entirely.
+    scatteringRadius: Optional[float] = None
 
 
 @dataclass

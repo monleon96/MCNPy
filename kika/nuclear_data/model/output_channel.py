@@ -64,6 +64,10 @@ class Product:
     multiplicity: Optional[Multiplicity] = None
     distribution: Optional[object] = None
     outputChannel: Optional["OutputChannel"] = None  # breakup or decay
+    #: Not a GNDS node. A distribution decoded from ENDF MF4 needs LTT, LI, LCT
+    #: and NM to be written back, and those belong to the MF4 section rather
+    #: than to the reaction — MF3 and MF4 carry separate headers.
+    provenance: Optional[object] = None
 
 
 @dataclass

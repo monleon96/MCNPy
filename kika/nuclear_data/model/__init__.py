@@ -45,6 +45,7 @@ from .enums import (
 from .functions import (
     Constant1d,
     Function1d,
+    Function2d,
     Gridded1d,
     Legendre,
     Polynomial1d,
@@ -55,6 +56,8 @@ from .functions import (
     XYs2d,
     XYs3d,
     Ys1d,
+    fromEndfTab2,
+    toEndfTab2,
 )
 from .conversion import ConversionReport
 from .covariances import (
@@ -82,6 +85,7 @@ from .distributions import (
     AngularTwoBody,
     Distribution,
     EnergyAngular,
+    Isotropic2d,
     KalbachMann,
     NBodyPhaseSpace,
     Recoil,
@@ -148,7 +152,8 @@ __all__ = [
     # §6
     "Function1d", "XYs1d", "Regions1d", "Constant1d", "Polynomial1d",
     "Ys1d", "Legendre", "Gridded1d",
-    "XYs2d", "XYs3d", "Regions2d", "Regions3d",
+    "Function2d", "XYs2d", "Regions2d", "fromEndfTab2", "toEndfTab2",
+    "XYs3d", "Regions3d",
     # §7
     "Uncertainty", "Covariance", "ListOfCovariances",
     # §9-10 styles
@@ -167,7 +172,7 @@ __all__ = [
     "URR_probabilityTables1d",
     # §17-18 output channels and distributions
     "OutputChannel", "Product", "Products", "Multiplicity", "Q",
-    "Distribution", "AngularTwoBody", "Unspecified", "Uncorrelated",
+    "Distribution", "AngularTwoBody", "Isotropic2d", "Unspecified", "Uncorrelated",
     "EnergyAngular", "AngularEnergy", "KalbachMann", "NBodyPhaseSpace",
     "Recoil", "NOT_IMPLEMENTED_DISTRIBUTIONS",
     # §19 resonances, by formalism

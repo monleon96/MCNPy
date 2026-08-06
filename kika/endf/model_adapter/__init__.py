@@ -8,6 +8,7 @@ package is also deliberately absent from kika-app's PyInstaller
 ``hiddenimports``, so a lazy import from an app-reachable code path would break
 the frozen build at run time and nowhere else.
 """
+from .angular import decodeMF4MT, encodeMF4MT
 from .covariances import (
     decodeCovarianceSuite,
     decodeMF33MT,
@@ -15,8 +16,10 @@ from .covariances import (
 )
 from .decode import decodeMF1MT451, decodeMF3MT, decodeReactionSuite
 from .encode import encodeMF3MT
+from .resonances import decodeMF2MT151
 
 __all__ = [
     "decodeMF3MT", "decodeMF1MT451", "decodeReactionSuite", "encodeMF3MT",
+    "decodeMF4MT", "encodeMF4MT", "decodeMF2MT151",
     "decodeMF33MT", "decodeMF34MT", "decodeCovarianceSuite",
 ]

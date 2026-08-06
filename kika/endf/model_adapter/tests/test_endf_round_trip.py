@@ -9,11 +9,18 @@ also already what the tier-1 golden asserts.
 
 The gate here is narrower and much stronger — per MF/MT section,
 
-    str(encodeMF3MT(decoded_reaction))  ==  str(CrossSection.from_endf(s).to_endf())
+    str(encodeMF3MT(decoded_reaction))  ==  str(s)
 
-which compares what the model produced against what the code it is replacing
-produces from the same input. If the model drops a field, rounds a number or
-reorders a region, this fails and the other formulation would not.
+**It compared against the flat path until P7b, and that was too weak.** The
+original formulation was ``== str(CrossSection.from_endf(s).to_endf())``: what
+the model produced against what the code it replaces produces. That catches a
+model that drops a field, but it cannot catch a model that inherits a *defect*
+from the code it is copying — and one was there. ENDF writes ZA as a
+fixed-format float, kika's reader rebuilds it as ``mantissa * 10**exponent``,
+and Th-232's ``9.023200+4`` comes back as ``90231.99999999999``; both paths did
+``int()`` on it and agreed on 90231. Comparing against the file instead makes
+all 57 Th-232 sections and all 53 Pu-241 sections fail, which is the truth. The
+flat path's version of that loss is pinned as an xfail below.
 """
 from __future__ import annotations
 
@@ -39,14 +46,23 @@ def test_the_fixture_has_sections_to_compare(decoded):
     assert len(suite.reactions) == len(endf.mf[3].mt)
 
 
-def test_every_mf3_section_encodes_byte_identically_to_the_flat_path(decoded):
+def test_every_mf3_section_encodes_byte_identically_to_the_file(decoded):
+    endf, suite, _ = decoded
+
+    for mt in sorted(endf.mf[3].mt):
+        section = endf.mf[3].mt[mt]
+        viaModel, _ = encodeMF3MT(suite.reactionByENDF_MT(mt))
+        assert str(viaModel) == str(section), f"MT{mt} differs from the file"
+
+
+def test_the_model_and_the_flat_path_still_agree_where_the_flat_path_is_right(decoded):
+    """On Fe-56 the two coincide, which is what makes the swap of gate safe."""
     endf, suite, _ = decoded
 
     for mt in sorted(endf.mf[3].mt):
         section = endf.mf[3].mt[mt]
         viaModel, _ = encodeMF3MT(suite.reactionByENDF_MT(mt))
         viaFlat = CrossSection.from_endf(section).to_endf()
-
         assert str(viaModel) == str(viaFlat), f"MT{mt} differs from the flat path"
 
 
@@ -62,8 +78,19 @@ def test_the_same_holds_on_real_tapes(request, tape):
     for mt in sorted(endf.mf[3].mt):
         section = endf.mf[3].mt[mt]
         viaModel, _ = encodeMF3MT(suite.reactionByENDF_MT(mt))
-        viaFlat = CrossSection.from_endf(section).to_endf()
-        assert str(viaModel) == str(viaFlat), f"{tape} MT{mt} differs from the flat path"
+        assert str(viaModel) == str(section), f"{tape} MT{mt} differs from the file"
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "CrossSection.nuclide_id truncates ZA instead of rounding it, so every "
+    "Th-232 MF3 section comes back naming ZA 90231. Phase 3d reimplements "
+    "from_endf over the model, at which point this XPASSes and should go."
+))
+def test_the_flat_path_round_trips_a_tape_whose_za_does_not_parse_exactly(th232_tape):
+    endf = read_endf(str(th232_tape))
+    for mt in sorted(endf.mf[3].mt):
+        section = endf.mf[3].mt[mt]
+        assert str(CrossSection.from_endf(section).to_endf()) == str(section)
 
 
 # ---------------------------------------------------------------------------
@@ -150,9 +177,11 @@ def test_the_report_names_every_mf_the_decoder_did_not_read(decoded):
     """
     endf, _, report = decoded
 
-    assert report.unsupported, "the micro-tape has MF2 and MF4; neither is read yet"
+    assert report.unsupported, "the micro-tape has MF34, which is not a reactionSuite node"
     text = " ".join(report.unsupported)
-    for mf in sorted(set(endf.mf) - {1, 3}):
+    # MF1, MF2, MF3 and MF4 are read as of P7b. What remains is the covariance
+    # files, which §25.1.1 puts in a root node of their own.
+    for mf in sorted(set(endf.mf) - {1, 2, 3, 4}):
         assert f"MF{mf}" in text, f"MF{mf} is in the file and the report does not mention it"
 
 

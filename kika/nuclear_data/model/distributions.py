@@ -5,19 +5,19 @@ phase 7b. Until then each law is declared, so a reader meeting one can say which
 GNDS node it cannot handle instead of failing somewhere unrelated, and so that
 adding the implementation later restructures nothing.
 
-``angularTwoBody`` is the exception: MF4 is inside kika's current parser
-coverage, so phase 3c fills it and it is a real container from the start.
+``angularTwoBody`` and ``isotropic2d`` are the exceptions: MF4 is inside kika's
+current parser coverage, so phase 3c fills them and they are real containers.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from .enums import Frame
-from .functions import Function1d
+from .functions import Function1d, Function2d, Regions2d, XYs2d
 
 __all__ = [
-    "Distribution", "AngularTwoBody", "Unspecified",
+    "Distribution", "AngularTwoBody", "Isotropic2d", "Unspecified",
     "Uncorrelated", "EnergyAngular", "AngularEnergy",
     "KalbachMann", "NBodyPhaseSpace", "Recoil",
     "NOT_IMPLEMENTED_DISTRIBUTIONS",
@@ -28,23 +28,58 @@ __all__ = [
 class AngularTwoBody:
     """§18. P(mu|E) for two-body kinematics — what ENDF MF4 carries.
 
-    ``byEnergy`` maps incident energy to the angular function at that energy: a
-    ``Legendre`` for a coefficient representation, an ``XYs1d`` for a tabulated
-    one. Both appear in MF4 and both must survive a round trip.
+    ``angular`` is a two-dimensional form: an :class:`XYs2d` whose children are
+    ``Legendre`` (a coefficient representation) or ``XYs1d`` (a tabulated one),
+    or a :class:`Regions2d` when the file uses more than one region — including
+    ENDF's LTT=3, where a Legendre region and a tabulated region meet.
+
+    **It was a dict, keyed on energy, and that was wrong.** The committed Fe-56
+    slice repeats an incident energy inside one Legendre grid (a discontinuity)
+    and repeats the LTT=3 boundary energy across the two representations. A dict
+    drops one entry in each case, silently, and the file that comes back out is
+    a valid ENDF file missing two angular distributions. The 2-d forms carry an
+    ordered list precisely so that cannot happen; see
+    ``kika/nuclear_data/model/functions/higher.py``.
     """
 
-    byEnergy: Dict[float, Function1d] = field(default_factory=dict)
+    angular: Optional[Union[XYs2d, Regions2d]] = None
     productFrame: Frame = Frame.centerOfMass
     label: Optional[str] = None
 
     @property
     def energies(self) -> List[float]:
-        return sorted(self.byEnergy)
+        """The incident energies, in file order, **duplicates included**."""
+        if self.angular is None:
+            return []
+        if isinstance(self.angular, Regions2d):
+            return [f.outerDomainValue for f in self.angular.function1ds]
+        return list(self.angular.outerDomainValues)
+
+    @property
+    def function1ds(self) -> List[Function1d]:
+        """Every per-energy angular function, in file order."""
+        if self.angular is None:
+            return []
+        if isinstance(self.angular, Regions2d):
+            return self.angular.function1ds
+        return list(self.angular.function1ds)
+
+
+@dataclass
+class Isotropic2d:
+    """§18. P(mu|E) is flat in mu at every energy — ENDF's LI=1.
+
+    Distinct from :class:`Unspecified`: this *is* the distribution, stated
+    positively, and it is not an absence to be filled in later.
+    """
+
+    label: Optional[str] = None
+    productFrame: Frame = Frame.centerOfMass
 
 
 @dataclass
 class Unspecified:
-    """§18. The distribution is deliberately not given (ENDF's LTT=0 and friends)."""
+    """§18. The distribution is deliberately not given."""
 
     label: Optional[str] = None
     productFrame: Frame = Frame.lab

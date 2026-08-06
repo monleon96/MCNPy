@@ -40,6 +40,17 @@ GNDS_NODES: dict[str, tuple[str, ...]] = {
     "XYs1d": ("interpolation", "axes", "label", "outerDomainValue", "index"),
     # §6.4.1 regions1d
     "Regions1d": ("function1ds", "axes", "label", "outerDomainValue", "index"),
+    # §6 XYs2d / regions2d — the outer axis is an ordered list, never a mapping
+    "XYs2d": ("function1ds", "interpolation", "interpolationQualifier",
+              "outerDomainValues", "axes", "label", "outerDomainValue", "index"),
+    "Regions2d": ("function2ds", "function1ds", "axes", "label",
+                  "outerDomainValue", "index"),
+    # §18 angularTwoBody / isotropic2d
+    "AngularTwoBody": ("angular", "productFrame", "label"),
+    "Isotropic2d": ("productFrame", "label"),
+    # §19.3.4 channel
+    "Channel": ("label", "resonanceReaction", "L", "channelSpin", "columnIndex",
+                "scatteringRadius"),
     # §7
     "Uncertainty": ("standard", "covariance", "listOfCovariances"),
     "Covariance": ("href", "label"),

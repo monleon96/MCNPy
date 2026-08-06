@@ -1,25 +1,299 @@
-"""Declared-but-unimplemented higher-dimensional §6 forms.
+"""GNDS-2.1 §6 two-dimensional forms: ``XYs2d`` and ``regions2d``.
 
-The roadmap's rule for the whole model: **empty slots exist, they are not
-absent**. A node kika cannot yet represent must raise ``NotImplementedError``
-naming the GNDS node, so a reader meeting one gets told what is missing rather
-than a silent wrong answer or an ``AttributeError`` three frames away.
+Phase 5 declared these as ``NotImplementedError`` stubs under the model's rule
+that *empty slots exist, they are not absent*. Phase 7b fills the two the ENDF
+MF4 decoder needs; the three-dimensional pair stays declared and empty.
 
-These are the 2-d and 3-d forms. Phase 7b fills them, together with the §18
-distribution laws. Until then, constructing one is the error.
+**Why a list and not a dict — the finding that forced this module.**
+``AngularTwoBody`` was first written as ``byEnergy: Dict[float, Function1d]``,
+which reads naturally and is wrong. Two things on the committed Fe-56 slice
+break it:
+
+* the Legendre grid of MF4/MT2 contains **3.905 MeV twice** — ENDF's way of
+  writing a discontinuity in the angular distribution, and a legitimate one;
+* the LTT=3 boundary energy **45 MeV is the last Legendre energy and the first
+  tabulated one**, so the two representations genuinely share an abscissa.
+
+A dict keyed on energy silently drops one entry in each case. Nothing raises,
+nothing is logged, and the file that comes back out is a valid ENDF file with
+two fewer angular distributions in it. So the outer axis is an **ordered list**
+whose entries carry their own ``outerDomainValue``, exactly as §6 specifies, and
+the two-representation case is a ``regions2d`` — which is what that node is for.
+
+**Why there is no 2-d ``evaluate``.** Interpolating *between* two angular
+distributions is governed by ``interpolationQualifier`` (§3.4.5: ``unitBase``,
+``correspondingPoints``, ...), and between two ``Legendre`` forms of different
+order it also needs a padding convention. Guessing any of that would produce
+numbers that look right, so :meth:`XYs2d.evaluate` raises and names what is
+missing. Callers that need P(mu|E) today go through the flat
+``AngularDistribution``, which is honest about interpolating on a single grid.
 """
 from __future__ import annotations
 
-from typing import Any
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any, List, Optional, Sequence, Tuple
 
-__all__ = ["XYs2d", "XYs3d", "Regions2d", "Regions3d", "NOT_IMPLEMENTED_NODES"]
+from ..axes import Axes
+from ..enums import ENDF_INT_TO_INTERPOLATION, INTERPOLATION_TO_ENDF_INT, Interpolation, InterpolationQualifier
+from .base import Function1d
 
+__all__ = [
+    "Function2d", "XYs2d", "Regions2d", "XYs3d", "Regions3d",
+    "fromEndfTab2", "toEndfTab2", "NOT_IMPLEMENTED_NODES",
+]
+
+
+class Function2d(ABC):
+    """Abstract base for the §6 two-dimensional functional containers.
+
+    The same four optional attributes every ``functional`` node carries, so a
+    ``regions2d`` can hold ``XYs2d`` children that know their own position.
+    """
+
+    axes: Optional[Axes]
+    label: Optional[str]
+    outerDomainValue: Optional[float]
+    index: Optional[int]
+
+    @property
+    @abstractmethod
+    def domainMin(self) -> float:
+        """Lowest outer-axis value the function is defined at."""
+
+    @property
+    @abstractmethod
+    def domainMax(self) -> float:
+        """Highest outer-axis value the function is defined at."""
+
+
+@dataclass
+class XYs2d(Function2d):
+    """§6. A function of two variables as one 1-d function per outer value.
+
+    ``function1ds`` is ordered and may repeat an ``outerDomainValue``; see the
+    module docstring for why that is not an accident to be cleaned up.
+    """
+
+    function1ds: List[Function1d] = field(default_factory=list)
+    #: Interpolation along the *outer* axis (ENDF's TAB2 ``INT``).
+    interpolation: Interpolation = Interpolation.linlin
+    interpolationQualifier: Optional[InterpolationQualifier] = None
+    axes: Optional[Axes] = None
+    label: Optional[str] = None
+    outerDomainValue: Optional[float] = None
+    index: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        self.interpolation = Interpolation(self.interpolation)
+        if self.interpolationQualifier is not None:
+            self.interpolationQualifier = InterpolationQualifier(self.interpolationQualifier)
+
+    def __len__(self) -> int:
+        return len(self.function1ds)
+
+    def __iter__(self):
+        return iter(self.function1ds)
+
+    def __getitem__(self, index: int) -> Function1d:
+        return self.function1ds[index]
+
+    @property
+    def outerDomainValues(self) -> List[float]:
+        """The outer abscissae, in file order, **duplicates included**."""
+        return [f.outerDomainValue for f in self.function1ds]
+
+    @property
+    def domainMin(self) -> float:
+        if not self.function1ds:
+            return float("nan")
+        return float(self.function1ds[0].outerDomainValue)
+
+    @property
+    def domainMax(self) -> float:
+        if not self.function1ds:
+            return float("nan")
+        return float(self.function1ds[-1].outerDomainValue)
+
+    @property
+    def endfInterpolationCode(self) -> int:
+        """The ENDF-6 ``INT`` for the outer axis (§3.4.4 adopted ENDF's codes)."""
+        return INTERPOLATION_TO_ENDF_INT[self.interpolation]
+
+    def evaluate(self, *args: Any, **kwargs: Any):
+        raise NotImplementedError(
+            "XYs2d.evaluate is deliberately absent. Interpolating between two "
+            "1-d functions depends on interpolationQualifier (§3.4.5) and, for "
+            "Legendre children of different order, on a padding convention. "
+            "Neither is decided, and a wrong answer here is indistinguishable "
+            "from a right one. Use the flat AngularDistribution for P(mu|E)."
+        )
+
+    def __repr__(self) -> str:
+        kinds = {type(f).__name__ for f in self.function1ds}
+        return (
+            f"XYs2d(n={len(self)}, of={'/'.join(sorted(kinds)) or 'nothing'}, "
+            f"interpolation={self.interpolation.value!r})"
+        )
+
+
+@dataclass
+class Regions2d(Function2d):
+    """§6. Adjacent outer-axis regions, each its own :class:`XYs2d`.
+
+    ENDF reaches this shape two ways: a TAB2 with more than one ``(NBT, INT)``
+    pair, and LTT=3, where a Legendre region and a tabulated region meet at a
+    shared energy. Both are the same node.
+
+    **A child may itself be a ``regions2d``, and only for one reason.** An LTT=3
+    section is two TAB2 records, and either of them may carry several
+    interpolation regions of its own. Flattening that into one list of regions
+    would lose *where the split between the two records falls*, which is what
+    tells the encoder how many energies belong to the Legendre TAB2. So the
+    LTT=3 node always has exactly two children, each of which is an ``XYs2d``
+    when its record has one region and a ``regions2d`` when it has more.
+    """
+
+    function2ds: List[Function2d] = field(default_factory=list)
+    axes: Optional[Axes] = None
+    label: Optional[str] = None
+    outerDomainValue: Optional[float] = None
+    index: Optional[int] = None
+
+    def __len__(self) -> int:
+        return len(self.function2ds)
+
+    def __iter__(self):
+        return iter(self.function2ds)
+
+    def __getitem__(self, index: int) -> XYs2d:
+        return self.function2ds[index]
+
+    @property
+    def domainMin(self) -> float:
+        return self.function2ds[0].domainMin if self.function2ds else float("nan")
+
+    @property
+    def domainMax(self) -> float:
+        return self.function2ds[-1].domainMax if self.function2ds else float("nan")
+
+    @property
+    def function1ds(self) -> List[Function1d]:
+        """Every 1-d child of every region, flattened recursively, in file order.
+
+        Duplicated boundary values are **kept**, because they are two distinct
+        functions that happen to share an abscissa, not one function written
+        twice.
+        """
+        out: List[Function1d] = []
+        for region in self.function2ds:
+            out.extend(region.function1ds)
+        return out
+
+    @property
+    def sharesBoundaries(self) -> bool:
+        """Whether each region begins where the previous one ended.
+
+        GNDS expects it and ENDF's own regions satisfy it, but a tape is a tape;
+        this is a question a caller may ask rather than a rule enforced at
+        construction.
+        """
+        return all(
+            self.function2ds[i].domainMax == self.function2ds[i + 1].domainMin
+            for i in range(len(self.function2ds) - 1)
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"Regions2d(n_regions={len(self)}, "
+            f"n_functions={len(self.function1ds)})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The ENDF TAB2 shape, in and out
+# ---------------------------------------------------------------------------
+
+def fromEndfTab2(
+    function1ds: Sequence[Function1d],
+    nbtIntPairs: Sequence[Tuple[int, int]],
+    axes: Optional[Axes] = None,
+    label: Optional[str] = None,
+) -> Function2d:
+    """One ENDF TAB2 → an :class:`XYs2d`, or a :class:`Regions2d` when NR > 1.
+
+    ``NBT`` is **cumulative**, exactly as in
+    :meth:`~kika.nuclear_data.model.functions.regions1d.Regions1d.fromEndfRegions`
+    — region *i* ends at the ``NBT[i]``-th function, one-based, counting from
+    the start of the whole list.
+
+    Unlike ``regions1d``, the split here does **not** duplicate the boundary
+    entry. A TAB2 stores each sub-function exactly once, so region *k* takes
+    records ``NBT[k-1]+1 .. NBT[k]`` and the next region starts at the record
+    after. (The boundary record is still the lower end of the next region's
+    interpolation interval — that is a statement about interpolation, not about
+    storage.) Copying it into both regions the way ``regions1d`` does would
+    write an extra angular distribution into the file.
+    """
+    functions = list(function1ds)
+    pairs = [(int(nbt), int(code)) for nbt, code in nbtIntPairs]
+
+    if len(pairs) <= 1:
+        code = pairs[0][1] if pairs else 2
+        return XYs2d(
+            function1ds=functions,
+            interpolation=ENDF_INT_TO_INTERPOLATION[code],
+            axes=axes,
+            label=label,
+        )
+
+    regions: List[XYs2d] = []
+    previous = 0
+    for order, (nbt, code) in enumerate(pairs):
+        if nbt <= previous:
+            continue
+        regions.append(XYs2d(
+            function1ds=functions[previous:nbt],
+            interpolation=ENDF_INT_TO_INTERPOLATION[code],
+            axes=axes,
+            index=order,
+        ))
+        previous = nbt
+    return Regions2d(function2ds=regions, axes=axes, label=label)
+
+
+def toEndfTab2(form: Function2d) -> Tuple[List[Function1d], List[Tuple[int, int]]]:
+    """The inverse: the flat function list and the cumulative ``(NBT, INT)`` pairs."""
+    if isinstance(form, XYs2d):
+        return list(form.function1ds), [(len(form), form.endfInterpolationCode)]
+
+    if isinstance(form, Regions2d):
+        functions: List[Function1d] = []
+        pairs: List[Tuple[int, int]] = []
+        for region in form.function2ds:
+            if not isinstance(region, XYs2d):
+                raise ValueError(
+                    "this regions2d nests another regions2d, so it is not one "
+                    "TAB2 and cannot be written as one. That nesting means an "
+                    "ENDF LTT=3 section: encode each of its two children "
+                    "separately, as the MF4 encoder does."
+                )
+            functions.extend(region.function1ds)
+            pairs.append((len(functions), region.endfInterpolationCode))
+        return functions, pairs
+
+    raise TypeError(f"not a two-dimensional form: {type(form).__name__}")
+
+
+# ---------------------------------------------------------------------------
+# Still declared, still empty
+# ---------------------------------------------------------------------------
 
 class _UnimplementedNode:
-    """Base for a declared GNDS node with no implementation behind it yet."""
+    """A declared GNDS node with no implementation behind it yet."""
 
     gndsNodeName: str = "?"
-    plannedFor: str = "phase 7b"
+    plannedFor: str = "no phase scheduled"
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         raise NotImplementedError(
@@ -30,24 +304,15 @@ class _UnimplementedNode:
         )
 
 
-class XYs2d(_UnimplementedNode):
-    gndsNodeName = "XYs2d"
-
-
 class XYs3d(_UnimplementedNode):
     gndsNodeName = "XYs3d"
-
-
-class Regions2d(_UnimplementedNode):
-    gndsNodeName = "regions2d"
 
 
 class Regions3d(_UnimplementedNode):
     gndsNodeName = "regions3d"
 
 
-#: Every node declared here, for the reader in phase 5 to consult when it needs
-#: to say "I know this node exists and I cannot read it yet".
-NOT_IMPLEMENTED_NODES = {
-    cls.gndsNodeName: cls for cls in (XYs2d, XYs3d, Regions2d, Regions3d)
-}
+#: Every node still declared without an implementation, for the phase 5 reader
+#: to consult when it needs to say "I know this node exists and I cannot read
+#: it yet".
+NOT_IMPLEMENTED_NODES = {cls.gndsNodeName: cls for cls in (XYs3d, Regions3d)}

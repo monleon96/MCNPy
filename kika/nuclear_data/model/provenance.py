@@ -44,6 +44,21 @@ def _asFloat(value: object) -> Optional[float]:
     return None if value is None else float(value)
 
 
+def _asEndfInt(value: object) -> Optional[int]:
+    """Round, do not truncate, an ENDF field that is conceptually an integer.
+
+    ENDF writes ZA as a fixed-format float and kika's reader rebuilds it as
+    ``mantissa * 10**exponent``, which is not exact: Th-232's ``9.023200+4``
+    comes back as ``90231.99999999999``. ``int()`` on that is 90231, so a
+    section decoded and re-encoded names a different nuclide — and because the
+    flat classes truncate the same way, a gate that compares the model against
+    them agrees on the wrong answer. Caught by comparing against the *file*.
+    """
+    if value is None:
+        return None
+    return int(round(float(value)))
+
+
 @dataclass
 class EndfProvenance(Provenance):
     """ENDF-6 bookkeeping that the physics model has no home for.
@@ -83,10 +98,8 @@ class EndfProvenance(Provenance):
         self.qm = _asFloat(self.qm)
         if self.lr is not None:
             self.lr = int(self.lr)
-        if self.mat is not None:
-            self.mat = int(self.mat)
-        if self.za is not None:
-            self.za = int(self.za)
+        self.mat = _asEndfInt(self.mat)
+        self.za = _asEndfInt(self.za)
 
 
 @dataclass
