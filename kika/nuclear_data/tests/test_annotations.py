@@ -36,12 +36,23 @@ import pytest
 import kika.nuclear_data
 
 
+_PREFIX = "kika.nuclear_data."
+
+
 def _public_modules():
-    """Every module in ``kika.nuclear_data``, tests excluded."""
-    for info in pkgutil.iter_modules(kika.nuclear_data.__path__):
-        if info.name.startswith("_") or info.name == "tests":
+    """Every module in ``kika.nuclear_data``, **recursively**, tests excluded.
+
+    ``walk_packages`` rather than ``iter_modules``: phase 3 of the GNDS roadmap
+    adds ``kika/nuclear_data/model/`` with subpackages of its own, and
+    ``iter_modules`` would have reached only their ``__init__``. Walking also
+    means an import error anywhere in the new model fails this suite the first
+    time it runs, which is the cheapest place to find one.
+    """
+    for info in pkgutil.walk_packages(kika.nuclear_data.__path__, prefix=_PREFIX):
+        parts = info.name[len(_PREFIX):].split(".")
+        if any(part.startswith("_") or part == "tests" for part in parts):
             continue
-        yield importlib.import_module(f"kika.nuclear_data.{info.name}")
+        yield importlib.import_module(info.name)
 
 
 def _checker_namespace(module) -> dict:
