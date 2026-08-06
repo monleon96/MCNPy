@@ -63,6 +63,7 @@ def build_mf34_block(
     mu: np.ndarray,
     c0: np.ndarray,
     a_l_per_pt: np.ndarray,
+    drop: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Dense N×N covariance contribution from MF34 for one experiment.
 
@@ -73,6 +74,23 @@ def build_mf34_block(
     mu : (N,) cos(scattering angle).
     c0 : (N,) c_0(E_j) used by the library at each point.
     a_l_per_pt : (N, L_max) interpolated a_L(E_j) for L = 1..L_max.
+    drop : (N, L_max) bool, optional
+        True where the (point, order) draws on an MF34 parameter the evaluation
+        never determined, so its row AND column are to be excluded. A term
+        contributes only if BOTH its orders are kept — dropping only the
+        variance would leave the correlations behind and is not the same thing.
+
+        WHY THIS EXISTS (roadmap §10.6-1). `row_aggregator` returns an all-zero
+        row for any (shape group, order) with no valid fine bin, so the MC
+        constrains nothing at ~37 % of MF34's parameters — yet the shipped file
+        declares relative variance up to 7.6 (σ_rel ≈ 276 %) at ~95 % of them.
+        Those are NOT invisible here: this function scales a relative block by
+        `a_l_per_pt`, and the file's own MF4 is not zero there. Measured on run
+        86: 2.14 % of the Σ_eval diagonal, reaching 82.9 % of points, with two
+        small datasets above 44 %. It inflates `This_work` alone — JEFF and
+        JENDL carry no such term — so it flatters us. §10.1.8-L14.2.
+
+        Default None keeps every existing number unchanged.
 
     Returns
     -------
@@ -121,6 +139,13 @@ def build_mf34_block(
         if mf34.is_relative[idx]:
             sens_r *= a_l_per_pt[:, l_r - 1]
             sens_c *= a_l_per_pt[:, l_c - 1]
+        if drop is not None:
+            # Zeroing the SENSITIVITY, not the block, is what removes the
+            # parameter's row and its column: a point that draws on a dropped
+            # (group, order) contributes nothing through it, in this term or in
+            # its companion transpose below.
+            sens_r = np.where(drop[:, l_r - 1], 0.0, sens_r)
+            sens_c = np.where(drop[:, l_c - 1], 0.0, sens_c)
 
         sigma += sens_r[:, None] * block * sens_c[None, :]
         if l_r != l_c:
@@ -366,7 +391,33 @@ def build_eval_cov_for_groups(
         for i, e_i in enumerate(e_mev):
             a_l_per_pt[i] = a_l_lookup(lib_key, lib, float(e_i))
 
-        sigma_mf34 = build_mf34_block(lib.get("mf34"), e_mev, mu, c0, a_l_per_pt)
+        # OPT-IN removal of MF34 parameters the evaluation never determined
+        # (roadmap §10.6-1). Absent keys → drop is None → every existing number
+        # is unchanged, and only the library carrying the mask is affected.
+        #
+        # Placed per POINT, by the same nearest-bin convention `build_mf34_block`
+        # uses to place data (`searchsorted(grid, e) - 1`, clamped), so the
+        # re-score removes exactly what `null_slot_exposure.py` sized.
+        #
+        # ⚠ Conservative where a block's grid is coarser than the mask's. The
+        # shipped MF34 sits on four nested grids (673/676/684/703) and the mask
+        # is on the finest, so a point in a dropped base group inside a
+        # partially supported coarse bin is dropped anyway. That over-removes
+        # rather than under-removes, which is the right direction for a term
+        # that inflates our own Sigma_eval.
+        drop = None
+        _mask = lib.get("mf34_null_mask")
+        if _mask is not None:
+            _grid = np.asarray(lib["mf34_null_grid_ev"], dtype=float)
+            _mask = np.asarray(_mask, dtype=bool)
+            g_pt = np.clip(
+                np.searchsorted(_grid, e_mev * 1e6, side="right") - 1,
+                0, _mask.shape[0] - 1,
+            )
+            drop = _mask[g_pt][:, :l_max]
+
+        sigma_mf34 = build_mf34_block(
+            lib.get("mf34"), e_mev, mu, c0, a_l_per_pt, drop=drop)
         sigma_mf33 = build_mf33_block(
             lib.get("mf33_grid_ev"), lib.get("mf33_rel_cov"),
             lib.get("energies_mf4_mev"), e_mev, y_eval,

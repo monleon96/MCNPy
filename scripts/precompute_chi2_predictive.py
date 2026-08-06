@@ -266,6 +266,24 @@ MF33_MF34_CROSS_DIR = os.environ.get("KIKA_MF33_MF34_CROSS_DIR", "").strip()
 # and so the ±1 Cauchy–Schwarz ends can be probed without a new evaluation.
 MF33_MF34_CROSS_SCALE = float(os.environ.get("KIKA_MF33_MF34_CROSS_SCALE", "1.0"))
 
+# ── Removing MF34 parameters the evaluation never determined (roadmap §10.6-1) ─
+# Path to the npz from `build_group_cross.py --write-null-mask`. Unset → nothing
+# changes, which is what every run up to 90 did.
+#
+# WHY. `row_aggregator` returns an all-zero row for any (shape group, order) with
+# no valid fine bin, so the MC constrains nothing at 1542 of 4218 parameters --
+# and the shipped file still declares relative variance up to 7.6 (sigma_rel
+# ~ 276 %) at ~95 % of them. §10.1.8-L11 established the chi2 folds them at FULL
+# weight, because `build_mf34_block` scales the relative block by the file's own
+# MF4 interpolated onto each EXFOR energy, which is NOT zero there. Measured on
+# run 86 by `null_slot_exposure.py`: 2.14 % of the Sigma_eval diagonal, 82.9 % of
+# points touched, two small datasets above 44 %, Cierjacks at 3.0 %.
+#
+# ⚠ THIS_WORK ONLY, and that asymmetry is the point rather than a bug: JEFF and
+# JENDL ship no such term, so the inflation is one-sided in OUR favour. Applying
+# a mask derived from our MC to their files would be meaningless.
+MF34_NULL_MASK = os.environ.get("KIKA_MF34_NULL_MASK", "").strip()
+
 OUTPUT_PARQUET = (
     "/share_snc/snc/JuanMonleon/chi2/"
     f"chi2_data_predictive_{RUN_TAG}{_FOLD_SUFFIX[FOLD_MODE]}.parquet"
@@ -739,6 +757,32 @@ def main() -> None:
     else:
         print(f"\n[XCROSS] MF33↔MF34 cross block OFF (zero) — "
               f"Sigma_eval = Sigma^MF34 + Sigma^MF33, as in runs 82-86.")
+
+    # Opt-in removal of unsupported MF34 parameters, This_work only (§10.6-1).
+    if MF34_NULL_MASK:
+        _z = np.load(MF34_NULL_MASK)
+        _m, _g = np.asarray(_z["null_mask"], bool), np.asarray(_z["shape_grid_ev"], float)
+        if _g.size != _m.shape[0] + 1:
+            raise SystemExit(
+                f"{MF34_NULL_MASK}: mask is {_m.shape} but the grid has {_g.size} "
+                f"edges. These must come from the SAME build_group_cross run."
+            )
+        libraries["This_work"]["mf34_null_mask"] = _m
+        libraries["This_work"]["mf34_null_grid_ev"] = _g
+        print(f"\n[NULLMASK] Unsupported MF34 parameters REMOVED for This_work only.")
+        print(f"[NULLMASK]   source : {MF34_NULL_MASK}")
+        print(f"[NULLMASK]   {int(_m.sum())} of {_m.size} (group, order) slots, "
+              f"on {_m.shape[0]} shape groups")
+        print(f"[NULLMASK]   by order: " + "  ".join(
+            f"a_{l+1} {int(_m[:, l].sum())}" for l in range(_m.shape[1])))
+        print(f"[NULLMASK]   These are parameters `row_aggregator` never "
+              f"populated; the file declares up to 7.6 relative variance there "
+              f"and the fold was applying it at full weight (§10.1.8-L14.2).")
+        print(f"[NULLMASK]   JEFF and JENDL are untouched — they ship no such "
+              f"term, so this asymmetry REMOVES a bias in our favour.")
+    else:
+        print(f"\n[NULLMASK] OFF — unsupported MF34 parameters are folded at "
+              f"full weight, as in runs 82-90.")
 
     missing_mf33 = [k for k, v in libraries.items() if v.get("mf33_rel_cov") is None]
     if missing_mf33:

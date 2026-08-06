@@ -21,7 +21,7 @@ if str(_ROOT) not in sys.path:
 
 from kika.cov.legendre_covariance import LegendreCovariance
 
-from scripts.eval_covariance import build_mf34_block
+from scripts.eval_covariance import build_eval_cov_for_groups, build_mf34_block
 from scripts.null_slot_exposure import L_MAX, mf34_diag
 
 
@@ -124,3 +124,82 @@ def test_drop_is_per_point(case):
     got, _ = mf34_diag(mf34, e_mev, mu, c0, a_l, drop=drop)
     assert np.all(got[::2] == 0.0)
     np.testing.assert_array_equal(got[1::2], full[1::2])
+
+
+# ── the production path: build_mf34_block's own `drop` (roadmap §10.6-1) ──────
+
+def test_block_drop_matches_the_diagnostic(case):
+    """The re-score must remove exactly what the diagnostic sized.
+
+    `null_slot_exposure` measured a SIZE off its own diagonal helper; the
+    re-score removes it inside `build_mf34_block`. If those two disagree, the
+    chi2 answers a different question from the one that motivated it.
+    """
+    mf34, e_mev, mu, c0, a_l, _, _ = case
+    rng = np.random.default_rng(5)
+    drop = rng.random((e_mev.size, L_MAX)) < 0.3
+    ref, _ = mf34_diag(mf34, e_mev, mu, c0, a_l, drop=drop)
+    got = np.diag(build_mf34_block(mf34, e_mev, mu, c0, a_l, drop=drop))
+    np.testing.assert_allclose(got, ref, rtol=1e-12, atol=0.0)
+
+
+def test_block_drop_none_is_the_old_behaviour(case):
+    """Default None must leave every existing number bit-identical."""
+    mf34, e_mev, mu, c0, a_l, _, _ = case
+    ref = build_mf34_block(mf34, e_mev, mu, c0, a_l)
+    got = build_mf34_block(mf34, e_mev, mu, c0, a_l, drop=None)
+    np.testing.assert_array_equal(got, ref)
+    zeros = build_mf34_block(mf34, e_mev, mu, c0, a_l,
+                             drop=np.zeros((e_mev.size, L_MAX), bool))
+    np.testing.assert_array_equal(zeros, ref)
+
+
+def test_block_drop_removes_rows_and_columns(case):
+    """Off the diagonal too — a dropped point couples to nothing, either way.
+
+    The diagonal helper can only ever check `drop[j] or drop[j]`; this is the
+    half of the semantics it structurally cannot see.
+    """
+    mf34, e_mev, mu, c0, a_l, _, _ = case
+    N = e_mev.size
+    drop = np.zeros((N, L_MAX), bool)
+    drop[3, :] = True
+    S = build_mf34_block(mf34, e_mev, mu, c0, a_l, drop=drop)
+    assert np.all(S[3, :] == 0.0), "the dropped point's row must vanish"
+    assert np.all(S[:, 3] == 0.0), "and its column"
+    keep = [i for i in range(N) if i != 3]
+    ref = build_mf34_block(mf34, e_mev, mu, c0, a_l)
+    np.testing.assert_allclose(S[np.ix_(keep, keep)], ref[np.ix_(keep, keep)],
+                               rtol=1e-12, atol=0.0)
+
+
+def test_eval_cov_honours_the_library_mask(case):
+    """`build_eval_cov_for_groups` must place the mask the consumer's way.
+
+    The mask is per (shape group, order); the fold places each point by
+    `searchsorted(grid, e) - 1`, clamped. This asserts the orchestrator does the
+    same, because a half-bin offset here would silently mask the wrong groups.
+    """
+    import pandas as pd
+
+    mf34, e_mev, mu, c0, a_l, grid_ev, _ = case
+    N = e_mev.size
+    df = pd.DataFrame({
+        "library": ["This_work"] * N, "experiment_id": ["X"] * N,
+        "energy_mev": e_mev, "mu": mu, "c0": c0, "y_eval": np.ones(N),
+    })
+    n_g = grid_ev.size - 1
+    mask = np.zeros((n_g, L_MAX), bool)
+    mask[1, 0] = True                      # group 1 unsupported at order 1
+    lib = {"mf34": mf34, "mf34_null_mask": mask, "mf34_null_grid_ev": grid_ev}
+
+    out = build_eval_cov_for_groups(
+        df, {"This_work": lib}, lambda k, l, e: a_l[np.argmin(np.abs(e_mev - e))],
+        l_max=L_MAX)
+    got = np.diag(out[("This_work", "X")])
+
+    g_pt = np.clip(np.searchsorted(grid_ev, e_mev * 1e6, side="right") - 1,
+                   0, n_g - 1)
+    ref, _ = mf34_diag(mf34, e_mev, mu, c0, a_l, drop=mask[g_pt])
+    assert (g_pt == 1).any(), "the fixture must actually hit the masked group"
+    np.testing.assert_allclose(got, ref.astype(np.float32), rtol=1e-5, atol=0.0)

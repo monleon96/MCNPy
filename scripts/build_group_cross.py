@@ -580,6 +580,13 @@ def main():
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--write", action="store_true")
     ap.add_argument(
+        "--c33-from-file", action="store_true",
+        help="Also diagnose against the MF33 read from the SOURCE ENDF -- the "
+             "one the chi2 actually folds -- instead of only the 188-group "
+             "adaptive sidecar the joint is certified against. Roadmap "
+             "§10.6-3 item 5. Costs one extra ENDF parse.",
+    )
+    ap.add_argument(
         "--write-null-mask", metavar="OUT.npz",
         help="Emit the (n_shape_groups, L_MAX) boolean mask of (group, order) "
              "slots the MC never populated, with the shape grid and a_nom_group. "
@@ -846,6 +853,60 @@ def main():
           "                      MF34 is folded relative (x a_l(E_j)) and Cx\n"
           "                      absolute, so the two legs differ by a factor\n"
           "                      that crosses zero. Sec. 10.1.8-L13.")
+
+    # ── THE MF33 THE CHI2 ACTUALLY FOLDS (roadmap §10.6-3 item 5) ─────────────
+    # Every PSD row above -- and every one in §§J, K, L3, L12 -- takes `c33_ship`
+    # from `mf33_multigroup_relative_covariance.npy`, the 188-group adaptive
+    # object, which is also the cross sidecar's magnitude axis. THE CHI2 DOES NOT
+    # FOLD THAT. It reads MF33 out of the ENDF (2317 bins on run 86's file) and
+    # averages each point over its MF4 bin onto that grid via `W`
+    # (`eval_covariance.build_mf33_block`). So this is §L3's mistake with the
+    # MAGNITUDE leg in place of the shape leg: a trio verified that is not the
+    # trio folded, and nobody had checked it for MF33.
+    #
+    # The cross block's magnitude axis is expanded onto the file's grid by
+    # DUPLICATION -- under the group model the relative sigma perturbation of a
+    # file bin inside group m IS group m's, so Cov(bin, a_l) = Cov(group m, a_l).
+    # Same reading §K uses for MF34's four nested grids. Bins outside the
+    # 188-group span get zero: the cross block says nothing there.
+    if args.c33_from_file:
+        from scripts.precompute_chi2_library_c0 import load_library_lib_c0
+
+        print("\n=== re-certifying against the MF33 the chi2 folds ===")
+        lib = load_library_lib_c0(str(source_endf), "This work")
+        g33 = np.asarray(lib.get("mf33_grid_ev"), float)
+        c33_file = np.asarray(lib.get("mf33_rel_cov"), float)
+        if c33_file.ndim != 2 or g33.size != c33_file.shape[0] + 1:
+            raise SystemExit(
+                f"MF33 from the file is {c33_file.shape} against {g33.size} "
+                f"edges; cannot re-certify.")
+        print(f"  file MF33: {c33_file.shape[0]} bins   "
+              f"sidecar magnitude axis: {n_gm} groups")
+
+        cen33 = 0.5 * (g33[:-1] + g33[1:])
+        m_of = np.searchsorted(mag_ev, cen33, side="right") - 1
+        inside = (m_of >= 0) & (m_of < n_gm)
+        cx_file = np.zeros((c33_file.shape[0], cx_post.shape[1]))
+        cx_file[inside] = cx_post[m_of[inside]]
+        print(f"  file bins inside the sidecar's span: "
+              f"{int(inside.sum())} of {inside.size}; the rest carry no cross "
+              f"covariance and are written zero")
+
+        rows3 = [
+            diagnose("A' file MF33, Cx = 0   (the real run-86 baseline)",
+                     c33_file, rel_ship_K, np.zeros_like(cx_file[:, K])),
+            diagnose("B' file MF33 + Cx      (what run 89 really folded)",
+                     c33_file, rel_ship_K, cx_file[:, K]),
+            diagnose("C' file MF33 + Cx, rebuilt MF34 (run 90)",
+                     c33_file, rel_shipfill_K, cx_file[:, K]),
+        ]
+        print("\n=== PSD against the FILE's MF33, in the chi2's own space ===")
+        print(pd.DataFrame(rows3).set_index("case").to_string())
+        print("\n  Read A' against A, and B' against B. A difference means the "
+              "188-group\n  object the joint is certified against is not "
+              "interchangeable with the\n  MF33 the chi2 reads, and every PSD "
+              "number in this document predating\n  2026-08-06 inherits that. "
+              "Sec. 10.6-3 item 5.")
 
     if args.check:
         print("\n--check: nothing written.")

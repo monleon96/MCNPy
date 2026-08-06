@@ -376,6 +376,23 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
         "title":      "χ² analysis — run-90 consistent joint: MF34 from the collapsed Pass-1 replicas + the group-space MF33↔MF34 cross block",
         "systematic_block_col": None,
     },
+    # Run 86 re-scored with the unsupported MF34 parameters removed (roadmap
+    # §10.6-1). Same ENDF, same centrals, same MF33, NO cross block — the only
+    # difference from run 86 is that the 1542 (group, order) slots the MC never
+    # populated no longer contribute. Compare V2/V4 against `predictive_86`:
+    # that difference IS the bias, and it is one-sided in This_work's favour
+    # because JEFF and JENDL carry no such term. Sized at 2.14 % of the Sigma_eval
+    # diagonal before this ran (§10.1.8-L14.2); a diagonal share does not map
+    # linearly onto a chi2, which is why it is re-scored rather than scaled.
+    #
+    # REGISTERED BEFORE THE JOB WAS LAUNCHED. Runs 85 and 89 both died after
+    # their precompute because their entry was missing here (§10.1.8-L1).
+    "predictive_86_nonull": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_86_nonull.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run 86 with MF34 parameters the fit never determined removed",
+        "systematic_block_col": None,
+    },
     # Fold-mode sweep. Identical to `predictive` in every respect except which
     # part of the forward model is resolution-averaged (FOLD_MODE in
     # precompute_chi2_predictive.py). Compare V2 across these to decide, over
