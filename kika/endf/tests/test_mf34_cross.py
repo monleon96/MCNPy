@@ -1,6 +1,6 @@
 """Tests for the opt-in MF34 (L=0, L1) sigma↔a_l cross-block writing.
 
-Covers: structure (LTT=2 upper triangle with a null (0,0) block), round-trip
+Covers: structure (LTT=3 upper triangle with a null (0,0) block), round-trip
 through ``parse_mf34_mt``, byte-identical shape blocks vs the default path, the
 warn-only zero-crossing guard, and input validation.
 """
@@ -44,10 +44,38 @@ def test_cross_structure_and_ltt():
         _shape_cov(), SHAPE_GRID, MAX_ORDER, ZA, AWR, MAT, MT,
         ltt=1, cross_cov=_cross(), cross_energy_grid_ev=CROSS_GRID,
     )
-    assert mf34._ltt == 2
+    # "LTT=3 if either L or L1=0 anywhere in the Section" (ENDF-6 Sec. 34.2).
+    assert mf34._ltt == 3
     pairs = [(ss.l, ss.l1, ss.records[0].lb)
              for ss in mf34._subsections[0].sub_subsections]
     assert pairs == [(0, 0, 5), (0, 1, 6), (0, 2, 6), (1, 1, 5), (1, 2, 6), (2, 2, 5)]
+
+
+def test_declared_nl_is_the_coefficient_count_not_the_max_index():
+    """NL must equal the NUMBER of coefficients, so NSS = NL*(NL+1)/2 holds.
+
+    The section carries a_0..a_MAX_ORDER, so NL = MAX_ORDER + 1.  Declaring the
+    highest index instead under-counts the sub-subsections, and
+    ``parse_mf34_mt`` loops exactly NSS times — so the tail of the section is
+    silently dropped rather than raising.
+    """
+    mf34 = create_mf34_from_covariance(
+        _shape_cov(), SHAPE_GRID, MAX_ORDER, ZA, AWR, MAT, MT,
+        ltt=1, cross_cov=_cross(), cross_energy_grid_ev=CROSS_GRID,
+    )
+    sub = mf34._subsections[0]
+    assert (sub.nl, sub.nl1) == (MAX_ORDER + 1, MAX_ORDER + 1)
+    assert len(sub.sub_subsections) == sub.nl * (sub.nl + 1) // 2
+
+
+def test_default_ltt1_declares_nl_as_the_count_too():
+    """LTT=1 carries a_1..a_max_order, so the count equals max_order."""
+    mf34 = create_mf34_from_covariance(
+        _shape_cov(), SHAPE_GRID, MAX_ORDER, ZA, AWR, MAT, MT, ltt=1,
+    )
+    sub = mf34._subsections[0]
+    assert (sub.nl, sub.nl1) == (MAX_ORDER, MAX_ORDER)
+    assert len(sub.sub_subsections) == sub.nl * (sub.nl + 1) // 2
 
 
 def test_cross_roundtrip():

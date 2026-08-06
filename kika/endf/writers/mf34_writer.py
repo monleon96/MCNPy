@@ -36,8 +36,13 @@ if TYPE_CHECKING:
 
 
 def _l_min_for_ltt(ltt) -> int:
-    """Lowest Legendre index L allowed by the given LTT representation."""
-    return 0 if int(ltt or 1) == 2 else 1
+    """Lowest Legendre index L allowed by the given LTT representation.
+
+    LTT=2 (coefficients start at a_0) and LTT=3 ("if either L or L1=0 anywhere
+    in the Section", ENDF-6 manual Sec. 34.2) both admit a_0; every other value
+    starts at a_1.
+    """
+    return 0 if int(ltt or 1) in (2, 3) else 1
 
 
 def _make_lb5_record(
@@ -249,8 +254,10 @@ def create_mf34_from_covariance(
         a_1..a_L layout, i.e. pass ``ltt=1``), the (L=0, L1>=1) blocks carry the
         cross terms as LB=6 rectangular records on the coarse×shape grids, and
         the (0, 0) magnitude self-block is written **null (zeros)** — magnitude
-        self-covariance belongs in MF33, not MF34.  Default ``None`` leaves the
-        output byte-identical to the pre-existing behavior.
+        self-covariance belongs in MF33, not MF34, which is what the format
+        prescribes (manual Sec. 34.3).  The section is emitted with **LTT=3**
+        and NL = NL1 = ``max_order + 1``.  Default ``None`` leaves the output
+        byte-identical to the pre-existing behavior.
     cross_energy_grid_ev : np.ndarray, optional
         Coarse (magnitude) energy boundaries in eV for the L=0 dimension of the
         cross blocks (``N0 + 1`` values).  Defaults to ``energy_grid_ev``.
@@ -313,8 +320,11 @@ def create_mf34_from_covariance(
 
     subsection = Subsection()
     subsection.mt1 = mt1
-    subsection.nl = max_order
-    subsection.nl1 = max_order
+    # NL/NL1 are the NUMBER of Legendre coefficients carried, not the highest
+    # index (ENDF-6 manual Sec. 34.2).  With l_min = 1 the count equals
+    # max_order, so the LTT=1 output is byte-identical to before.
+    subsection.nl = n_orders
+    subsection.nl1 = n_orders
     subsection.mat1 = 0.0
 
     lct_map = {"same-as-MF4": 0, "LAB": 1, "CM": 2}
@@ -356,13 +366,14 @@ def _create_mf34_with_cross(
     cross_energy_grid_ev: Optional[np.ndarray],
     cross_zero_warn_threshold: float,
 ) -> MF34MT:
-    """LTT=2 builder that appends (L=0, L1) sigma↔a_l cross blocks.
+    """LTT=3 builder that appends (L=0, L1) sigma↔a_l cross blocks.
 
     The L>=1 shape blocks are built from ``cov_matrix`` exactly as the default
     LTT=1 path (so the shape covariance is unchanged); the L=0 row uses the
     coarse magnitude grid, with a null (zeros) (0, 0) block and LB=6 (0, L1)
     cross blocks.  The full upper triangle (including the zero (0, 0)) is
-    emitted so the existing parser's LTT=2 sub-subsection count matches.
+    emitted, which is NSS = NL*(NL+1)/2 for NL = max_order + 1 — the count the
+    format defines for a section whose first coefficient is a_0.
     """
     if int(ltt or 1) != 1:
         raise ValueError(
@@ -419,13 +430,19 @@ def _create_mf34_with_cross(
     mf34._za = za
     mf34._awr = awr
     mf34._mat = mat
-    mf34._ltt = 2
+    # LTT=3 is the flag the format defines for this case: "LTT=3 if either L or
+    # L1=0 anywhere in the Section" (ENDF-6 manual Sec. 34.2), and the same
+    # section's NL definition reads "(The first coefficient is a0 if LTT=3,
+    # a1 if LTT=1)".  LTT=2 was written here previously.
+    mf34._ltt = 3
     mf34._mf = 34
 
     subsection = Subsection()
     subsection.mt1 = mt1
-    subsection.nl = max_order
-    subsection.nl1 = max_order
+    # a_0 .. a_max_order -> max_order + 1 coefficients.  NSS = NL*(NL+1)/2 then
+    # gives the (max_order+1)(max_order+2)/2 sub-subsections emitted below.
+    subsection.nl = max_order + 1
+    subsection.nl1 = max_order + 1
     subsection.mat1 = 0.0
 
     lct_map = {"same-as-MF4": 0, "LAB": 1, "CM": 2}
@@ -485,7 +502,7 @@ def merge_mf34(
     Returns
     -------
     MF34MT
-        New MF34MT whose LTT is set to 2 if any L=0 pair appears in the
+        New MF34MT whose LTT is set to 3 if any L=0 pair appears in the
         merged data, otherwise to the overlay's LTT (or 1 by default).
     """
     from kika.cov.legendre_covariance import LegendreCovariance  # noqa: F401
@@ -525,12 +542,20 @@ def merge_mf34(
     all_l_values = {l for pair in all_ll_pairs for l in pair}
     max_order = max(all_l_values) if all_l_values else 1
     has_l0 = 0 in all_l_values
-    merged._ltt = 2 if has_l0 else (overlay_mf34._ltt or 1)
+    # LTT=3 is the flag for a section carrying a_0, and NL/NL1 are the NUMBER of
+    # Legendre coefficients, not the highest index (ENDF-6 manual Sec. 34.2 —
+    # the same pair of defects fixed in `_create_mf34_with_cross`; this was the
+    # dormant second copy).  Both branches below are UNCHANGED when a_0 is
+    # absent: l_min is then 1, so the count equals max_order and LTT passes
+    # through.  That is what keeps `exfor_to_endf_sampling_v2` — the frozen
+    # thesis pipeline and this function's only production caller, which never
+    # emits a_0 blocks — bit-identical.
+    merged._ltt = 3 if has_l0 else (overlay_mf34._ltt or 1)
 
     subsection = Subsection()
     subsection.mt1 = overlay_mf34.number
-    subsection.nl = max_order
-    subsection.nl1 = max_order
+    subsection.nl = max_order + 1 if has_l0 else max_order
+    subsection.nl1 = subsection.nl
     subsection.mat1 = 0.0
 
     for l, l1 in all_ll_pairs:

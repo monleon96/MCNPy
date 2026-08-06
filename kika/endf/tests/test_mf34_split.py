@@ -298,3 +298,72 @@ def test_merge_roundtrip_serialization():
     # Verify the parsed object can produce a valid covmat
     covmat = parsed.to_ang_covmat()
     assert covmat.num_matrices > 0
+
+
+# ---------- merge_mf34 declares LTT/NL per the format ----------
+
+
+def _merge_with_a0(max_order=2, n=3):
+    """A merge whose result carries a_0, i.e. the LTT=3 case."""
+    from kika.endf.writers.mf34_writer import (
+        create_mf34_from_covariance,
+        merge_mf34,
+    )
+
+    grid = np.array([0.85e6, 1.5e6, 2.5e6, 4.0e6])
+    cov = np.eye(n * max_order) * 1e-3
+    kw = dict(energy_grid_ev=grid, max_order=max_order, za=26056.0,
+              awr=55.454, mat=2631, mt=2, ltt=1)
+    base = create_mf34_from_covariance(cov_matrix=cov, **kw)
+    overlay = create_mf34_from_covariance(
+        cov_matrix=cov,
+        cross_cov={l: 0.01 * np.ones((n, n)) for l in range(1, max_order + 1)},
+        cross_energy_grid_ev=grid, **kw,
+    )
+    return merge_mf34(base, overlay, 1.0e6, 3.0e6)
+
+
+def test_merge_declares_ltt3_and_nl_as_the_count_when_a0_is_present():
+    """The dormant second copy of the Sec. 34.2 defect pair.
+
+    `merge_mf34` set LTT=2 and NL=max_order whenever a_0 appeared — the same
+    two errors `_create_mf34_with_cross` carried. Under-declaring NL is the
+    dangerous one: `parse_mf34_mt` loops exactly NSS = NL(NL+1)/2 times, so a
+    short NL SILENTLY TRUNCATES the tail of the section instead of raising.
+    """
+    max_order = 2
+    merged = _merge_with_a0(max_order=max_order)
+    sub = merged._subsections[0]
+
+    assert merged._ltt == 3
+    assert (sub.nl, sub.nl1) == (max_order + 1, max_order + 1)
+    # The declaration must match what was actually emitted, or the parser
+    # over-reads past the end of the section.
+    assert len(sub.sub_subsections) == sub.nl * (sub.nl + 1) // 2
+    assert 0 in {ss.l for ss in sub.sub_subsections}
+
+
+def test_merge_without_a0_is_unchanged():
+    """The no-a_0 branch must not move: it is what the frozen v2 pipeline uses.
+
+    With l_min = 1 the coefficient count equals the highest index, so NL is the
+    same number under both readings and LTT passes the overlay's value through.
+    """
+    from kika.endf.writers.mf34_writer import (
+        create_mf34_from_covariance,
+        merge_mf34,
+    )
+
+    grid = np.linspace(1e6, 20e6, 6)
+    max_order = 4
+    cov = np.eye(5 * max_order) * 0.01
+    kw = dict(energy_grid_ev=grid, max_order=max_order, za=26056.0,
+              awr=55.47, mat=2631, mt=2)
+    mf = create_mf34_from_covariance(cov_matrix=cov, **kw)
+    merged = merge_mf34(mf, mf, 5e6, 15e6)
+    sub = merged._subsections[0]
+
+    assert merged._ltt == 1
+    assert (sub.nl, sub.nl1) == (max_order, max_order)
+    assert len(sub.sub_subsections) == sub.nl * (sub.nl + 1) // 2
+    assert 0 not in {ss.l for ss in sub.sub_subsections}

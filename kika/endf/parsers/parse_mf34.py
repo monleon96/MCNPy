@@ -23,22 +23,30 @@ logger = get_endf_logger(__name__)
 def _l_min_for_ltt(ltt) -> int:
     """Lowest Legendre index L allowed by the given LTT representation.
 
-    LTT=2 includes a_0; all other LTT values start at a_1.
+    LTT=2 (coefficients start at a_0) and LTT=3 ("if either L or L1=0 anywhere
+    in the Section", ENDF-6 manual Sec. 34.2) both admit a_0; every other value
+    starts at a_1.
     """
-    return 0 if int(ltt or 1) == 2 else 1
+    return 0 if int(ltt or 1) in (2, 3) else 1
 
 
 def _expected_subsubsection_count(nl, nl1, mt: int, mt1, ltt) -> int:
     """Number of (L, L1) sub-subsections per ENDF-6 MF34 conventions.
 
-    For MT1 == MT only the upper triangle is stored
-    (count = N*(N+1)/2).  Otherwise every (L, L1) pair is stored
-    (count = N * N1).  N and N1 are the number of Legendre orders given
-    NL/NL1 and the L_min implied by LTT.
+    For MT1 == MT only the upper triangle is stored (count = NL*(NL+1)/2);
+    otherwise every (L, L1) pair is stored (count = NL * NL1).  ENDF-6 manual
+    Sec. 34.2, which defines NL as the *number* of Legendre coefficients
+    carried -- "NL Number of Legendre coefficients for which covariance data
+    are given ... (The first coefficient is a0 if LTT=3, a1 if LTT=1)" -- not
+    the highest index.  With l_min = 1 the two readings coincide, which is why
+    LTT=1 files are unaffected by this distinction; they differ only when a_0
+    is present, where the count is max_order + 1.
+
+    ``ltt`` is retained in the signature for callers and for symmetry with
+    :func:`_l_min_for_ltt`; the count itself depends only on NL/NL1.
     """
-    l_min = _l_min_for_ltt(ltt)
-    n = max(0, int(nl or 0) - l_min + 1)
-    n1 = max(0, int(nl1 or 0) - l_min + 1)
+    n = max(0, int(nl or 0))
+    n1 = max(0, int(nl1 or 0))
     if mt1 == mt:
         return n * (n + 1) // 2
     return n * n1
