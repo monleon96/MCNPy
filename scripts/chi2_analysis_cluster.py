@@ -351,6 +351,31 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
         "title":      "χ² analysis — run-88 evaluation with the COMPLETE MF33↔MF34 cross block, declared σ_E in the fold",
         "systematic_block_col": None,
     },
+    # ⚠ RUN 89 HAS NO ENTRY ON PURPOSE, AND THAT IS THE POINT. It was never
+    # added, so the job died on `Unknown methodology entry: ['predictive_89']`
+    # after the 11 GB precompute had already succeeded — the identical omission
+    # that cost run 85 its analysis (roadmap "Run 85's χ² — the recovery"). The
+    # runner's `|| echo "[FAIL] not PD in chi2"` fired on the non-zero exit and
+    # misreported it as a Cholesky failure. Nothing was scored at tag 89.
+    #
+    # Run 90 is the repair, and it is a different evaluation, not a re-run:
+    # run 89 shipped cx_post as a sidecar next to the FILE's MF34, a pairing
+    # that had never been diagnosed and measures σ_max(K) = 41.27,
+    # λ_min/scale = −0.447 (§10.1.8-L). Run 90 ships the marginals the cross
+    # block was built with — MF34 rebuilt from the same collapsed Pass-1
+    # replicas, published σ's preserved to 2.8e-17 — so the joint is PSD by
+    # construction rather than by repair.
+    #
+    # vs run 86: same MF3, MF4 and MF33; MF34 differs in its CORRELATIONS only
+    # (median |Δρ| 0.0000, p95 0.0376), plus the cross term. So `predictive_90`
+    # against `predictive_86` prices exactly one thing: making the file
+    # internally consistent and carrying σ↔shape correlation.
+    "predictive_90": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_90.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run-90 consistent joint: MF34 from the collapsed Pass-1 replicas + the group-space MF33↔MF34 cross block",
+        "systematic_block_col": None,
+    },
     # Fold-mode sweep. Identical to `predictive` in every respect except which
     # part of the forward model is resolution-averaged (FOLD_MODE in
     # precompute_chi2_predictive.py). Compare V2 across these to decide, over
