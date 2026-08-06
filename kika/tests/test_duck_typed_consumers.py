@@ -134,39 +134,56 @@ def endf_for_collapse(micro_tape):
     return read_endf(str(micro_tape))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "MF34_to_MG reads _pendf_mt._energies / ._cross_sections "
-        "(kika/cov/multigroup/collapse.py:958 and :941), which only MF3MT has. "
-        "But its own docstring at :734 tells the caller to write "
-        "`endf.pendf = kika.processing.njoy_reconstruct(...)`, and that returns "
-        "Dict[int, CrossSection]. So the documented recipe raises AttributeError. "
-        "The existing golden passes because it feeds MF3MT objects from "
-        "kika.endf.processing.reconstruct instead. Not fixed here: this "
-        "increment adds tests only. Fix belongs with phase 4's move of the "
-        "calculations onto the model, or sooner as its own commit."
-    ),
-)
-def test_mf34_to_mg_accepts_the_pendf_its_own_docstring_recommends(endf_for_collapse):
-    from kika.cov.multigroup.collapse import MF34_to_MG
+def test_mf34_to_mg_gives_the_same_answer_for_both_pendf_shapes(endf_for_collapse):
+    """Both ``pendf`` shapes, same numbers — not merely "neither crashes".
 
-    endf = endf_for_collapse
-    # The shape njoy_reconstruct hands back, which is what the docstring names.
-    endf.pendf = {2: CrossSection.from_endf(endf.mf[3].mt[2])}
+    This was a real defect. ``MF34_to_MG``'s docstring tells the caller to
+    write ``endf.pendf = kika.processing.njoy_reconstruct(...)``, which yields
+    ``Dict[int, CrossSection]``, while ``collapse.py`` read ``_energies`` and
+    ``_cross_sections`` — names only ``MF3MT`` has. The documented recipe
+    raised ``AttributeError``, and the golden never noticed because it feeds
+    ``MF3MT`` from ``kika.endf.processing.reconstruct`` instead. Fixed by
+    ``collapse._pendf_grid``.
 
-    MF34_to_MG(endf, energy_grid=MG_GRID_EV, mt=2)
-
-
-def test_mf34_to_mg_works_on_the_shape_the_golden_actually_feeds(endf_for_collapse):
-    """The other half of the pair above: MF3MT sections do work.
-
-    Keeping both means the xfail above is attributable to the *shape* of
-    ``pendf`` and not to anything else about the collapse.
+    Equality is the assertion that matters: reading sigma off a different
+    attribute of the same data must not move the collapsed matrix.
     """
     from kika.cov.multigroup.collapse import MF34_to_MG
 
     endf = endf_for_collapse
-    endf.pendf = {2: endf.mf[3].mt[2]}
+    raw = endf.mf[3].mt[2]
 
-    MF34_to_MG(endf, energy_grid=MG_GRID_EV, mt=2)
+    endf.pendf = {2: raw}
+    from_mf3mt = MF34_to_MG(endf, energy_grid=MG_GRID_EV, mt=2)
+
+    endf.pendf = {2: CrossSection.from_endf(raw)}
+    from_cross_section = MF34_to_MG(endf, energy_grid=MG_GRID_EV, mt=2)
+
+    np.testing.assert_array_equal(
+        np.asarray(from_mf3mt.energy_grid, dtype=float),
+        np.asarray(from_cross_section.energy_grid, dtype=float),
+    )
+    for attr in ("relative_matrices", "absolute_matrices"):
+        left = getattr(from_mf3mt, attr)
+        right = getattr(from_cross_section, attr)
+        assert len(left) == len(right) and left, f"{attr} is empty"
+        for i, (a, b) in enumerate(zip(left, right)):
+            np.testing.assert_array_equal(
+                np.asarray(a, dtype=float),
+                np.asarray(b, dtype=float),
+                err_msg=f"{attr}[{i}] moved with the pendf shape",
+            )
+
+
+def test_a_pendf_section_of_an_unknown_shape_is_refused(endf_for_collapse):
+    """Silence here would mean an unweighted collapse reported as a weighted one."""
+    from kika.cov.multigroup.collapse import MF34_to_MG
+
+    class _Nothing:
+        pass
+
+    endf = endf_for_collapse
+    endf.pendf = {2: _Nothing()}
+
+    with pytest.raises(TypeError, match="exposes neither"):
+        MF34_to_MG(endf, energy_grid=MG_GRID_EV, mt=2)
