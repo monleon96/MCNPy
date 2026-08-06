@@ -56,6 +56,7 @@ from .functions import (
     XYs3d,
     Ys1d,
 )
+from .conversion import ConversionReport
 from .covariances import (
     CovarianceMatrix,
     CovarianceSection,
@@ -89,6 +90,7 @@ from .distributions import (
 )
 from .output_channel import Multiplicity, OutputChannel, Product, Products, Q
 from .pops import Nuclide, Particle, PoPs
+from .provenance import AceProvenance, EndfProvenance, Provenance
 from .quantities import PhysicalQuantity
 from .quantities import Uncertainty as ScalarUncertainty
 from .reaction_id import ReactionId
@@ -172,6 +174,8 @@ __all__ = [
     "Resonances", "ResolvedRegion", "UnresolvedRegion", "ScatteringRadius",
     "BreitWigner", "BreitWignerApproximation", "Resonance", "SpinGroup",
     "RMatrix", "RMatrixSpinGroup", "Channel", "TabulatedWidths",
+    # conversion bookkeeping (not GNDS nodes)
+    "ConversionReport", "Provenance", "EndfProvenance", "AceProvenance",
     # §25 covariances
     "CovarianceSuite", "CovarianceSection", "DataLink", "CovarianceMatrix",
     "Mixed", "Sum", "Slice", "Slices",

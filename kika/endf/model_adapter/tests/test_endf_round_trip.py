@@ -1,0 +1,189 @@
+"""The real phase 3c gate: the model reproduces the flat path, byte for byte.
+
+**Why not "ENDF → model → ENDF byte-identical".** That is what the roadmap
+originally asked for, and it measures almost nothing. The writer is
+patch-in-place (``kika/endf/writers/endf_writer.py:162-166``): whatever it is
+not handed survives verbatim, so the assertion stays true even if the model
+computes garbage, as long as the garbage is never given to the writer. It is
+also already what the tier-1 golden asserts.
+
+The gate here is narrower and much stronger — per MF/MT section,
+
+    str(encodeMF3MT(decoded_reaction))  ==  str(CrossSection.from_endf(s).to_endf())
+
+which compares what the model produced against what the code it is replacing
+produces from the same input. If the model drops a field, rounds a number or
+reorders a region, this fails and the other formulation would not.
+"""
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from kika.endf.model_adapter import decodeMF3MT, decodeReactionSuite, encodeMF3MT
+from kika.endf.read_endf import read_endf
+from kika.nuclear_data import CrossSection
+
+
+@pytest.fixture(scope="module")
+def decoded(micro_tape):
+    endf = read_endf(str(micro_tape))
+    suite, report = decodeReactionSuite(endf)
+    return endf, suite, report
+
+
+def test_the_fixture_has_sections_to_compare(decoded):
+    """A tape with no MF3 would make every comparison below vacuous."""
+    endf, suite, _ = decoded
+    assert len(endf.mf[3].mt) >= 3
+    assert len(suite.reactions) == len(endf.mf[3].mt)
+
+
+def test_every_mf3_section_encodes_byte_identically_to_the_flat_path(decoded):
+    endf, suite, _ = decoded
+
+    for mt in sorted(endf.mf[3].mt):
+        section = endf.mf[3].mt[mt]
+        viaModel, _ = encodeMF3MT(suite.reactionByENDF_MT(mt))
+        viaFlat = CrossSection.from_endf(section).to_endf()
+
+        assert str(viaModel) == str(viaFlat), f"MT{mt} differs from the flat path"
+
+
+@pytest.mark.parametrize(
+    "tape", ["fe56_host_tape", "fe56_jendl_tape", "u235_tape", "th232_tape"]
+)
+def test_the_same_holds_on_real_tapes(request, tape):
+    """Under ``--deep``, on the real evaluations, not just the committed slice."""
+    path = request.getfixturevalue(tape)
+    endf = read_endf(str(path))
+    suite, _ = decodeReactionSuite(endf)
+
+    for mt in sorted(endf.mf[3].mt):
+        section = endf.mf[3].mt[mt]
+        viaModel, _ = encodeMF3MT(suite.reactionByENDF_MT(mt))
+        viaFlat = CrossSection.from_endf(section).to_endf()
+        assert str(viaModel) == str(viaFlat), f"{tape} MT{mt} differs from the flat path"
+
+
+# ---------------------------------------------------------------------------
+# Provenance keeps what the metadata dict kept
+# ---------------------------------------------------------------------------
+
+def test_provenance_carries_every_key_the_metadata_contract_pins(decoded):
+    """``kika/nuclear_data/tests/test_metadata_contract.py`` froze the ENDF key
+    set. ``Provenance`` replaces that dict, and the replacement is only lossless
+    if every key still has a home."""
+    endf, suite, _ = decoded
+    section = endf.mf[3].mt[2]
+    flat = CrossSection.from_endf(section)
+    reaction = suite.reactionByENDF_MT(2)
+    provenance = reaction.provenance
+
+    assert provenance.mat == flat.metadata["mat"]
+    assert provenance.awr == pytest.approx(flat.metadata["awr"])
+    assert provenance.qm == pytest.approx(flat.metadata["qm"])
+    assert provenance.lr == flat.metadata["lr"]
+    assert provenance.interpolationRegions == flat.metadata["interpolation_regions"]
+
+    # `qi` is not provenance: it is the reaction's Q value, and it lives on the
+    # output channel where §17.1.1 puts it.
+    assert reaction.outputChannel.Q.value == pytest.approx(flat.metadata["qi"])
+
+
+def test_a_missing_q_is_none_and_not_zero(decoded):
+    """The distinction the untyped dict could not make.
+
+    ``metadata.get('qi', 0.0)`` returns the same thing for "the Q is zero" and
+    "there is no Q", which is half of the Q = 0 defect. ``Q.value is None`` says
+    the second, and the encoder refuses rather than writing a zero.
+    """
+    from kika.nuclear_data.model import (EVAL_LABEL, EndfProvenance, Reaction,
+                                          ReactionId, Regions1d)
+
+    reaction = Reaction(id=ReactionId(label="MT102", ENDF_MT=102))
+    assert reaction.outputChannel.Q.value is None
+    assert reaction.outputChannel.Q.isKnown is False
+
+    # Give it everything *except* a Q, so the failure is attributable to the Q
+    # and not to some other missing piece.
+    reaction.crossSection[EVAL_LABEL] = Regions1d.fromEndfRegions(
+        np.array([1.0, 10.0]), np.array([2.0, 3.0]), [(2, 2)]
+    )
+    reaction.provenance = EndfProvenance(mat=2631, awr=55.0, za=26056, qm=0.0, lr=0)
+
+    with pytest.raises(ValueError, match=r"carries no .*qi"):
+        encodeMF3MT(reaction)
+
+    # And with a Q it writes, which is what makes the failure above meaningful.
+    reaction.outputChannel.Q.value = 0.0
+    section, _ = encodeMF3MT(reaction)
+    assert section.number == 102
+
+
+def test_the_reconstructed_regions_agree_with_the_file_s_own_pairs(decoded):
+    """The encoder prefers the file's ``(NBT, INT)`` pairs over the rebuilt ones.
+
+    They agree — this asserts it — but preferring the original means a round
+    trip does not depend on that agreement holding for every tape ever written.
+    """
+    endf, suite, _ = decoded
+    for mt in sorted(endf.mf[3].mt):
+        reaction = suite.reactionByENDF_MT(mt)
+        _, _, rebuilt = reaction.crossSection["eval"].toEndfRegions()
+        assert rebuilt == reaction.provenance.interpolationRegions, (
+            f"MT{mt}: rebuilding the regions from regions1d does not reproduce "
+            f"the file's own pairs"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The report declares what is missing
+# ---------------------------------------------------------------------------
+
+def test_the_report_names_every_mf_the_decoder_did_not_read(decoded):
+    """The phase 7 hard rule, applied from the first decoder.
+
+    *"A structurally valid, physically incomplete reactionSuite is worse than
+    none, because it carries authority it has not earned."* So the gaps are
+    declared, by MF number, rather than left for a reader to notice.
+    """
+    endf, _, report = decoded
+
+    assert report.unsupported, "the micro-tape has MF2 and MF4; neither is read yet"
+    text = " ".join(report.unsupported)
+    for mf in sorted(set(endf.mf) - {1, 3}):
+        assert f"MF{mf}" in text, f"MF{mf} is in the file and the report does not mention it"
+
+
+def test_a_report_is_always_present_even_when_it_says_nothing():
+    """``if report:`` must not read "nothing to report" as "no report"."""
+    from kika.nuclear_data.model import ConversionReport
+
+    report = ConversionReport()
+    assert bool(report) is True
+    assert report.isClean and report.isEmpty
+    assert report.summary() == "clean"
+
+
+def test_decoding_one_section_reports_a_missing_interpolation_region():
+    """An approximation is declared, because an approximation looks like data."""
+    from kika.nuclear_data.model import ConversionReport
+
+    class _Section:
+        number = 2
+        energies = [1.0, 10.0]
+        cross_sections = [1.0, 2.0]
+        energy_interpolation: list = []
+        atomic_weight_ratio = 55.0
+        q_mass_difference = 0.0
+        q_reaction = 0.0
+        breakup_flag = 0
+        zaid = 26056
+        _mat = 2631
+
+    report = ConversionReport()
+    _, report = decodeMF3MT(_Section(), report)
+
+    assert report.approximations
+    assert "lin-lin" in report.approximations[0]

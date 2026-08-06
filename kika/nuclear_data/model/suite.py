@@ -113,6 +113,10 @@ class ReactionSuite:
     #: `externalFiles` points at, and the writer must emit them that way.
     covarianceSuite: Optional[CovarianceSuite] = None
 
+    #: Not a GNDS node either -- the MF1/451 header, kept so the encoder can
+    #: write it back byte for byte. See Reaction.provenance.
+    provenance: Optional[object] = None
+
     def __post_init__(self) -> None:
         self.projectileFrame = Frame(self.projectileFrame)
         if self.interaction not in INTERACTIONS:

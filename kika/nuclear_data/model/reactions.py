@@ -22,6 +22,11 @@ class Reaction:
     doubleDifferentialCrossSection: Optional[object] = None
     availableEnergy: Optional[object] = None
     availableMomentum: Optional[object] = None
+    #: Not a GNDS node. Where the section came from, in its own format's terms,
+    #: so an encoder can write it back without recomputing anything. GNDS keeps
+    #: this kind of thing in `documentation`; kika keeps it typed and separate
+    #: because the encoders need it and `documentation` is free text.
+    provenance: Optional[object] = None
 
     @property
     def label(self) -> str:
