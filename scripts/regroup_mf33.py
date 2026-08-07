@@ -116,12 +116,15 @@ def _read_mf33_mt2(path):
     the grids come back in eV whatever `energy_unit` says (that parameter is a
     label for MF34 and a no-op — roadmap §10.7-2(c)).
     """
-    from kika.cov import CrossSectionCovariance
+    from kika.endf import read_endf
 
-    cov = CrossSectionCovariance.from_endf(str(path), mf=33)
+    endf = read_endf(str(path), mf_numbers=[33])
+    mf33 = endf.get_file(33)
+    if mf33 is None or MT not in mf33.sections:
+        raise SystemExit(f"MF33/MT={MT} not present in {path.name}")
+    cov = mf33.sections[MT].to_xs_covmat(energy_unit="MeV")
     for i in range(cov.num_matrices):
-        if (int(cov.reaction_rows[i]) == MT and int(cov.reaction_cols[i]) == MT
-                and int(cov.isotope_rows[i]) == ZA):
+        if int(cov.reaction_rows[i]) == MT and int(cov.reaction_cols[i]) == MT:
             if not bool(cov.is_relative[i]):
                 raise SystemExit("MT2 self block came back absolute; expected relative")
             return (np.asarray(cov.energy_grids[i], float),
@@ -136,6 +139,11 @@ def main():
     ap.add_argument("--out", help="destination; required unless --check")
     ap.add_argument("--check", action="store_true",
                     help="measure the inputs and write nothing")
+    ap.add_argument("--verify-only", action="store_true",
+                    help="skip the copy/merge and re-read an --out that already "
+                         "exists. The verification is two 200 MB ENDF parses and "
+                         "the write is one more, so a reader bug should not cost "
+                         "the write again.")
     args = ap.parse_args()
 
     src, run_dir = Path(args.source), Path(args.run_dir)
@@ -166,21 +174,28 @@ def main():
         raise SystemExit("--out is required unless --check")
 
     out = Path(args.out)
-    print(f"\ncopying {src.name} -> {out.name} ...", flush=True)
-    shutil.copyfile(src, out)
+    if args.verify_only:
+        if not out.exists():
+            raise SystemExit(f"--verify-only needs {out} to exist already")
+        print(f"\n--verify-only: re-reading {out.name} "
+              f"({out.stat().st_size} bytes, "
+              f"{out.stat().st_size - src.stat().st_size:+d})")
+    else:
+        print(f"\ncopying {src.name} -> {out.name} ...", flush=True)
+        shutil.copyfile(src, out)
 
-    from kika.endf.writers.mf33_writer import (
-        merge_mf33_covariance_into_host, write_mf33_to_file,
-    )
+        from kika.endf.writers.mf33_writer import (
+            merge_mf33_covariance_into_host, write_mf33_to_file,
+        )
 
-    print("merging the GROUP matrix into MT2 (MT1 and every other section "
-          "stay as shipped) ...", flush=True)
-    section = merge_mf33_covariance_into_host(
-        host_endf=str(out), cov_matrix=cov_c, energy_grid_ev=grid_c, mt=MT,
-    )
-    write_mf33_to_file(str(out), section, str(out))
-    print(f"  written: {out}  ({out.stat().st_size} bytes, "
-          f"{out.stat().st_size - src.stat().st_size:+d})")
+        print("merging the GROUP matrix into MT2 (MT1 and every other section "
+              "stay as shipped) ...", flush=True)
+        section = merge_mf33_covariance_into_host(
+            host_endf=str(out), cov_matrix=cov_c, energy_grid_ev=grid_c, mt=MT,
+        )
+        write_mf33_to_file(str(out), section, str(out))
+        print(f"  written: {out}  ({out.stat().st_size} bytes, "
+              f"{out.stat().st_size - src.stat().st_size:+d})")
 
     # ── verify on the ARTEFACT, not on the inputs ────────────────────────────
     print("\n=== re-reading what was written ===", flush=True)
