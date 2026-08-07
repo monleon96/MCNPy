@@ -80,6 +80,16 @@ ENDF_METADATA: dict[str, dict[str, str]] = {
         "abundance": NUMBER,
     },
     "NuclideInfo": {
+        # Added when `docs/library-gaps.md` M2 was fixed, and the two keys are
+        # the whole of what made `to_endf` possible. MF1/451's NWD descriptive
+        # records -- up to 700 lines of an evaluator's comment block, parsed
+        # into nothing else -- and its NXC directory had no home in the fields
+        # or here, so the section could be read and not written. NWD and NXC
+        # themselves are deliberately absent: they are these lists' lengths,
+        # and a stored count that can disagree with what it counts is the shape
+        # of the MF34 defect 98d7d23 fixed.
+        "text": LIST,
+        "directory": LIST,
         "mat": INT,
         "lrp": INT,
         "lfi": INT,

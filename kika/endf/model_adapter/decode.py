@@ -162,12 +162,31 @@ def decodeMF1MT451(mt451, report: Optional[ConversionReport] = None):
                      "dist_date", "revision_date", "material_id")
     }
 
+    # The NWD descriptive records and the NXC directory. Neither is physics and
+    # neither is parsed into anything else -- `evaluationInfo` covers the seven
+    # fields of the first two text records and nothing covers the remaining
+    # ~600 lines of an evaluator's comment block -- so an encoder that does not
+    # keep them can only approximate the section. `_text_lines` is the whole
+    # section's raw lines, header included, so the text starts at index 4; the
+    # ID columns are dropped because they are regenerated on the way out.
+    nwd = int(getattr(mt451, "_nwd", 0) or 0)
+    rawLines = getattr(mt451, "_text_lines", None) or []
+    descriptiveText = [line[:66] for line in rawLines[4:4 + nwd]]
+    if nwd and len(descriptiveText) < nwd:
+        report.warn(
+            f"MF1/451 declares NWD={nwd} descriptive records but only "
+            f"{len(descriptiveText)} were kept, so it cannot be written back "
+            f"as it was read"
+        )
+
     provenance = EndfProvenance(
         mat=getattr(mt451, "_mat", None),
         awr=getattr(mt451, "atomic_weight_ratio", None),
         za=_za(mt451),
         headerFields=fields,
         evaluationInfo=evaluationInfo,
+        descriptiveText=descriptiveText,
+        directory=[tuple(entry) for entry in getattr(mt451, "_directory", None) or []],
     )
 
     za = _za(mt451)

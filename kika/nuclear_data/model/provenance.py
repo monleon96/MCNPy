@@ -92,6 +92,19 @@ class EndfProvenance(Provenance):
     #: MF1/451 header fields, for a section decoded from one.
     headerFields: Dict[str, object] = field(default_factory=dict)
     evaluationInfo: Dict[str, str] = field(default_factory=dict)
+    #: MF1/451's NWD descriptive records, data columns only (the ID columns are
+    #: regenerated on the way out). ``evaluationInfo`` holds the seven fields
+    #: the first two of these records are *parsed into*; this holds all NWD of
+    #: them verbatim, because the rest — the free-text comment block an
+    #: evaluator wrote — is parsed into nothing at all and is most of the
+    #: section. Without it MF1/451 cannot be written back, only approximated.
+    descriptiveText: List[str] = field(default_factory=list)
+    #: MF1/451's NXC directory entries, ``(MF, MT, NC, MOD)``. NC is a **line
+    #: count**, so this is only valid for the tape it was read from; after a
+    #: section is replaced, ``kika.endf.writers.update_directory`` rebuilds it
+    #: from the written file. Kept here so a round trip that changes nothing
+    #: writes back what it read rather than a recomputation of it.
+    directory: List[Tuple[int, int, int, int]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.awr = _asFloat(self.awr)

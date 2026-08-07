@@ -83,6 +83,13 @@ def flatNuclideInfo(provenance) -> Dict[str, Any]:
                 "lrp", "lfi", "nlib", "nmod", "elis", "sta", "lis", "liso",
                 "nfor", "awi", "emax", "lrel", "nsub", "nver", "ldrv",
             )},
+            # What `to_endf` needs and no other field carries: the free-text
+            # block and the directory. NWD and NXC are deliberately not stored
+            # -- they are the lengths of these two lists, and a stored count
+            # that can disagree with what it counts is a defect waiting to be
+            # written. See `docs/library-gaps.md` M2.
+            "text": list(provenance.descriptiveText),
+            "directory": [tuple(entry) for entry in provenance.directory],
         },
     }
 
