@@ -204,10 +204,11 @@ class CrossSection:
         ------
         ValueError
             If ``qm``/``qi``/``lr`` are neither given nor in ``metadata``.
-            ACE records no reaction Q values, so a section built by
-            :meth:`from_ace` always lands here — it used to default them to
-            zero instead, writing a physically wrong MF3 header for every
-            threshold reaction without saying so.
+            A section built by :meth:`from_ace` still lands here, but for
+            ``qm`` and ``lr`` only: ACE's LQR block carries QI and
+            :meth:`from_ace` reads it. It used to default all three to zero
+            instead, writing a physically wrong MF3 header for every threshold
+            reaction without saying so.
         """
         from kika.endf.classes.mf3.mf3mt import MF3MT
 
@@ -221,10 +222,15 @@ class CrossSection:
         ]
         if missing:
             source = self.metadata.get("source_format", "unknown")
+            # The old wording here said "ACE stores no reaction Q values",
+            # which is false — it stores QI, in the LQR block, and `from_ace`
+            # now reads it. QM and LR are the ones ACE has no counterpart for.
+            # `docs/library-gaps.md` D4.
             raise ValueError(
                 f"CrossSection for MT{self.reaction} (source_format={source!r}) "
                 f"carries no {'/'.join(missing)}, so an ENDF MF3 header cannot "
-                f"be written for it. ACE stores no reaction Q values. Pass them "
+                f"be written for it. ACE carries QI but has no counterpart for "
+                f"QM (the mass-difference Q) or LR. Pass what is missing "
                 f"explicitly — to_endf(qm=..., qi=..., lr=...) — or build the "
                 f"section from ENDF, where they come from the file."
             )
@@ -352,8 +358,26 @@ class CrossSection:
         ------
         ValueError
             If the requested MT is not available.
+
+        Notes
+        -----
+        **ACE does carry a reaction Q value, and this reads it.** The LQR block
+        holds one QI per reaction, in MeV, positionally aligned with MTR; a
+        section whose MT has an entry there gets ``metadata["qi"]`` in eV. The
+        record said otherwise for a long time — see ``docs/library-gaps.md`` D4
+        — and callers were supplying by hand a number that was in the file.
+
+        What ACE genuinely has no counterpart for is **QM**, the mass-difference
+        Q, and **LR**. So :meth:`to_endf` still refuses on an ACE-sourced
+        section; it now refuses for the two fields that are really missing
+        rather than for three.
+
+        Composites (MT 4, 18, 101 …) are absent from MTR and get no ``qi``,
+        which is correct rather than a gap: a sum over reactions with different
+        Q values does not have one.
         """
         from kika._constants import BOLTZMANN_CONSTANT
+        from kika.ace.model_adapter.decode import qValuesByMT
 
         reaction = ace.cross_section._get_or_compute_reaction(mt)
         if reaction is None:
@@ -368,6 +392,22 @@ class CrossSection:
         kT_MeV = ace.header.temperature or 0.0
         temperature = kT_MeV / BOLTZMANN_CONSTANT if kT_MeV else 0.0
 
+        metadata = {
+            "source_format": "ace",
+            "ace_zaid": ace.header.zaid,
+            "ace_extension": ace.header.extension,
+            "awr": ace.header.atomic_weight_ratio,
+            "ace_comment": ace.header.comment,
+            "ace_date": ace.header.date,
+        }
+        # The alignment rules — LQR parallel to MTR, MeV, elastic filled in as
+        # the known zero it is by definition — live in the ACE adapter and are
+        # tested there. Reimplementing them here would be a second copy of a
+        # positional convention, which is the kind of duplication that drifts.
+        qi = qValuesByMT(ace).get(mt)
+        if qi is not None:
+            metadata["qi"] = qi
+
         return cls(
             energies=energies,
             values=values,
@@ -375,14 +415,7 @@ class CrossSection:
             nuclide_id=ace.header.zaid or 0,
             temperature=temperature,
             interpolation="linlin",
-            metadata={
-                "source_format": "ace",
-                "ace_zaid": ace.header.zaid,
-                "ace_extension": ace.header.extension,
-                "awr": ace.header.atomic_weight_ratio,
-                "ace_comment": ace.header.comment,
-                "ace_date": ace.header.date,
-            },
+            metadata=metadata,
         )
 
     @classmethod

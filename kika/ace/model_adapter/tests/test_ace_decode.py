@@ -194,19 +194,45 @@ def test_a_composite_has_no_q_and_says_so(decoded):
     assert reaction.outputChannel.Q.isKnown is False
 
 
-def test_the_flat_path_still_drops_the_q_values(ace):
-    """Pins the gap this decoder closes.
+def test_the_flat_path_reads_the_same_q_values_this_decoder_does(ace):
+    """The gap this decoder recorded, now closed on the flat side too.
 
-    ``CrossSection.from_ace`` builds six ACE metadata keys and no Q at all, even
-    though ``ace.q_values`` is right there. Not fixed here — the flat classes are
-    rewritten in phase 3d — but recorded, so "ACE has no Q values" stops being
-    repeated.
+    ``CrossSection.from_ace`` used to build six ACE metadata keys and no Q at
+    all, with ``ace.q_values`` right there — ``docs/library-gaps.md`` D4. It
+    calls ``qValuesByMT`` now, so there is one alignment convention rather than
+    two, and this asserts the two paths agree rather than merely that the flat
+    one is non-empty. Agreement is the property that matters: a second copy of
+    a positional convention is exactly what drifts.
     """
-    flat = CrossSection.from_ace(ace, 102)
-    assert "qi" not in flat.metadata and "qm" not in flat.metadata
     assert ace.q_values.has_q_values, (
         "the premise of this test is gone: the file has no LQR block"
     )
+    expected = qValuesByMT(ace)
+
+    flat = CrossSection.from_ace(ace, 102)
+    assert flat.metadata["qi"] == expected[102]
+    # QM is the mass-difference Q and has no ACE counterpart. Still absent, and
+    # that is the reason `to_endf` still refuses on an ACE-sourced section.
+    assert "qm" not in flat.metadata
+
+
+def test_the_flat_path_gives_elastic_its_defined_zero(ace):
+    """MT 2 is absent from MTR because its Q is zero by definition.
+
+    Filling it in is knowledge, not a default — the same call the decoder
+    makes, so the flat path cannot disagree with it.
+    """
+    assert CrossSection.from_ace(ace, 2).metadata["qi"] == 0.0
+
+
+def test_a_composite_has_no_qi_on_the_flat_path_either(ace):
+    """MT 4 sums levels with different Q values, so it has none.
+
+    Absent rather than zero: the same statement the model makes with
+    ``Q.isKnown is False``, made in the only way an untyped dict can make it.
+    """
+    flat = CrossSection.from_ace(ace, 4)
+    assert "qi" not in flat.metadata
 
 
 def test_the_report_names_qm_and_lr_rather_than_claiming_ace_has_no_q(decoded):

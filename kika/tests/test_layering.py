@@ -71,9 +71,19 @@ FORBIDDEN_ROOTS = ("kika.endf", "kika.ace")
 #: between them in the first place. These entries go to **zero** when the flat
 #: classes are removed in 1.0 — they are the deprecation's cost, held visibly
 #: rather than hidden. No *new* module may join the list.
+#:
+#: **D4 raises ``cross_section.py`` from 2 to 3, for the same reason and
+#: knowingly.** ``from_ace`` now reads ACE's LQR block through
+#: ``kika.ace.model_adapter``'s ``qValuesByMT`` instead of aligning MTR and LQR
+#: a second time locally. The alignment is positional, undeclared in the file,
+#: and has one subtlety (MT 2 is absent because elastic Q is zero *by
+#: definition*) — precisely the kind of convention that drifts when it is
+#: written twice. It already had: the library carried "ACE stores no reaction Q
+#: values" in a docstring, a roadmap and an error message while the values sat
+#: parsed in ``ace.q_values``. One decoder, one convention, one worse number.
 RUNTIME_ALLOWLIST: dict[str, int] = {
     "kika/nuclear_data/angular_distribution.py": 13,
-    "kika/nuclear_data/cross_section.py": 2,
+    "kika/nuclear_data/cross_section.py": 3,
     "kika/nuclear_data/nuclide_info.py": 1,
     "kika/nuclear_data/resonance_parameters.py": 2,
     "kika/processing/derived_covariance.py": 1,

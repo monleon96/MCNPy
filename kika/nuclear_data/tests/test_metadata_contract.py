@@ -115,6 +115,13 @@ ACE_METADATA: dict[str, dict[str, str]] = {
         "awr": NUMBER,
         "ace_comment": STR,
         "ace_date": STR,
+        # Gained when `docs/library-gaps.md` D4 was fixed. ACE's LQR block
+        # carries one QI per reaction and `from_ace` had never read it, so
+        # callers were passing `to_endf(qi=...)` by hand for a number that was
+        # in the file. Present only for an MT that has an LQR entry — the
+        # fixture below asks for MT 2, whose Q is zero by definition. A
+        # composite has none, and that absence is data.
+        "qi": NUMBER,
     },
     "AngularDistribution": {
         "source_format": STR,
@@ -234,14 +241,27 @@ def test_ace_evaluation_info_keys_are_unchanged(ace_objects):
     assert set(ace_objects["NuclideInfo"].evaluation_info) == ACE_EVALUATION_INFO
 
 
-def test_ace_carries_no_q_values(ace_objects):
-    """The structural half of the phase 1 Q = 0 fix.
+def test_ace_carries_qi_but_not_qm_or_lr(ace_objects):
+    """The structural half of the phase 1 Q = 0 fix, with D4's correction.
 
-    ACE has no ``qm``/``qi``/``lr``, so ``to_endf`` on an ACE-sourced section
-    must refuse rather than silently write Q = 0. Phase 3c's ``ConversionReport``
-    is meant to *declare* this loss instead of leaving it implicit.
+    ``to_endf`` on an ACE-sourced section must still refuse rather than
+    silently write Q = 0 — but the reason is narrower than this test used to
+    assert. ACE **does** carry QI, one per reaction in the LQR block, and
+    ``from_ace`` reads it. QM and LR are the two ENDF header fields ACE has no
+    counterpart for, so those are what the refusal is about.
+
+    The distinction is the whole of ``docs/library-gaps.md`` D4: "ACE has no Q
+    values" was written down, believed, and made callers hand-supply a number
+    the file already held.
     """
     xs = ace_objects["CrossSection"]
-    assert not ({"qm", "qi", "lr"} & set(xs.metadata))
-    with pytest.raises(ValueError):
+    assert "qi" in xs.metadata, "the LQR block is not reaching the flat class"
+    assert not ({"qm", "lr"} & set(xs.metadata))
+
+    with pytest.raises(ValueError) as excinfo:
         xs.to_endf()
+    message = str(excinfo.value)
+    assert "qm" in message and "lr" in message
+    assert "carries no qm/lr" in message, (
+        f"the refusal should name only the fields ACE really lacks: {message}"
+    )
