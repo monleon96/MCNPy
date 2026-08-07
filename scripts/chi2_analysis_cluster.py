@@ -393,6 +393,31 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
         "title":      "χ² analysis — run 86 with MF34 parameters the fit never determined removed",
         "systematic_block_col": None,
     },
+    # Run 86 with MF33/MT2 written on the 188-group ADAPTIVE grid instead of the
+    # 1738-bin fine one (roadmap §10.7-4 step 2, `regroup_mf33.py`).
+    #
+    # WHAT IT PRICES. §10.7-3 says grouping MF33 is the enabling step for the
+    # cross term, not a size optimisation: it is what makes the fold a
+    # congruence (`test_fold_maps.py`), it takes the cross block from +132 MB to
+    # +11 MB, and it is what lets MF33 survive ENDF's six digits at all
+    # (condition 1.6e9 fine vs 1.0e6 grouped). It costs relative sigma: median
+    # 0.0616 -> 0.0528, PEAK 0.204 -> 0.113. Less evaluated variance means a
+    # LARGER chi2 for This_work, so expect this to look worse and the JEFF gap
+    # to narrow.
+    #
+    # SINGLE VARIABLE. Same run-86 directory, same MF34, same MF4, same MF3,
+    # same centrals, no cross block in either — `regroup_mf33.py` copies the
+    # shipped file and replaces only the MT2 self-block. JEFF and JENDL must
+    # move by exactly 0.0; if they do not, something else moved.
+    #
+    # REGISTERED BEFORE THE JOB WAS LAUNCHED. Runs 85 and 89 both died after
+    # their precompute because their entry was missing here (§10.1.8-L1).
+    "predictive_86_mf33grouped": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_86_mf33grouped.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run 86 with MF33 on the 188-group adaptive grid",
+        "systematic_block_col": None,
+    },
     # Fold-mode sweep. Identical to `predictive` in every respect except which
     # part of the forward model is resolution-averaged (FOLD_MODE in
     # precompute_chi2_predictive.py). Compare V2 across these to decide, over
