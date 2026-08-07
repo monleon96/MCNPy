@@ -5,4 +5,4 @@ try:
 except PackageNotFoundError:
     LIBRARY_VERSION = "0.0.0+local"
 
-AUTHOR = "Juan Antonio Monleon de la Lluvia <juanjuanmonleon@gmail.com>"
+AUTHOR = "Juan Antonio Monleon de la Lluvia <juanmonleon96@gmail.com>"

@@ -18,6 +18,36 @@ from ...exfor.angular_distribution import ExforAngularDistribution
 from ...processing.multigroup import (compute_rebin_operator, collapse_covariance, relative_to_absolute, absolute_to_relative, WeightingFunction)
 
 
+def _pendf_grid(section: Any) -> Tuple[np.ndarray, np.ndarray]:
+    """``(energies, sigma)`` from a ``pendf`` section of either shape.
+
+    ``ENDF.pendf`` takes ``{MT: section}``, and its two producers disagree on
+    what a section looks like: ``kika.endf.processing.reconstruct`` yields
+    ``MF3MT``, whose arrays are ``_energies`` / ``_cross_sections``, while
+    ``kika.processing.njoy_reconstruct`` yields ``CrossSection``, whose arrays
+    are ``energies`` / ``values``.
+
+    This function exists because the code below used to read the ``MF3MT``
+    private names directly, so :func:`MF34_to_MG` raised ``AttributeError`` on
+    the very recipe its own docstring gives (``endf.pendf =
+    kika.processing.njoy_reconstruct(...)``). The golden test never caught it
+    because it feeds ``MF3MT``.
+    """
+    if hasattr(section, "_energies") and hasattr(section, "_cross_sections"):
+        energies, sigma = section._energies, section._cross_sections
+    elif hasattr(section, "energies") and hasattr(section, "values"):
+        energies, sigma = section.energies, section.values
+    elif hasattr(section, "energies") and hasattr(section, "cross_sections"):
+        energies, sigma = section.energies, section.cross_sections
+    else:
+        raise TypeError(
+            f"pendf section of type {type(section).__name__} exposes neither "
+            f"(energies, values) nor (energies, cross_sections); "
+            f"MF34_to_MG cannot weight with it"
+        )
+    return np.asarray(energies, dtype=float), np.asarray(sigma, dtype=float)
+
+
 def validate_frame_consistency(mf4_frame: str, mf34_frame: str) -> None:
     """
     Validate that MF4 and MF34 data are in consistent reference frames.
@@ -938,8 +968,8 @@ def MF34_to_MG(endf_object,
 
             def _make_sigma_phi_antideriv(pendf_mt, base_phi):
                 """Numerical antiderivative of sigma(E)*phi(E) via cumulative trapezoid."""
-                E_grid = np.array(pendf_mt._energies, dtype=float)
-                sigma_grid = np.maximum(np.array(pendf_mt._cross_sections, dtype=float), 0.0)
+                E_grid, sigma_raw = _pendf_grid(pendf_mt)
+                sigma_grid = np.maximum(sigma_raw, 0.0)
                 phi_grid = base_phi(E_grid)
                 integrand = sigma_grid * phi_grid
 
@@ -955,7 +985,7 @@ def MF34_to_MG(endf_object,
 
             phi_func = _make_sigma_phi(_pendf_mt, _base_phi_func)
             phi_antiderivative = _make_sigma_phi_antideriv(_pendf_mt, _base_phi_func)
-            _pendf_energies = np.array(_pendf_mt._energies, dtype=float)
+            _pendf_energies = _pendf_grid(_pendf_mt)[0]
         else:
             warnings.warn(
                 f"No PENDF data for MT{_mt_for_sigma}, "

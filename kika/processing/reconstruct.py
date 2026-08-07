@@ -291,7 +291,7 @@ def reconstruct(
 def _add_background(energy_grid, sig_el, sig_cap, sig_fis, sig_tot,
                     background, res_E_lo, res_E_hi):
     """Add background cross sections (modifies arrays in-place)."""
-    from kika.endf.utils import interpolate_1d_endf
+    from .interpolation import interpolate_1d
 
     mt_map = {
         MT_ELASTIC: sig_el,
@@ -304,7 +304,7 @@ def _add_background(energy_grid, sig_el, sig_cap, sig_fis, sig_tot,
             xs = background[mt_num]
             interp_regions = xs.metadata.get("interpolation_regions",
                                              [(len(xs.energies), 2)])
-            bg = interpolate_1d_endf(
+            bg = interpolate_1d(
                 xs.energies, xs.values, interp_regions,
                 energy_grid, out_of_range="zero",
             )
@@ -317,7 +317,7 @@ def _add_background(energy_grid, sig_el, sig_cap, sig_fis, sig_tot,
 def _extend_to_full_range(energy_grid, sig_el, sig_cap, sig_fis, sig_tot,
                            background, res_E_lo, res_E_hi):
     """Extend PENDF beyond resonance region using background data."""
-    from kika.endf.utils import interpolate_1d_endf
+    from .interpolation import interpolate_1d
 
     all_extra_E = set()
     for mt_num in [MT_ELASTIC, MT_CAPTURE, MT_FISSION, MT_TOTAL]:
@@ -343,7 +343,7 @@ def _extend_to_full_range(energy_grid, sig_el, sig_cap, sig_fis, sig_tot,
             xs = background[mt_num]
             interp_regions = xs.metadata.get("interpolation_regions",
                                              [(len(xs.energies), 2)])
-            arr[:] = np.asarray(interpolate_1d_endf(
+            arr[:] = np.asarray(interpolate_1d(
                 xs.energies, xs.values, interp_regions,
                 extra_E, out_of_range="zero",
             ))
@@ -352,7 +352,7 @@ def _extend_to_full_range(energy_grid, sig_el, sig_cap, sig_fis, sig_tot,
         xs = background[MT_TOTAL]
         interp_regions = xs.metadata.get("interpolation_regions",
                                          [(len(xs.energies), 2)])
-        extra_sig_tot = np.asarray(interpolate_1d_endf(
+        extra_sig_tot = np.asarray(interpolate_1d(
             xs.energies, xs.values, interp_regions,
             extra_E, out_of_range="zero",
         ))

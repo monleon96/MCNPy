@@ -9,15 +9,26 @@ calculation layer. ``kika.endf`` and ``kika.ace`` are format layers. The arrow
 points one way: formats may import the calculations, the calculations may not
 import the formats.
 
-**Why a ratchet and not a rule.** The arrow is currently inverted in places —
-worst of all, ~960 lines of pure numerics (``linearization``, ``penetration``,
-``resonance_formulas``, ``urr_formulas``, ``resonance_bounds``) live physically
-inside ``kika/endf/processing/`` and are re-exported *upward* by shims in
-``kika/processing/``. Phase 2 of the GNDS roadmap moves them. Until then a
-hard rule would just fail, so this test freezes the count instead: every
-violation that exists today is written down, and the count per file may go
-**down** without touching this file but never up. Deleting a violation needs no
-edit here; adding one fails immediately.
+**Why a ratchet and not a rule.** The arrow was inverted in places, worst of
+all ~960 lines of pure numerics living inside ``kika/endf/processing/`` and
+re-exported *upward* by shims in ``kika/processing/``. Phase 2 of the GNDS
+roadmap moved four of them — ``linearization``, ``penetration``,
+``resonance_formulas``, ``urr_formulas`` — and deleted the shims, which had no
+other importers. ``resonance_bounds`` stayed put: it reads
+``mf2.mt[151].isotopes`` and ``rng.lru/el/eh``, so it is an ENDF adapter and
+moving it would have created a *new* violation rather than removing one.
+
+Violations still exist, so a hard rule would just fail. This test freezes the
+count instead: every violation that exists today is written down, and the count
+per file may go **down** without touching this file but never up. Deleting a
+violation needs no edit here; adding one fails immediately.
+
+**What the count cannot see.** It counts import *statements*, not when they
+run. The three surviving ``kika/processing`` entries are all deferred to call
+time, which is a real improvement the number does not show — and the reason it
+matters is concrete: while ``kika.processing`` imported ``kika.endf`` at import
+time, nothing in ``kika.endf`` could import from ``kika.processing`` at module
+scope, so ``interpolate_1d`` could not be moved down at all.
 
 **Two kinds, counted separately.** A runtime import genuinely couples the
 layers. An import under ``if TYPE_CHECKING:`` couples only the vocabulary — it
@@ -41,20 +52,33 @@ GUARDED_PACKAGES = ("kika/processing", "kika/nuclear_data")
 #: Packages they must not import.
 FORBIDDEN_ROOTS = ("kika.endf", "kika.ace")
 
-#: Runtime imports of a format package, per module, as of GNDS phase 0.
-#: May only decrease. Phase 2 empties the kika/processing entries.
+#: Runtime imports of a format package, per module. May only decrease.
+#:
+#: Phase 2 took kika/processing from 8 entries to 3. It does **not** reach
+#: zero, and the original roadmap was wrong to say it would: the three that
+#: remain each need ``kika.endf.read_endf`` to parse a PENDF tape, which is a
+#: real dependency and not a layering accident. All three are deferred to call
+#: time, so ``kika.processing`` no longer pulls ``kika.endf`` in at *import*
+#: time — that mattered, because while it did, nothing in ``kika.endf`` could
+#: import from ``kika.processing`` at module scope, and ``interpolate_1d``
+#: could not move down at all.
+#:
+#: **Phase 3d makes this figure go up, on purpose.** The flat classes become
+#: façades whose ``from_endf``/``to_endf`` route through
+#: ``kika.endf.model_adapter``, so each gains an import of it. That is a worse
+#: layering number and a better library: the alternative is two decoders for the
+#: same file, which is how the ZA truncation and the LTT=3 losses came to differ
+#: between them in the first place. These entries go to **zero** when the flat
+#: classes are removed in 1.0 — they are the deprecation's cost, held visibly
+#: rather than hidden. No *new* module may join the list.
 RUNTIME_ALLOWLIST: dict[str, int] = {
-    "kika/nuclear_data/angular_distribution.py": 12,
+    "kika/nuclear_data/angular_distribution.py": 13,
     "kika/nuclear_data/cross_section.py": 2,
+    "kika/nuclear_data/nuclide_info.py": 1,
     "kika/nuclear_data/resonance_parameters.py": 2,
     "kika/processing/derived_covariance.py": 1,
-    "kika/processing/linearization.py": 1,
     "kika/processing/njoy_pendf_cache.py": 1,
     "kika/processing/njoy_reconstruct.py": 1,
-    "kika/processing/penetration.py": 1,
-    "kika/processing/reconstruct.py": 2,
-    "kika/processing/resonance_formulas.py": 1,
-    "kika/processing/urr_formulas.py": 1,
 }
 
 #: ``if TYPE_CHECKING:`` imports of a format package, per module.

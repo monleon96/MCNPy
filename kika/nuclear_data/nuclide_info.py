@@ -47,6 +47,18 @@ class NuclideInfo:
     def from_endf(cls, mt451: "MF1MT451") -> "NuclideInfo":
         """Create from an ENDF ``MT451`` object.
 
+        **Phase 3d: this reads the file through the GNDS model.** The section is
+        decoded into ``PoPs`` + an ``evaluated`` style + ``EndfProvenance``, and
+        ``model.interop`` projects that back into the five fields this class has
+        always had. The fields, their order and their defaults are unchanged —
+        only the body is — which is what makes ``test_flat_class_surface.py``
+        the proof that nothing downstream can tell.
+
+        One thing does change, and it is a fix: ZA is **rounded** rather than
+        truncated. ENDF's fixed-format floats do not round-trip exactly, so
+        Th-232's ``9.023200+4`` reads back as ``90231.99999999999`` and the old
+        ``int()`` named Ac-231. See ``docs/library-gaps.md`` D1.
+
         Parameters
         ----------
         mt451 : MT451
@@ -56,38 +68,11 @@ class NuclideInfo:
         -------
         NuclideInfo
         """
-        return cls(
-            nuclide_id=int(mt451.zaid) if mt451.zaid is not None else 0,
-            atomic_weight_ratio=mt451.atomic_weight_ratio or 0.0,
-            temperature=mt451.temperature or 0.0,
-            evaluation_info={
-                "laboratory": mt451.laboratory,
-                "authors": mt451.authors,
-                "eval_date": mt451.eval_date,
-                "reference": mt451.reference,
-                "dist_date": mt451.dist_date,
-                "revision_date": mt451.revision_date,
-                "material_id": mt451.material_id,
-            },
-            metadata={
-                "mat": getattr(mt451, "_mat", None),
-                "lrp": getattr(mt451, "_lrp", None),
-                "lfi": getattr(mt451, "_lfi", None),
-                "nlib": mt451.library_id,
-                "nmod": mt451.mod_number,
-                "elis": mt451.excitation_energy,
-                "sta": getattr(mt451, "_sta", None),
-                "lis": mt451.state_number,
-                "liso": mt451.isomer_number,
-                "nfor": mt451.format_version,
-                "awi": mt451.projectile_mass,
-                "emax": mt451.energy_max,
-                "lrel": mt451.library_release,
-                "nsub": mt451.sublibrary,
-                "nver": mt451.library_version,
-                "ldrv": getattr(mt451, "_ldrv", None),
-            },
-        )
+        from kika.endf.model_adapter import decodeMF1MT451
+        from kika.nuclear_data.model.interop import flatNuclideInfo
+
+        _, _, provenance, _ = decodeMF1MT451(mt451)
+        return cls(**flatNuclideInfo(provenance))
 
     # ------------------------------------------------------------------
     # ACE adapter
