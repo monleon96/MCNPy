@@ -49,6 +49,14 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+# `--c33-from-file` imports a sibling script as `scripts.<name>`. On the cluster
+# the deployed copy is run by path, so the package root is not on sys.path and
+# the import dies -- which is what killed step 1 of job 8452834. Same three
+# lines as null_slot_exposure.py:58-60.
+_kika_root = Path(__file__).resolve().parent.parent
+if str(_kika_root) not in sys.path:
+    sys.path.insert(0, str(_kika_root))
+
 L_MAX = 6
 A_COLS = [f"a_{l}" for l in range(1, L_MAX + 1)]
 ZA, MT = 26056, 2
@@ -272,6 +280,23 @@ def shipped_c34_rel_on_base(blocks, base_ev):
     in its own right: it is what the rewrite must fall back on wherever the
     absolute round trip destroys the file's content (see `write_consistent_mf34`
     on null parameters).
+
+    ⚠⚠ THE BLOCKS DO NOT ALL SPAN THE BASE GRID, AND OUT-OF-RANGE MUST BE ZERO
+    RATHER THAN PINNED. Sec. 10.1.8-L18. `np.clip` on a `searchsorted` index
+    does not mean "outside the range there is nothing", it means "use the first
+    or last interval" -- and the blocks come back on FOUR grids, because
+    `merge_mf34` builds each (L, L1) pair on that pair's own union of JEFF's
+    grid and the pipeline overlay's. Block (2,6) starts at 0.8468 MeV and leaves
+    9 of the 703 base groups uncovered, so pinning credited the 0.1-0.7 MeV
+    region -- where JEFF publishes (2,2) but no (2,6) -- with (2,6)'s FIRST
+    interval: 5120 fabricated cross-seam cells at up to 2.07e-02, against a
+    genuine JEFF (2,2) variance and a genuine overlay (6,6) variance.
+
+    That one line is the whole of Sec. L17's "the shipped MF34 is not PSD":
+    lam_min -6.2091e-02 (1.34e-03 relative) pinned, **-5.9359e-05 (1.28e-06,
+    the ENDF round-trip floor) masked**. ENDF-6 LB=5/6 matrices are defined ON
+    their grid and assert nothing outside it, so masking is not a repair, it is
+    the file's own semantics. Do not reintroduce the clip.
     """
     n_g = len(base_ev) - 1
     centres = 0.5 * (base_ev[:-1] + base_ev[1:])
@@ -288,8 +313,14 @@ def shipped_c34_rel_on_base(blocks, base_ev):
                          0, mat.shape[0] - 1)
             gj = np.clip(np.searchsorted(edges, centres, side="right") - 1,
                          0, mat.shape[1] - 1)
+            # The clip above still bounds the INDEX; this zeroes the rows and
+            # columns it would otherwise have invented. Both axes, because the
+            # block is a covariance and a fabricated column is as wrong as a
+            # fabricated row.
+            covered = (centres >= edges[0]) & (centres <= edges[-1])
             out[np.ix_(np.arange(n_g) * L_MAX + lr - 1,
-                       np.arange(n_g) * L_MAX + lc - 1)] = mat[np.ix_(gi, gj)]
+                       np.arange(n_g) * L_MAX + lc - 1)] = (
+                mat[np.ix_(gi, gj)] * np.outer(covered, covered))
     return 0.5 * (out + out.T)
 
 
@@ -323,7 +354,28 @@ def whiten(A, tol=NULL_TOL):
             V[:, ~keep] @ V[:, ~keep].T, int(keep.sum()))
 
 
-def diagnose(name, c33, c34, cx):
+def spectrum(name, A):
+    """What a matrix's eigenvalues say about whether whitening it means anything.
+
+    The three numbers that matter are the smallest RETAINED eigenvalue (it sets
+    the `w^-1/2` amplification), the most NEGATIVE one (it is the noise floor --
+    a covariance cannot have one, so its size is how much garbage the round trip
+    left), and their ratio. If the retained minimum sits below the noise floor,
+    the pseudo-inverse is inverting noise. Sec. 10.1.8-L16.1.
+    """
+    w = np.linalg.eigvalsh(0.5 * (np.asarray(A, float) + np.asarray(A, float).T))
+    keep = w > NULL_TOL * w.max()
+    wmin_keep = float(w[keep].min()) if keep.any() else float("nan")
+    wneg = float(w.min())
+    return {"matrix": name, "n": A.shape[0], "rank@NULL_TOL": int(keep.sum()),
+            "lam_max": float(w.max()), "lam_min_kept": wmin_keep,
+            "amplif_w^-0.5": wmin_keep ** -0.5 if wmin_keep > 0 else np.inf,
+            "cond_kept": float(w.max()) / wmin_keep if wmin_keep > 0 else np.inf,
+            "n_negative": int((w < 0).sum()), "lam_most_negative": wneg,
+            "kept_min/|most_neg|": abs(wmin_keep / wneg) if wneg < 0 else np.inf}
+
+
+def diagnose(name, c33, c34, cx, tol=NULL_TOL):
     """PSD diagnostics for the joint [[c33, cx], [cx.T, c34]].
 
     ⚠ `lam_min_norm` IS NOT COMPARABLE ACROSS ROWS THAT DIFFER IN THEIR
@@ -337,9 +389,19 @@ def diagnose(name, c33, c34, cx):
 
     Compare `sigma_max(K)` across rows. Compare `lam_min_norm` only against rows
     with the same `scale`.
+
+    ⚠ `sigma_max(K)` AND `leak_null34` ARE TOLERANCE-DEPENDENT; `lam_min` IS
+    NOT. `whiten` keeps `w > tol*w_max` and inverts the square root, so both
+    columns are set by the smallest RETAINED eigenvalue. Against the file's
+    2317-bin MF33 that is 6.37e-10 while the matrix's own most negative
+    eigenvalue is -1.27e-07 -- 200x larger in magnitude -- so at NULL_TOL the
+    whitening inverts directions below the file's numerical noise floor and
+    sigma_max(K) measures nothing (18837 vs 1560 for the same Cx, roadmap
+    Sec. 10.1.8-L16.1). Use `--tol-sweep` before reading either column off a
+    matrix that has been through an ENDF round trip.
     """
-    w33, p33, r33 = whiten(c33)
-    w34, p34, r34 = whiten(c34)
+    w33, p33, r33 = whiten(c33, tol)
+    w34, p34, r34 = whiten(c34, tol)
     nx = float(np.linalg.norm(cx, "fro"))
     j = np.block([[c33, cx], [cx.T, c34]])
     lam = float(np.linalg.eigvalsh(0.5 * (j + j.T))[0])
@@ -585,6 +647,16 @@ def main():
              "one the chi2 actually folds -- instead of only the 188-group "
              "adaptive sidecar the joint is certified against. Roadmap "
              "§10.6-3 item 5. Costs one extra ENDF parse.",
+    )
+    ap.add_argument(
+        "--tol-sweep", action="store_true",
+        help="With --c33-from-file: print the eigenvalue spectra of both MF33 "
+             "objects and of the shipped relative MF34, then re-diagnose rows "
+             "B and B' at NULL_TOL = 1e-10 .. 1e-4. `lam_min` must be FLAT "
+             "across the sweep; sigma_max(K) and leak_null34 will not be, and "
+             "reading them at NULL_TOL on a post-ENDF matrix is meaningless "
+             "because its smallest retained eigenvalue sits below its own "
+             "round-trip noise floor. Roadmap §10.1.8-L16.1/L16.2.",
     )
     ap.add_argument(
         "--write-null-mask", metavar="OUT.npz",
@@ -886,8 +958,17 @@ def main():
         cen33 = 0.5 * (g33[:-1] + g33[1:])
         m_of = np.searchsorted(mag_ev, cen33, side="right") - 1
         inside = (m_of >= 0) & (m_of < n_gm)
+        # ⚠ 2026-08-07: DIVIDE THE SHAPE AXIS BY a_pt, exactly as `cxA` does.
+        # This block previously expanded the RAW `cx_post`, whose shape axis is
+        # ABSOLUTE, against `rel_ship_K`, which is RELATIVE -- so B' differed
+        # from B in TWO things at once (the MF33 grid AND whether the cross leg
+        # was converted), and the -26.31 -> -0.42 step could not be attributed
+        # to the MF33 swap it was built to isolate. a_pt is small and crosses
+        # zero, so the division is most of the magnitude here, not a detail.
+        # With this line B' vs B moves the MF33 and nothing else.
+        cx_rel_full = cx_post / a_pt[None, :]
         cx_file = np.zeros((c33_file.shape[0], cx_post.shape[1]))
-        cx_file[inside] = cx_post[m_of[inside]]
+        cx_file[inside] = cx_rel_full[m_of[inside]]
         print(f"  file bins inside the sidecar's span: "
               f"{int(inside.sum())} of {inside.size}; the rest carry no cross "
               f"covariance and are written zero")
@@ -907,6 +988,41 @@ def main():
               "interchangeable with the\n  MF33 the chi2 reads, and every PSD "
               "number in this document predating\n  2026-08-06 inherits that. "
               "Sec. 10.6-3 item 5.")
+
+        if args.tol_sweep:
+            print("\n=== SPECTRA: is whitening these matrices meaningful? ===")
+            print(pd.DataFrame([
+                spectrum("MF33 188-group (what we certify against)", c33_ship),
+                spectrum("MF33 from the file (what the chi2 folds)", c33_file),
+                spectrum("MF34 shipped, relative (a_pt space)", rel_ship_K),
+            ]).set_index("matrix").to_string())
+            print("\n  `kept_min/|most_neg|` < 1 means the smallest RETAINED\n"
+                  "  eigenvalue is below the matrix's own noise floor, so\n"
+                  "  w^-1/2 amplifies garbage and sigma_max(K) is not a\n"
+                  "  measurement. ENDF-6 is a 6-significant-digit ASCII\n"
+                  "  format, so an O(1e-7) relative floor is the round trip,\n"
+                  "  not a defect in the MC. Sec. 10.1.8-L16.1.")
+
+            print("\n=== TOLERANCE SWEEP: which columns move, and which do not ===")
+            sweep = []
+            for t in (1e-10, 1e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4):
+                for nm, c33x, c34x, cxx in (
+                        ("188grp B", c33_ship, rel_ship_K, cxA),
+                        ("file   B'", c33_file, rel_ship_K, cx_file[:, K])):
+                    r = diagnose(nm, c33x, c34x, cxx, tol=t)
+                    r["tol"] = t
+                    sweep.append(r)
+            df = pd.DataFrame(sweep)[
+                ["tol", "case", "rank33", "rank34", "sigma_max(K)",
+                 "leak_null34", "lam_min"]]
+            print(df.to_string(index=False))
+            print("\n  EXPECTED, and it is the whole point: `lam_min` is a\n"
+                  "  property of the joint and must be FLAT across every row --\n"
+                  "  if it is not, something other than the tolerance is\n"
+                  "  moving. `sigma_max(K)` and `leak_null34` will move, and\n"
+                  "  the tolerance at which the two `case` blocks stop\n"
+                  "  disagreeing is the one above both noise floors. Read\n"
+                  "  sigma_max(K) THERE, not at NULL_TOL. Sec. 10.1.8-L16.2.")
 
     if args.check:
         print("\n--check: nothing written.")

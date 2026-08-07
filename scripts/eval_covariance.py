@@ -132,6 +132,29 @@ def build_mf34_block(
         bin_idx = np.clip(
             np.searchsorted(grid, e_ev, side="right") - 1, 0, M - 1,
         )
+        # ⚠ THE CLIP ABOVE EXTRAPOLATES, AND MF34's BLOCKS DO NOT ALL SPAN THE
+        # SAME RANGE. `merge_mf34` builds each (L, L1) pair on its own union of
+        # JEFF's grid and the pipeline overlay's, so the shipped file carries
+        # four grids; block (2,6) starts at 0.8468 MeV. Pinning an off-grid
+        # point to the first or last interval INVENTS covariance the file does
+        # not assert, and in `build_group_cross` the same line manufactured a
+        # lam_min of -6.21e-02 out of nothing (Sec. 10.1.8-L18).
+        #
+        # It has never fired here -- all 140457 EXFOR points sit in
+        # 0.85-4.0 MeV, inside every block's range -- so this is a guard, not a
+        # fix, and it must stay loud rather than silently masking: a point off
+        # the grid means the evaluation and the data no longer agree on where
+        # this covariance applies, and that is a question for a human.
+        _off = (e_ev < grid[0]) | (e_ev > grid[-1])
+        if _off.any():
+            raise ValueError(
+                f"MF34 block (L={l_r}, L1={l_c}) spans "
+                f"[{grid[0]:.6g}, {grid[-1]:.6g}] eV but {int(_off.sum())} of "
+                f"{e_ev.size} points fall outside it "
+                f"([{e_ev.min():.6g}, {e_ev.max():.6g}] eV). Clipping them "
+                f"would fabricate covariance the file does not declare — see "
+                f"roadmap Sec. 10.1.8-L18."
+            )
         block = mat[np.ix_(bin_idx, bin_idx)]  # (N, N), block[j,k] = mat[bin_j, bin_k]
 
         sens_r = base_sens[l_r - 1].copy()
