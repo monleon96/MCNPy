@@ -100,6 +100,15 @@ def mf34_diag(mf34, e_mev, mu, c0, a_l_per_pt, drop=None):
             continue
         b = np.clip(np.searchsorted(grid, e_ev, side="right") - 1, 0, M - 1)
         diag = mat[b, b]
+        # Off-grid points contribute ZERO through this block, not the value of
+        # its edge interval — the same masking `build_mf34_block` applies, and
+        # it must be applied here too or this second copy of the fold drifts
+        # (which `test_null_slot_exposure.py` is there to catch, and did).
+        # On the DIAGONAL both axes are the same point, so `covered` enters
+        # once, not as an outer product. Roadmap §10.7-6.
+        covered = (e_ev >= grid[0]) & (e_ev <= grid[-1])
+        if not covered.all():
+            diag = diag * covered
 
         sens_r = base_sens[l_r - 1].copy()
         sens_c = base_sens[l_c - 1].copy()

@@ -35,6 +35,11 @@ from typing import Callable, Dict, Optional, Tuple
 import numpy as np
 from numpy.polynomial.legendre import legval
 
+# Blocks already reported as partly off-grid, so the message is printed once per
+# (l_row, l_col, group size) instead of once per experiment. Reporting matters;
+# 67 identical lines per library do not.
+_OFF_GRID_SEEN: set = set()
+
 
 # ── MF34: dense Σ_eval contribution from Legendre coefficient covariance ──────
 
@@ -132,30 +137,42 @@ def build_mf34_block(
         bin_idx = np.clip(
             np.searchsorted(grid, e_ev, side="right") - 1, 0, M - 1,
         )
-        # ⚠ THE CLIP ABOVE EXTRAPOLATES, AND MF34's BLOCKS DO NOT ALL SPAN THE
-        # SAME RANGE. `merge_mf34` builds each (L, L1) pair on its own union of
-        # JEFF's grid and the pipeline overlay's, so the shipped file carries
-        # four grids; block (2,6) starts at 0.8468 MeV. Pinning an off-grid
-        # point to the first or last interval INVENTS covariance the file does
-        # not assert, and in `build_group_cross` the same line manufactured a
-        # lam_min of -6.21e-02 out of nothing (Sec. 10.1.8-L18).
+        # ⚠⚠ THE CLIP ABOVE EXTRAPOLATES, AND MF34's BLOCKS DO NOT ALL SPAN THE
+        # SAME RANGE. `np.clip` on a searchsorted index does not mean "outside
+        # the range there is nothing", it means "use the first or last
+        # interval". ENDF-6 LB=5/6 matrices are defined ON their grid and assert
+        # nothing outside it, so pinning an off-grid point INVENTS covariance --
+        # in `build_group_cross` the identical line manufactured a lam_min of
+        # -6.21e-02 out of nothing (roadmap Sec. 10.1.8-L18).
         #
-        # It has never fired here -- all 140457 EXFOR points sit in
-        # 0.85-4.0 MeV, inside every block's range -- so this is a guard, not a
-        # fix, and it must stay loud rather than silently masking: a point off
-        # the grid means the evaluation and the data no longer agree on where
-        # this covariance applies, and that is a question for a human.
-        _off = (e_ev < grid[0]) | (e_ev > grid[-1])
-        if _off.any():
-            raise ValueError(
-                f"MF34 block (L={l_r}, L1={l_c}) spans "
-                f"[{grid[0]:.6g}, {grid[-1]:.6g}] eV but {int(_off.sum())} of "
-                f"{e_ev.size} points fall outside it "
-                f"([{e_ev.min():.6g}, {e_ev.max():.6g}] eV). Clipping them "
-                f"would fabricate covariance the file does not declare — see "
-                f"roadmap Sec. 10.1.8-L18."
-            )
+        # ⚑ AND IT FIRES HERE, on JEFF-4.0. Sec. L18.7 said it never did; that
+        # was checked against This_work and is WRONG in general (Sec. 10.7-6).
+        # JEFF publishes 20 of its 21 blocks from 1e-05 eV but **(2,6) only from
+        # 1 MeV**, while the EXFOR points run down to 0.85 MeV -- so every run
+        # from 82 to 90 folded a fabricated Cov(a_2, a_6) for the points below
+        # 1 MeV, for JEFF and JEFF alone. This_work's own (2,6) starts at
+        # 0.846822 MeV and covers every point, which is why it was never seen.
+        #
+        # MASK, DO NOT PIN: zero the rows AND columns of the uncovered points,
+        # which is what the file says. Both axes, because a fabricated column is
+        # as wrong as a fabricated row. Loud, because the failure mode this
+        # whole section exists to prevent is silence.
+        _covered = (e_ev >= grid[0]) & (e_ev <= grid[-1])
         block = mat[np.ix_(bin_idx, bin_idx)]  # (N, N), block[j,k] = mat[bin_j, bin_k]
+        if not _covered.all():
+            n_off = int((~_covered).sum())
+            _key = (l_r, l_c, int(N))
+            if _key not in _OFF_GRID_SEEN:
+                _OFF_GRID_SEEN.add(_key)
+                print(
+                    f"  [MF34 off-grid] block (L={l_r}, L1={l_c}) spans "
+                    f"[{grid[0]:.6g}, {grid[-1]:.6g}] eV; {n_off} of "
+                    f"{e_ev.size} points lie outside it and contribute ZERO "
+                    f"through this block (the file declares nothing there). "
+                    f"Roadmap §10.7-6.",
+                    flush=True,
+                )
+            block = block * np.outer(_covered, _covered)
 
         sens_r = base_sens[l_r - 1].copy()
         sens_c = base_sens[l_c - 1].copy()
@@ -350,6 +367,15 @@ def build_mf33_mf34_cross_block(
         bin0 = np.clip(np.searchsorted(mag_grid, e_ev, side="right") - 1, 0, n0 - 1)
         binL = np.clip(np.searchsorted(shape_grid, e_ev, side="right") - 1, 0, n_sh - 1)
         C = mat[np.ix_(bin0, binL)]  # (N, N): C[j,k] = Cov(sigma bin0_j, a_L binL_k)
+        # Same masking rule as `build_mf34_block`, and for the same reason: the
+        # clip above pins an off-grid point to the edge interval, which invents
+        # covariance the block does not declare. Applied per AXIS here, since
+        # the two axes have different grids and a point can be inside one and
+        # outside the other. Roadmap §10.7-6.
+        cov0 = (e_ev >= mag_grid[0]) & (e_ev <= mag_grid[-1])
+        covL = (e_ev >= shape_grid[0]) & (e_ev <= shape_grid[-1])
+        if not (cov0.all() and covL.all()):
+            C = C * np.outer(cov0, covL)
 
         sens_L = base_sens[L - 1].copy()
         if blk.get("is_relative", True):

@@ -393,8 +393,37 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
         "title":      "χ² analysis — run 86 with MF34 parameters the fit never determined removed",
         "systematic_block_col": None,
     },
+    # Run 86 re-scored with ONE change: MF34 blocks no longer extrapolate off
+    # their own energy grid (roadmap §10.7-6). Same ENDF as run 86, same MF33,
+    # same everything — only the fold changed.
+    #
+    # WHAT IT PRICES, and it is not ours. JEFF-4.0 publishes 20 of its 21 MF34
+    # blocks from 1e-05 eV and **(2,6) only from 1 MeV**, while the EXFOR points
+    # run down to 0.85 MeV. `np.clip` on the bin index pinned those points to
+    # (2,6)'s first interval, so runs 82–90 all folded a **fabricated
+    # Cov(a_2, a_6) for JEFF** below 1 MeV. This_work's own (2,6) starts at
+    # 0.846822 MeV and covers every point, so it never had the problem.
+    #
+    # ⚠ SO THIS MOVES JEFF AND (probably) NOT US, which is the opposite of every
+    # other single-variable job in this document. `This_work` must come out
+    # IDENTICAL to run_086; if it does not, the mask is reaching something it
+    # should not. JENDL has one MF34 block — check whether it moves at all.
+    #
+    # ⚠ AND IT MUST BE READ BEFORE `predictive_86_mf33grouped`, because that job
+    # carries this change too. Scoring the grouping against run_086 directly
+    # would confound the two.
+    "predictive_86_maskfix": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_86_maskfix.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run 86, MF34 blocks masked outside their own grid",
+        "systematic_block_col": None,
+    },
     # Run 86 with MF33/MT2 written on the 188-group ADAPTIVE grid instead of the
     # 1738-bin fine one (roadmap §10.7-4 step 2, `regroup_mf33.py`).
+    #
+    # ⚠ COMPARE THIS AGAINST `predictive_86_maskfix`, NOT against run_086. Both
+    # carry the §10.7-6 mask; only this one also regroups MF33. Against run_086
+    # it would be two variables.
     #
     # WHAT IT PRICES. §10.7-3 says grouping MF33 is the enabling step for the
     # cross term, not a size optimisation: it is what makes the fold a

@@ -257,6 +257,65 @@ def test_the_two_defects_are_independent(world):
     assert abs(bad) > 1e4 * abs(ok) + 1e-9, (ok, bad)
 
 
+def test_a_block_that_does_not_span_the_points_contributes_zero_there(world):
+    """⚑ §10.7-6. A block whose grid does not reach a point must contribute
+    NOTHING at that point, not the value of its nearest edge interval.
+
+    THIS IS NOT HYPOTHETICAL. JEFF-4.0 publishes 20 of its 21 MF34 blocks from
+    1e-05 eV and **(2,6) only from 1 MeV**, while the EXFOR points run down to
+    0.85 MeV — so every chi2 from run 82 to run 90 folded a fabricated
+    Cov(a_2, a_6) for JEFF below 1 MeV. `build_group_cross` had the identical
+    line and it manufactured a lam_min of -6.21e-02 out of nothing (§L18).
+    Sec. L18.7's "it never fires in the chi2" was checked against This_work,
+    whose own (2,6) starts at 0.846822 MeV and covers every point.
+
+    The assertion is an identity, not a tolerance: masking the points must give
+    exactly what deleting those rows and columns from the block gives.
+    """
+    w = world
+    lo_cut = float(np.median(w["e_mev"]) * 1e6)     # truncate half the points away
+    trunc = LegendreCovariance()
+    for k in range(w["mf34"].num_matrices):
+        lr, lc = int(w["mf34"].l_rows[k]), int(w["mf34"].l_cols[k])
+        grid = np.asarray(w["mf34"].energy_grids[k], float)
+        mat = np.asarray(w["mf34"].matrices[k], float)
+        if (lr, lc) == (1, 2):                      # truncate ONE off-diagonal block
+            keep = np.searchsorted(grid, lo_cut, side="right") - 1
+            grid, mat = grid[keep:], mat[keep:, keep:]
+        trunc.add_matrix(isotope_row=26056, reaction_row=2, l_row=lr,
+                         isotope_col=26056, reaction_col=2, l_col=lc,
+                         matrix=mat, energy_grid=list(grid),
+                         is_relative=True, frame="LAB")
+
+    got = build_mf34_block(trunc, w["e_mev"], w["mu"], w["c0"], w["a_pt"])
+
+    # What the file says, built independently: the (1,2) term simply absent for
+    # the uncovered points, every other block untouched.
+    g12 = np.asarray(trunc.energy_grids[
+        [i for i in range(trunc.num_matrices)
+         if (int(trunc.l_rows[i]), int(trunc.l_cols[i])) == (1, 2)][0]], float)
+    covered = (w["e_mev"] * 1e6 >= g12[0]) & (w["e_mev"] * 1e6 <= g12[-1])
+    assert 0 < covered.sum() < N, "the fixture must leave some points uncovered"
+
+    M = _M34(w)
+    c34 = world["c34"].copy()
+    r1 = np.arange(G34) * L + 0
+    c2 = np.arange(G34) * L + 1
+    want = M @ c34 @ M.T
+    # subtract the (1,2)+(2,1) contribution, then add it back only where covered
+    cross_only = np.zeros_like(c34)
+    cross_only[np.ix_(r1, c2)] = c34[np.ix_(r1, c2)]
+    cross_only[np.ix_(c2, r1)] = c34[np.ix_(c2, r1)]
+    term = M @ cross_only @ M.T
+    want = want - term + term * np.outer(covered, covered)
+    assert np.allclose(got, 0.5 * (want + want.T), atol=1e-10)
+
+    # And the uncovered points must not have picked up the edge interval.
+    pinned = build_mf34_block(w["mf34"], w["e_mev"], w["mu"], w["c0"], w["a_pt"])
+    assert not np.allclose(got, pinned, atol=1e-10), \
+        "truncating a block must change the fold — otherwise nothing is tested"
+
+
 def test_the_violation_is_the_structure_the_collapse_discards(world):
     """WHY it breaks, so the fix is not guessed at.
 
