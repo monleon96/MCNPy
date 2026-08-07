@@ -81,10 +81,17 @@ FORBIDDEN_ROOTS = ("kika.endf", "kika.ace")
 #: written twice. It already had: the library carried "ACE stores no reaction Q
 #: values" in a docstring, a roadmap and an error message while the values sat
 #: parsed in ``ace.q_values``. One decoder, one convention, one worse number.
+#:
+#: **M2 raises ``nuclide_info.py`` from 1 to 2, and it is the façade's own
+#: definition rather than a new coupling.** ``NuclideInfo.to_endf`` has to
+#: *construct* an ``MF1MT451``, so it imports the class it builds; the existing
+#: entry is ``from_endf``'s ``decodeMF1MT451``. A canonical→format method that
+#: did not name a format type would not be writing ENDF. Deferred to call time
+#: like the rest, and it goes to zero with the flat classes at 1.0.
 RUNTIME_ALLOWLIST: dict[str, int] = {
     "kika/nuclear_data/angular_distribution.py": 13,
     "kika/nuclear_data/cross_section.py": 3,
-    "kika/nuclear_data/nuclide_info.py": 1,
+    "kika/nuclear_data/nuclide_info.py": 2,
     "kika/nuclear_data/resonance_parameters.py": 2,
     "kika/processing/derived_covariance.py": 1,
     "kika/processing/njoy_pendf_cache.py": 1,
