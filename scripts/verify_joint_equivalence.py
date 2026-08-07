@@ -44,7 +44,10 @@ from scripts.eval_covariance import (  # noqa: E402
     build_mf33_block,
     build_mf34_block,
 )
-from scripts.joint_covariance import JointCov  # noqa: E402
+from scripts.joint_covariance import (  # noqa: E402
+    CORR_TOL_FROM_ENDF,
+    JointCov,
+)
 from scripts.precompute_chi2_library_c0 import (  # noqa: E402
     interp_a_l_to_energy,
     load_library_lib_c0,
@@ -88,7 +91,10 @@ def main() -> int:
     print(f"  restricted to {ours.n_sigma} sigma + {ours.n_a_bins} a_l bins "
           f"({ours.n} params) — the host remainder is NOT modelled here, it is "
           f"the merge's business (§10.7-7)")
-    print(ours.check(eigen=args.eigen))
+    # Read from a file, so the six-significant-digit round trip sets the
+    # correlation tolerance; see CORR_TOL_FROM_ENDF.
+    print(ours.check(eigen=args.eigen,
+                     correlation_tolerance=CORR_TOL_FROM_ENDF))
 
     # ── the gate ─────────────────────────────────────────────────────────────
     df = pd.read_parquet(args.parquet)

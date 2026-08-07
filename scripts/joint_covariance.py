@@ -202,6 +202,17 @@ def width_weights(fine_edges_ev: np.ndarray, group_edges_ev: np.ndarray) -> np.n
 
 # ── report ────────────────────────────────────────────────────────────────────
 
+# A correlation reconstructed from a file cannot be tested against 1 + 1e-9.
+# ENDF-6 writes six significant digits, so a stored rho of exactly 1 comes back
+# from independently-rounded covariance and variance entries off by ~1e-6.
+# MEASURED on run 86: the pre-write sidecars give max|rho| = 1.000000000 exactly
+# and the same matrix read back out of the _mg file gives 1.000002 -- so this is
+# the ASCII round trip and nothing else. Named and defaulted per source rather
+# than widened globally, because a joint assembled in memory really should hit
+# 1 + 1e-9 and quietly losing that check is how a real violation would hide.
+CORR_TOL_IN_MEMORY = 1.0e-9
+CORR_TOL_FROM_ENDF = 5.0e-6
+
 @dataclass
 class CovReport:
     """What :meth:`JointCov.check` found. ``ok`` is the gate; the rest is why."""
@@ -216,13 +227,14 @@ class CovReport:
     min_eig_sigma: Optional[float]
     min_eig_a: Optional[float]
     negative_tolerance: float
+    correlation_tolerance: float = CORR_TOL_IN_MEMORY
 
     @property
     def ok(self) -> bool:
         return (
             self.n_non_finite == 0
             and self.symmetry_residual <= 1e-12
-            and self.max_abs_correlation <= 1.0 + 1e-9
+            and self.max_abs_correlation <= 1.0 + self.correlation_tolerance
             and (self.min_eig is None or self.min_eig >= -self.negative_tolerance)
         )
 
@@ -233,7 +245,8 @@ class CovReport:
             f"JointCov[{self.n} params = {self.n_sigma} sigma + {self.n_a} a_l]\n"
             f"  finite        : {'yes' if self.n_non_finite == 0 else str(self.n_non_finite) + ' BAD'}\n"
             f"  symmetry      : {self.symmetry_residual:.3e}\n"
-            f"  max |corr|    : {self.max_abs_correlation:.6f}\n"
+            f"  max |corr|    : {self.max_abs_correlation:.9f}"
+            f"   (tol 1 + {self.correlation_tolerance:.1e})\n"
             f"  min eig joint : {_f(self.min_eig)}"
             f"   (negatives: {self.n_negative_eig})\n"
             f"  min eig sigma : {_f(self.min_eig_sigma)}\n"
@@ -370,7 +383,8 @@ class JointCov:
 
     # ── verification ──────────────────────────────────────────────────────────
 
-    def check(self, eigen: bool = True, negative_tolerance: float = 1e-8) -> CovReport:
+    def check(self, eigen: bool = True, negative_tolerance: float = 1e-8,
+              correlation_tolerance: float = CORR_TOL_IN_MEMORY) -> CovReport:
         """Structural + PSD report. ``eigen=False`` skips the O(n^3) part.
 
         The per-block eigenvalues are reported too, but note the direction of
@@ -404,6 +418,7 @@ class JointCov:
             min_eig=min_eig, n_negative_eig=n_neg,
             min_eig_sigma=e_s, min_eig_a=e_a,
             negative_tolerance=negative_tolerance,
+            correlation_tolerance=correlation_tolerance,
         )
 
     # ── range restriction ─────────────────────────────────────────────────────

@@ -439,3 +439,22 @@ def test_check_reports_the_blocks_but_the_verdict_is_the_joint(psd_setup, rng):
     assert rep.min_eig_sigma >= -1e-12 and rep.min_eig_a >= -1e-12
     assert rep.min_eig < 0 and not rep.ok
     assert "NOT OK" in str(rep)
+
+
+def test_the_correlation_tolerance_is_per_source_not_widened_globally(psd_setup):
+    """1 + 1e-9 in memory; 1 + 5e-6 for a file, and only for a file.
+
+    Run 86 measured both ends of this: the pre-write sidecars give
+    max|rho| = 1.000000000 exactly and the same matrix read back out of the
+    _mg file gives 1.000002. Widening the in-memory check to swallow that is
+    how a real violation would hide, so the two are separate numbers.
+    """
+    from scripts.joint_covariance import CORR_TOL_FROM_ENDF, CORR_TOL_IN_MEMORY
+
+    assert CORR_TOL_IN_MEMORY < CORR_TOL_FROM_ENDF
+    j = _psd_joint(psd_setup)
+    # A rho of exactly 1 nudged by the round trip's order of magnitude.
+    j.matrix[0, 1] = j.matrix[1, 0] = (
+        np.sqrt(j.matrix[0, 0] * j.matrix[1, 1]) * (1 + 2e-6))
+    assert not j.check(eigen=False).ok
+    assert j.check(eigen=False, correlation_tolerance=CORR_TOL_FROM_ENDF).ok
