@@ -143,6 +143,56 @@ def test_a_file_with_no_covariances_says_so():
     assert any("no MF33 and no MF34" in entry for entry in report.losses)
 
 
+def test_an_a0_section_reaches_the_model_with_its_order_zero_blocks():
+    """The gate the branch merge needed, and the one nothing else covers.
+
+    ``develop`` fixed two MF34 defects while this adapter was being written on a
+    branch (``98d7d23``): NL is the *number* of Legendre coefficients, not the
+    highest index, and a section carrying a_0 is LTT=3 rather than LTT=2. Both
+    live in ``parse_mf34``/``mf34_writer``, and this decoder reads through
+    ``to_ang_covmat`` rather than counting sub-subsections itself — so the fix
+    propagates for free. "For free" is a claim, and this is the measurement.
+
+    Every other MF34 test here runs on evaluations whose sections start at a_1,
+    where the count convention and the highest index coincide and the two
+    readings are indistinguishable. The sections that carry a_0 are the ones
+    *kika itself writes* — the sigma↔a_l cross blocks — so this builds one, puts
+    it through the writer and the parser, and asserts the model gets every
+    block including the L=0 row. Under the pre-fix reading NSS was
+    under-declared, ``parse_mf34_mt`` looped NSS times, and the tail of the
+    section went missing with no error anywhere.
+    """
+    from kika.endf.parsers.parse_mf34 import parse_mf34_mt
+    from kika.endf.writers.mf34_writer import create_mf34_from_covariance
+
+    maxOrder, nShape, nCross = 2, 3, 2
+    shapeGrid = np.array([0.85e6, 1.5e6, 2.5e6, 4.0e6])
+    crossGrid = np.array([0.85e6, 2.5e6, 4.0e6])
+    base = np.arange(1, nShape * maxOrder + 1, dtype=float)
+    shapeCov = 0.0005 * np.outer(base, base) + np.diag(0.01 * base)
+    shapeCov = 0.5 * (shapeCov + shapeCov.T)
+
+    written = create_mf34_from_covariance(
+        shapeCov, shapeGrid, maxOrder, 26056.0, 55.454, 2631, 2,
+        ltt=1,
+        cross_cov={1: 0.01 * np.ones((nCross, nShape)),
+                   2: -0.005 * np.ones((nCross, nShape))},
+        cross_energy_grid_ev=crossGrid,
+    )
+    assert written._ltt == 3, "the premise is gone: this is no longer an a_0 section"
+
+    reparsed = parse_mf34_mt(str(written).splitlines(), 2)
+    sections, _ = decodeMF34MT(reparsed)
+
+    orders = {(s.rowData.legendreOrder, s.columnData.legendreOrder)
+              for s in sections}
+    assert orders == {(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)}, (
+        f"the model did not receive the full a_0 upper triangle: {sorted(orders)}"
+    )
+    nl = maxOrder + 1
+    assert len(sections) == nl * (nl + 1) // 2
+
+
 @pytest.mark.parametrize("tape", ["fe56_host_tape", "fe56_jendl_tape"])
 def test_real_tapes_convert_element_for_element(request, tape):
     """Under ``--deep``, on the real MF33/MF34 rather than the synthetic fixture."""
