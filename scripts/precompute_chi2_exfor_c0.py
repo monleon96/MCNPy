@@ -62,6 +62,7 @@ from kika.cov.mf34_covmat import MF34CovMat
 
 from scripts.exfor_utils import build_exfor_cache_from_objects
 from scripts.eval_covariance import build_eval_cov_for_groups, save_eval_cov
+from scripts.mf34_cross_reader import read_mf34_split
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -127,12 +128,25 @@ def load_library(filepath: str, label: str) -> Dict:
           f"E=[{energies_mev[0]:.4g}, {energies_mev[-1]:.4g}] MeV, "
           f"max L={max(len(c) for c in coefficients)}")
 
+    # ⚑ THIS SCENARIO FOLDS MF34 ALONE — no MF33, so no magnitude parameter —
+    # and it therefore has no cross term to score. Dropping the whole magnitude
+    # family is a principal submatrix of the joint, so PSD is unaffected; what
+    # would NOT be safe is keeping Cx without C33, and
+    # `build_eval_cov_for_groups` refuses that outright.
+    #
+    # `read_mf34_split` is used only to keep the a_0 blocks from being lifted:
+    # `to_ang_covmat` would project each onto union(magnitude, shape) — six
+    # ~3020^2 matrices, ~440 MB — which `build_mf34_block`'s `l_r < 1` skip
+    # then ignores. The L>=1 blocks it returns are the same objects on the same
+    # grids as before, so this is a no-op for JEFF, for JENDL, and for any file
+    # without a_0 blocks, i.e. for every number this thesis lineage has
+    # published so far.
+    mf34 = None
     try:
-        mf34 = MF34CovMat.from_endf(filepath, energy_unit="MeV")
-        mf34 = mf34.filter_by_isotope_reaction(26056, MT_NUMBER)
+        mf34 = read_mf34_split(filepath, isotope=26056, mt=MT_NUMBER,
+                               l_max=L_MAX, energy_unit="MeV").mf34
         print(f"  MF34: {mf34.num_matrices} covariance blocks")
     except Exception as e:
-        mf34 = None
         print(f"  MF34: not available ({e})")
 
     return dict(label=label, energies_mev=energies_mev,

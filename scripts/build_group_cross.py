@@ -429,6 +429,30 @@ def _za_awr_mat_from_endf(path: Path):
     raise SystemExit(f"no MF34 MT=2 HEAD record found in {path}")
 
 
+def _compact_null_self_block(sub, mag_grid_ev) -> Tuple[int, int]:
+    """Rewrite MF34's (0,0) null block as one interval. ``(before, after)`` values.
+
+    The magnitude self-covariance belongs to MF33 and must not be repeated in
+    MF34 (manual Sec. 34.3), so the (0,0) sub-subsection has to exist and has to
+    be null. It does not have to be null on every bin: an LB=5 record over a
+    single interval spanning the same range asserts exactly the same zero.
+
+    Returns (0, 0) when there is no (0,0) block, so a section without a_0 is
+    untouched and the frozen pipeline stays bit-identical.
+    """
+    from kika.endf.writers.mf34_writer import _make_lb5_record
+
+    for ss in sub.sub_subsections:
+        if int(ss.l or 0) != 0 or int(ss.l1 or 0) != 0:
+            continue
+        before = sum(len(r.energies) + len(r.matrix) for r in ss.records)
+        edges = [float(mag_grid_ev[0]), float(mag_grid_ev[-1])]
+        ss.records = [_make_lb5_record(np.zeros((1, 1)), edges)]
+        after = sum(len(r.energies) + len(r.matrix) for r in ss.records)
+        return before, after
+    return 0, 0
+
+
 def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
                           a_nom_group, shape_ev, mag_ev, c34_rel_ship,
                           null_fill="zero",
@@ -591,6 +615,30 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
         ltt=1, cross_cov=cross_cov, cross_energy_grid_ev=cross_grid,
     )
     sub = mf34._subsections[0]
+
+    # ⚑ THE NULL (0,0) BLOCK COSTS 36 MB OF ASCII ZEROS ON A FINE MAGNITUDE AXIS.
+    # `_create_mf34_with_cross` writes it as `np.zeros((n0, n0))` through an
+    # LB=5 record, i.e. the whole upper triangle: n0(n0+1)/2 numbers. At the
+    # 188-group axis that was 17 k numbers and nobody noticed; on the shipped
+    # 2317-bin MF33 grid it is 2.685 M numbers, and every reader decodes them
+    # and projects a 2317^2 zero matrix on the way in.
+    #
+    # One interval spanning the same range says exactly the same thing --
+    # "the magnitude self-covariance is not here, it is in MF33" (manual Sec.
+    # 34.3) -- in three numbers. NL, NL1, NSS and LTT are untouched, so the
+    # section stays conforming and `parse_mf34_mt` still finds NL(NL+1)/2
+    # sub-subsections; only the record inside one of them shrinks.
+    #
+    # Done here rather than in the writer on purpose: the cluster gets kika as
+    # an installed wheel and `scripts/` by file copy, so a library change would
+    # not reach the run this is built for. `scripts/mf34_cross_reader.py`
+    # accepts both forms.
+    n_before, n_after = _compact_null_self_block(sub, cross_grid)
+    if n_before:
+        print(f"    (0,0) null block: {n_before} -> {n_after} values "
+              f"(~{(n_before - n_after) * 11 / 6 * 81 / 80 / 1e6:.1f} MB of "
+              f"zeros not written)")
+
     print(f"    MF34: LTT={mf34._ltt}, NL={sub.nl}, "
           f"{len(sub.sub_subsections)} sub-subsections "
           f"(NL(NL+1)/2 = {sub.nl * (sub.nl + 1) // 2})")

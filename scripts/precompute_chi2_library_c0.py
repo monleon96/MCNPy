@@ -73,6 +73,7 @@ from kika.processing.njoy_pendf_cache import (
     mf33_needs_pendf, get_or_create_pendf, read_pendf_mf3_sections,
 )
 from scripts.eval_covariance import build_eval_cov_for_groups, save_eval_cov
+from scripts.mf34_cross_reader import read_mf34_split
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -140,14 +141,11 @@ def load_library_lib_c0(filepath: str, label: str) -> Dict:
     xs_mf3 = np.asarray(mt3.cross_sections, dtype=float)
     print(f"  MF3: {len(e_mf3_ev)} pointwise σ values")
 
-    # MF34: a_l covariance (a-l covariance reader handles relative/absolute).
-    try:
-        mf34 = MF34CovMat.from_endf(filepath, energy_unit="MeV")
-        mf34 = mf34.filter_by_isotope_reaction(26056, MT_NUMBER)
-        print(f"  MF34: {mf34.num_matrices} covariance blocks")
-    except Exception as e:
-        mf34 = None
-        print(f"  MF34: not available ({e})")
+    # ⚑ MF34 IS READ *AFTER* MF33 NOW, AND THE ORDER IS LOAD-BEARING.
+    # The a_0 (L=0, L1) blocks carry the MF33<->MF34 cross term, and their
+    # magnitude axis must BE the grid MF33 comes back on -- that is the whole of
+    # §10.7-2(a). `read_mf34_split` checks it, and it cannot check what has not
+    # been read yet. See below the MF33 block.
 
     # MF33: sigma(E) covariance for MT=2. Libraries with NC LTY=0 sub-subsections
     # (e.g. JENDL) need reconstructed σ(E) for the sum-rule contraction — we
@@ -207,12 +205,44 @@ def load_library_lib_c0(filepath: str, label: str) -> Dict:
     except Exception as e:
         print(f"  MF33: not available ({e}) — magnitude term will be 0")
 
+    # MF34: a_l covariance, with the a_0 blocks split out rather than lifted.
+    #
+    # `MF34CovMat.from_endf` projects every LB=6 record onto union(row, col),
+    # so an a_0 block on the 2317-bin magnitude axis against the 703-group
+    # shape axis comes back as a ~3020^2 dense matrix — six of them, ~440 MB,
+    # retained for the life of the load and consumed by NOTHING, because
+    # `build_mf34_block` skips `l_r < 1`. `read_mf34_split` removes them before
+    # the projection and hands them back on their native rectangular grids.
+    #
+    # ONE PARSE feeds both, so "same file, same MT, same LTT" is structural.
+    # The returned `mf34_a0_cross` is DATA, not an instruction: the key the fold
+    # reads is `mf33_mf34_cross`, and only a scenario script that means to score
+    # the term promotes it. Loading and folding stay separate on purpose —
+    # §L8's no-double-counting property is now "the sidecar is absent", and
+    # that is only checkable if attaching the term is an explicit act.
+    mf34 = None
+    a0_cross: List[dict] = []
+    a0_info: Dict = {}
+    try:
+        _res = read_mf34_split(
+            filepath, isotope=26056, mt=MT_NUMBER, l_max=L_MAX,
+            mf33_grid_ev=mf33_grid_ev, energy_unit="MeV",
+        )
+        mf34, a0_cross, a0_info = _res.mf34, _res.cross, _res.info
+        print(f"  MF34: {mf34.num_matrices} covariance blocks"
+              + (f", plus {len(a0_cross)} a_0 cross blocks "
+                 f"({a0_info.get('n_mag_bins')} mag x "
+                 f"{a0_info.get('n_shape_bins')} shape)" if a0_cross else ""))
+    except Exception as e:
+        print(f"  MF34: not available ({e})")
+
     return dict(
         label=label,
         energies_mf4_mev=energies_mf4_mev, coefficients=coefficients,
         e_mf3_ev=e_mf3_ev, xs_mf3=xs_mf3,
         mf34=mf34,
         mf33_grid_ev=mf33_grid_ev, mf33_rel_cov=mf33_rel_cov,
+        mf34_a0_cross=a0_cross, mf34_a0_info=a0_info,
     )
 
 

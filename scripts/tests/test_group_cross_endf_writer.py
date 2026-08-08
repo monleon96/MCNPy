@@ -160,6 +160,38 @@ def test_magnitude_self_block_is_null(written):
     assert np.allclose(written["blocks"][(0, 0)][0], 0.0)
 
 
+def test_the_null_self_block_is_written_as_one_interval(written):
+    """⚑ It is null either way; the question is how many zeros it costs.
+
+    `_create_mf34_with_cross` emits the (0,0) block as a full `zeros((n0, n0))`
+    upper triangle -- n0(n0+1)/2 numbers. At the 188-group magnitude axis that
+    was 17 k numbers and nobody looked; on the shipped 2317-bin MF33 grid it is
+    2.685 M, about 36 MB of ASCII zeros in the deliverable, decoded and
+    projected as a 2317^2 matrix by every reader on the way in.
+
+    One interval spanning the same range asserts the identical zero. Pinned on
+    the RECORD rather than on the matrix, because the lifted matrix looks the
+    same either way -- which is exactly why this was free to get wrong.
+    """
+    from kika.endf.parsers.parse_mf34 import parse_mf34_mt
+    from kika.endf import read_endf
+
+    sec = read_endf(str(written["out"]), mf_numbers=[34]).get_file(34).sections[MT]
+    ss = next(s for s in sec._subsections[0].sub_subsections
+              if (s.l, s.l1) == (0, 0))
+    rec = ss.records[0]
+    assert rec.lb == 5, "square blocks are LB=5; LB=6 would need two grids"
+    assert len(rec.energies) == 2, (
+        f"the null block spans {len(rec.energies) - 1} intervals; one is "
+        f"enough and {N_GM} is already more than needed"
+    )
+    assert list(rec.energies) == [MAG_EV[0], MAG_EV[-1]], (
+        "the single interval must still span the magnitude range, so the "
+        "block asserts zero over the same energies it did before"
+    )
+    assert np.allclose(rec.matrix, 0.0)
+
+
 def test_cross_blocks_carry_cov_over_a_l(written):
     """The cross axis divides by `a_L` on the shape axis only, and lifts."""
     cx_rel = (written["cx_post"] / written["a_flat"][None, :]
