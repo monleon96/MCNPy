@@ -17,9 +17,14 @@ Three jobs, and nothing else:
    it, every ``tape``/``njoy`` skip becomes a **failure**, and the session ends
    with a list of exactly which tapes could not be resolved.
 
+A bare ``pytest`` also holds back the ``njoy``/``slow``/``perf`` tests — 29 of
+1511, and nearly all of the wall clock. Say ``-m``, ``-k`` or ``--deep`` and
+you get exactly what you asked for instead.
+
 Typical use::
 
-    pytest                                  # fast lane, skips what it lacks
+    pytest                                  # fast lane: no NJOY, no slow, no perf
+    pytest -m njoy                          # the 7 that spawn NJOY
     pytest -m "not tape and not njoy"       # what CI runs
     pytest --deep                           # workstation: prove nothing skipped
     KIKA_TAPES=/other/root pytest --deep
@@ -182,14 +187,30 @@ _TAPE_FIXTURES = frozenset(
 #: Fixtures whose presence means the test spawns NJOY.
 _NJOY_FIXTURES = frozenset({"njoy_exe"})
 
+#: Marks held back from a bare ``pytest``. Measured 2026-08-07: 29 of 1511
+#: tests carry one of these and they dominate the wall clock — the seven
+#: ``njoy`` tests alone run longer than the other 1504 together, because each
+#: spawns the NJOY executable. A bare ``pytest`` used to run them, so verifying
+#: a one-function change cost half an hour on a box that several sessions
+#: share. Everything else still runs: this is not a fast *subset*, it is the
+#: whole suite minus the parts that shell out or measure wall clock.
+_EXPENSIVE_MARKS = frozenset({"njoy", "slow", "perf"})
+
 
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
-    """Mark tests from the fixtures they request.
+    """Mark tests from the fixtures they request, then hold back the expensive ones.
 
     Hand-applied markers drift from reality the moment a test grows a new
-    dependency. Deriving them from ``fixturenames`` cannot drift.
+    dependency. Deriving them from ``fixturenames`` cannot drift — so the
+    auto-marking has to happen before anything reads those marks, including the
+    hold-back below.
+
+    The hold-back applies only when the invocation expressed no opinion. Any of
+    ``-m``, ``-k`` or ``--deep`` means the caller aimed at something specific
+    and gets exactly what they aimed at; in particular ``--deep`` must keep
+    running everything, since its whole purpose is to prove nothing was skipped.
     """
     for item in items:
         names = set(getattr(item, "fixturenames", ()))
@@ -197,6 +218,17 @@ def pytest_collection_modifyitems(
             item.add_marker(pytest.mark.tape)
         if names & _NJOY_FIXTURES:
             item.add_marker(pytest.mark.njoy)
+
+    if (config.getoption("markexpr") or config.getoption("keyword")
+            or _deep(config)):
+        return
+
+    held = pytest.mark.skip(
+        reason="expensive by default; run it with --deep, -m or -k"
+    )
+    for item in items:
+        if set(item.keywords) & _EXPENSIVE_MARKS:
+            item.add_marker(held)
 
 
 # ``--deep`` is enforced in :func:`_missing`, which every fixture below goes
