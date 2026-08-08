@@ -266,6 +266,27 @@ MF33_MF34_CROSS_DIR = os.environ.get("KIKA_MF33_MF34_CROSS_DIR", "").strip()
 # and so the ±1 Cauchy–Schwarz ends can be probed without a new evaluation.
 MF33_MF34_CROSS_SCALE = float(os.environ.get("KIKA_MF33_MF34_CROSS_SCALE", "1.0"))
 
+# ⚑ THE CROSS TERM FROM THE FILE ITSELF, which is the whole of roadmap §10.7-4
+# step 5. Set KIKA_MF33_MF34_CROSS_FROM_FILE=1 and the term is read out of
+# This_work's MF34 (L=0, L1) a₀ blocks instead of a sidecar.
+#
+# Why that is not a cosmetic change of source. A sidecar is a second object,
+# and the cross term is Cauchy-Schwarz-compatible only with the marginals it
+# was built from (§10.1) — run 89 shipped one next to marginals nothing had
+# diagnosed and measured λ_min/scale = -0.447. The sidecar also declares
+# `is_relative=False` against a relative MF34 family, which the §L13 guard
+# refuses outright, so it has never been scorable at all. Read from the file,
+# both legs come from one ENDF in one convention and the units question cannot
+# arise.
+#
+# ⚑ MUTUALLY EXCLUSIVE with KIKA_MF33_MF34_CROSS_DIR, and this is §L8's
+# no-double-counting check INVERTED. It used to read "eval_covariance skips
+# l_r < 1, so the sidecar is the only source"; it now reads "the a₀ blocks are
+# the source, so the sidecar must be ABSENT". Both set is the double count, and
+# nothing else would warn.
+MF33_MF34_CROSS_FROM_FILE = os.environ.get(
+    "KIKA_MF33_MF34_CROSS_FROM_FILE", "").strip() not in ("", "0", "false", "False")
+
 # ── Removing MF34 parameters the evaluation never determined (roadmap §10.6-1) ─
 # Path to the npz from `build_group_cross.py --write-null-mask`. Unset → nothing
 # changes, which is what every run up to 90 did.
@@ -447,6 +468,32 @@ def build_rows_at_energy(
 
 
 # ── MF33 ↔ MF34 cross block ───────────────────────────────────────────────────
+
+def refuse_double_cross_source(from_file: bool, cross_dir: str) -> None:
+    """⚑ §L8's no-double-counting check, INVERTED for item 5.
+
+    It used to be structural and needed no code: `build_mf34_block` skips
+    ``l_r < 1``, so MF34's a₀ blocks were invisible to the fold and the sidecar
+    was necessarily the only source of the cross term.
+
+    That skip is still there — deliberately — but the a₀ blocks are now read by
+    `mf34_cross_reader` and written to the SAME ``mf33_mf34_cross`` key the
+    sidecar loader uses. So with both enabled the term is folded twice, or one
+    silently overwrites the other depending on assignment order, and nothing
+    downstream can tell: Σ_eval simply comes out with the magnitude↔shape
+    correlation counted at 2×. The assertion therefore flips from "the sidecar
+    is the only source" to "the sidecar is ABSENT", and it has to be checked.
+    """
+    if from_file and cross_dir:
+        raise SystemExit(
+            "KIKA_MF33_MF34_CROSS_FROM_FILE and KIKA_MF33_MF34_CROSS_DIR are "
+            "both set. That folds the cross term TWICE -- once from "
+            "This_work's MF34 a_0 blocks and once from the sidecar -- and "
+            "nothing else would warn, because both write the same key. This is "
+            "§L8's no-double-counting check inverted: with the term in the "
+            "file, the assertion is that the sidecar is absent. Unset one."
+        )
+
 
 def load_mf33_mf34_cross(
     run_dir: str, l_max: int = L_MAX, scale: float = 1.0,
@@ -735,7 +782,47 @@ def main() -> None:
     # Opt-in MF33↔MF34 cross block, This_work only. JEFF and JENDL ship no such
     # measurement, and inventing one for them would make the comparison unfair in
     # the opposite direction to the missing-MF33 warning below. Say so out loud.
-    if MF33_MF34_CROSS_DIR and MF33_MF34_CROSS_SCALE != 0.0:
+    refuse_double_cross_source(MF33_MF34_CROSS_FROM_FILE, MF33_MF34_CROSS_DIR)
+
+    if MF33_MF34_CROSS_FROM_FILE and MF33_MF34_CROSS_SCALE != 0.0:
+        cross_blocks = libraries["This_work"].get("mf34_a0_cross") or []
+        cross_info = dict(libraries["This_work"].get("mf34_a0_info") or {})
+        if not cross_blocks:
+            raise SystemExit(
+                f"KIKA_MF33_MF34_CROSS_FROM_FILE is set but {THIS_WORK_FILE} "
+                f"ships no MF34 a_0 blocks, so the cross term would be a silent "
+                f"zero and the run would be misattributed. Write the file with "
+                f"`build_group_cross.py --mag-grid fine --write-endf`, or unset "
+                f"the variable."
+            )
+        # ⚑ s in [0, 1] is PSD-safe and s > 1 is not:
+        #   [[A, sB], [sB.T, C]] = s*J + (1-s)*diag(A, C)
+        # is a convex combination of two PSD matrices for s in [0, 1], and
+        # nothing bounds it beyond. The knob exists to bracket a PSD failure by
+        # damping rather than by rebuilding the file; it is not a free dial.
+        if MF33_MF34_CROSS_SCALE != 1.0:
+            if not 0.0 <= MF33_MF34_CROSS_SCALE <= 1.0:
+                raise SystemExit(
+                    f"KIKA_MF33_MF34_CROSS_SCALE={MF33_MF34_CROSS_SCALE} is "
+                    f"outside [0, 1]. Only that range is a convex combination "
+                    f"of the joint and its block diagonal, i.e. only there is "
+                    f"the damped matrix guaranteed PSD when the joint is."
+                )
+            cross_blocks = [dict(b, matrix=b["matrix"] * MF33_MF34_CROSS_SCALE)
+                            for b in cross_blocks]
+        libraries["This_work"]["mf33_mf34_cross"] = cross_blocks
+        print(f"\n[XCROSS] MF33↔MF34 cross ENABLED for This_work, FROM THE FILE.")
+        print(f"[XCROSS]   source : {THIS_WORK_FILE}")
+        print(f"[XCROSS]   form: MF34 (L=0, L1) a_0 blocks — "
+              f"{cross_info.get('n_mag_bins')} magnitude bins x "
+              f"{cross_info.get('n_shape_bins')} shape groups, "
+              f"orders {cross_info.get('orders')}, scale="
+              f"{MF33_MF34_CROSS_SCALE:g}")
+        print(f"[XCROSS]   both legs relative, one file, one convention — "
+              f"§L13 cannot arise and the sidecar is not read (§L8 inverted).")
+        print(f"[XCROSS]   JEFF and JENDL keep a zero cross block; This_work "
+              f"therefore carries a term the others do not.")
+    elif MF33_MF34_CROSS_DIR and MF33_MF34_CROSS_SCALE != 0.0:
         cross_blocks, cross_info = load_mf33_mf34_cross(
             MF33_MF34_CROSS_DIR, l_max=L_MAX, scale=MF33_MF34_CROSS_SCALE,
         )
@@ -884,7 +971,8 @@ def main() -> None:
     # Cierjacks alone is 28631² — plus a diagonal check everywhere, which is
     # cheap and catches the failure mode that actually bites the χ².
     _EIG_MAX_N = 2500
-    _cross_on = bool(MF33_MF34_CROSS_DIR) and MF33_MF34_CROSS_SCALE != 0.0
+    _cross_on = ((bool(MF33_MF34_CROSS_DIR) or MF33_MF34_CROSS_FROM_FILE)
+                 and MF33_MF34_CROSS_SCALE != 0.0)
     n_neg_diag_total = 0
     worst_min_eig = (None, np.inf)
     n_eig_checked = 0

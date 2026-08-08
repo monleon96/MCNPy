@@ -453,3 +453,45 @@ def test_group_block_reaches_sigma_eval_with_both_axes_binned(group_run_dir):
     # Two points inside the SAME magnitude group but different shape groups must
     # not receive identical rows.
     assert not np.allclose(sigma[0], sigma[1])
+
+
+# ── §L8 inverted: the file is the source, so the sidecar must be absent ───────
+
+def test_the_file_and_the_sidecar_cannot_both_be_the_source():
+    """⚑ The no-double-counting property, restated for item 5.
+
+    It used to be structural: `build_mf34_block` skips `l_r < 1`, so the a_0
+    blocks were invisible and the sidecar was necessarily the only source. That
+    skip is still there, but the a_0 reader now writes the SAME
+    `mf33_mf34_cross` key the sidecar loader writes -- so with both enabled the
+    magnitude<->shape correlation is folded at 2x and nothing downstream can
+    tell. Hence the check, and hence a test for it.
+    """
+    from scripts.precompute_chi2_predictive import refuse_double_cross_source
+
+    with pytest.raises(SystemExit, match="TWICE"):
+        refuse_double_cross_source(True, "/some/run/dir")
+
+    # Each alone, and neither, are all fine.
+    refuse_double_cross_source(True, "")
+    refuse_double_cross_source(False, "/some/run/dir")
+    refuse_double_cross_source(False, "")
+
+
+@pytest.mark.parametrize("value, want", [
+    ("", False), ("0", False), ("false", False), ("False", False),
+    ("1", True), ("yes", True),
+])
+def test_the_from_file_switch_reads_off_the_environment(monkeypatch, value, want):
+    """Off by default and off for the spellings of 'no', because a truthy
+    "0" would turn the cross term on in every run that tried to disable it."""
+    import importlib
+    import scripts.precompute_chi2_predictive as p
+
+    monkeypatch.setenv("KIKA_MF33_MF34_CROSS_FROM_FILE", value)
+    mod = importlib.reload(p)
+    try:
+        assert mod.MF33_MF34_CROSS_FROM_FILE is want
+    finally:
+        monkeypatch.delenv("KIKA_MF33_MF34_CROSS_FROM_FILE")
+        importlib.reload(p)
