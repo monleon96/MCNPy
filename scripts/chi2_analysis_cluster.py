@@ -447,6 +447,37 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
         "title":      "χ² analysis — run 86 with MF33 on the 188-group adaptive grid",
         "systematic_block_col": None,
     },
+    # Run 86, NOTHING GROUPED — the third row of the grouping table (§10.7-9).
+    #
+    # Scores `26-Fe-56g_nominal.endf` (843 MB): MF33 on its 1738 fine bins AND
+    # MF34 on its 1738 fine bins, against the shipped `_mg.endf` which is MF33
+    # fine + MF34 grouped to 660, and against `_mf33grouped` which is 188 + 660.
+    # Three points on one axis, same evaluation, same centrals:
+    #
+    #   predictive_86_fine         MF33 1738   MF34 1738     843.4 MB
+    #   predictive_86              MF33 1738   MF34  660     205.8 MB
+    #   predictive_86_mf33grouped  MF33  188   MF34  660     173.5 MB
+    #
+    # ⚠ `run_085_fine` is NOT this row. It is run 85's evaluation, and run 86 is
+    # the re-evaluation that fixed the multigroup mask — different centrals, so
+    # putting the two in one column would compare two things at once.
+    #
+    # WHAT IT ANSWERS. Job B priced the MF33 step at -57 % on Cierjacks, -52 %
+    # on K&S and +22 % on the other 64 experiments, with the centrals BYTE-
+    # IDENTICAL — so grouping cannot have improved the model, only softened
+    # Sigma_eval. This row separates the MF34 grouping (the 111.7 MB half of the
+    # file, and the one nobody has priced) from the MF33 grouping (the 75.7 MB
+    # half, priced by B).
+    #
+    # Resources: the 843 MB parse and 21 blocks of 1738^2 need the 300G; the
+    # walltime is raised to 8 h because the `_mg` precompute alone took 76 min
+    # on a file a quarter the size.
+    "predictive_86_fine": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_86_fine.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run 86, NOTHING grouped (MF33 and MF34 both on the 1738 fine bins)",
+        "systematic_block_col": None,
+    },
     # Fold-mode sweep. Identical to `predictive` in every respect except which
     # part of the forward model is resolution-averaged (FOLD_MODE in
     # precompute_chi2_predictive.py). Compare V2 across these to decide, over
