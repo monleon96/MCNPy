@@ -60,6 +60,7 @@ if str(_kika_root) not in sys.path:
     sys.path.insert(0, str(_kika_root))
 
 from scripts.eval_covariance import _legendre_base_sens
+from scripts.point_map import PointMap
 from scripts.precompute_chi2_library_c0 import (
     interp_a_l_to_energy,
     load_library_lib_c0,
@@ -98,17 +99,13 @@ def mf34_diag(mf34, e_mev, mu, c0, a_l_per_pt, drop=None):
         M = mat.shape[0]
         if M == 0:
             continue
-        b = np.clip(np.searchsorted(grid, e_ev, side="right") - 1, 0, M - 1)
-        diag = mat[b, b]
-        # Off-grid points contribute ZERO through this block, not the value of
-        # its edge interval — the same masking `build_mf34_block` applies, and
-        # it must be applied here too or this second copy of the fold drifts
-        # (which `test_null_slot_exposure.py` is there to catch, and did).
-        # On the DIAGONAL both axes are the same point, so `covered` enters
-        # once, not as an outer product. Roadmap §10.7-6.
-        covered = (e_ev >= grid[0]) & (e_ev <= grid[-1])
-        if not covered.all():
-            diag = diag * covered
+        # THE SAME MAP `build_mf34_block` uses, by construction rather than by
+        # being written to match (roadmap §10.7-7). This used to be a hand copy
+        # of the bin lookup plus the off-grid mask, and it drifted the moment
+        # the first copy changed — `test_null_slot_exposure.py` caught it, which
+        # is luck we should not need twice. `sandwich_diag` also skips the (N,N)
+        # the diagonal never needed.
+        diag = PointMap.nearest(grid, e_ev).sandwich_diag(mat)
 
         sens_r = base_sens[l_r - 1].copy()
         sens_c = base_sens[l_c - 1].copy()

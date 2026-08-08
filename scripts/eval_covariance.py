@@ -35,6 +35,11 @@ from typing import Callable, Dict, Optional, Tuple
 import numpy as np
 from numpy.polynomial.legendre import legval
 
+try:                                    # module, or script on sys.path
+    from scripts.point_map import PointMap
+except ImportError:                     # pragma: no cover - direct execution
+    from point_map import PointMap
+
 # Blocks already reported as partly off-grid, so the message is printed once per
 # (l_row, l_col, group size) instead of once per experiment. Reporting matters;
 # 67 identical lines per library do not.
@@ -134,45 +139,35 @@ def build_mf34_block(
         M = mat.shape[0]
         if M == 0:
             continue
-        bin_idx = np.clip(
-            np.searchsorted(grid, e_ev, side="right") - 1, 0, M - 1,
-        )
-        # ⚠⚠ THE CLIP ABOVE EXTRAPOLATES, AND MF34's BLOCKS DO NOT ALL SPAN THE
-        # SAME RANGE. `np.clip` on a searchsorted index does not mean "outside
-        # the range there is nothing", it means "use the first or last
-        # interval". ENDF-6 LB=5/6 matrices are defined ON their grid and assert
-        # nothing outside it, so pinning an off-grid point INVENTS covariance --
-        # in `build_group_cross` the identical line manufactured a lam_min of
-        # -6.21e-02 out of nothing (roadmap Sec. 10.1.8-L18).
-        #
-        # ⚑ AND IT FIRES HERE, on JEFF-4.0. Sec. L18.7 said it never did; that
-        # was checked against This_work and is WRONG in general (Sec. 10.7-6).
-        # JEFF publishes 20 of its 21 blocks from 1e-05 eV but **(2,6) only from
-        # 1 MeV**, while the EXFOR points run down to 0.85 MeV -- so every run
-        # from 82 to 90 folded a fabricated Cov(a_2, a_6) for the points below
-        # 1 MeV, for JEFF and JEFF alone. This_work's own (2,6) starts at
-        # 0.846822 MeV and covers every point, which is why it was never seen.
-        #
-        # MASK, DO NOT PIN: zero the rows AND columns of the uncovered points,
-        # which is what the file says. Both axes, because a fabricated column is
-        # as wrong as a fabricated row. Loud, because the failure mode this
+        # THE ONE MAP for the Legendre family (roadmap §10.7-7). Containing-bin,
+        # because ENDF LB=5/6 is piecewise-constant ON its grid; all-zero row
+        # off-grid, because the file declares nothing there. Both properties
+        # live in `PointMap.nearest` now, so the JEFF (2,6) case below cannot be
+        # fixed in one copy of the fold and missed in another -- which is
+        # exactly what happened when there were five copies.
+        pm = PointMap.nearest(grid, e_ev)
+        # ⚑ THE OFF-GRID CASE IS REAL AND IT FIRES ON JEFF-4.0. §L18.7 said it
+        # never did; that was checked against This_work and is WRONG in general
+        # (§10.7-6). JEFF publishes 20 of its 21 blocks from 1e-05 eV but
+        # **(2,6) only from 1 MeV**, while the EXFOR points run down to
+        # 0.85 MeV -- so every chi^2 from run 82 to 90 folded a fabricated
+        # Cov(a_2, a_6) for the points below 1 MeV, for JEFF and JEFF alone.
+        # This_work's own (2,6) starts at 0.846822 MeV and covers every point,
+        # which is why it was invisible. Loud, because the failure mode this
         # whole section exists to prevent is silence.
-        _covered = (e_ev >= grid[0]) & (e_ev <= grid[-1])
-        block = mat[np.ix_(bin_idx, bin_idx)]  # (N, N), block[j,k] = mat[bin_j, bin_k]
-        if not _covered.all():
-            n_off = int((~_covered).sum())
+        if pm.n_off_grid:
             _key = (l_r, l_c, int(N))
             if _key not in _OFF_GRID_SEEN:
                 _OFF_GRID_SEEN.add(_key)
                 print(
                     f"  [MF34 off-grid] block (L={l_r}, L1={l_c}) spans "
-                    f"[{grid[0]:.6g}, {grid[-1]:.6g}] eV; {n_off} of "
+                    f"[{grid[0]:.6g}, {grid[-1]:.6g}] eV; {pm.n_off_grid} of "
                     f"{e_ev.size} points lie outside it and contribute ZERO "
                     f"through this block (the file declares nothing there). "
                     f"Roadmap §10.7-6.",
                     flush=True,
                 )
-            block = block * np.outer(_covered, _covered)
+        block = pm.sandwich(mat)  # (N, N), block[j,k] = mat[bin_j, bin_k], masked
 
         sens_r = base_sens[l_r - 1].copy()
         sens_c = base_sens[l_c - 1].copy()
@@ -224,37 +219,36 @@ def _mf4_bin_edges_for_points(
     return e_lo, e_hi
 
 
+def _mf33_magnitude_map(
+    mf33_grid_ev: np.ndarray, energies_mf4_mev: np.ndarray, e_mev: np.ndarray,
+) -> PointMap:
+    """THE ONE MAP for the magnitude family (roadmap §10.7-7).
+
+    Overlap-average over the MF4 bin containing each point — the same
+    length-weighted averaging as `avg_mf33_rel_var_over_bin`, in 2-D.
+
+    ⚑ Every leg that touches the magnitude parameter must come through here:
+    the MF33 self block AND the magnitude side of the MF33↔MF34 cross term.
+    That is not tidiness. `Sigma_eval = M J M^T` is a congruence — hence PSD
+    whenever `J` is — only if one `M` exists, and while the cross term used a
+    nearest-bin lookup against the self block's `W`, none did.
+    """
+    e_lo_mev, e_hi_mev = _mf4_bin_edges_for_points(energies_mf4_mev, e_mev)
+    return PointMap.overlap(
+        np.asarray(mf33_grid_ev, dtype=float), e_lo_mev * 1e6, e_hi_mev * 1e6,
+    )
+
+
 def _mf33_overlap_weights(
     grid_ev: np.ndarray, e_lo_ev: np.ndarray, e_hi_ev: np.ndarray,
 ) -> np.ndarray:
-    """Bin-overlap weight matrix W of shape (N, M), normalized per row.
+    """Row-normalised (N, M) overlap weights.
 
-    W[j, k] = overlap(MF4 bin j, MF33 bin k) / sum_{k'} overlap(MF4 bin j, MF33 bin k').
-
-    Used to bin-average σ-cov over the MF4 bin containing each data point —
-    same length-weighted averaging as `avg_mf33_rel_var_over_bin`, but in 2-D
-    for ρ_σ(E_j, E_k) = W[j] @ rel_cov @ W[k]^T.
+    Kept as the name existing tests and callers import; it **delegates** to
+    `PointMap.overlap` rather than reimplementing it, so this cannot become a
+    sixth copy.
     """
-    grid_ev = np.asarray(grid_ev, dtype=float)
-    M = grid_ev.size - 1
-    N = e_lo_ev.size
-    W = np.zeros((N, M), dtype=float)
-    for j in range(N):
-        lo = float(e_lo_ev[j])
-        hi = float(e_hi_ev[j])
-        if hi <= lo or hi <= grid_ev[0] or lo >= grid_ev[-1]:
-            continue
-        k_first = max(0, int(np.searchsorted(grid_ev, lo, side="right") - 1))
-        k_last = min(M - 1, int(np.searchsorted(grid_ev, hi, side="left")))
-        for k in range(k_first, k_last + 1):
-            bin_lo = max(grid_ev[k], lo)
-            bin_hi = min(grid_ev[k + 1], hi)
-            if bin_hi > bin_lo:
-                W[j, k] = bin_hi - bin_lo
-        s = W[j].sum()
-        if s > 0:
-            W[j] /= s
-    return W
+    return PointMap.overlap(grid_ev, e_lo_ev, e_hi_ev).dense()
 
 
 def build_mf33_block(
@@ -280,13 +274,8 @@ def build_mf33_block(
     if mf33_grid_ev is None or mf33_rel_cov is None:
         return np.zeros((N, N), dtype=float)
 
-    e_lo_mev, e_hi_mev = _mf4_bin_edges_for_points(energies_mf4_mev, e_mev)
-    W = _mf33_overlap_weights(
-        np.asarray(mf33_grid_ev, dtype=float),
-        e_lo_mev * 1e6,
-        e_hi_mev * 1e6,
-    )
-    rho = W @ np.asarray(mf33_rel_cov, dtype=float) @ W.T
+    pm = _mf33_magnitude_map(mf33_grid_ev, energies_mf4_mev, e_mev)
+    rho = pm.sandwich(np.asarray(mf33_rel_cov, dtype=float))
     y = np.asarray(y_eval, dtype=float).ravel()
     sigma = (y[:, None] * y[None, :]) * rho
     return 0.5 * (sigma + sigma.T)
@@ -301,6 +290,9 @@ def build_mf33_mf34_cross_block(
     c0: np.ndarray,
     a_l_per_pt: np.ndarray,
     y_eval: np.ndarray,
+    *,
+    mf33_grid_ev: Optional[np.ndarray] = None,
+    energies_mf4_mev: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Dense N×N MF33↔MF34 cross contribution (magnitude ↔ shape).
 
@@ -316,18 +308,43 @@ def build_mf33_mf34_cross_block(
         Per-order cross-covariance blocks.  Each entry::
 
             {"l": L1,                       # Legendre order (>= 1)
-             "mag_grid_ev": (N0+1,),        # coarse magnitude (sigma) grid
              "shape_grid_ev": (Nsh+1,),     # a_L shape grid
-             "matrix": (N0, Nsh),           # Cov(sigma bin, a_L1 bin)
+             "matrix": (M33, Nsh),          # Cov(sigma bin, a_L1 bin)
              "is_relative": bool}           # default True
 
         Mirrors item-2's LB=6 (L=0, L1) block layout.  Missing/empty → zeros.
+        The magnitude axis is **``mf33_grid_ev``**, not a grid of the block's
+        own choosing — see below.
     e_mev, mu, c0, a_l_per_pt, y_eval
         Same per-point arrays as :func:`build_mf34_block` /
         :func:`build_mf33_block`.
+    mf33_grid_ev, energies_mf4_mev
+        The MF33 self block's grid and the MF4 grid, i.e. exactly what
+        :func:`build_mf33_block` is given.  Required whenever ``cross`` is
+        non-empty; the magnitude leg is built from them through
+        :func:`_mf33_magnitude_map`, the same call the self block makes.
 
     Notes
     -----
+    ⚑⚑ **ONE MAP PER FAMILY** (roadmap §10.7-2(a), §10.7-7).  The magnitude leg
+    goes through ``_mf33_magnitude_map`` — the MF4-bin overlap average ``W`` —
+    because that is what :func:`build_mf33_block` uses; the shape leg goes
+    through ``PointMap.nearest`` on the block's own grid because that is what
+    :func:`build_mf34_block` uses.  Then
+
+        Σ_eval = M J M^T,  M = [ diag(y)·W | sens·S ]
+
+    is a congruence and PSD transfers from ``J`` by algebra rather than by luck.
+
+    ⚠ **This is a behaviour change, and it is the point.**  This function used
+    to take a per-block ``mag_grid_ev`` and place points on it by nearest-bin.
+    Against a self block averaging over ``W``, no single ``M`` existed, and that
+    is why a certified-PSD joint kept folding indefinite (runs 87–90, four runs
+    with no χ²).  A sidecar whose magnitude axis is *not* the shipped MF33 grid
+    is now rejected loudly instead of folded wrongly — which is the honest
+    reading of §10.1: ``Cx`` is Cauchy–Schwarz-compatible only with the
+    marginals it was built from.
+
     Sensitivities: dy/dsigma = ``y_eval`` (magnitude side), dy/da_L1 =
     ``c0*(2L1+1)*P_L1`` (shape side; scaled by the nominal a_L1 for relative
     blocks, matching :func:`build_mf34_block`).  The block is assembled
@@ -349,33 +366,43 @@ def build_mf33_mf34_cross_block(
     if L_max == 0:
         return np.zeros((N, N), dtype=float)
 
+    if mf33_grid_ev is None or energies_mf4_mev is None:
+        raise ValueError(
+            "a non-empty cross term needs `mf33_grid_ev` and "
+            "`energies_mf4_mev`: its magnitude leg must reach the points "
+            "through the SAME map as `build_mf33_block`, or Sigma_eval is not "
+            "a congruence and PSD does not transfer (roadmap §10.7-2(a))."
+        )
+
     base_sens = _legendre_base_sens(mu, c0, L_max)  # (L_max, N)
     y = np.asarray(y_eval, dtype=float).ravel()
     e_ev = e_mev * 1e6
+
+    # THE magnitude map — one call, identical to the self block's.
+    pm_mag = _mf33_magnitude_map(mf33_grid_ev, energies_mf4_mev, e_mev)
 
     sigma = np.zeros((N, N), dtype=float)
     for blk in cross:
         L = int(blk["l"])
         if L < 1 or L > L_max:
             continue
-        mag_grid = np.asarray(blk["mag_grid_ev"], dtype=float)
         shape_grid = np.asarray(blk["shape_grid_ev"], dtype=float)
         mat = np.asarray(blk["matrix"], dtype=float)
         if mat.size == 0:
             continue
-        n0, n_sh = mat.shape
-        bin0 = np.clip(np.searchsorted(mag_grid, e_ev, side="right") - 1, 0, n0 - 1)
-        binL = np.clip(np.searchsorted(shape_grid, e_ev, side="right") - 1, 0, n_sh - 1)
-        C = mat[np.ix_(bin0, binL)]  # (N, N): C[j,k] = Cov(sigma bin0_j, a_L binL_k)
-        # Same masking rule as `build_mf34_block`, and for the same reason: the
-        # clip above pins an off-grid point to the edge interval, which invents
-        # covariance the block does not declare. Applied per AXIS here, since
-        # the two axes have different grids and a point can be inside one and
-        # outside the other. Roadmap §10.7-6.
-        cov0 = (e_ev >= mag_grid[0]) & (e_ev <= mag_grid[-1])
-        covL = (e_ev >= shape_grid[0]) & (e_ev <= shape_grid[-1])
-        if not (cov0.all() and covL.all()):
-            C = C * np.outer(cov0, covL)
+        if mat.shape[0] != pm_mag.n_bins:
+            raise ValueError(
+                f"cross block l={L} has {mat.shape[0]} magnitude bins but the "
+                f"shipped MF33 grid has {pm_mag.n_bins}. A cross term is "
+                f"Cauchy-Schwarz-compatible only with the marginals it was "
+                f"built from (§10.1); rebuild it on the MF33 grid rather than "
+                f"regridding it here."
+            )
+        # THE shape map — identical to `build_mf34_block`'s, off-grid masking
+        # included, so a block that does not span a point contributes zero
+        # there on this axis too.
+        pm_shape = PointMap.nearest(shape_grid, e_ev)
+        C = pm_mag.sandwich(mat, pm_shape)  # (N, N): Cov(sigma_j, a_L k)
 
         sens_L = base_sens[L - 1].copy()
         if blk.get("is_relative", True):
@@ -472,8 +499,13 @@ def build_eval_cov_for_groups(
             lib.get("energies_mf4_mev"), e_mev, y_eval,
         )
         # Opt-in MF33↔MF34 cross term; None → zero block → numbers unchanged.
+        # The MF33 grid and the MF4 grid go in because the cross term's
+        # magnitude leg is built from them by the SAME call the self block
+        # makes — that is the whole of §10.7-2(a).
         sigma_cross = build_mf33_mf34_cross_block(
             lib.get("mf33_mf34_cross"), e_mev, mu, c0, a_l_per_pt, y_eval,
+            mf33_grid_ev=lib.get("mf33_grid_ev"),
+            energies_mf4_mev=lib.get("energies_mf4_mev"),
         )
         eval_cov[key] = (sigma_mf34 + sigma_mf33 + sigma_cross).astype(np.float32)
     return eval_cov

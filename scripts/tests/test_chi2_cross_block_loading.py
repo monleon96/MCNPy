@@ -153,7 +153,7 @@ def test_loaded_blocks_are_accepted_by_the_builder_and_move_sigma(run_dir):
     surface as a silently zero cross term, which is exactly today's behaviour
     and therefore invisible.
     """
-    d, *_ = run_dir
+    d, _cov, grid, _c0 = run_dir
     blocks, _ = load_mf33_mf34_cross(str(d), l_max=L_MAX)
 
     n = 12
@@ -164,7 +164,9 @@ def test_loaded_blocks_are_accepted_by_the_builder_and_move_sigma(run_dir):
     y = c0 * (1.0 + a_l[:, 0])
 
     zero = build_mf33_mf34_cross_block(None, e_mev, mu, c0, a_l, y)
-    got = build_mf33_mf34_cross_block(blocks, e_mev, mu, c0, a_l, y)
+    got = build_mf33_mf34_cross_block(blocks, e_mev, mu, c0, a_l, y,
+                                      mf33_grid_ev=grid,
+                                      energies_mf4_mev=grid / 1e6)
 
     assert zero.shape == got.shape == (n, n)
     assert np.all(zero == 0.0)
@@ -174,7 +176,7 @@ def test_loaded_blocks_are_accepted_by_the_builder_and_move_sigma(run_dir):
 
 def test_scaling_the_block_scales_the_assembled_sigma(run_dir):
     """Sigma_cross is linear in the block, so damping is interpretable."""
-    d, *_ = run_dir
+    d, _cov, grid, _c0 = run_dir
     n = 8
     e_mev = np.linspace(0.9, 3.9, n)
     mu = np.linspace(-0.8, 0.8, n)
@@ -184,8 +186,9 @@ def test_scaling_the_block_scales_the_assembled_sigma(run_dir):
 
     b1, _ = load_mf33_mf34_cross(str(d), l_max=L_MAX, scale=1.0)
     b2, _ = load_mf33_mf34_cross(str(d), l_max=L_MAX, scale=0.25)
-    s1 = build_mf33_mf34_cross_block(b1, e_mev, mu, c0, a_l, y)
-    s2 = build_mf33_mf34_cross_block(b2, e_mev, mu, c0, a_l, y)
+    kw = dict(mf33_grid_ev=grid, energies_mf4_mev=grid / 1e6)
+    s1 = build_mf33_mf34_cross_block(b1, e_mev, mu, c0, a_l, y, **kw)
+    s2 = build_mf33_mf34_cross_block(b2, e_mev, mu, c0, a_l, y, **kw)
     np.testing.assert_allclose(s2, 0.25 * s1, rtol=1e-12, atol=1e-20)
 
 
@@ -238,13 +241,14 @@ def test_sigma_eval_is_linear_in_the_scale():
     y = c0 * (1.0 + a_l[:, 0])
 
     def blocks(scale):
-        return [{"l": L, "mag_grid_ev": grid, "shape_grid_ev": grid,
+        return [{"l": L, "shape_grid_ev": grid,
                  "matrix": np.diag(scale * cov[:, L - 1]), "is_relative": False}
                 for L in range(1, l_max + 1)]
 
-    base = build_mf33_mf34_cross_block(blocks(1.0), e_mev, mu, c0, a_l, y)
+    kw = dict(mf33_grid_ev=grid, energies_mf4_mev=grid / 1e6)
+    base = build_mf33_mf34_cross_block(blocks(1.0), e_mev, mu, c0, a_l, y, **kw)
     for s in (0.0, 0.25, 0.5, 2.0):
-        got = build_mf33_mf34_cross_block(blocks(s), e_mev, mu, c0, a_l, y)
+        got = build_mf33_mf34_cross_block(blocks(s), e_mev, mu, c0, a_l, y, **kw)
         np.testing.assert_allclose(got, s * base, rtol=1e-12, atol=1e-20)
 
 
@@ -362,21 +366,43 @@ def test_group_block_is_not_divided_by_c0_host_again(group_run_dir):
         )
 
 
-def test_group_block_carries_its_two_DIFFERENT_grids(group_run_dir):
-    """The magnitude and shape axes are on the run's own adaptive grids.
+def test_group_block_carries_its_shape_grid_but_no_magnitude_grid(group_run_dir):
+    """The shape axis is still the run's own adaptive grid and still independent
+    of the magnitude axis — §10.7-2: the two families do NOT have to share a
+    grid, only each family with itself.
 
-    They are not the same grid and neither is the fine one, so passing a single
-    `grid_ev` for both -- which is what the fine path does -- would silently
-    mis-bin every point on one axis.
+    ⚑ What changed: the block no longer carries a magnitude grid of its own.
+    Since §10.7-7 the magnitude axis IS the shipped MF33 grid, passed to the
+    fold once, because that is the only way `Sigma_eval = M J M^T` is a
+    congruence. A block that disagrees is caught by row count, not re-binned.
     """
-    d, grp, mag_ev, shape_ev = group_run_dir
+    d, grp, _mag_ev, shape_ev = group_run_dir
     blocks, info = load_mf33_mf34_cross(str(d), l_max=L_MAX)
     assert info["n_bins"] == N_MAG
     for blk in blocks:
-        np.testing.assert_array_equal(blk["mag_grid_ev"], mag_ev)
+        assert "mag_grid_ev" not in blk
         np.testing.assert_array_equal(blk["shape_grid_ev"], shape_ev)
         assert blk["matrix"].shape == (N_MAG, N_SHAPE)
         assert blk["is_relative"] is False
+
+
+def test_a_group_block_against_the_fine_mf33_is_refused(group_run_dir):
+    """⚑ THE GUARD, on the real artefact. This is run 89/90's configuration:
+    a cross term certified on the 188-group magnitude axis, folded against the
+    fine MF33 the file actually ships. It produced four runs and no χ².
+
+    It is now a loud error instead of an indefinite Σ_eval.
+    """
+    d, _grp, _mag_ev, _shape_ev = group_run_dir
+    blocks, _ = load_mf33_mf34_cross(str(d), l_max=L_MAX)
+    fine_ev = np.linspace(0.85e6, 4.0e6, N_MAG * 7 + 1)   # the shipped grid
+    with pytest.raises(ValueError, match="magnitude bins"):
+        build_mf33_mf34_cross_block(
+            blocks, np.linspace(0.9, 3.9, 12), np.linspace(-0.9, 0.9, 12),
+            np.full(12, 0.2), np.tile(np.array([0.3, 0.1, 0.05]), (12, 1)),
+            np.full(12, 0.2),
+            mf33_grid_ev=fine_ev, energies_mf4_mev=fine_ev / 1e6,
+        )
 
 
 def test_group_scale_is_applied(group_run_dir):
@@ -404,14 +430,17 @@ def test_group_block_reaches_sigma_eval_with_both_axes_binned(group_run_dir):
     resolve -- so assert the assembled matrix actually varies within a magnitude
     group.
     """
-    d, _grp, _m, _s = group_run_dir
+    d, _grp, mag_ev, _s = group_run_dir
     blocks, _ = load_mf33_mf34_cross(str(d), l_max=L_MAX)
     e_mev = np.linspace(0.9, 3.9, 12)
     mu = np.linspace(-0.9, 0.9, 12)
     c0 = np.full(12, 0.2)
     a_l = np.tile(np.array([0.3, 0.1, 0.05]), (12, 1))
+    # Folded against the MF33 grid the block was BUILT on, which is the only
+    # configuration the fold now accepts — the axes still bin independently.
     sigma = build_mf33_mf34_cross_block(
         blocks, e_mev, mu, c0, a_l, y_eval=np.full(12, 0.2),
+        mf33_grid_ev=mag_ev, energies_mf4_mev=mag_ev / 1e6,
     )
     assert sigma.shape == (12, 12)
     np.testing.assert_allclose(sigma, sigma.T, rtol=0, atol=1e-18)

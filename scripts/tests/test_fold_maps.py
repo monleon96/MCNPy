@@ -149,11 +149,38 @@ def world():
 
 
 def _fold(w, mf33_grid, mf33_cov):
-    """Sigma_eval, with the MF33 self block on whichever grid is passed."""
+    """Sigma_eval through the production fold, MF33 on whichever grid is passed.
+
+    Since the maps were unified (§10.7-7) the cross term's magnitude leg is
+    built from `mf33_grid` too — there is no second axis to disagree with.
+    """
     S = (build_mf34_block(w["mf34"], w["e_mev"], w["mu"], w["c0"], w["a_pt"])
          + build_mf33_block(mf33_grid, mf33_cov, w["mf4_mev"], w["e_mev"], w["y"])
          + build_mf33_mf34_cross_block(w["cross"], w["e_mev"], w["mu"],
-                                       w["c0"], w["a_pt"], w["y"]))
+                                       w["c0"], w["a_pt"], w["y"],
+                                       mf33_grid_ev=mf33_grid,
+                                       energies_mf4_mev=w["mf4_mev"]))
+    return 0.5 * (S + S.T)
+
+
+def _fold_legacy(w, mf33_grid, mf33_cov):
+    """Sigma_eval as the fold assembled it BEFORE the maps were unified.
+
+    Kept because the diagnosis is worth more than the code that had it: the
+    self block averaged over `mf33_grid` while the cross term's magnitude leg
+    did a nearest-bin lookup on its own `mag_ev`. Two maps for one parameter,
+    so no single `M` existed and `Sigma_eval = M J M^T` was simply false.
+
+    Written out of the test's own `_M33`/`_M34` rather than by calling the
+    production code, which can no longer be made to do this — that is the point
+    of the change.
+    """
+    M33_self = _M33(w, mf33_grid)
+    M33_cross = _M33(w, w["mag_ev"])          # ← the second, disagreeing map
+    M34 = _M34(w)
+    S = M34 @ w["c34"] @ M34.T + M33_self @ mf33_cov @ M33_self.T
+    X = M33_cross @ w["cx_c"] @ M34.T
+    S = S + X + X.T
     return 0.5 * (S + S.T)
 
 
@@ -233,25 +260,47 @@ def test_control_one_grid_is_exactly_the_certified_congruence(world):
 
 # ── the defect ────────────────────────────────────────────────────────────────
 
-def test_magnitude_grid_mismatch_breaks_psd(world):
-    """Run 86's configuration: certify on the coarse axis, ship and fold the
-    fine MF33. Same J, same code, ONE variable against the control.
+def test_the_legacy_two_map_assembly_broke_psd(world):
+    """Run 86's configuration under the OLD fold: certify on the coarse axis,
+    ship and fold the fine MF33, and let the cross term keep its own magnitude
+    axis. Same J, ONE variable against the control.
 
-    The units are consistent here, so this is §L13 switched off and
-    §10.7-2(a) standing alone.
+    The units are consistent here, so this is §L13 switched off and §10.7-2(a)
+    standing alone. This is now a historical record — `_fold_legacy` is the only
+    thing that can still produce it.
     """
-    lam = _lam_min_norm(_fold(world, world["fine_ev"], world["c33_f"]))
-    assert lam < -1e-6, (
-        f"expected the grid mismatch to break PSD, got {lam:.3e} — if this "
-        f"starts passing the fold has been fixed, and this test should become "
-        f"a control"
-    )
+    lam = _lam_min_norm(_fold_legacy(world, world["fine_ev"], world["c33_f"]))
+    assert lam < -1e-6, f"the two-map assembly must break PSD, got {lam:.3e}"
+
+
+def test_the_legacy_assembly_agrees_with_production_when_the_axes_coincide(world):
+    """`_fold_legacy` is the old fold and not merely a broken function: on the
+    control configuration, where both magnitude maps land on the same grid, it
+    reproduces the production fold exactly. Without this the test above would
+    prove nothing about what the code used to do.
+    """
+    got = _fold_legacy(world, world["mag_ev"], world["c33_c"])
+    want = _fold(world, world["mag_ev"], world["c33_c"])
+    assert np.allclose(got, want, atol=1e-10)
+
+
+def test_a_cross_block_off_the_mf33_grid_is_now_rejected(world):
+    """⚑ THE FIX. The configuration that produced four runs with no χ² is no
+    longer foldable: a cross term whose magnitude axis is not the shipped MF33
+    grid is refused, loudly, instead of folded into an indefinite Σ_eval.
+
+    This is the honest reading of §10.1 — `Cx` is Cauchy–Schwarz-compatible only
+    with the marginals it was built from — turned into a guard.
+    """
+    with pytest.raises(ValueError, match="magnitude bins"):
+        _fold(world, world["fine_ev"], world["c33_f"])
 
 
 def test_the_two_defects_are_independent(world):
-    """Fixing the units alone cannot be enough, because the map breaks it too."""
-    ok = _lam_min_norm(_fold(world, world["mag_ev"], world["c33_c"]))
-    bad = _lam_min_norm(_fold(world, world["fine_ev"], world["c33_f"]))
+    """Fixing the units alone could not have been enough, because the map broke
+    it too — measured on the legacy assembly, one variable at a time."""
+    ok = _lam_min_norm(_fold_legacy(world, world["mag_ev"], world["c33_c"]))
+    bad = _lam_min_norm(_fold_legacy(world, world["fine_ev"], world["c33_f"]))
     assert ok > -1e-12, ok
     assert bad < -1e-6, bad
     assert abs(bad) > 1e4 * abs(ok) + 1e-9, (ok, bad)
@@ -341,7 +390,7 @@ def test_the_violation_is_the_structure_the_collapse_discards(world):
         assert np.linalg.eigvalsh(0.5 * (c33_f + c33_f.T))[0] > -1e-10
         assert np.allclose(A @ c33_f @ A.T, world["c33_c"], atol=1e-12), \
             "the blend must not move the collapse -- that is the control"
-        lams.append(_lam_min_norm(_fold(world, world["fine_ev"], c33_f)))
+        lams.append(_lam_min_norm(_fold_legacy(world, world["fine_ev"], c33_f)))
 
     assert lams[0] > -1e-9, (
         f"t=0 is the piecewise-constant matrix, i.e. exactly the duplication of "

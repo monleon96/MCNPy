@@ -57,6 +57,8 @@ _kika_root = Path(__file__).resolve().parent.parent
 if str(_kika_root) not in sys.path:
     sys.path.insert(0, str(_kika_root))
 
+from scripts.point_map import PointMap  # noqa: E402  (needs the sys.path above)
+
 L_MAX = 6
 A_COLS = [f"a_{l}" for l in range(1, L_MAX + 1)]
 ZA, MT = 26056, 2
@@ -309,18 +311,14 @@ def shipped_c34_rel_on_base(blocks, base_ev):
             edges, mat = blocks[f"e_{key}"], blocks[f"m_{key}"]
             if lr > lc:
                 mat = mat.T
-            gi = np.clip(np.searchsorted(edges, centres, side="right") - 1,
-                         0, mat.shape[0] - 1)
-            gj = np.clip(np.searchsorted(edges, centres, side="right") - 1,
-                         0, mat.shape[1] - 1)
-            # The clip above still bounds the INDEX; this zeroes the rows and
-            # columns it would otherwise have invented. Both axes, because the
-            # block is a covariance and a fabricated column is as wrong as a
-            # fabricated row.
-            covered = (centres >= edges[0]) & (centres <= edges[-1])
+            # THE SAME MAP the chi2 fold uses (roadmap §10.7-7). Containing-bin
+            # with an all-zero row off-grid: `PointMap.nearest` carries the
+            # masking rule this docstring spends four paragraphs on, so it
+            # cannot be reintroduced here and missed there. This was the fifth
+            # hand-written copy of that idea.
+            pm = PointMap.nearest(edges, centres)
             out[np.ix_(np.arange(n_g) * L_MAX + lr - 1,
-                       np.arange(n_g) * L_MAX + lc - 1)] = (
-                mat[np.ix_(gi, gj)] * np.outer(covered, covered))
+                       np.arange(n_g) * L_MAX + lc - 1)] = pm.sandwich(mat)
     return 0.5 * (out + out.T)
 
 

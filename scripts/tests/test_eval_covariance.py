@@ -257,14 +257,18 @@ def test_cross_block_single_point_analytic():
     y = np.array([0.6])
     e_mev = np.array([2.0])
     c_val = 0.02
+    mf33_grid_ev = np.array([1.0e6, 3.0e6])       # the magnitude axis, one bin
+    mf4_mev = np.array([1.0, 2.0, 3.0])
     cross = [{
         "l": 1,
-        "mag_grid_ev": np.array([1.0e6, 3.0e6]),
         "shape_grid_ev": np.array([1.0e6, 3.0e6]),
         "matrix": np.array([[c_val]]),
         "is_relative": True,
     }]
-    sigma = build_mf33_mf34_cross_block(cross, e_mev, mu, c0, a_l, y)
+    sigma = build_mf33_mf34_cross_block(
+        cross, e_mev, mu, c0, a_l, y,
+        mf33_grid_ev=mf33_grid_ev, energies_mf4_mev=mf4_mev,
+    )
     sens_L = c0[0] * (2 * 1 + 1) * mu[0] * a_l[0, 0]  # P_1(mu)=mu; relative → *a_L
     expected = 2.0 * y[0] * c_val * sens_L
     np.testing.assert_allclose(sigma[0, 0], expected, rtol=1e-12)
@@ -278,13 +282,19 @@ def test_cross_block_symmetric_and_order_filtered():
     a_l = np.array([[0.5, 0.2], [0.4, 0.1]])  # L=1,2
     y = np.array([0.7, 0.55])
     grid = np.array([1.0e6, 2.0e6, 3.0e6])
+    # The MF4 grid nests inside the MF33 grid, so the overlap average `W` comes
+    # out one-hot and this stays the same arithmetic it always tested.
+    mf4_mev = np.array([1.0, 2.0, 3.0])
     cross = [
-        {"l": 1, "mag_grid_ev": grid, "shape_grid_ev": grid,
+        {"l": 1, "shape_grid_ev": grid,
          "matrix": np.array([[0.01, 0.002], [0.002, 0.02]]), "is_relative": True},
-        {"l": 9, "mag_grid_ev": grid, "shape_grid_ev": grid,  # beyond L_max=2
+        {"l": 9, "shape_grid_ev": grid,  # beyond L_max=2
          "matrix": np.array([[1.0, 1.0], [1.0, 1.0]]), "is_relative": True},
     ]
-    sigma = build_mf33_mf34_cross_block(cross, e_mev, mu, c0, a_l, y)
+    sigma = build_mf33_mf34_cross_block(
+        cross, e_mev, mu, c0, a_l, y,
+        mf33_grid_ev=grid, energies_mf4_mev=mf4_mev,
+    )
     assert np.allclose(sigma, sigma.T, atol=1e-15)
     assert np.any(np.abs(sigma) > 0)  # L=1 block contributes
 

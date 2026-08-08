@@ -91,7 +91,9 @@ def world():
                             matrix=blk, energy_grid=list(grp_ev),
                             is_relative=True, frame="LAB")
 
-    cross = [{"l": l + 1, "mag_grid_ev": grp_ev, "shape_grid_ev": grp_ev,
+    # The magnitude axis is the MF33 grid itself now, so the block no longer
+    # carries one of its own; `grp_ev` reaches the fold as `mf33_grid_ev`.
+    cross = [{"l": l + 1, "shape_grid_ev": grp_ev,
               "matrix": cx[:, [g * L + l for g in range(G)]],
               "is_relative": False} for l in range(L)]
 
@@ -108,7 +110,8 @@ def _lam_min_norm(w, a_l_per_pt):
     s34 = build_mf34_block(w["mf34"], w["e_mev"], w["mu"], w["c0"], a_l_per_pt)
     s33 = build_mf33_block(w["grp_ev"], w["c33"], w["mf4_mev"], w["e_mev"], w["y"])
     sx = build_mf33_mf34_cross_block(
-        w["cross"], w["e_mev"], w["mu"], w["c0"], a_l_per_pt, w["y"])
+        w["cross"], w["e_mev"], w["mu"], w["c0"], a_l_per_pt, w["y"],
+        mf33_grid_ev=w["grp_ev"], energies_mf4_mev=w["mf4_mev"])
     S = s34 + s33 + sx
     lam = float(np.linalg.eigvalsh(0.5 * (S + S.T))[0])
     return lam / float(np.max(np.abs(np.diag(S)))), S

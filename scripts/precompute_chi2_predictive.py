@@ -543,10 +543,21 @@ def load_mf33_mf34_cross(
     # shipped relative MF33), so unlike the fine sidecars it must NOT be divided
     # by c0_host again. The shape axis is absolute, as before.
     #
-    # GRIDS. Its two axes are the run's OWN adaptive grids and they differ from
-    # each other (MF33 magnitude ~188 groups, MF34 shape ~703). That is why the
-    # block dict carries `mag_grid_ev` and `shape_grid_ev` separately;
-    # `build_mf33_mf34_cross_block` bins each axis independently.
+    # ⚠⚠ GRIDS — AND THIS ARTEFACT NO LONGER SATISFIES THE CONTRACT.
+    # Its two axes are the run's OWN adaptive grids (MF33 magnitude ~188 groups,
+    # MF34 shape ~703), and the magnitude one is NOT the grid the shipped MF33
+    # is written on (~2317 fine bins). Since §10.7-7 the fold requires them to
+    # be the same, because `Sigma_eval = M J M^T` is a congruence only if the
+    # magnitude parameter reaches the points through ONE map — and a cross term
+    # is Cauchy-Schwarz-compatible only with the marginals it was built from
+    # (§10.1). Folding this against the fine MF33 is what produced runs 89 and
+    # 90 and no chi2.
+    #
+    # `build_mf33_mf34_cross_block` now rejects it by row count rather than
+    # silently regridding, so the block dict no longer carries a magnitude grid
+    # of its own. To use a group cross term, rebuild BOTH the marginal and the
+    # cross on one magnitude grid — which, per §10.7-9, means the fine one,
+    # since job B disqualified grouping MF33.
     grp_path = d / "mf33_mf34_cross_group_covariance.npy"
     grp_mag_path = d / "mf33_mf34_cross_group_mag_grid_ev.npy"
     grp_shape_path = d / "mf33_mf34_cross_group_shape_grid_ev.npy"
@@ -574,7 +585,6 @@ def load_mf33_mf34_cross(
 
         blocks = [{
             "l": L,
-            "mag_grid_ev": mag_ev,
             "shape_grid_ev": shape_ev,
             "matrix": grp[:, :, L - 1],
             "is_relative": False,
@@ -643,7 +653,6 @@ def load_mf33_mf34_cross(
     for L in range(1, min(l_max, cov.shape[1]) + 1):
         blocks.append({
             "l": L,
-            "mag_grid_ev": grid_ev,
             "shape_grid_ev": grid_ev,
             "matrix": full[:, :, L - 1] if full is not None
                       else np.diag(cov_rel_mag[:, L - 1]),

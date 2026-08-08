@@ -56,6 +56,11 @@ import numpy as np
 import scipy.sparse as sp
 from numpy.polynomial.legendre import legval
 
+try:                                    # module, or script on sys.path
+    from scripts.point_map import PointMap
+except ImportError:                     # pragma: no cover - direct execution
+    from point_map import PointMap
+
 # ── helpers shared with the legacy fold, so equivalence is checkable ──────────
 
 def _legendre_base_sens(mu: np.ndarray, c0: np.ndarray, l_max: int) -> np.ndarray:
@@ -81,26 +86,12 @@ def overlap_weights(grid_ev: np.ndarray, lo_ev: np.ndarray, hi_ev: np.ndarray) -
 
     A window with no overlap gets an all-zero row -- which is the off-grid mask,
     for free and on both axes once it goes through ``S``.
+
+    Delegates to ``PointMap``: this module needs the dense array to build ``S``,
+    but the RULE lives in one place (§10.7-7), so the legacy fold and this one
+    cannot drift apart.
     """
-    grid_ev = np.asarray(grid_ev, dtype=float)
-    M = grid_ev.size - 1
-    lo = np.asarray(lo_ev, dtype=float).ravel()
-    hi = np.asarray(hi_ev, dtype=float).ravel()
-    W = np.zeros((lo.size, M), dtype=float)
-    for j in range(lo.size):
-        a, b = float(lo[j]), float(hi[j])
-        if b <= a or b <= grid_ev[0] or a >= grid_ev[-1]:
-            continue
-        k0 = max(0, int(np.searchsorted(grid_ev, a, side="right") - 1))
-        k1 = min(M - 1, int(np.searchsorted(grid_ev, b, side="left")))
-        for k in range(k0, k1 + 1):
-            w = min(grid_ev[k + 1], b) - max(grid_ev[k], a)
-            if w > 0:
-                W[j, k] = w
-        s = W[j].sum()
-        if s > 0:
-            W[j] /= s
-    return W
+    return PointMap.overlap(grid_ev, lo_ev, hi_ev).dense()
 
 
 def nearest_weights(grid_ev: np.ndarray, e_ev: np.ndarray) -> np.ndarray:
@@ -111,15 +102,10 @@ def nearest_weights(grid_ev: np.ndarray, e_ev: np.ndarray) -> np.ndarray:
     the edge interval's value. Pinning it is what manufactured a lam_min of
     -6.21e-02 in ``build_group_cross`` (§L18) and a fabricated ``Cov(a_2, a_6)``
     for JEFF in every chi^2 from run 82 to 90 (§10.7-6).
+
+    Delegates to ``PointMap`` -- see :func:`overlap_weights`.
     """
-    grid_ev = np.asarray(grid_ev, dtype=float)
-    M = grid_ev.size - 1
-    e = np.asarray(e_ev, dtype=float).ravel()
-    idx = np.clip(np.searchsorted(grid_ev, e, side="right") - 1, 0, M - 1)
-    covered = (e >= grid_ev[0]) & (e <= grid_ev[-1])
-    W = np.zeros((e.size, M), dtype=float)
-    W[np.arange(e.size), idx] = covered.astype(float)
-    return W
+    return PointMap.nearest(grid_ev, e_ev).dense()
 
 
 def assemble_a_block(mf34, l_max: int) -> Tuple[np.ndarray, np.ndarray, bool]:

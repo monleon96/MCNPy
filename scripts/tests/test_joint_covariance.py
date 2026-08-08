@@ -244,15 +244,22 @@ def test_splitting_into_endf_blocks_and_back_is_exact(psd_setup):
     assert rel is True
 
 
-def test_the_legacy_three_term_sum_breaks_psd_and_the_operator_does_not(
-        psd_setup, rng):
-    """Same joint, two folds. This is §10.7-7c in one assertion.
+def test_both_folds_are_congruences_and_agree(psd_setup, rng):
+    """Same joint, two folds, and since §10.7-7 they are the same map.
 
-    The cross block is scaled down until the JOINT is PSD, so any
-    indefiniteness in the folded Sigma is manufactured by the fold, not
-    inherited. The legacy path folds the magnitude leg of the cross term with a
-    nearest-bin lookup while folding the same variable in the MF33 self block
-    with `W`; that is not a congruence and it shows.
+    ⚑ THIS TEST USED TO ASSERT THE OPPOSITE for the three-term sum, and the
+    change is the result. It read
+    `test_the_legacy_three_term_sum_breaks_psd_and_the_operator_does_not`, and
+    it pinned the defect its own docstring named: the legacy path folded the
+    magnitude leg of the cross term with a nearest-bin lookup while folding the
+    same variable in the MF33 self block with `W`, which is not a congruence and
+    it showed. Now that both legs go through `_mf33_magnitude_map`, the sum is a
+    congruence too — measured, that moved lam_min/scale from < -1e-8 to
+    **-1.2e-16**, i.e. from indefinite to machine zero.
+
+    The cross block is still scaled down until the JOINT is PSD, so any
+    indefiniteness in either folded Sigma would be manufactured by the fold
+    rather than inherited. Neither manufactures any.
     """
     s = psd_setup
     n0, na = s.c33.shape[0], s.c34.shape[0]
@@ -274,7 +281,7 @@ def test_the_legacy_three_term_sum_breaks_psd_and_the_operator_does_not(
                        sigma_map="overlap", a_map="nearest")
 
     cross_blocks = [
-        {"l": l, "mag_grid_ev": s.grid_sigma, "shape_grid_ev": s.grid_a,
+        {"l": l, "shape_grid_ev": s.grid_a,
          "matrix": j.cross.reshape(n0, s.grid_a.size - 1, L_MAX)[:, :, l - 1],
          "is_relative": True}
         for l in range(1, L_MAX + 1)
@@ -284,7 +291,9 @@ def test_the_legacy_three_term_sum_breaks_psd_and_the_operator_does_not(
         + build_mf33_block(s.grid_sigma, s.c33, s.energies_mf4_mev,
                            s.e_mev, s.y)
         + build_mf33_mf34_cross_block(cross_blocks, s.e_mev, s.mu,
-                                      s.c0, s.a_l, s.y)
+                                      s.c0, s.a_l, s.y,
+                                      mf33_grid_ev=s.grid_sigma,
+                                      energies_mf4_mev=s.energies_mf4_mev)
     )
 
     scale_new = max(np.abs(np.diag(sigma_new)).max(), 1e-300)
@@ -296,10 +305,17 @@ def test_the_legacy_three_term_sum_breaks_psd_and_the_operator_does_not(
         f"S C S^T is not PSD (lam_min/scale = {lam_new:.3e}); the congruence "
         f"argument is wrong or the operator is not one matrix"
     )
-    assert lam_old < -1e-8, (
-        f"the legacy three-term sum came out PSD (lam_min/scale = "
-        f"{lam_old:.3e}) on this draw, so this test is not exercising the "
-        f"defect it exists to pin"
+    assert lam_old >= -1e-10, (
+        f"the three-term sum is indefinite (lam_min/scale = {lam_old:.3e}). "
+        f"Its magnitude leg must have stopped sharing `_mf33_magnitude_map` "
+        f"with the MF33 self block — that is §10.7-2(a) regressing."
+    )
+    # Stronger than "both PSD": one map means one answer. If these ever drift
+    # apart, two folds exist again and the whole point has been lost.
+    assert np.allclose(sigma_old, sigma_new, rtol=1e-9, atol=1e-12), (
+        f"the two folds disagree by "
+        f"{np.abs(sigma_old - sigma_new).max():.3e} — they are meant to be the "
+        f"same congruence written two ways"
     )
 
 
