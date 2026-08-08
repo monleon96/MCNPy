@@ -237,6 +237,7 @@ def _write_isotope_parquet(
     energy_grid: List[float],
     verbose: bool = True,
     logger=None,
+    extra_metadata: Optional[Dict] = None,
 ) -> Optional[Dict]:
     """
     Write per-isotope perturbation factors to a parquet file.
@@ -264,12 +265,20 @@ def _write_isotope_parquet(
         Logger to use; if None, falls back to ``_get_logger()``. Workers
         should pass their own ``BufferedLogger`` to avoid touching the
         shared module-level logger.
+    extra_metadata : dict, optional
+        Extra per-isotope facts to carry into ``metadata.json`` alongside the
+        ZAID. Used by the nu-bar pipeline to flag which sampled MTs were
+        actually applied — MF31 samples the redundant total, but
+        ``perturb_nubar_family`` derives it from the components and discards
+        its block, so those columns are present in the parquet without being
+        free parameters. Other pipelines leave it unset.
 
     Returns
     -------
     fragment : dict or None
-        ``{"zaid": int}`` on success, or ``None`` if no columns were
-        produced (caller should not append to metadata in that case).
+        ``{"zaid": int, **extra_metadata}`` on success, or ``None`` if no
+        columns were produced (caller should not append to metadata in that
+        case).
     """
     symbol = zaid_to_symbol(zaid)
 
@@ -298,7 +307,7 @@ def _write_isotope_parquet(
         n_cols = len(columns_data) - 1
         log.info(f"[MATRIX] Saved {n_cols} columns for ZAID {zaid}")
 
-    return {"zaid": zaid}
+    return {"zaid": zaid, **(extra_metadata or {})}
 
 
 def _merge_isotope_metadata(matrix_dir: str, fragments: List[Dict]) -> None:
@@ -315,6 +324,9 @@ def _merge_isotope_metadata(matrix_dir: str, fragments: List[Dict]) -> None:
         Directory holding ``metadata.json``.
     fragments : list of dict
         Each fragment must have a ``"zaid"`` key; appended in input order.
+        Any other keys are recorded under ``isotope_details[<zaid>]`` — a
+        fragment that carries only ``"zaid"`` adds nothing there, so pipelines
+        that do not use it see an unchanged ``metadata.json``.
     """
     if not fragments:
         return
@@ -326,8 +338,13 @@ def _merge_isotope_metadata(matrix_dir: str, fragments: List[Dict]) -> None:
             metadata = json.load(f)
         for frag in fragments:
             zaid = frag.get("zaid")
-            if zaid is not None and zaid not in metadata["isotopes_processed"]:
+            if zaid is None:
+                continue
+            if zaid not in metadata["isotopes_processed"]:
                 metadata["isotopes_processed"].append(zaid)
+            details = {k: v for k, v in frag.items() if k != "zaid"}
+            if details:
+                metadata.setdefault("isotope_details", {})[str(zaid)] = details
         with open(metadata_file, 'w') as f:
             json.dump(metadata, f, indent=2)
     except Exception:
@@ -375,14 +392,22 @@ def _update_master_perturbation_matrix(
 def _finalize_master_perturbation_matrix(matrix_dir: str, verbose: bool = True) -> str:
     """
     Combine all isotope-specific parquet files into a single master matrix.
-    
+
+    The parts directory is removed at the end, so ``metadata.json`` is copied
+    out beside the master parquet first — it is the only run manifest written
+    to disk (the caller's summary dict lives in memory), and it is what says
+    which of the parquet's columns were actually applied. A nu-bar run samples
+    the redundant total but derives it from the sum rule, so three of Pu-241's
+    MTs appear as columns and only two are free parameters; without the copy
+    that distinction died with the temporary directory.
+
     Parameters
     ----------
     matrix_dir : str
         Directory containing isotope-specific parquet files
     verbose : bool
         Enable verbose output
-        
+
     Returns
     -------
     str
@@ -443,6 +468,22 @@ def _finalize_master_perturbation_matrix(matrix_dir: str, verbose: bool = True) 
         logger.info(f"[MATRIX] [FINALIZE] Master matrix created: {n_samples} samples × {n_factor_cols} parameters")
         logger.info(f"[MATRIX] [FINALIZE] File: {os.path.basename(master_file)}")
     
+    # Preserve the run manifest before the parts directory goes away.
+    try:
+        import shutil
+        meta_out = os.path.join(
+            parent_dir, f"perturbation_matrix_{timestamp}_metadata.json"
+        )
+        if os.path.exists(metadata_file):
+            shutil.copyfile(metadata_file, meta_out)
+            if verbose and logger:
+                logger.info(
+                    f"[MATRIX] [FINALIZE] Manifest: {os.path.basename(meta_out)}"
+                )
+    except Exception as e:
+        if verbose and logger:
+            logger.warning(f"[MATRIX] [FINALIZE] Could not save the manifest: {e}")
+
     # Clean up temporary files
     try:
         import shutil
