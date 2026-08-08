@@ -215,8 +215,6 @@ def read_mf34_split(
     * the (0,0) block is null, because the magnitude self-covariance belongs to
       MF33 and counting it twice would double the magnitude variance.
     """
-    from kika.cov import MF34CovMat  # noqa: F401  (kept local; heavy import)
-
     path = str(path)
     endf = read_endf(path, mf_numbers=[34])
     mf34_file = endf.get_file(34)
