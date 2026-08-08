@@ -294,6 +294,7 @@ def build_mf33_mf34_cross_block(
     mf33_grid_ev: Optional[np.ndarray] = None,
     energies_mf4_mev: Optional[np.ndarray] = None,
     a_is_relative: Optional[bool] = None,
+    drop: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Dense N×N MF33↔MF34 cross contribution (magnitude ↔ shape).
 
@@ -329,6 +330,13 @@ def build_mf33_mf34_cross_block(
         whenever ``cross`` is non-empty.  The shape leg is scaled by it — not by
         the cross block's own flag — and a block that disagrees is refused.
         See §L13 below.
+    drop : (N, L_max) bool, optional
+        Exactly :func:`build_mf34_block`'s ``drop``, and it **must be the same
+        array**.  Removing a (point, order) from the self block but not from
+        here leaves ``M_d`` in one term of Σ_eval and ``M`` in the other, so no
+        single ``M`` reproduces the sum and the congruence is gone — §L13's
+        failure mode wearing different clothes.  Default None, so every
+        existing number is unchanged.
 
     Notes
     -----
@@ -455,9 +463,27 @@ def build_mf33_mf34_cross_block(
         sens_L = base_sens[L - 1].copy()
         if a_is_relative:
             sens_L *= a_l_per_pt[:, L - 1]
+        if drop is not None:
+            # THE SAME REMOVAL `build_mf34_block` MAKES, on the same axis.
+            # Dropping a (point, order) means deleting that parameter's row and
+            # column from the joint — a principal submatrix, which preserves
+            # PSD. Deleting it from the self block but not from here would
+            # leave `M_d` in one term and `M` in the other, so Sigma_eval would
+            # stop being `M J M^T` for any single M. That is §L13's failure
+            # mode in a new place, and it fires the moment the null mask and a
+            # cross term are both on.
+            sens_L = np.where(drop[:, L - 1], 0.0, sens_L)
 
-        sigma += y[:, None] * C * sens_L[None, :]
-        sigma += sens_L[:, None] * C.T * y[None, :]
+        # IN PLACE, and it is not micro-optimisation. At the shipped geometry
+        # (2317 magnitude bins x 703 shape groups x 6 orders) each (N, N) is
+        # 6.6 GB for Cierjacks' 28631 points; writing this as
+        # `y[:,None] * C * sens[None,:]` allocates two more of them per order
+        # on top of `C` and `sigma`. `C` is a fresh array out of `sandwich`
+        # (fancy indexing copies), so scaling it in place is safe.
+        C *= y[:, None]
+        C *= sens_L[None, :]
+        sigma += C
+        sigma += C.T
 
     return 0.5 * (sigma + sigma.T)
 
@@ -574,11 +600,28 @@ def build_eval_cov_for_groups(
         # makes — that is the whole of §10.7-2(a).
         # §L13: the shape leg is scaled by the MF34 family's convention, so it
         # has to be read off the family rather than off the cross block.
+        # ⚑ A cross term without its magnitude self block is never PSD. The
+        # joint is [[C33, Cx], [Cx.T, C34]]; with C33 absent it is
+        # [[0, Cx], [Cx.T, C34]], and any nonzero Cx then gives that matrix a
+        # negative eigenvalue — a zero variance cannot carry a covariance. The
+        # scenarios that fold MF34 alone (`exfor_c0`, `folded_c0`,
+        # `folded_al_c0`, `representation`) simply never set the key, and
+        # dropping the whole family is a principal submatrix and therefore
+        # fine; what must not happen is keeping Cx and losing C33.
+        if lib.get("mf33_mf34_cross") and lib.get("mf33_rel_cov") is None:
+            raise ValueError(
+                f"library {lib_key!r} carries an MF33<->MF34 cross term but no "
+                f"MF33 self block. [[0, Cx], [Cx.T, C34]] has a negative "
+                f"eigenvalue for every nonzero Cx, so this cannot be folded. "
+                f"Either supply `mf33_grid_ev`/`mf33_rel_cov`, or drop the "
+                f"cross term with them."
+            )
         sigma_cross = build_mf33_mf34_cross_block(
             lib.get("mf33_mf34_cross"), e_mev, mu, c0, a_l_per_pt, y_eval,
             mf33_grid_ev=lib.get("mf33_grid_ev"),
             energies_mf4_mev=lib.get("energies_mf4_mev"),
             a_is_relative=_mf34_family_is_relative(lib.get("mf34")),
+            drop=drop,
         )
         eval_cov[key] = (sigma_mf34 + sigma_mf33 + sigma_cross).astype(np.float32)
     return eval_cov
