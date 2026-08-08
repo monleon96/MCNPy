@@ -1296,13 +1296,31 @@ def main():
     # c33_ship is the shipped relative MF33 and the chi2 builder's magnitude
     # sensitivity is y_eval; the shape axis is ABSOLUTE because the relative
     # form would divide by a_l_nom, which crosses zero.
-    out = cx_post.reshape(n_gm, n_gs, L_MAX)
-    np.save(run_dir / "mf33_mf34_cross_group_covariance.npy", out)
-    np.save(run_dir / "mf33_mf34_cross_group_mag_grid_ev.npy", mag_ev)
-    np.save(run_dir / "mf33_mf34_cross_group_shape_grid_ev.npy", shape_ev)
-    print(f"\n  wrote mf33_mf34_cross_group_covariance.npy {out.shape}")
-    print("  wrote mf33_mf34_cross_group_mag_grid_ev.npy, "
-          "mf33_mf34_cross_group_shape_grid_ev.npy")
+    if _fine_mag:
+        # ⚑⚑ NO SIDECAR IN FINE MODE, AND THAT IS THE POINT OF ITEM 5.
+        #
+        # §L8's no-double-counting check has inverted: with the cross term in
+        # the MF34 a_0 blocks, the assertion is that the sidecar is ABSENT.
+        # `precompute_chi2_predictive` refuses to run with both
+        # KIKA_MF33_MF34_CROSS_FROM_FILE and KIKA_MF33_MF34_CROSS_DIR set, and
+        # writing one here would leave a loaded gun in the run directory --
+        # under the *_group_* filenames, on a 1738-bin axis that is not a group
+        # axis at all, next to a 188-bin file from an earlier run.
+        #
+        # It also keeps this command out of the run directory entirely: the
+        # only thing it writes is the ENDF named by --write-endf.
+        print("\n  no .npy sidecar written (--mag-grid fine): the cross term "
+              "ships INSIDE\n  the ENDF's MF34 a_0 blocks, and §L8 inverted "
+              "says the sidecar must be absent.\n  Score with "
+              "KIKA_MF33_MF34_CROSS_FROM_FILE=1.")
+    else:
+        out = cx_post.reshape(n_gm, n_gs, L_MAX)
+        np.save(run_dir / "mf33_mf34_cross_group_covariance.npy", out)
+        np.save(run_dir / "mf33_mf34_cross_group_mag_grid_ev.npy", mag_ev)
+        np.save(run_dir / "mf33_mf34_cross_group_shape_grid_ev.npy", shape_ev)
+        print(f"\n  wrote mf33_mf34_cross_group_covariance.npy {out.shape}")
+        print("  wrote mf33_mf34_cross_group_mag_grid_ev.npy, "
+              "mf33_mf34_cross_group_shape_grid_ev.npy")
 
     if args.write_endf:
         # ⚑ SAY OUT LOUD WHAT THE REWRITE DELETES, because a chi2 read against
