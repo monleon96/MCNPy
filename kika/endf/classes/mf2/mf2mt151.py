@@ -76,6 +76,11 @@ class ResolvedResonanceRange:
     nls: int            # Number of l-values
     nlsc: int           # Number of l-values for convergence
     l_values: List[LValueBlock] = field(default_factory=list)
+    # LAD: 1 when MF4 angular distributions can be computed from these
+    # parameters, 0 otherwise. Meaningful for LRF=3 only. Defaulted rather than
+    # required because it was neither parsed nor written until 2026-08-07, so
+    # every existing caller constructs this class without it.
+    lad: int = 0
 
 
 @dataclass
@@ -703,11 +708,16 @@ class MF2MT151(MT):
 
                 elif isinstance(er.parameters, ResolvedResonanceRange):
                     p = er.parameters
+                    # CONT: SPI, AP, LAD, 0, NLS, NLSC. LAD was written as a
+                    # hardcoded 0 until 2026-08-07 and was not parsed either, so
+                    # a tape declaring "MF4 can be computed from these
+                    # parameters" came back saying the opposite. Th-232
+                    # JEFF-4.0 is LAD=1.
                     lines.append(_cont(
-                        [p.spi, p.ap, 0, 0, p.nls, p.nlsc],
+                        [p.spi, p.ap, p.lad, 0, p.nls, p.nlsc],
                         mat, mf, mt, ln,
                         [ENDF_FORMAT_FLOAT, ENDF_FORMAT_FLOAT,
-                         ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT_ZERO,
+                         ENDF_FORMAT_INT, ENDF_FORMAT_INT_ZERO,
                          ENDF_FORMAT_INT, ENDF_FORMAT_INT],
                     ))
                     ln += 1
@@ -931,13 +941,20 @@ def _serialize_rml(p, lines, mat, mf, mt, ln):
     ))
     ln += 1
 
-    # Particle pairs LIST
+    # Particle pairs LIST: 0.0, 0.0, NPP, 0, 12*NPP, 2*NPP
+    #
+    # L1 is **NPP**, and it was written as a hardcoded 0 until 2026-08-07. The
+    # counts either side of it were right, so the section stayed structurally
+    # valid and self-consistent -- NPP is recoverable from 2*NPP, which is
+    # exactly why the parser never noticed it was reading a field the writer
+    # did not write. It cost one differing line out of 163 on Fe-57 JEFF-4.0,
+    # and it is the reason an MF2 encoder could not be gated on byte identity.
     npp = len(p.particle_pairs)
     lines.append(_cont(
-        [p.spi, p.ap, 0, 0, 12 * npp, 2 * npp],
+        [p.spi, p.ap, npp, 0, 12 * npp, 2 * npp],
         mat, mf, mt, ln,
         [ENDF_FORMAT_FLOAT, ENDF_FORMAT_FLOAT,
-         ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT_ZERO,
+         ENDF_FORMAT_INT, ENDF_FORMAT_INT_ZERO,
          ENDF_FORMAT_INT, ENDF_FORMAT_INT],
     ))
     ln += 1
