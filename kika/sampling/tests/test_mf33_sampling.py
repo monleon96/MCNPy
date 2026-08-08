@@ -214,3 +214,31 @@ def test_composite_partials_table_matches_mt_groups():
     assert 103 in _COMPOSITE_PARTIALS  # (n,p)
     assert 600 in _COMPOSITE_PARTIALS[103]
     assert 649 in _COMPOSITE_PARTIALS[103]
+
+
+def test_perturb_pointwise_xs_default_matches_the_legacy_rule():
+    # ``clamp_top_edge`` was added for the MF1 nu-bar path, where a table whose
+    # last point IS the top of the MF31 grid loses its last bin's perturbation.
+    # The PENDF path must not notice: with the default kwargs the bin assignment
+    # is exactly the pre-existing searchsorted rule.
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        bins = np.unique(np.sort(rng.uniform(1e-5, 2e7, 8)))
+        e = np.sort(rng.uniform(bins[0] * 0.5, bins[-1] * 1.5, 40))
+        for k in rng.choice(len(e) - 1, 5, replace=False):
+            e[k + 1] = e[k]
+        e = np.sort(e)
+        xs = rng.uniform(0.1, 10.0, e.size)
+        block = rng.uniform(0.8, 1.2, bins.size - 1)
+
+        idx_r = np.searchsorted(bins, e, side="right") - 1
+        idx_l = np.searchsorted(bins, e, side="left") - 1
+        first_dup = np.zeros(e.size, dtype=bool)
+        first_dup[:-1] = np.isclose(e[:-1], e[1:], rtol=0.0, atol=1e-10)
+        idx = np.where(first_dup, idx_l, idx_r)
+        in_cov = (idx >= 0) & (idx < bins.size - 1)
+        expected = np.ones_like(e)
+        expected[in_cov] = block[idx[in_cov]]
+
+        _, got, _ = perturb_pointwise_xs(e, xs, block, bins)
+        np.testing.assert_array_equal(got, expected)

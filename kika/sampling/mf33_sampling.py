@@ -349,6 +349,7 @@ def perturb_pointwise_xs(
     bins_native: np.ndarray,
     *,
     atol: float = 1e-10,
+    clamp_top_edge: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     """Apply a piecewise-constant per-bin factor block to pointwise σ(E),
     respecting ENDF-6 duplicate-energy step semantics.
@@ -364,6 +365,16 @@ def perturb_pointwise_xs(
 
     Same as the legacy ``side='right'`` rule for arrays without duplicates,
     so the bin assignment for non-duplicate energies is unchanged.
+
+    ``clamp_top_edge`` (opt-in, default off) assigns the LAST bin's factor to a
+    point sitting exactly on ``bins_native[-1]`` instead of leaving it outside
+    coverage at factor 1.0. Under the default ``side='right'`` rule that point
+    lands in the (non-existent) bin starting at the top edge, so it is never
+    perturbed — harmless for a PENDF table with thousands of points, but for an
+    MF1 nu-bar table whose last point *is* the top of the MF31 grid it turns the
+    last bin into a ramp back to the unperturbed value (measured: realised σ
+    0.50× the MF31 σ in the last bin of JEFF-4.0 Pu-241 MT456). Kept opt-in so
+    the MF33 → PENDF path is bit-for-bit unchanged.
 
     Returns ``(xs_new, factors_per_point, frac_out_of_coverage)``.
     """
@@ -387,6 +398,9 @@ def perturb_pointwise_xs(
         )
 
     idx = np.where(is_first_dup, idx_left, idx_right)
+    if clamp_top_edge and n_groups > 0 and energies.size:
+        at_top = np.isclose(energies, bins_native[-1], rtol=1e-12, atol=0.0)
+        idx = np.where(at_top, n_groups - 1, idx)
     in_cov = (idx >= 0) & (idx < n_groups)
     factors = np.ones_like(energies)
     factors[in_cov] = block[idx[in_cov]]

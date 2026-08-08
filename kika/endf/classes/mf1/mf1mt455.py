@@ -105,6 +105,10 @@ class MF1MT455(MT):
         return "unknown"
 
     @property
+    def coefficients(self) -> List[float]:
+        return self._coefficients
+
+    @property
     def energies(self) -> List[float]:
         return self._energies
 

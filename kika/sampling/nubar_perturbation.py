@@ -24,11 +24,14 @@ import time
 
 import numpy as np
 
+from kika._constants import NUBAR_TOTAL_MT, NUBAR_COMPONENT_MTS
+from kika.endf.parsers.parse_endf import parse_endf_file
 from kika.endf.writers.endf_writer import ENDFWriter, update_mf1_directory
 from kika.sampling.generators import generate_samples
 from kika.sampling.mf31_sampling import (
-    load_mf31_covariance,
+    build_mf31_covariance,
     perturb_nubar_family,
+    sum_rule_residual,
     extract_mt_param_blocks,
 )
 from kika.sampling.endf_perturbation import _process_njoy_for_sample
@@ -174,7 +177,11 @@ def perturb_nubar_files(
             f"({file_idx}/{len(endf_files)}) --------------------"
         )
         try:
-            zaid = _zaid_of(endf_file)
+            # Parsed once here and handed down: the covariance assembly and the
+            # ZAID lookup both need the whole tape, and parsing a JEFF-4.0
+            # actinide is not cheap.
+            endf_obj = parse_endf_file(endf_file)
+            zaid = _zaid_of(endf_obj)
         except Exception as e:
             _logger.error(f"  [ERROR] [NUBAR] Could not read ZAID from {endf_file}: {e}", console=True)
             continue
@@ -182,6 +189,7 @@ def perturb_nubar_files(
         try:
             iso_summary = _process_one_isotope(
                 endf_file=endf_file,
+                endf_obj=endf_obj,
                 zaid=zaid,
                 mts_req=mts_req,
                 num_samples=num_samples,
@@ -240,6 +248,7 @@ def perturb_nubar_files(
 def _process_one_isotope(
     *,
     endf_file: str,
+    endf_obj,
     zaid: int,
     mts_req: Optional[Sequence[int]],
     num_samples: int,
@@ -267,8 +276,8 @@ def _process_one_isotope(
     log = _get_logger()
 
     # --- assemble MF31 covariance + MF1 nu-bar sections -------------------
-    cov, nubar_sections, union_grid, mts_present = load_mf31_covariance(
-        endf_file, mt_list=mts_req, energy_unit="eV", logger=log,
+    cov, nubar_sections, union_grid, mts_present = build_mf31_covariance(
+        endf_obj, mt_list=mts_req, energy_unit="eV", logger=log,
     )
     log.info(
         f"  [INFO] [NUBAR] zaid={zaid}: MF31 cov assembled — "
@@ -303,9 +312,33 @@ def _process_one_isotope(
     mt_to_param_block = extract_mt_param_blocks(cov)
     mt_to_param_block = {mt: sl for mt, sl in mt_to_param_block.items() if mt in mts_present}
 
+    # --- which MTs actually receive their own factor block -----------------
+    # The family member that ``perturb_nubar_family`` derives from the sum rule
+    # never gets its own block applied. It is still sampled (MF31 gives it a
+    # covariance and the flatten order has to match), so its columns sit in the
+    # parquet looking like free parameters. Say so, here and in the metadata.
+    derived_used = _derived_family_mt(derived_mt, nubar_sections)
+    mts_applied = [mt for mt in mts_present if mt != derived_used]
+    if derived_used is not None and derived_used in mts_present:
+        log.info(
+            f"  [INFO] [NUBAR] zaid={zaid}: MT{derived_used} factors sampled but "
+            f"discarded — it is derived from the sum rule over "
+            f"{[mt for mt in NUBAR_COMPONENT_MTS if mt in nubar_sections]}"
+        )
+
+    # --- how far the input file itself is from the sum rule ---------------
+    residual = _report_sum_rule_residual(
+        nubar_sections, union_grid, cov, mts_present, zaid, derived_used, log
+    )
+
     fragment = _write_isotope_parquet(
         matrix_dir, zaid, factors, list(mts_present), list(union_grid),
         verbose=verbose_diagnostics > 0, logger=log,
+        extra_metadata={
+            "derived_mt": derived_used,
+            "mts_sampled": list(mts_present),
+            "mts_applied": list(mts_applied),
+        },
     )
     if fragment is not None:
         metadata_fragments.append(fragment)
@@ -313,6 +346,9 @@ def _process_one_isotope(
     if dry_run:
         return {
             "mts_perturbed": list(mts_present),
+            "mts_applied": list(mts_applied),
+            "derived_mt": derived_used,
+            "sum_rule_residual": residual,
             "n_native_bins": len(union_grid) - 1,
             "n_samples": int(factors.shape[0]),
             "dry_run": True,
@@ -326,7 +362,7 @@ def _process_one_isotope(
     n_endf_ok = 0
     n_ace_ok = 0
     error_counts: Dict[str, int] = {}
-    derived_used: Optional[int] = None
+    diag_acc: Dict[int, Dict[str, float]] = {}
 
     for s in range(int(factors.shape[0])):
         sample_str = f"{s + 1:04d}"
@@ -336,14 +372,11 @@ def _process_one_isotope(
 
         try:
             fblocks = {mt: factors[s][sl] for mt, sl in mt_to_param_block.items()}
-            out_sections, _diags = perturb_nubar_family(
+            out_sections, diags = perturb_nubar_family(
                 nubar_sections, fblocks, union_grid,
                 derived_mt=derived_mt, logger=log if verbose_diagnostics > 1 else None,
             )
-            derived_used = (
-                derived_mt if derived_mt is not None
-                else (452 if 452 in out_sections else None)
-            )
+            _accumulate_diags(diag_acc, diags)
             _write_perturbed_nubar_endf(endf_file, out_endf, out_sections)
             n_endf_ok += 1
         except Exception as e:
@@ -382,9 +415,20 @@ def _process_one_isotope(
         for err, count in sorted(error_counts.items(), key=lambda kv: -kv[1])[:10]:
             log.warning(f"  [WARN] [NUBAR] zaid={zaid}:   ({count}×) {err}")
 
+    for mt, d in sorted(diag_acc.items()):
+        log.info(
+            f"  [INFO] [NUBAR] zaid={zaid}: MT{mt} factors applied in "
+            f"[{d['min_factor']:.4f}, {d['max_factor']:.4f}], "
+            f"{d['frac_out_of_coverage']:.1%} of table points outside MF31 coverage, "
+            f"+{d['n_inserted']:.0f} points inserted"
+        )
+
     return {
         "mts_perturbed": list(mts_present),
+        "mts_applied": list(mts_applied),
         "derived_mt": derived_used,
+        "sum_rule_residual": residual,
+        "factor_diagnostics": diag_acc,
         "n_native_bins": len(union_grid) - 1,
         "n_samples": int(factors.shape[0]),
         "n_endf_ok": n_endf_ok,
@@ -397,10 +441,97 @@ def _process_one_isotope(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _zaid_of(endf_file: str) -> int:
-    """ZAID from the MF1 nu-bar ZA field (cheap, MF1-local)."""
-    from kika.endf.parsers.parse_endf import parse_endf_file
-    mf1 = parse_endf_file(endf_file).get_file(1)
+def _derived_family_mt(
+    derived_mt: Optional[int], nubar_sections: Dict[int, object]
+) -> Optional[int]:
+    """Which family member ``perturb_nubar_family`` will derive, if any.
+
+    Mirrors that function's own rule: nothing is derived unless the whole
+    452/455/456 family is present, since an incomplete family cannot be closed
+    by the sum rule.
+    """
+    present = set(int(mt) for mt in nubar_sections)
+    if not {NUBAR_TOTAL_MT, *NUBAR_COMPONENT_MTS}.issubset(present):
+        return None
+    return NUBAR_TOTAL_MT if derived_mt is None else int(derived_mt)
+
+
+def _report_sum_rule_residual(
+    nubar_sections, union_grid, cov, mts_present, zaid, derived_used, log,
+) -> Optional[Dict[str, Any]]:
+    """Measure and log how far the input file is from nu_452 = nu_455 + nu_456.
+
+    Rebuilding the derived member repairs that residual, which moves the central
+    value by something the perturbation never asked for. Expressed against the
+    MF31 1σ so it reads as "the repair is worth this fraction of the stated
+    uncertainty": the derived MT's own σ when MF31 covers it, otherwise the
+    largest σ among the MTs that do — those are what end up driving it.
+    """
+    if derived_used is None:
+        return None
+    res = sum_rule_residual(nubar_sections, union_grid)
+    if res is None:
+        return None
+
+    per_bin = np.asarray(res["per_bin_rel"], dtype=float)
+    blocks = extract_mt_param_blocks(cov)
+    diag = np.sqrt(np.clip(np.diag(cov.covariance_matrix), 0.0, None))
+    if derived_used in mts_present and blocks.get(int(derived_used)) is not None:
+        sig = diag[blocks[int(derived_used)]]
+    else:
+        sig = np.zeros_like(per_bin)
+        for mt in mts_present:
+            sl = blocks.get(int(mt))
+            if sl is not None:
+                sig = np.maximum(sig, diag[sl])
+    ratio = np.where(sig > 0, per_bin / np.where(sig > 0, sig, 1.0), np.nan)
+    max_over_sigma = (float(np.nanmax(ratio))
+                      if np.isfinite(ratio).any() else 0.0)
+
+    out = {
+        "max_bin_rel": float(res["max_bin_rel"]),
+        "argmax_bin": int(res["argmax_bin"]),
+        "max_pointwise_rel": float(res["max_pointwise_rel"]),
+        "max_bin_over_sigma": max_over_sigma,
+        "n_bins_scored": int(res["n_bins_scored"]),
+        "n_bins_uncovered": int(res["n_bins_uncovered"]),
+    }
+    msg = (
+        f"  [INFO] [NUBAR] zaid={zaid}: input sum-rule residual "
+        f"|452-(455+456)|/452 = {out['max_bin_rel']:.2e} at bin "
+        f"{out['argmax_bin']} ({out['max_bin_over_sigma']:.2f}× the MF31 1σ "
+        f"there) over {out['n_bins_scored']} bins the whole family spans"
+        + (f", {out['n_bins_uncovered']} not spanned by all three"
+           if out["n_bins_uncovered"] else "")
+        + f"; rebuilding MT{derived_used} removes it."
+    )
+    if out["max_bin_over_sigma"] > 0.25:
+        log.warning(msg.replace("[INFO]", "[WARN]", 1))
+    else:
+        log.info(msg)
+    return out
+
+
+def _accumulate_diags(
+    acc: Dict[int, Dict[str, float]], diags: Dict[int, dict]
+) -> None:
+    """Fold one sample's per-MT factor diagnostics into the running summary."""
+    for mt, d in (diags or {}).items():
+        cur = acc.setdefault(int(mt), {
+            "min_factor": float("inf"), "max_factor": float("-inf"),
+            "frac_out_of_coverage": 0.0, "n_inserted": 0.0,
+        })
+        cur["min_factor"] = min(cur["min_factor"], float(d["min_factor"]))
+        cur["max_factor"] = max(cur["max_factor"], float(d["max_factor"]))
+        cur["frac_out_of_coverage"] = max(
+            cur["frac_out_of_coverage"], float(d["frac_out_of_coverage"])
+        )
+        cur["n_inserted"] = max(cur["n_inserted"], float(d["n_inserted"]))
+
+
+def _zaid_of(endf_obj) -> int:
+    """ZAID from the MF1 nu-bar ZA field of an already-parsed tape."""
+    mf1 = endf_obj.get_file(1)
     if mf1 is not None and getattr(mf1, "sections", None):
         for mt in (452, 456, 455, 451):
             sec = mf1.sections.get(mt)

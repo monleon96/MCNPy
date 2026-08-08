@@ -44,13 +44,32 @@ from kika.sampling.mf33_sampling import (
 
 __all__ = [
     "load_mf31_covariance",
+    "build_mf31_covariance",
     "perturb_nubar_family",
     "apply_factors_to_mf1_nubar",
+    "sum_rule_residual",
     "extract_mt_param_blocks",
 ]
 
 # nu-bar MTs in the canonical (total, prompt, delayed) family.
 _NUBAR_MTS: Tuple[int, ...] = (NUBAR_TOTAL_MT, *NUBAR_COMPONENT_MTS)  # (452, 455, 456)
+
+#: Sub-intervals per MF31 bin used to reconstruct an LNU=1 polynomial nu-bar
+#: onto an explicit table (manual Ch. 31 Note 2).
+NUBAR_NODES_PER_BIN: int = 8
+
+#: Relative width of the "shoulder" node placed just below each interior MF31
+#: bin edge, which is how a duplicate-free lin-lin table approximates the step
+#: in the per-bin factor (see :func:`_augment_nubar_grid`). 1e-3 keeps the
+#: worst-case per-bin factor error at ~5e-4 while staying three orders of
+#: magnitude clear of the ~1e-6 relative resolution of the ENDF 11-character
+#: float — a shoulder any tighter would be *written* as a duplicate energy.
+NUBAR_STEP_SHOULDER: float = 1.0e-3
+
+#: Two energies closer than this in relative terms are the same energy once
+#: written to an ENDF record, so never insert a node that close to an existing
+#: one.
+_ENDF_ENERGY_RTOL: float = 1.0e-6
 
 
 # ---------------------------------------------------------------------------
@@ -75,16 +94,38 @@ class _NubarXS:
         )
 
 
+#: Points used to reconstruct an LNU=1 (polynomial) nu-bar as central values.
+#: Exact for the NC=1 constant the manual prescribes for spontaneous fission
+#: (§1.3.2, §1.4), and ample for any smooth low-order polynomial.
+_LNU1_CENTRAL_POINTS: int = 500
+
+
 def _nubar_central_values(mf1_file) -> Dict[int, _NubarXS]:
-    """Build {MT: _NubarXS} from the MF1 nu-bar sections (tabulated, eV)."""
+    """Build {MT: _NubarXS} from the MF1 nu-bar sections (tabulated, eV).
+
+    LNU=1 sections are reconstructed onto a dense log grid spanning the
+    material's energy range rather than being skipped: without central values
+    an absolute MF31 block cannot be converted to relative and an NC LTY=0
+    sub-subsection cannot be resolved, so the covariance would be dropped for
+    exactly the sections that carry no table.
+    """
     shim: Dict[int, _NubarXS] = {}
     if mf1_file is None or not getattr(mf1_file, "sections", None):
         return shim
+
+    mt451 = mf1_file.sections.get(451)
+    e_max = float(getattr(mt451, "_emax", None) or 0.0) or 2.0e7
+
     for mt in _NUBAR_MTS:
         sec = mf1_file.sections.get(mt)
         if sec is None:
             continue
         energies, nubar = _nubar_as_tabulated(sec)
+        if not energies.size and getattr(sec, "lnu", None) == 1:
+            energies = np.geomspace(1.0e-5, e_max, _LNU1_CENTRAL_POINTS)
+            nubar = _reconstruct_polynomial_on_grid(
+                _nubar_coefficients(sec), energies
+            )
         if energies.size:
             shim[mt] = _NubarXS(energies, nubar)
     return shim
@@ -270,6 +311,39 @@ def _nubar_as_tabulated(section) -> Tuple[np.ndarray, np.ndarray]:
     return np.asarray([], dtype=float), np.asarray([], dtype=float)
 
 
+def _nubar_coefficients(section) -> List[float]:
+    """LNU=1 polynomial coefficients of a nu-bar section."""
+    coeffs = getattr(section, "coefficients", None)
+    if coeffs is None:
+        coeffs = getattr(section, "_coefficients", None)
+    if not coeffs:
+        raise ValueError(
+            f"MT{getattr(section, 'number', '?')}: LNU=1 section carries no "
+            f"polynomial coefficients"
+        )
+    return list(coeffs)
+
+
+def _warn_non_linlin(section, logger) -> None:
+    """Warn when a section we are about to rewrite is not purely lin-lin.
+
+    The perturbed table is always written as a single INT=2 region (the
+    per-bin factor application and the sum-rule union are both lin-lin
+    identities), so any other interpolation law in the original is silently
+    reinterpreted. Every JEFF-4.0 nu-bar section is lin-lin, but say so if
+    that ever stops being true.
+    """
+    if logger is None:
+        return
+    laws = {int(intc) for _nbt, intc in (getattr(section, "interpolation", None) or [])}
+    if laws - {2}:
+        logger.warning(
+            f"  [MF31] MT{getattr(section, 'number', '?')}: interpolation laws "
+            f"{sorted(laws)} present; the perturbed table is rewritten as a "
+            f"single lin-lin (INT=2) region."
+        )
+
+
 def _reconstruct_polynomial_on_grid(
     coefficients: Sequence[float], grid_eV: Sequence[float]
 ) -> np.ndarray:
@@ -279,12 +353,6 @@ def _reconstruct_polynomial_on_grid(
     for n, c in enumerate(coefficients):
         nu += float(c) * e ** n
     return nu
-
-
-def _baseline_energies(section, fallback_grid: np.ndarray) -> np.ndarray:
-    """Original tabulated energies for a section, or the fallback grid (LNU=1)."""
-    e, _ = _nubar_as_tabulated(section)
-    return e if e.size else np.asarray(fallback_grid, dtype=float)
 
 
 def _set_nubar(section, energies: np.ndarray, nubar: np.ndarray, interp):
@@ -306,52 +374,108 @@ def _set_nubar(section, energies: np.ndarray, nubar: np.ndarray, interp):
 # Single-section primitive (own grid)
 # ---------------------------------------------------------------------------
 
-def _lnu1_reconstruction_grid(bins: np.ndarray, per_bin: int = 8) -> np.ndarray:
+def _lnu1_reconstruction_grid(
+    bins: np.ndarray, per_bin: int = NUBAR_NODES_PER_BIN
+) -> np.ndarray:
     """Grid for reconstructing a polynomial nu-bar: each MF31 bin subdivided.
 
     Polynomial nu-bar is smooth, so a handful of geometric points per bin
     reproduces it well while letting the per-bin factors apply cleanly (every
-    bin interior carries native nodes). Manual Ch. 31 Note 2.
+    bin interior carries native nodes). Bins starting at (or below) zero get a
+    small positive lower bound so the geometric spacing stays defined.
+    Manual Ch. 31 Note 2.
     """
     b = np.asarray(bins, dtype=float)
     segs = []
     for i in range(b.size - 1):
-        lo, hi = b[i], b[i + 1]
-        if lo <= 0:
-            lo = min(hi * 1.0e-6, 1.0e-5)
-        segs.append(np.geomspace(lo, hi, per_bin + 1))
+        x0, x1 = b[i], b[i + 1]
+        if not (x1 > x0):
+            continue
+        if x0 <= 0:
+            x0 = min(x1 * 1.0e-6, 1.0e-5)
+        segs.append(np.geomspace(x0, x1, per_bin + 1))
+    if not segs:
+        return np.asarray([], dtype=float)
     return np.unique(np.concatenate(segs))
 
 
-def _insert_bin_edges(
-    energies: np.ndarray, nubar: np.ndarray, bins: np.ndarray
+def _augment_nubar_grid(
+    energies: np.ndarray,
+    nubar: np.ndarray,
+    bins: np.ndarray,
+    *,
+    shoulder: float = NUBAR_STEP_SHOULDER,
 ) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]]]:
-    """Add a single interpolated point at each interior bin edge in range.
+    """Resolve the nu-bar table against the MF31 bin structure.
 
-    Unlike the MF3 step-duplicate augmentation, this inserts *single* (non-
-    duplicate) points so every MF31 bin is represented even for coarse nu-bar
-    tables (e.g. a 10-point delayed curve), while keeping nu-bar continuous and
-    the table compact. Duplicate energies are deliberately avoided: NJOY ACER
-    reads MF1 into fixed-size buffers and chokes on bloated / duplicate-energy
-    nu-bar tables.
+    The factor block is piecewise constant per MF31 bin, but a duplicate-free
+    lin-lin table cannot express a step: between the last node of bin *g* and
+    the edge it shares with bin *g+1*, the perturbed curve ramps from
+    ``f_g·nu`` to ``f_{g+1}·nu``, so the factor the file actually realises over
+    bin *g* is a blend of both. On a table as coarse as JEFF-4.0 Pu-241 MT456
+    (6 points for 15 MF31 bins) that ramp spans the whole bin and a worst-case
+    alternating ±5 % block cancels outright.
+
+    So two kinds of node are inserted, both *single* (non-duplicate) and both
+    valued by ``np.interp`` on the original table — the baseline curve is
+    preserved exactly:
+
+      * one at every interior MF31 bin edge inside the table's range, which is
+        what puts the factor step at the right energy; and
+      * one "shoulder" just below each of those edges, at
+        ``E_b · (1 - shoulder)``, which confines the ramp to that sliver.
+
+    Measured on the three JEFF-4.0 actinide tapes with a worst-case alternating
+    ±5 % block, the maximum per-bin factor error drops from 0.050 (bin edges
+    only) to 5e-4 — and the table grows *less* than it would under a uniform
+    subdivision of every bin (Pu-241 MT455: 17 → 39 points, versus 129 for 8
+    sub-intervals per bin at ten times the error). That matters because NJOY
+    ACER reads MF1 into fixed-size buffers and does not love bloated nu-bar
+    tables; duplicate energies are avoided for the same reason.
+
+    Returns ``(energies, nubar, interpolation)`` with a single lin-lin region.
     """
     e = np.asarray(energies, dtype=float)
     n = np.asarray(nubar, dtype=float)
     if e.size < 2:
         return e, n, [(int(e.size), 2)]
-    interior = np.asarray(bins, dtype=float)[1:-1]
-    lo, hi = e[0], e[-1]
-    add = [
-        b for b in interior
-        if lo < b < hi and not np.any(np.isclose(e, b, rtol=0.0, atol=0.0))
-    ]
-    if add:
-        add_e = np.asarray(add, dtype=float)
-        add_n = np.interp(add_e, e, n)
-        e = np.concatenate([e, add_e])
-        n = np.concatenate([n, add_n])
-        order = np.argsort(e, kind="mergesort")
-        e, n = e[order], n[order]
+
+    b = np.asarray(bins, dtype=float)
+    lo, hi = float(e[0]), float(e[-1])
+
+    candidates: List[float] = []
+    for edge in b[1:-1]:
+        edge = float(edge)
+        # ``edge == hi`` still needs a shoulder: the table's last point sits on
+        # a bin boundary and (side='right') takes the *upper* bin's factor, so
+        # without one the whole top of that bin ramps towards its neighbour.
+        # ``bins[-1]`` is excluded because ``clamp_top_edge`` already pulls a
+        # point there back into the last bin — there is no step to resolve.
+        if not (lo < edge <= hi):
+            continue
+        if edge < hi:
+            candidates.append(edge)
+        shoulder_e = edge * (1.0 - shoulder)
+        if shoulder_e > lo:
+            candidates.append(shoulder_e)
+
+    if candidates:
+        cand = np.unique(np.asarray(candidates, dtype=float))
+        cand = cand[(cand > lo) & (cand < hi)]
+        if cand.size:
+            # A node closer than the ENDF float resolution to one already there
+            # would be written as a duplicate energy — the very thing this
+            # construction exists to avoid.
+            nearest = np.searchsorted(e, cand).clip(1, e.size - 1)
+            keep = ~(np.isclose(cand, e[nearest], rtol=_ENDF_ENERGY_RTOL, atol=0.0)
+                     | np.isclose(cand, e[nearest - 1], rtol=_ENDF_ENERGY_RTOL, atol=0.0))
+            cand = cand[keep]
+        if cand.size:
+            e = np.concatenate([e, cand])
+            n = np.concatenate([n, np.interp(cand, energies, nubar)])
+            order = np.argsort(e, kind="mergesort")
+            e, n = e[order], n[order]
+
     return e, n, [(int(e.size), 2)]
 
 
@@ -365,8 +489,8 @@ def apply_factors_to_mf1_nubar(
     """Return a perturbed copy of one MF1 nu-bar section on its own grid.
 
     Piecewise per-MF31-bin scaling of the tabulated nu-bar(E): single
-    interpolated points are inserted at interior bin edges (so every bin is
-    represented even for coarse tables) and the per-bin factor is applied to
+    interpolated points are inserted at each interior bin edge and just below it
+    (see :func:`_augment_nubar_grid`), then the per-bin factor is applied to
     each point. LNU=1 sections are reconstructed onto the MF31 bin grid
     (→ LNU=2) first.
 
@@ -383,7 +507,9 @@ def apply_factors_to_mf1_nubar(
 
     if getattr(section, "lnu", None) == 1:
         energies_orig = _lnu1_reconstruction_grid(bins_arr)
-        nubar_orig = _reconstruct_polynomial_on_grid(section.coefficients, energies_orig)
+        nubar_orig = _reconstruct_polynomial_on_grid(
+            _nubar_coefficients(section), energies_orig
+        )
         if logger is not None:
             logger.info(
                 f"  [MF31] MT{section.number}: LNU=1 polynomial reconstructed "
@@ -392,12 +518,13 @@ def apply_factors_to_mf1_nubar(
     else:
         energies_orig = np.asarray(section.energies, dtype=float)
         nubar_orig = np.asarray(section.nubar_values, dtype=float)
+        _warn_non_linlin(section, logger)
 
-    energies_aug, nubar_aug, interp_aug = _insert_bin_edges(
+    energies_aug, nubar_aug, interp_aug = _augment_nubar_grid(
         energies_orig, nubar_orig, bins_arr,
     )
     nubar_new, factors, frac_out = perturb_pointwise_xs(
-        energies_aug, nubar_aug, block, bins_arr,
+        energies_aug, nubar_aug, block, bins_arr, clamp_top_edge=True,
     )
     new_section = _set_nubar(section, energies_aug, nubar_new, interp_aug)
     diagnostics = {
@@ -407,6 +534,74 @@ def apply_factors_to_mf1_nubar(
         "n_inserted": int(energies_aug.size - energies_orig.size),
     }
     return new_section, diagnostics
+
+
+# ---------------------------------------------------------------------------
+# Sum-rule diagnostics
+# ---------------------------------------------------------------------------
+
+def sum_rule_residual(
+    sections: Dict[int, object], bins: Sequence[float]
+) -> Optional[Dict[str, object]]:
+    """How far the *input* evaluation is from nu_452 = nu_455 + nu_456.
+
+    The ENDF-6 manual (§1.2.2) requires the three to be consistent, but
+    evaluations miss by a little — typically because the delayed table is far
+    coarser than the prompt one, so its lin-lin interpolant does not reproduce
+    the nu_d the total was built with. :func:`perturb_nubar_family` rebuilds the
+    derived member, which repairs that residual as a side effect; this function
+    puts a number on the repair so it is recorded rather than silent.
+
+    Only bins that all three tables actually span are scored. Where the delayed
+    table stops short of the prompt one — JEFF-4.0 U-235 tabulates nu_d to
+    20 MeV and nu_p to 30 MeV — there is no sum rule to check, and counting the
+    missing nu_d as a violation would report a 1e-3 discrepancy that is really
+    just absent data. Those bins come back as NaN and are counted separately.
+
+    Returns ``None`` when the family is incomplete (nothing is derived, so
+    nothing is repaired). Otherwise a dict with the 1/E-weighted relative
+    residual per MF31 bin, its maximum, and the pointwise maximum.
+    """
+    if not set(_NUBAR_MTS).issubset(set(int(mt) for mt in sections)):
+        return None
+
+    tables = {mt: _nubar_as_tabulated(sections[mt]) for mt in _NUBAR_MTS}
+    if any(e.size == 0 for e, _ in tables.values()):
+        return None
+
+    edges = np.asarray(bins, dtype=float)
+    lo = max(float(e[0]) for e, _ in tables.values())
+    hi = min(float(e[-1]) for e, _ in tables.values())
+    covered = (edges[:-1] >= lo) & (edges[1:] <= hi)
+
+    bar = {mt: _bin_average_xs(e, n, edges) for mt, (e, n) in tables.items()}
+    total = bar[NUBAR_TOTAL_MT]
+    resid = np.abs(total - sum(bar[mt] for mt in NUBAR_COMPONENT_MTS))
+    per_bin = np.full(total.shape, np.nan)
+    ok = covered & (total > 0)
+    per_bin[ok] = resid[ok] / total[ok]
+
+    # Pointwise, on the union of the three grids restricted to the common range.
+    union_e = np.unique(np.concatenate([e for e, _ in tables.values()]))
+    union_e = union_e[(union_e >= lo) & (union_e <= hi)]
+    if union_e.size:
+        vals = {mt: np.interp(union_e, e, n) for mt, (e, n) in tables.items()}
+        t = vals[NUBAR_TOTAL_MT]
+        pw = np.abs(t - sum(vals[mt] for mt in NUBAR_COMPONENT_MTS))
+        max_pointwise = float(np.max(np.where(t > 0, pw / np.where(t > 0, t, 1.0), 0.0)))
+    else:
+        max_pointwise = 0.0
+
+    scored = np.isfinite(per_bin)
+    return {
+        "per_bin_rel": per_bin,
+        "max_bin_rel": float(np.nanmax(per_bin)) if scored.any() else 0.0,
+        "argmax_bin": int(np.nanargmax(per_bin)) if scored.any() else -1,
+        "max_pointwise_rel": max_pointwise,
+        "n_bins_scored": int(scored.sum()),
+        "n_bins_uncovered": int((~scored).sum()),
+        "common_range_eV": (lo, hi),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -424,12 +619,13 @@ def perturb_nubar_family(
     """Apply sampled factors to the 452/455/456 family, enforcing the sum rule.
 
     Each member is perturbed on *its own* compact grid (its tabulated energies
-    plus single interpolated points at the interior MF31 bin edges). The derived
-    total is then built on the union of the perturbed members' grids and
-    evaluated as nu_d + nu_p; because no member carries duplicate energies, that
-    union sum is exact (a piecewise-linear identity), so the sum rule holds to
-    machine precision without bloating the sparse delayed-nu-bar table. Handles
-    all MF31 coverage patterns with one rule (mirrors ``UQ.sandwich`` ``nubar_mode``):
+    plus single interpolated points at the interior MF31 bin edges and inside
+    under-resolved bins). The derived total is then built on the union of the
+    perturbed members' grids and evaluated as nu_d + nu_p; because no member
+    carries duplicate energies, that union sum is exact (a piecewise-linear
+    identity), so the sum rule holds to machine precision without bloating the
+    sparse delayed-nu-bar table. Handles all MF31 coverage patterns with one
+    rule (mirrors ``UQ.sandwich`` ``nubar_mode``):
 
       * **components carry covariance** (455 and/or 456): each perturbed by its
         own factor; an unperturbed component stays at baseline; total derived.
@@ -437,6 +633,14 @@ def perturb_nubar_family(
         components, so all three scale together and the sum rule still holds.
       * **all three carry covariance**: components perturbed independently, the
         redundant total is recomputed (its own factor block is discarded).
+
+    Enforcing the sum rule is deliberate: the ENDF-6 manual (§1.2.2) requires
+    nu_p + nu_d to be consistent with the total whenever MT=455 is present, and
+    requires MT=452 to be LNU=2 in that case. Evaluations do not always comply
+    exactly, so rebuilding the total also repairs whatever residual the input
+    file carries — a change to the central value that the perturbation did not
+    ask for. :func:`sum_rule_residual` measures it so the repair is on record
+    rather than silent; for the JEFF-4.0 actinides it is ≤0.15 of the MF31 1σ.
 
     Parameters
     ----------
@@ -455,18 +659,54 @@ def perturb_nubar_family(
         ``out_sections`` is {MT: perturbed MF1 section} for every MT in
         ``sections``; ``diagnostics`` is {MT: {min_factor, max_factor,
         frac_out_of_coverage}} for the directly-perturbed members.
+
+    Raises
+    ------
+    ValueError
+        If ``sections`` is empty, if a factor block targets an MT with no MF1
+        section, or if a contributor to the derived member carries no usable
+        table (an LNU=1 section that was never perturbed) — dropping it would
+        silently erase that component from the total.
     """
     bins_arr = np.asarray(bins, dtype=float)
     n_groups = bins_arr.size - 1
     derived = NUBAR_TOTAL_MT if derived_mt is None else int(derived_mt)
     present = set(int(mt) for mt in sections)
 
-    components_present = [mt for mt in NUBAR_COMPONENT_MTS if mt in present]
-    can_derive = (NUBAR_TOTAL_MT in present) and len(components_present) >= 1
+    if not present:
+        raise ValueError(
+            "no MF1 nu-bar sections to perturb (MT 452/455/456 all absent); "
+            "writing the tape unchanged would report a perturbation that "
+            "never happened"
+        )
+    orphan_blocks = sorted(int(mt) for mt in factor_blocks if int(mt) not in present)
+    if orphan_blocks:
+        raise ValueError(
+            f"MF31 covariance for MT(s) {orphan_blocks} but no matching MF1 "
+            f"nu-bar section (present: {sorted(present)})"
+        )
 
-    # Degenerate case: no derivable family (e.g. only total present, no
-    # components) → perturb each present member on its own grid directly.
+    components_present = [mt for mt in NUBAR_COMPONENT_MTS if mt in present]
+    # The family is derivable only when EVERY contributor to the derived member
+    # is present. The manual (§1.3.2) makes MT=456 mandatory whenever MT=455
+    # exists, so an incomplete family means a malformed tape — deriving anyway
+    # would write, for a {452, 455} file, nu_total := nu_delayed.
+    if derived == NUBAR_TOTAL_MT:
+        can_derive = (NUBAR_TOTAL_MT in present
+                      and set(NUBAR_COMPONENT_MTS).issubset(present))
+    else:
+        required = {NUBAR_TOTAL_MT} | (set(NUBAR_COMPONENT_MTS) - {derived})
+        can_derive = derived in present and required.issubset(present)
+
+    # Degenerate case: no derivable family (e.g. only the total is present, or
+    # the tape is missing a mandatory member) → perturb each present member on
+    # its own grid directly and leave the sum rule alone.
     if not can_derive:
+        if logger is not None and len(present) > 1:
+            logger.warning(
+                f"  [MF31] incomplete nu-bar family {sorted(present)}: MT{derived} "
+                f"cannot be derived, perturbing each member directly."
+            )
         out: Dict[int, object] = {}
         diags: Dict[int, dict] = {}
         for mt, sec in sections.items():
@@ -525,17 +765,27 @@ def perturb_nubar_family(
             ]
             signs = {mt: (+1.0 if mt == NUBAR_TOTAL_MT else -1.0) for mt in contributors}
 
-        grids = [_baseline_energies(out.get(mt) or sections[mt], bins_arr)
-                 for mt in contributors if (mt in out or mt in sections)]
-        union_e = np.unique(np.concatenate(grids))
-        nu_derived = np.zeros_like(union_e)
+        tables: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
         for mt in contributors:
-            sec = out.get(mt) or sections.get(mt)
-            if sec is None:
-                continue
-            e, n = _nubar_as_tabulated(sec)
+            sec = out.get(mt, sections.get(mt))
+            e, n = (_nubar_as_tabulated(sec) if sec is not None
+                    else (np.asarray([]), np.asarray([])))
             if e.size == 0:
-                continue
+                # An LNU=1 contributor that was never perturbed has no table.
+                # Skipping it used to drop that component from the total
+                # outright (measured: −0.55 % on nu-bar when the delayed part
+                # vanished), so refuse instead.
+                raise ValueError(
+                    f"MT{derived} is derived from MT{mt}, but MT{mt} carries no "
+                    f"usable nu-bar table (LNU="
+                    f"{getattr(sec, 'lnu', None) if sec is not None else None}); "
+                    f"perturb it too, or set derived_mt to a member that is"
+                )
+            tables[mt] = (e, n)
+
+        union_e = np.unique(np.concatenate([e for e, _ in tables.values()]))
+        nu_derived = np.zeros_like(union_e)
+        for mt, (e, n) in tables.items():
             nu_derived = nu_derived + signs[mt] * np.interp(
                 union_e, e, n, left=n[0], right=n[-1]
             )
