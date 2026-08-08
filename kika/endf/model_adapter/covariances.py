@@ -36,9 +36,11 @@ from kika.nuclear_data.model import (
     CovarianceSection,
     CovarianceSuite,
     DataLink,
+    EndfProvenance,
 )
 
 __all__ = ["decodeMF33MT", "decodeMF34MT", "decodeCovarianceSuite",
+           "encodeMF33MT", "encodeMF34MT",
            "reactionHref", "angularDistributionHref"]
 
 
@@ -67,13 +69,30 @@ def angularDistributionHref(mt: int) -> str:
 LEGENDRE_DIMENSION = 1
 
 
-def _matrixForm(matrix, grid, isRelative: bool) -> CovarianceMatrix:
+def _matrixForm(matrix, grid, isRelative: bool,
+                productFrame: Optional[str] = None) -> CovarianceMatrix:
     grid = np.asarray(grid, dtype=float) if grid is not None else None
     return CovarianceMatrix(
         matrix=np.asarray(matrix, dtype=float),
         rowGrid=grid,
         columnGrid=grid,
         isRelative=bool(isRelative),
+        productFrame=productFrame,
+    )
+
+
+def _sectionProvenance(section, ltt: Optional[int] = None) -> EndfProvenance:
+    """ZA, AWR, MAT — and MF34's LTT — off an MF33 or MF34 section header.
+
+    None of the four has a GNDS counterpart: §25.2.2 identifies a covariance by
+    its ``href``, not by a material header. They are kept so the encoder writes
+    the header the file had rather than one it defaulted.
+    """
+    return EndfProvenance(
+        mat=getattr(section, "_mat", None),
+        awr=getattr(section, "_awr", None),
+        za=getattr(section, "_za", None),
+        headerFields={} if ltt is None else {"ltt": int(ltt)},
     )
 
 
@@ -87,6 +106,11 @@ def decodeMF33MT(mf33mt, report: Optional[ConversionReport] = None):
     """
     report = report if report is not None else ConversionReport()
     covmat = mf33mt.to_xs_covmat()
+
+    # `CrossSectionCovariance` has no `mt_metadata`, so unlike MF34 the section
+    # header does not survive the trip through `kika/cov` at all: ZA reaches the
+    # isotope tags and AWR and MAT reach nothing. Read them off the section.
+    provenance = _sectionProvenance(mf33mt)
 
     sections = []
     for index, matrix in enumerate(covmat.matrices):
@@ -102,6 +126,7 @@ def decodeMF33MT(mf33mt, report: Optional[ConversionReport] = None):
                 if colMT != rowMT else None
             ),
             form=_matrixForm(matrix, grid, covmat.is_relative[index]),
+            provenance=provenance,
         ))
 
     if not sections:
@@ -118,6 +143,14 @@ def decodeMF34MT(mf34mt, report: Optional[ConversionReport] = None, mf4Data=None
     """
     report = report if report is not None else ConversionReport()
     covmat = mf34mt.to_ang_covmat(mf4_data=mf4Data)
+
+    # LTT as well as ZA/AWR/MAT: §34.1 makes it the difference between a section
+    # whose blocks start at a_0 and one that starts at a_1, and `to_mf34` would
+    # otherwise infer it from whether an L=0 pair is present. The inference is
+    # right, and preferring the file's own value means a round trip does not
+    # depend on it staying right — the same argument `encodeMF3MT` makes for the
+    # (NBT, INT) pairs.
+    provenance = _sectionProvenance(mf34mt, ltt=getattr(mf34mt, "_ltt", None))
 
     sections = []
     for index, matrix in enumerate(covmat.matrices):
@@ -138,12 +171,170 @@ def decodeMF34MT(mf34mt, report: Optional[ConversionReport] = None, mf4Data=None
                 angularDistributionHref(colMT), colOrder,
                 ENDF_MFMT=f"34/{colMT}", dimension=LEGENDRE_DIMENSION,
             ),
-            form=_matrixForm(matrix, grid, covmat.is_relative[index]),
+            form=_matrixForm(matrix, grid, covmat.is_relative[index],
+                             productFrame=covmat.frame[index]),
+            provenance=provenance,
         ))
 
     if not sections:
         report.lost(f"MF34/MT{mf34mt.number}: no Legendre covariance blocks decoded")
     return sections, report
+
+
+# ---------------------------------------------------------------------------
+# Encoders
+# ---------------------------------------------------------------------------
+#
+# **These are projections back onto `kika/cov`, not record writers**, and the
+# reason is structural rather than a shortcut. The decoders above read through
+# `to_xs_covmat()` / `to_ang_covmat()`, which have already collapsed the file's
+# NC/NI subsection structure -- LB type, derived-versus-explicit -- into dense
+# matrices on a grid. `CovarianceMatrix` keeps the matrix, the grids, the frame
+# and whether it is relative, and that is all there is to keep. **The LB
+# structure is not recoverable from the model**, so the honest thing is to hand
+# the policy back to the code that already owns it: `to_mf34` chooses LB=5 on
+# the diagonal and LB=6 off it, `create_mf33_from_covariance` its equivalent.
+# Reimplementing that choice here would make it two policies that agree until
+# they don't -- which is exactly how "ACE stores no reaction Q values" came to
+# be written in three places while the values sat parsed (`docs/library-gaps.md`
+# D4).
+#
+# The consequence for testing is stated where it matters, in
+# `tests/test_covariance_round_trip.py`: the gate is a numerical **fixed point**,
+# not the byte identity MF3, MF4 and MF1 are held to.
+
+def _endfMT(link) -> int:
+    """The MT an ``ENDF_MFMT`` names — ``"34/2"`` → 2."""
+    if link is None or not link.ENDF_MFMT:
+        raise ValueError("a covariance link with no ENDF_MFMT cannot be written to ENDF")
+    return int(str(link.ENDF_MFMT).split("/")[1])
+
+
+def _legendreOrder(link) -> int:
+    """The Legendre order a link is sliced at (§25.2.5-6)."""
+    for entry in link.slices.slices:
+        if entry.domainValue is not None:
+            return int(entry.domainValue)
+    raise ValueError(
+        f"the link to {link.href!r} carries no slice, so the Legendre order it "
+        f"is about is unknown; MF34 cannot be written from it"
+    )
+
+
+def _covarianceSections(source, prefix: str, mt: int):
+    """The sections of *source* that belong to one MF and row MT."""
+    sections = getattr(source, "covarianceSections", source)
+    selected = [
+        section for section in sections
+        if section.rowData is not None
+        and str(section.rowData.ENDF_MFMT or "").startswith(prefix)
+        and _endfMT(section.rowData) == mt
+    ]
+    if not selected:
+        raise ValueError(f"no MF{prefix.rstrip('/')} covariance sections for MT{mt}")
+    return selected
+
+
+def encodeMF34MT(source, mt: int, mat: Optional[int] = None,
+                 report: Optional[ConversionReport] = None):
+    """A :class:`CovarianceSuite` → an ``MF34MT`` for one MT.
+
+    Rebuilds the :class:`~kika.cov.legendre_covariance.LegendreCovariance` the
+    decoder read through and lets :meth:`LegendreCovariance.to_mf34` write the
+    records. Everything comes from the model — the Legendre orders from the row
+    and column **slices**, which is where §25.2.5-6 put them, and the header
+    from the provenance the decoder kept.
+    """
+    from kika.cov.legendre_covariance import LegendreCovariance
+
+    report = report if report is not None else ConversionReport()
+    sections = _covarianceSections(source, "34/", mt)
+
+    covmat = LegendreCovariance()
+    isotope = None
+    for section in sections:
+        provenance = section.provenance
+        za = int(getattr(provenance, "za", None) or 0)
+        isotope = isotope if isotope is not None else za
+        form = section.form
+
+        covmat.isotope_rows.append(za)
+        covmat.reaction_rows.append(_endfMT(section.rowData))
+        covmat.l_rows.append(_legendreOrder(section.rowData))
+        covmat.isotope_cols.append(za)
+        covmat.reaction_cols.append(_endfMT(section.columnData))
+        covmat.l_cols.append(_legendreOrder(section.columnData))
+        covmat.matrices.append(np.asarray(form.matrix, dtype=float))
+        covmat.energy_grids.append([float(e) for e in form.rowGrid])
+        covmat.is_relative.append(bool(form.isRelative))
+        covmat.frame.append(form.productFrame)
+
+    provenance = sections[0].provenance
+    covmat.mt_metadata[(isotope, mt)] = {
+        "za": getattr(provenance, "za", None),
+        "awr": getattr(provenance, "awr", None),
+        "mat": getattr(provenance, "mat", None),
+        "ltt": (getattr(provenance, "headerFields", None) or {}).get("ltt"),
+    }
+
+    section = covmat.to_mf34(isotope, mt, mat=mat)
+    report.approximated(
+        f"MF34/MT{mt}: written through kika/cov, so NI>1 sub-subsections are "
+        f"collapsed to one LB=5/LB=6 record on the stored grid. The numbers are "
+        f"preserved; the file's original per-record split is not."
+    )
+    return section, report
+
+
+def encodeMF33MT(source, mt: int, mat: Optional[int] = None,
+                 report: Optional[ConversionReport] = None):
+    """A :class:`CovarianceSuite` → an ``MF33MT`` for one MT.
+
+    One subsection per (row MT, column MT) block, each built by
+    :func:`~kika.endf.writers.mf33_writer.create_mf33_from_covariance` so the
+    LB=5/LB=6 record layout has exactly one implementation.
+    """
+    from kika.endf.writers.mf33_writer import create_mf33_from_covariance
+
+    report = report if report is not None else ConversionReport()
+    sections = _covarianceSections(source, "33/", mt)
+    provenance = sections[0].provenance
+
+    za = getattr(provenance, "za", None)
+    awr = getattr(provenance, "awr", None)
+    if za is None or awr is None:
+        raise ValueError(
+            f"MF33/MT{mt} carries no ZA/AWR, so the section header would be "
+            f"invented. Decode from ENDF, where the header comes from the file."
+        )
+    resolvedMat = mat if mat is not None else getattr(provenance, "mat", None)
+
+    built = None
+    for section in sections:
+        form = section.form
+        colMT = _endfMT(section.columnData) if section.columnData is not None else mt
+        if not form.isRelative:
+            report.approximated(
+                f"MF33/MT{mt}-MT{colMT}: the block is absolute and is written as "
+                f"LB=5/LB=6, which ENDF-6 reads as relative"
+            )
+        one = create_mf33_from_covariance(
+            cov_matrix=np.asarray(form.matrix, dtype=float),
+            energy_grid_ev=np.asarray(form.rowGrid, dtype=float),
+            za=float(za), awr=float(awr), mat=int(resolvedMat or 0),
+            mt=mt, mt1=colMT,
+            lb=5 if colMT == mt else 6,
+            col_energy_grid_ev=(
+                None if colMT == mt else np.asarray(form.columnGrid, dtype=float)
+            ),
+        )
+        if built is None:
+            built = one
+        else:
+            built.add_subsection(one.subsections[0])
+
+    built._nl = len(built.subsections)
+    return built, report
 
 
 def decodeCovarianceSuite(endf, report: Optional[ConversionReport] = None,

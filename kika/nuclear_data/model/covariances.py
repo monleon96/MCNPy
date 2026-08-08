@@ -152,6 +152,15 @@ class CovarianceSection:
     rowData: Optional[DataLink] = None
     columnData: Optional[DataLink] = None
     form: Optional[object] = None   # CovarianceMatrix | Mixed | Sum
+    #: The ENDF section header the decoder read, kept so the section can be
+    #: written back rather than approximated. ZA, AWR, MAT and — for MF34 —
+    #: LTT have no GNDS counterpart: §25.2.2 identifies a covariance by its
+    #: ``href`` into a ``reactionSuite``, not by a material header. Without
+    #: this the encoder would have to default AWR and MAT, which is the third
+    #: time in this package that what the *read* path discarded turned out to
+    #: be the whole cost of the write path (see ``docs/library-gaps.md`` D2
+    #: and M2).
+    provenance: Optional[object] = None
 
     @property
     def isCrossTerm(self) -> bool:

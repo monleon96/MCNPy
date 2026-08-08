@@ -89,7 +89,10 @@ class EndfProvenance(Provenance):
     #: ``regions1d`` is built from these; keeping the originals means a
     #: round-trip does not depend on the reconstruction being lossless.
     interpolationRegions: List[Tuple[int, int]] = field(default_factory=list)
-    #: MF1/451 header fields, for a section decoded from one.
+    #: Section header fields with no GNDS counterpart, kept verbatim so the
+    #: encoder writes them back rather than recomputing them: MF1/451's
+    #: nineteen, or MF34's ``ltt``. Untyped by design — this is the one place
+    #: an ENDF-only field can live without the model growing a slot for it.
     headerFields: Dict[str, object] = field(default_factory=dict)
     evaluationInfo: Dict[str, str] = field(default_factory=dict)
     #: MF1/451's NWD descriptive records, data columns only (the ID columns are

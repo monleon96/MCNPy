@@ -17,7 +17,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kika.endf.model_adapter import decodeCovarianceSuite, decodeMF33MT, decodeMF34MT
+from kika.endf.model_adapter import (decodeCovarianceSuite, decodeMF33MT,
+                                     decodeMF34MT, encodeMF33MT, encodeMF34MT)
 from kika.endf.read_endf import read_endf
 
 
@@ -205,3 +206,121 @@ def test_real_tapes_convert_element_for_element(request, tape):
         decoded, _ = decodeMF33MT(endf.mf[33].mt[mt])
         for entry, matrix in zip(decoded, expected.matrices):
             np.testing.assert_array_equal(entry.form.matrix, np.asarray(matrix, dtype=float))
+
+
+# ---------------------------------------------------------------------------
+# The encode direction
+# ---------------------------------------------------------------------------
+#
+# **The gate here is a fixed point, and deliberately not the byte identity MF1,
+# MF3 and MF4 are held to.** Those three decode into a model that keeps the
+# file's own record structure -- the (NBT, INT) pairs, the NWD block -- so
+# re-encoding can reproduce the bytes. Covariances do not: the decoders read
+# through `to_xs_covmat()` / `to_ang_covmat()`, which have already collapsed
+# NC/NI subsections and LB types into dense matrices, and `CovarianceMatrix`
+# keeps only the matrix, the grids, the frame and `isRelative`.
+#
+# Claiming byte identity would therefore be claiming something the model cannot
+# do, and the honest statement is weaker and still strong: **encoding then
+# decoding returns the same arrays**, so nothing is lost or altered in the half
+# of the trip the model is responsible for. What the round trip does *not*
+# preserve -- an evaluator's per-record NI split -- is declared by the encoder's
+# own `ConversionReport` rather than left for a reader to discover.
+
+def _sectionsFor(suite, mf, mt):
+    return [s for s in suite.covarianceSections
+            if str(s.rowData.ENDF_MFMT or "").startswith(f"{mf}/")
+            and int(str(s.rowData.ENDF_MFMT).split("/")[1]) == mt]
+
+
+def _assertFixedPoint(original, rebuilt, what):
+    assert len(rebuilt) == len(original), (
+        f"{what}: {len(original)} sections in, {len(rebuilt)} back out"
+    )
+    for before, after in zip(original, rebuilt):
+        assert after.label == before.label, f"{what}: label moved"
+        np.testing.assert_array_equal(after.form.matrix, before.form.matrix)
+        np.testing.assert_array_equal(after.form.rowGrid, before.form.rowGrid)
+        np.testing.assert_array_equal(after.form.columnGrid, before.form.columnGrid)
+
+
+def test_mf33_survives_a_round_trip_through_the_model(covEndf, suite):
+    covarianceSuite, _ = suite
+    for mt in sorted(covEndf.mf[33].mt):
+        built, _ = encodeMF33MT(covarianceSuite, mt)
+        rebuilt, _ = decodeMF33MT(built)
+        _assertFixedPoint(_sectionsFor(covarianceSuite, 33, mt), rebuilt, f"MF33/MT{mt}")
+
+
+def test_mf34_survives_a_round_trip_through_the_model(covEndf, suite):
+    covarianceSuite, _ = suite
+    for mt in sorted(covEndf.mf[34].mt):
+        built, _ = encodeMF34MT(covarianceSuite, mt)
+        rebuilt, _ = decodeMF34MT(built)
+        _assertFixedPoint(_sectionsFor(covarianceSuite, 34, mt), rebuilt, f"MF34/MT{mt}")
+
+
+def test_the_encoded_header_is_the_file_s_and_not_a_default(covEndf, suite):
+    """`to_mf34` defaults AWR to 1.0 and MAT to 0 when it is told nothing.
+
+    That default is why the header has to be carried: a section written with
+    ``awr=1.0`` is structurally valid, silently wrong, and indistinguishable
+    from a correct one without the source tape in hand.
+    """
+    covarianceSuite, _ = suite
+    for mf, encode in ((33, encodeMF33MT), (34, encodeMF34MT)):
+        for mt in sorted(covEndf.mf[mf].mt):
+            source = covEndf.mf[mf].mt[mt]
+            built, _ = encode(covarianceSuite, mt)
+            assert built._za == pytest.approx(source._za), f"MF{mf}/MT{mt} ZA"
+            assert built._awr == pytest.approx(source._awr), f"MF{mf}/MT{mt} AWR"
+            assert int(built._mat or 0) == int(source._mat or 0), f"MF{mf}/MT{mt} MAT"
+
+
+def test_mf34_keeps_the_file_s_ltt_rather_than_inferring_it(covEndf, suite):
+    """§34.1: LTT says whether the blocks start at a_0 or a_1.
+
+    `to_mf34` infers it from whether an L=0 pair is present, which is right —
+    and preferring the file's own value means the round trip does not depend on
+    the inference staying right, the same argument `encodeMF3MT` makes for the
+    (NBT, INT) pairs.
+    """
+    covarianceSuite, _ = suite
+    for mt in sorted(covEndf.mf[34].mt):
+        built, _ = encodeMF34MT(covarianceSuite, mt)
+        assert built._ltt == covEndf.mf[34].mt[mt]._ltt
+
+
+def test_the_encoder_declares_what_the_round_trip_cannot_preserve(covEndf, suite):
+    """Nothing converts silently — the NI collapse is stated, not discovered."""
+    covarianceSuite, _ = suite
+    mt = sorted(covEndf.mf[34].mt)[0]
+    _, report = encodeMF34MT(covarianceSuite, mt)
+    assert any("NI" in message for message in report.approximations)
+
+
+def test_encoding_an_mt_the_suite_does_not_carry_raises(suite):
+    covarianceSuite, _ = suite
+    with pytest.raises(ValueError, match="MT999"):
+        encodeMF34MT(covarianceSuite, 999)
+
+
+@pytest.mark.parametrize("tape", ["fe56_host_tape", "fe56_jendl_tape"])
+def test_the_fixed_point_holds_on_real_tapes(request, tape):
+    """Under ``--deep``, on real MF33/MF34 rather than the synthetic fixture."""
+    endf = read_endf(str(request.getfixturevalue(tape)))
+    if 33 not in endf.mf:
+        pytest.skip(f"{tape} carries no MF33")
+    covarianceSuite, _ = decodeCovarianceSuite(endf)
+
+    for mt in sorted(endf.mf[33].mt):
+        built, _ = encodeMF33MT(covarianceSuite, mt)
+        rebuilt, _ = decodeMF33MT(built)
+        _assertFixedPoint(_sectionsFor(covarianceSuite, 33, mt), rebuilt,
+                          f"{tape} MF33/MT{mt}")
+
+    for mt in sorted(getattr(endf.mf.get(34), "mt", {})):
+        built, _ = encodeMF34MT(covarianceSuite, mt)
+        rebuilt, _ = decodeMF34MT(built)
+        _assertFixedPoint(_sectionsFor(covarianceSuite, 34, mt), rebuilt,
+                          f"{tape} MF34/MT{mt}")
