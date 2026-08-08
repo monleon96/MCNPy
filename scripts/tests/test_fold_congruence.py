@@ -6,17 +6,31 @@ worth something to the chi2 only if the fold is a congruence `M J M^T`, because
 a congruence cannot change the sign of an eigenvalue. It is one iff the cross
 term's legs use the same maps to points as the self blocks do.
 
-They do not. MF34 is shipped RELATIVE, so `build_mf34_block` scales its leg by
-`a_l_per_pt`; the cross block is shipped ABSOLUTE, so
-`build_mf33_mf34_cross_block` does not. The chi2 therefore folds `cx` against
+THEY DID NOT, FOR RUNS 87 THROUGH 90. MF34 is shipped RELATIVE, so
+`build_mf34_block` scales its leg by `a_l_per_pt`; the cross SIDECAR was
+absolute, so `build_mf33_mf34_cross_block` did not. The chi2 folded `cx` against
 `r^2 * Var34` where it was certified against `Var34`, with
 `r(j,l) = a_l(E_j)/a_nom(g)`. And because `J` is a SINGULAR sample covariance it
 sits ON the Cauchy-Schwarz boundary, so there is no margin: any `|r| < 1`
-violates PSD.
+violates PSD. All four runs died on `potrf`, and every diagnosis until §L13 was
+taken in parameter space, where this is invisible.
 
-These tests are the controlled demonstration -- same `J`, same code, one
-variable. Runs 87 through 90 all died on `potrf` in the chi2 and every diagnosis
-until now was taken in parameter space, where this is invisible.
+⚑ THE FILE NOW ANSWERS IT, and this suite is in two halves.
+
+`_lam_min_norm` keeps the defect switched ON deliberately (`a_is_relative=False`
+against a relative family) and the dose-response tests below are the evidence
+that the guard added in §L13 is guarding something real. The production
+orchestrator can no longer assemble that at all -- it reads the convention off
+the MF34 family and refuses a block that disagrees.
+
+`_lam_min_norm_congruent` is the repair: the cross term divided by `a_nom` on
+the shape axis, which is what `write_consistent_mf34` writes into the MF34 a_0
+blocks. Both legs then carry `a_l(E_j)`, one `M` exists, and
+`test_psd_transfers_for_any_a_l` -- a STRICT XFAIL until 2026-08-08, with
+"flip this when the a_0 blocks land" as its stated condition -- passes, at
+spreads up to 90 %. Note what turned out not to matter: `a_l(E_j)` still varies
+freely inside a group. It never had to be constant. Both legs had to be
+multiplied by the SAME thing, which one file in one convention guarantees.
 """
 
 from __future__ import annotations
@@ -34,6 +48,9 @@ if str(_ROOT) not in sys.path:
 from kika.cov.legendre_covariance import LegendreCovariance
 
 from scripts.eval_covariance import (
+    _legendre_base_sens,
+    _mf33_overlap_weights,
+    _mf4_bin_edges_for_points,
     build_mf33_block,
     _mf34_family_is_relative,
     build_mf33_mf34_cross_block,
@@ -103,8 +120,8 @@ def world():
                c0=rng.uniform(0.8, 1.2, N), y=rng.uniform(0.5, 1.5, N))
     pts["g_pt"] = np.clip(
         np.searchsorted(grp_ev, e_mev * 1e6, side="right") - 1, 0, G - 1)
-    return dict(grp_ev=grp_ev, mf4_mev=mf4_mev, c33=c33, cross=cross,
-                mf34=mf34, a_nom=a_nom, **pts)
+    return dict(grp_ev=grp_ev, mf4_mev=mf4_mev, c33=c33, c34=c34,
+                cx_abs=cx, cross=cross, mf34=mf34, a_nom=a_nom, **pts)
 
 
 def _lam_min_norm(w, a_l_per_pt):
@@ -128,6 +145,37 @@ def _lam_min_norm(w, a_l_per_pt):
         w["cross"], w["e_mev"], w["mu"], w["c0"], a_l_per_pt, w["y"],
         mf33_grid_ev=w["grp_ev"], energies_mf4_mev=w["mf4_mev"],
         a_is_relative=False)
+    S = s34 + s33 + sx
+    lam = float(np.linalg.eigvalsh(0.5 * (S + S.T))[0])
+    return lam / float(np.max(np.abs(np.diag(S)))), S
+
+
+def _lam_min_norm_congruent(w, a_l_per_pt):
+    """Sigma_eval with the cross term in the marginals' OWN coordinates.
+
+    ⚑ The repair §L13 pointed at, and the reason it had to be upstream. The
+    cross block is divided by `a_nom` on the shape axis -- exactly what
+    `write_consistent_mf34` does before writing the MF34 a_0 blocks -- so it
+    declares `is_relative=True` and matches the family. Then BOTH legs of the
+    shape parameter carry `a_l(E_j)`, one `M` exists, and
+
+        Sigma_eval = M J M^T,   M = [ diag(y).W | base_l * a_l(E_j) * S ]
+
+    is a congruence for ANY `a_l_per_pt`, however it varies inside a group.
+    That is the whole claim, and `test_psd_transfers_for_any_a_l` below is now
+    a plain test rather than an xfail because of it.
+    """
+    a_flat = w["a_nom"].reshape(-1)
+    cross_rel = [dict(b, matrix=b["matrix"] / a_flat[None, [g * L + b["l"] - 1
+                                                           for g in range(G)]],
+                      is_relative=True)
+                 for b in w["cross"]]
+    s34 = build_mf34_block(w["mf34"], w["e_mev"], w["mu"], w["c0"], a_l_per_pt)
+    s33 = build_mf33_block(w["grp_ev"], w["c33"], w["mf4_mev"], w["e_mev"], w["y"])
+    sx = build_mf33_mf34_cross_block(
+        cross_rel, w["e_mev"], w["mu"], w["c0"], a_l_per_pt, w["y"],
+        mf33_grid_ev=w["grp_ev"], energies_mf4_mev=w["mf4_mev"],
+        a_is_relative=True)
     S = s34 + s33 + sx
     lam = float(np.linalg.eigvalsh(0.5 * (S + S.T))[0])
     return lam / float(np.max(np.abs(np.diag(S)))), S
@@ -221,17 +269,49 @@ def test_a_l_crossing_zero_is_the_unbounded_case(world):
     assert (np.diag(S) < 0).any(), "some point must get negative variance"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="roadmap §10.6-3: the cross term must be read from MF34's a_0 blocks "
-           "so both legs carry a_l(E_j). Until then the fold is not a congruence "
-           "and this cannot pass. Flip to a plain test when that lands -- strict "
-           "xfail makes it fail loudly the moment it starts passing.",
-)
-def test_psd_transfers_for_any_a_l(world):
-    """WHAT WE WANT: certify J once, and have the chi2 inherit it."""
+@pytest.mark.parametrize("spread", [0.05, 0.5, 0.9])
+def test_psd_transfers_for_any_a_l(world, spread):
+    """⚑⚑ WHAT THE WHOLE TRACK WAS FOR: certify J once, and have the chi2
+    inherit it. This was a STRICT XFAIL until the cross term moved into the
+    MF34 a_0 blocks; it is now a plain test, at the spreads that broke the
+    absolute assembly by 1e-2 and 1e-1 above.
+
+    Note what is NOT required: `a_l(E_j)` still varies inside a group by up to
+    90 %. It never mattered. What mattered was that both legs be multiplied by
+    the SAME thing, which is what one file in one convention guarantees.
+    """
     rng = np.random.default_rng(3)
     a_pt = world["a_nom"][world["g_pt"]] * (
-        1.0 + 0.5 * rng.uniform(-1, 1, size=(N, L)))
-    lam, _ = _lam_min_norm(world, a_pt)
+        1.0 + spread * rng.uniform(-1, 1, size=(N, L)))
+    lam, S = _lam_min_norm_congruent(world, a_pt)
     assert lam > -1e-12, f"Sigma_eval must inherit J's PSD, got {lam:.3e}"
+    assert (np.diag(S) >= 0).all(), "no point may have negative variance"
+
+
+def test_the_congruent_fold_is_exactly_M_J_MT(world):
+    """PSD is the consequence; the identity is the reason. A sign check passes
+    on folds that are not congruences -- 10.7-9's baseline sits at -0.008 and
+    is still 'PSD enough' -- so assert the algebra, not its symptom."""
+    rng = np.random.default_rng(5)
+    a_pt = world["a_nom"][world["g_pt"]] * (
+        1.0 + 0.5 * rng.uniform(-1, 1, size=(N, L)))
+    _, S = _lam_min_norm_congruent(world, a_pt)
+
+    e_lo, e_hi = _mf4_bin_edges_for_points(world["mf4_mev"], world["e_mev"])
+    W = _mf33_overlap_weights(world["grp_ev"], e_lo * 1e6, e_hi * 1e6)
+    base = _legendre_base_sens(world["mu"], world["c0"], L)
+    M = np.zeros((N, G + G * L))
+    M[:, :G] = world["y"][:, None] * W
+    for l in range(1, L + 1):
+        M[np.arange(N), G + world["g_pt"] * L + (l - 1)] = (
+            base[l - 1] * a_pt[:, l - 1])
+
+    a_flat = world["a_nom"].reshape(-1)
+    c34_rel = world["c34"] / np.outer(a_flat, a_flat)
+    cx_rel = world["cx_abs"] / a_flat[None, :]
+    J_rel = np.block([[world["c33"], cx_rel], [cx_rel.T, c34_rel]])
+
+    want = M @ J_rel @ M.T
+    want = 0.5 * (want + want.T)
+    err = float(np.abs(S - want).max()) / float(np.abs(want).max())
+    assert err < 1e-10, f"Sigma_eval is not M J M^T: relative {err:.3e}"

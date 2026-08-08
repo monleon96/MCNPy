@@ -324,15 +324,27 @@ def read_mf34_split(
                 f"M J M^T (roadmap §10.7-2(a))."
             )
         if mf33_grid is not None and not _grids_equal(row, mf33_grid, grid_rtol):
-            d = ("shape mismatch" if row.shape != mf33_grid.shape
-                 else f"max rel diff {np.abs(row - mf33_grid).max():.3e}")
+            if row.shape != mf33_grid.shape:
+                d = (f"{row.size} edges against {mf33_grid.size}")
+                why = ("The magnitude leg must be `_mf33_magnitude_map` on the "
+                       "MF33 grid, unmodified -- a cross term is "
+                       "Cauchy-Schwarz-compatible only with the marginals it "
+                       "was built from (§10.1). Pad it out to the file's grid "
+                       "with zeros rather than regridding it.")
+            else:
+                _s = np.maximum(np.abs(row), np.abs(mf33_grid))
+                _s[_s == 0.0] = 1.0
+                _k = int((np.abs(row - mf33_grid) / _s).argmax())
+                d = (f"same {row.size} edges, worst relative {(np.abs(row - mf33_grid) / _s).max():.3e} "
+                     f"at index {_k}: {row[_k]!r} vs {mf33_grid[_k]!r}")
+                why = ("At ~1e-7 this is the 6-significant-digit write: the a_0 "
+                       "row grid was built from an in-memory array instead of "
+                       "from the one MF33 was read back into. Write the file's "
+                       "own floats -- that round trip is idempotent, a "
+                       "reconstruction is not (§10.7-10, 0.7).")
             raise ValueError(
-                f"{path} a_0 block (0, {l1}) has a magnitude grid of "
-                f"{row.size} edges but the file's own MF33 comes back on "
-                f"{mf33_grid.size} ({d}). The magnitude leg must be "
-                f"`_mf33_magnitude_map` on the MF33 grid, unmodified — a cross "
-                f"term is Cauchy-Schwarz-compatible only with the marginals it "
-                f"was built from (§10.1)."
+                f"{path} a_0 block (0, {l1}) magnitude grid does not match the "
+                f"file's MF33 grid ({d}). {why}"
             )
         if row_ref is None:
             row_ref = row
