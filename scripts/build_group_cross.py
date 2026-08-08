@@ -1127,8 +1127,37 @@ def main():
         # has to be rewritten too.
         diagnose("E  rebuilt + null=zero + c33_post (MF33 rebuilt too)",
                  c33_post, rel_post_K, cxA),
+        # ⚑⚑ ROW F — THE ONE THE a_0 BLOCKS ACTUALLY PRODUCE, and the only row
+        # above that is not modelling a sidecar.
+        #
+        # Rows B-E all divide the cross block by `a_pt` while the shape blocks
+        # are divided by `a_nom`. TWO DENOMINATORS FOR ONE PARAMETER -- which is
+        # §L13 itself, reproduced inside the diagnostic, because when they were
+        # written the cross term arrived as an absolute sidecar and there was no
+        # single convention to divide by. Their sigma_max(K) ~ 1000 measures
+        # that mismatch and says nothing about the file below.
+        #
+        # `write_consistent_mf34` divides the cross by `a_nom`, the SAME
+        # denominator as the shape blocks. The published joint is then
+        # J_rel = diag(I, diag(1/a_nom)) J_post diag(I, diag(1/a_nom)),
+        # a positive diagonal congruence of a PSD matrix, and the fold applies
+        # another one (diag(I, diag(a_pt))). Congruences cannot change the sign
+        # of an eigenvalue, so this row should come out at the CONTROL's level
+        # and not at row D's. If it does not, do not ship the file.
+        diagnose("F  a_0 blocks: cx/a_nom, ONE convention (WHAT WE NOW SHIP)",
+                 c33_ship, rel_post_K,
+                 np.divide(cx_post, a_flat_nom[None, :],
+                           out=np.zeros_like(cx_post),
+                           where=(np.abs(a_flat_nom) >= np.finfo(float).tiny
+                                  )[None, :])[:, K]),
     ]
     print("\n=== PSD in the space the chi2 folds (relative MF34, a_pt) ===")
+    print("  ⚠ ROWS A-E MODEL THE SIDECAR ROUTE AND ARE HISTORY. They divide "
+          "the cross\n  block by `a_pt` and the shape blocks by `a_nom` -- two "
+          "denominators for one\n  parameter, i.e. §L13 itself -- because when "
+          "they were written the cross term\n  arrived absolute and there was "
+          "no single convention. Their sigma_max(K) ~ 1000\n  measures that "
+          "mismatch, NOT the file. **Read row F.**")
     print(pd.DataFrame(rows2).set_index("case").to_string())
     n_null_nom = int((np.abs(a_flat_nom) < np.finfo(float).tiny).sum())
     n_seen = int((np.abs(a_flat_nom) < np.finfo(float).tiny)[K].sum())
@@ -1141,15 +1170,25 @@ def main():
           "  lam_min_norm are divided by different numbers and cannot be read\n"
           "  against each other. sigma_max(K) is free of it. Sec. 10.1.8-L12.")
     print("\n  How to read it:\n"
-          "    C ~ B          -> the null-slot fill is what made the rebuild\n"
-          "                      invisible; it is not by itself the fix.\n"
-          "    C ~ D on sigma_max -> the null fill is not the lever either way.\n"
-          "    E << D on sigma_max -> rebuilding MF33 helps; how much is the\n"
-          "                      number, and 1.57x was not enough.\n"
-          "    all rows >> 1  -> the violation is in the FOLD, not in any block:\n"
-          "                      MF34 is folded relative (x a_l(E_j)) and Cx\n"
-          "                      absolute, so the two legs differ by a factor\n"
-          "                      that crosses zero. Sec. 10.1.8-L13.")
+          "    A            -> the run-86 baseline, cross term off.\n"
+          "    B, C, D, E   -> the SIDECAR route. They land on one number\n"
+          "                    because they share one defect: the cross is\n"
+          "                    divided by a_pt and the shape blocks by a_nom.\n"
+          "                    Two denominators for one parameter, so no single\n"
+          "                    M exists and Sigma_eval is not M J M^T. That is\n"
+          "                    Sec. 10.1.8-L13, and it is why runs 87-90 died on\n"
+          "                    potrf. The null fill (C vs D) is not the lever.\n"
+          "                    D == E because on the FINE axis c33_post IS\n"
+          "                    c33_ship -- see the c33 matrix gate above -- so\n"
+          "                    rebuilding MF33 changes nothing; on the group\n"
+          "                    axis it would.\n"
+          "    F            -> the a_0 blocks, ONE denominator. The published\n"
+          "                    joint is then a positive diagonal congruence of\n"
+          "                    the CANDIDATE row above, and the fold is another,\n"
+          "                    so sigma_max(K) must land on the CONTROL's\n"
+          "                    0.999993 and lam_min_norm at machine zero. If it\n"
+          "                    does not, something in the chain is not a\n"
+          "                    congruence and the file must not ship.")
 
     # ── THE MF33 THE CHI2 ACTUALLY FOLDS (roadmap §10.6-3 item 5) ─────────────
     # Every PSD row above -- and every one in §§J, K, L3, L12 -- takes `c33_ship`
