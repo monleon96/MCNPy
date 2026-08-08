@@ -478,6 +478,47 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
         "title":      "χ² analysis — run 86, NOTHING grouped (MF33 and MF34 both on the 1738 fine bins)",
         "systematic_block_col": None,
     },
+    # ── ITEM 5: the MF33↔MF34 cross term, shipped in MF34's a_0 blocks ──────
+    #
+    # ONE FILE, TWO ROWS, and that is what makes it single-variable. The a_0
+    # blocks are in the file for both; `build_mf34_block` skips `l_r < 1`, so
+    # with KIKA_MF33_MF34_CROSS_FROM_FILE unset they are simply not read. The
+    # marginals are therefore BYTE-IDENTICAL between the two rows — not "the
+    # same construction", the same bytes.
+    #
+    #   predictive_91_rewrite   MF34 rebuilt from the collapsed replicas, cross NOT read
+    #   predictive_91_cross     the same file, cross READ from the a_0 blocks
+    #
+    # ⚠ READ 91_rewrite AGAINST predictive_86_nonull, NOT against predictive_86.
+    # `--null-fill zero` and the null mask remove the SAME 1542 (group, order)
+    # slots — `build_group_cross`'s mask is `|a_nom_group| < tiny` and
+    # `write_consistent_mf34`'s `live` is its exact complement — so the rewrite
+    # has already had §L14.2's 2.14 % of the diagonal removed. Against run 86
+    # the comparison would move two things.
+    #
+    # ⚠ 91_rewrite IS NOT A NULL RESULT BY CONSTRUCTION. It carries two changes
+    # against 086_nonull: the MF34 correlations now come from the collapsed
+    # replicas rather than the shipped file, and the 39 shape groups outside
+    # 0.8468-4.075 MeV lose the host's merged MF34 (178 of 46819 points bin
+    # into them). Its job is to absorb both so that 91_cross - 91_rewrite is
+    # the cross term alone.
+    #
+    # §10.7-5 predicts the cross term at 1-3 pp. Measured before launch:
+    # sigma_max(K) 0.999993 and lam_min/scale -1.4e-16 in the space the chi2
+    # folds (§10.7-10, row F), against 1055 and -113 for the sidecar route that
+    # killed runs 87-90.
+    "predictive_91_rewrite": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_91_rewrite.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — MF34 rebuilt from the collapsed replicas, cross term NOT read",
+        "systematic_block_col": None,
+    },
+    "predictive_91_cross": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_91_cross.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — MF33↔MF34 cross term read from MF34's a_0 blocks",
+        "systematic_block_col": None,
+    },
     # Fold-mode sweep. Identical to `predictive` in every respect except which
     # part of the forward model is resolution-averaged (FOLD_MODE in
     # precompute_chi2_predictive.py). Compare V2 across these to decide, over
