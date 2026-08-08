@@ -384,3 +384,105 @@ def test_assemble_does_not_mutate_the_shipped_matrix():
     assemble_c34_rel(c34, a, ship, "ship")
     assemble_c34_rel(c34, a, ship, "zero")
     np.testing.assert_array_equal(ship, before)
+
+
+# ── the fine magnitude axis (roadmap §10.7-4 step 5, §10.7-10) ────────────────
+
+# A stand-in for the file's own MF33 grid: our magnitude range sits INSIDE it,
+# with host bins below and above, exactly as run 86 has 431 JEFF bins below our
+# 1738 and 148 above.
+MF33_FILE_EV = np.array([1.0e5, 4.0e5, 0.85e6, 1.8e6, 3.0e6, 4.0e6, 9.0e6, 2.0e7])
+
+
+@pytest.fixture(scope="module")
+def written_padded(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("group_cross_padded")
+    a_nom_group, a_flat, c34_post, cx_post = _inputs()
+    src = _source_endf(tmp)
+    out = tmp / "padded_mg.endf"
+    write_consistent_mf34(out, src, c34_post, cx_post, a_nom_group,
+                          SHAPE_EV, MAG_EV, _rel_ship(),
+                          mf33_file_grid=MF33_FILE_EV)
+    return {"out": out, "src": src, "a_flat": a_flat, "cx_post": cx_post}
+
+
+def test_the_cross_rows_are_embedded_in_the_files_own_mf33_grid(written_padded):
+    """⚑ The magnitude leg must be `_mf33_magnitude_map` on the MF33 grid,
+    unmodified — so the a_0 rows have to BE that grid, zero-padded, not our
+    narrower one. Padding adds parameters with no variance and no covariance;
+    the shipped MF33 has `max|cov[in, out]| = 0` exactly, so they are genuinely
+    separable rather than merely small.
+    """
+    from scripts.mf34_cross_reader import read_mf34_split
+
+    res = read_mf34_split(written_padded["out"], isotope=int(ZA), mt=MT,
+                          l_max=L_MAX, mf33_grid_ev=MF33_FILE_EV)
+    assert len(res.cross) == L_MAX
+    i0 = int(np.searchsorted(MF33_FILE_EV, MAG_EV[0]))
+    want = (written_padded["cx_post"] / written_padded["a_flat"][None, :]
+            ).reshape(N_GM, N_GS, L_MAX)
+    for b in res.cross:
+        m = b["matrix"]
+        assert m.shape == (MF33_FILE_EV.size - 1, N_GS)
+        np.testing.assert_allclose(m[i0:i0 + N_GM], want[:, :, b["l"] - 1],
+                                   rtol=2e-6, atol=0)
+        assert not m[:i0].any(), "host bins below our range must be zero"
+        assert not m[i0 + N_GM:].any(), "host bins above our range must be zero"
+
+
+def test_a_cross_grid_that_is_not_a_sub_sequence_of_the_files_grid_is_refused(tmp_path):
+    """Regridding here is the run-89 mistake: Cx folded against marginals it was
+    never built with."""
+    a_nom_group, _, c34_post, cx_post = _inputs()
+    src = _source_endf(tmp_path)
+    bogus = np.array([1.0e5, 1.0e6, 2.0e6, 4.0e6, 2.0e7])   # our edges absent
+    with pytest.raises(SystemExit, match="contiguous sub-sequence"):
+        write_consistent_mf34(tmp_path / "bad.endf", src, c34_post, cx_post,
+                              a_nom_group, SHAPE_EV, MAG_EV, _rel_ship(),
+                              mf33_file_grid=bogus)
+
+
+def test_without_the_file_grid_the_rows_stay_on_the_magnitude_grid(written):
+    """The group-axis path is untouched, so `--mag-grid group` still writes what
+    it always wrote."""
+    from scripts.mf34_cross_reader import read_mf34_split
+
+    res = read_mf34_split(written["out"], isotope=int(ZA), mt=MT, l_max=L_MAX,
+                          mf33_grid_ev=MAG_EV)
+    assert all(b["matrix"].shape == (N_GM, N_GS) for b in res.cross)
+
+
+def test_the_c33_matrix_gate_passes_on_the_fine_construction_and_fails_off_diagonal():
+    """⚑ The diagonal-only marginal check cannot see the failure this catches.
+
+    Reproduce the fine-axis construction in miniature: one replica set, a
+    correlation matrix, and the two-pass rescale as a positive diagonal
+    congruence. `c33_post` then equals the shipped matrix EXACTLY, which is what
+    makes the fold a congruence — measured on run 86 at 4.58e-16.
+
+    Then perturb an OFF-DIAGONAL element only. The marginals are untouched, so
+    `marginal-identity` still passes; the gate must not.
+    """
+    from scripts.build_group_cross import c33_matrix_gate
+
+    rng = np.random.default_rng(11)
+    m = 12
+    z = rng.normal(size=(500, m))
+    cov_mc = np.cov(z, rowvar=False)
+    d_mc = np.sqrt(np.diag(cov_mc))
+    d_ship = rng.uniform(0.02, 0.2, m)          # Pass-2 sigmas, unrelated to MC
+    c33_ship = (cov_mc / np.outer(d_mc, d_mc)) * np.outer(d_ship, d_ship)
+
+    j33 = d_ship / d_mc
+    c33_post = cov_mc * np.outer(j33, j33)
+    assert c33_matrix_gate(c33_post, c33_ship, fatal=True) < 1e-12
+
+    bad = c33_post.copy()
+    bump = 0.05 * np.abs(c33_ship).max()
+    bad[0, 3] += bump
+    bad[3, 0] += bump
+    np.testing.assert_allclose(np.diag(bad), np.diag(c33_post))  # marginals intact
+    with pytest.raises(SystemExit, match="same matrix"):
+        c33_matrix_gate(bad, c33_ship, fatal=True)
+    # ... and on the group axis the same disagreement is reported, not fatal.
+    assert c33_matrix_gate(bad, c33_ship, fatal=False) > 1e-3

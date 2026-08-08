@@ -134,6 +134,81 @@ def mf34_group_edges_ev(mg: Path, cache: Path) -> dict:
     return dict(np.load(raw))
 
 
+C33_GATE_RTOL = 1e-10
+
+
+def c33_matrix_gate(c33_post, c33_ship, *, fatal: bool,
+                    rtol: float = C33_GATE_RTOL) -> float:
+    """Is the joint's magnitude block the SAME MATRIX the chi2 folds?
+
+    ⚑ THE GATE THE WHOLE PSD CHAIN RESTS ON, and the reason the older
+    marginal-identity check is not enough: that one pins the DIAGONAL, and a
+    diagonal match is not what a congruence needs. `Sigma_eval = M J M^T`
+    transfers J's PSD to the chi2 only if J's c33 block is the matrix
+    `build_mf33_block` folds -- not merely one with the same variances.
+
+    On the FINE axis it is, by algebra: `A_mag = I`, so
+    `c33_post = corr1 (*) sigma_tar sigma_tar^T`, and the shipped MF33 is
+    `corr1 (*) sigma_ship sigma_ship^T` because
+    `regularize_near_zero_relative_covariance` is a positive diagonal
+    congruence. Same correlation matrix, same outer-product form. Measured on
+    run 86 at 4.58e-16 (roadmap §10.7-10, 0.1).
+
+    On the GROUP axis it is not, and the returned number measures exactly why:
+    `corr(A C A^T) != A corr(C) A^T`. Hence `fatal` rather than two functions --
+    the group path keeps printing the number that disqualifies it.
+    """
+    num = float(np.abs(np.asarray(c33_post) - np.asarray(c33_ship)).max())
+    den = float(np.abs(np.asarray(c33_ship)).max())
+    rel = num / den if den > 0 else float("inf")
+    print(f"  c33 matrix gate: max|c33_post - c33_ship| = {num:.6e}   "
+          f"relative = {rel:.6e}"
+          + ("" if fatal else "   [group axis: informational]"))
+    if fatal and rel > rtol:
+        raise SystemExit(
+            f"c33_post and the shipped MF33 differ by {rel:.3e} relative, "
+            f"above the {rtol:.0e} gate. On the fine axis they must be the "
+            f"same matrix; run 86 measures 4.6e-16. Something broke the "
+            f"two-pass identity -- check for NaN Pass-1 c0 (the "
+            f"pairwise-complete np.ma.corrcoef in `combine_c0_covariance` then "
+            f"disagrees with this script's drop-incomplete rule) or for fine "
+            f"bins with sigma_mc = 0 (they get j33 = 0 while the file declares "
+            f"sigma > 0). Nothing downstream is a congruence until this "
+            f"passes, so nothing has been written."
+        )
+    return rel
+
+
+def mf33_file_grid_ev(mg: Path, cache: Path) -> np.ndarray:
+    """The MF33 energy grid as the chi2 reads it back, cached.
+
+    ⚑ Read through `load_library_lib_c0`, the chi2's own entry point, and NOT
+    reconstructed from the run's `.npy` sidecars. The a_0 blocks' row grid has
+    to equal this array element-wise or `read_mf34_split` refuses to fold them,
+    and the two are not interchangeable: the ENDF parser evaluates
+    `mantissa * 10**exp`, so `2.000500+6` comes back as 2000500.0000000002
+    while the in-memory grid holds 2000499.9999999998 -- one ULP, on 613 of
+    1739 edges (roadmap §10.7-10, 0.7).
+
+    Writing the file's own floats back out IS idempotent, because they
+    re-format to the same 11 characters. Reconstructing them is not. Hence this
+    function rather than `np.load(... mf33_energy_grid_ev.npy)`.
+    """
+    raw = cache / f"mf33_file_grid__{mg.name}__{mg.stat().st_size}.npy"
+    if not raw.exists():
+        from scripts.precompute_chi2_library_c0 import load_library_lib_c0
+        lib = load_library_lib_c0(str(mg), "source (for the MF33 grid)")
+        g = lib.get("mf33_grid_ev")
+        if g is None:
+            raise SystemExit(
+                f"{mg} has no readable MF33/MT=2, so the a_0 blocks have no "
+                f"magnitude axis to be written on."
+            )
+        cache.mkdir(parents=True, exist_ok=True)
+        np.save(raw, np.asarray(g, float))
+    return np.load(raw)
+
+
 def base_shape_grid(blocks: dict) -> np.ndarray:
     """The finest MF34 grid; every other block's grid must be a subset of it."""
     keys = [k[2:] for k in blocks if k.startswith("m_")]
@@ -456,7 +531,8 @@ def _compact_null_self_block(sub, mag_grid_ev) -> Tuple[int, int]:
 def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
                           a_nom_group, shape_ev, mag_ev, c34_rel_ship,
                           null_fill="zero",
-                          cross_emin_ev=None, cross_emax_ev=None):
+                          cross_emin_ev=None, cross_emax_ev=None,
+                          mf33_file_grid=None):
     """Emit the _mg.endf whose MF34 *is* the joint that was just diagnosed.
 
     WHY THIS EXISTS. `cx_post` is Cauchy-Schwarz-compatible with `c34_post`, not
@@ -607,6 +683,43 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
     print(f"    cross rows: {tag} — groups {g0}:{g1} ({g1 - g0} of {n_gm}), "
           f"{cross_grid[0] / 1e6:.4g}-{cross_grid[-1] / 1e6:.4g} MeV")
 
+    # ⚑ EMBED THE CROSS ROWS IN THE FILE'S OWN MF33 GRID.
+    #
+    # The chi2 builds the magnitude leg with `_mf33_magnitude_map` on the grid
+    # MF33 comes back on -- 2317 bins for run 86, of which ours are 1738 -- and
+    # a cross block on any other axis is refused by `read_mf34_split`, because
+    # regridding it here is exactly the "Cx against marginals it was not built
+    # with" mistake run 89 shipped.
+    #
+    # Padding is SAFE where windowing is not: the added rows are parameters
+    # with no variance and no covariance, i.e. a zero-bordered embedding, and
+    # `max|cov[in, out]| = 0.000000e+00` exactly on the shipped MF33 (§10.7-10,
+    # 0.2) so they are genuinely separable rather than merely small.
+    #
+    # The grid written out is the FILE's array, not ours: same floats in, same
+    # 11 characters out, same floats back. See `mf33_file_grid_ev`.
+    if mf33_file_grid is not None:
+        g_file = np.asarray(mf33_file_grid, float)
+        i0 = int(np.searchsorted(g_file, cross_grid[0]))
+        seg = g_file[i0:i0 + cross_grid.size]
+        if seg.shape != cross_grid.shape or not np.allclose(
+                seg, cross_grid, rtol=1e-9, atol=0.0):
+            raise SystemExit(
+                f"the cross magnitude grid ({cross_grid.size} edges, "
+                f"{cross_grid[0]:.7g}-{cross_grid[-1]:.7g} eV) is not a "
+                f"contiguous sub-sequence of the file's MF33 grid "
+                f"({g_file.size} edges). It has to be, or the a_0 blocks and "
+                f"the MF33 self block describe different parameters and the "
+                f"fold is not a congruence."
+            )
+        padded = np.zeros((g_file.size - 1, n_gs, L_MAX), dtype=float)
+        padded[i0:i0 + cx_win.shape[0]] = cx_win
+        print(f"    cross rows embedded in the file's MF33 grid: "
+              f"{cx_win.shape[0]} live rows at [{i0}, {i0 + cx_win.shape[0]}) "
+              f"of {g_file.size - 1}; the rest written zero")
+        cx_win = padded
+        cross_grid = g_file
+
     cross_cov = {l1: cx_win[:, :, l1 - 1] for l1 in range(1, L_MAX + 1)}
 
     za, awr, mat = _za_awr_mat_from_endf(source_endf)
@@ -684,6 +797,21 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", required=True)
     ap.add_argument("--cache", default=None)
+    ap.add_argument(
+        "--mag-grid", choices=["group", "fine"], default="group",
+        help="Which energy axis the MAGNITUDE family lives on. 'group' (default, "
+             "unchanged): the run's 188-bin adaptive MF33 grid. 'fine': the 1738-bin "
+             "analysis mesh, which is what the shipped file actually carries. "
+             "⚑ 'fine' is the only one that makes the fold a congruence. With "
+             "A_mag = I the joint's c33 block IS the shipped MF33 -- both are "
+             "corr1 (*) sigma sigma^T and the two-pass rescale is a positive "
+             "diagonal congruence, measured at 4.58e-16 (roadmap §10.7-10, 0.1). "
+             "At 188 groups corr(A C A^T) != A corr(C) A^T and the certified "
+             "joint is not the matrix the chi2 folds. Collapsing only the "
+             "Legendre family, A = I (+) A_34, is still a congruence, so PSD "
+             "survives and it lands on §10.7-9's vindicated representation: "
+             "MF33 fine, MF34 grouped.",
+    )
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--write", action="store_true")
@@ -743,10 +871,40 @@ def main():
     cache = Path(args.cache) if args.cache else run_dir / ".group_cross_cache"
 
     fine_ev = np.load(run_dir / "mf33_energy_grid_ev.npy").astype(float)
-    mag_ev = np.load(run_dir / "mf33_multigroup_grid_ev.npy").astype(float)
-    c33_ship = np.load(run_dir / "mf33_multigroup_relative_covariance.npy")
     n_fine = len(fine_ev) - 1
     widths = np.diff(fine_ev) / 1e6
+
+    # THE MAGNITUDE AXIS. In 'fine' mode this is the identity collapse: the
+    # rest of the script is grid-agnostic, so `fine_to_group(fine_ev, fine_ev)`
+    # sends bin i to group i and `row_aggregator` returns I. Nothing else below
+    # needs to know which mode it is in -- which is the point, because two code
+    # paths for "collapse the magnitude family" is how §L3 happened.
+    _fine_mag = args.mag_grid == "fine"
+    if _fine_mag:
+        mag_ev = fine_ev
+        c33_ship = np.load(run_dir / "mf33_relative_covariance.npy")
+        if args.null_fill != "zero":
+            raise SystemExit(
+                "--mag-grid fine requires --null-fill zero. 'ship' keeps the "
+                "file's declared relative variance at the ~1542 slots where "
+                "a_l is exactly zero, which injects the old construction into "
+                "the softest directions of the new one and reproduced run 89 "
+                "almost exactly (§L11). There is nothing to preserve there: a "
+                "parameter with no variance has no covariance either."
+            )
+        if args.cross_emin_ev is not None or args.cross_emax_ev is not None:
+            raise SystemExit(
+                "--cross-emin-ev/--cross-emax-ev are refused with --mag-grid "
+                "fine. Zero-PADDING the magnitude axis out to the file's MF33 "
+                "grid is safe -- it adds separable parameters with no variance "
+                "and no covariance. WINDOWING inside our own block is not: it "
+                "zeroes rows of a PSD matrix's off-diagonal while leaving the "
+                "marginals, which is not PSD-preserving and is precisely what "
+                "`check_endf_roundtrip_psd.py`'s header warns about."
+            )
+    else:
+        mag_ev = np.load(run_dir / "mf33_multigroup_grid_ev.npy").astype(float)
+        c33_ship = np.load(run_dir / "mf33_multigroup_relative_covariance.npy")
 
     # ONE resolved source, used for BOTH the shipped grids/c34_ship and the
     # --write-endf template. They must be the same file or the diagnosis is not
@@ -885,6 +1043,27 @@ def main():
     e34 = np.max(np.abs(np.sqrt(np.maximum(np.diag(c34_post), 0)) - d_tar[n_gm:]))
     print(f"\n  marginal-identity gate: max abs sigma error  "
           f"MF33 {e33:.3e}   MF34 {e34:.3e}")
+
+    # ⚑⚑ THE MATRIX GATE, and it is the one the whole PSD chain rests on.
+    #
+    # The gate above pins the DIAGONAL only, and a diagonal match is not what
+    # the congruence needs. `Sigma_eval = M J M^T` transfers J's PSD to the chi2
+    # only if the c33 block of J is the SAME MATRIX `build_mf33_block` folds --
+    # not merely a matrix with the same variances.
+    #
+    # On the fine axis it is, by algebra rather than luck: A_mag = I, so
+    # c33_post = corr1 (*) sigma_tar sigma_tar^T, and the shipped MF33 is
+    # corr1 (*) sigma_ship sigma_ship^T because
+    # `regularize_near_zero_relative_covariance` is a positive diagonal
+    # congruence. Same correlation matrix, same outer-product form. Measured on
+    # run 86 at 4.58e-16 (§10.7-10, 0.1), with zero NaN c0 cells and zero
+    # zero-sigma bins -- the four ways it could fail are all empty there, and
+    # this gate is what notices if they stop being empty.
+    #
+    # On the group axis it is NOT, and the number printed here is the direct
+    # measurement of why: corr(A C A^T) != A corr(C) A^T. Informational there,
+    # fatal here.
+    c33_matrix_gate(c33_post, c33_ship, fatal=_fine_mag)
 
     rows = [
         diagnose("CONTROL: all blocks from the collapsed replicas", c33_mc, c34_mc, cx_mc),
@@ -1087,6 +1266,32 @@ def main():
           "mf33_mf34_cross_group_shape_grid_ev.npy")
 
     if args.write_endf:
+        # ⚑ SAY OUT LOUD WHAT THE REWRITE DELETES, because a chi2 read against
+        # run 86 will otherwise attribute all of it to the cross term.
+        #
+        # (a) `--null-fill zero` and the NULL MASK are the SAME 1542 slots:
+        #     this script's mask is `|a_nom_group| < tiny` and
+        #     `write_consistent_mf34`'s `live` is its exact complement. So the
+        #     rewritten file has already had §L14.2's 2.14 % of the Sigma_eval
+        #     diagonal removed, whether or not KIKA_MF34_NULL_MASK is set.
+        #     ⇒ the baseline for the chi2 is `086_nonull`, not run 86.
+        #
+        # (b) It also deletes JEFF's merged out-of-range MF34. The shape grid
+        #     spans the host's full range while the fine grid covers only
+        #     0.8468-4.075 MeV, so groups with no fine bin get a_nom = 0 and are
+        #     written zero -- but they are not empty to the consumer.
+        _cen = 0.5 * (shape_ev[:-1] + shape_ev[1:])
+        _outside = (_cen < fine_ev[0]) | (_cen > fine_ev[-1])
+        _dead = np.abs(a_nom_group) < np.finfo(float).tiny
+        print(f"\n  ⚑ what this rewrite REMOVES relative to {source_endf.name}:")
+        print(f"    dead (group, order) slots written zero: "
+              f"{int(_dead.sum())} of {_dead.size} "
+              f"({100.0 * _dead.sum() / _dead.size:.1f} %) — the SAME set the "
+              f"null mask removes, so score against 086_nonull, not run 086")
+        print(f"    shape groups outside the fine range: "
+              f"{int(_outside.sum())} of {_outside.size} — these carried the "
+              f"host's merged MF34 and now carry nothing")
+
         write_consistent_mf34(
             out_path=Path(args.write_endf),
             source_endf=source_endf,
@@ -1094,6 +1299,8 @@ def main():
             shape_ev=shape_ev, mag_ev=mag_ev, c34_rel_ship=c34_rel_ship,
             null_fill=args.null_fill,
             cross_emin_ev=args.cross_emin_ev, cross_emax_ev=args.cross_emax_ev,
+            mf33_file_grid=(mf33_file_grid_ev(source_endf, cache)
+                            if _fine_mag else None),
         )
     return 0
 
