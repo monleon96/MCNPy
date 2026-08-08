@@ -1,6 +1,22 @@
 #!/usr/bin/env python
 """Build the joint (sigma, a_1..a_L) on the FINE grid, from one set of replicas.
 
+⚠⚠ THIS IS A DIAGNOSTIC. THE PRODUCER IS `build_group_cross.py --mag-grid fine`.
+Two scripts that both build the joint is how §L3 happened -- a matrix was
+certified that was not the matrix being shipped -- so nothing downstream may
+read this one's output, and it deliberately writes no files.
+
+⚠⚠ AND EVERY CROSS-BLOCK NUMBER IT PRINTED BEFORE 2026-08-08 WAS TAKEN ON NOISE.
+`_a_replicas` joined the TMC parquet on its raw `sample_idx`, which is the MC
+draw PLUS ONE (row 0 is the nominal fit), so c0 replica k was paired with a_l
+draw k-1 and row 0 was all zeros. Measured: within-bin corr(c0, a_l) 0.0060
+median, below the 0.0100 noise floor, against 0.386 once the shift is applied
+(roadmap §10.7-10, 0.5). **§10.7-8's `lam_min = -2.48e-16` therefore certified a
+joint whose cross block carried no signal** -- true, because a sample covariance
+of any stacked rows is PSD, but not evidence about the cross term. The
+construction argument survives; that specific matrix does not. Fixed below; the
+marginals were never affected.
+
 ROADMAP §10.7-8. The point Juan made and the measurement that follows from it:
 **on the fine grid MF33 and MF34 are already the same mesh** -- 1738 analysis
 bins, [846822, 4.075e+06] eV -- and so is the cross term. The 188/660/703
@@ -99,6 +115,27 @@ def _a_replicas(path: Path, uniq_e: np.ndarray, t0: float) -> np.ndarray:
     a = np.column_stack([tbl.column(f"a_{l}").to_numpy()[keep]
                          for l in range(1, L_MAX + 1)])
     del tbl
+    # ⚑ THE -1 IS LOAD-BEARING, AND ITS ABSENCE WAS A REAL BUG (roadmap
+    # §10.7-10, 0.5). `save_all_legendre_coefficients` writes MC draw s as
+    # `sample_idx = s + 1`, keeping row 0 for the nominal fit, while
+    # `mf33_c0_samples.parquet` writes 0..N-1. Joining on the raw column
+    # therefore paired c0 replica k with a_l draw k-1 and left row 0 all zero.
+    #
+    # Measured rather than argued: within-bin corr(c0, a_l) was 0.0060 median
+    # without the shift -- BELOW the 1/sqrt(10000) = 0.0100 noise floor -- and
+    # 0.386 with it, inside the 0.18-0.59 band §10.1 measured independently.
+    # So this is what produced the "max|diff|/scale = 1.009, a total mismatch"
+    # against `mf33_mf34_cross_covariance_full.npy`, and the Pass-1/Pass-2
+    # family explanation is retracted.
+    #
+    # ⚠ EVERY CROSS-BLOCK NUMBER THIS SCRIPT PRINTED BEFORE 2026-08-08 WAS
+    # TAKEN ON NOISE, §10.7-8's included. The joint was PSD because a sample
+    # covariance always is, not because its cross term was right.
+    #
+    # `build_group_cross._read_a_chunk` has always done this correctly; that is
+    # the producer. This script is a DIAGNOSTIC and must not become a second
+    # one -- see the module docstring.
+    s = s - 1
     n_s = int(s.max()) + 1
     col = np.searchsorted(uniq_e, e)
     z = np.zeros((n_s, uniq_e.size, L_MAX))
