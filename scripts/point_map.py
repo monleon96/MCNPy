@@ -165,6 +165,31 @@ class PointMap:
             if not (self.covered.all() and other.covered.all()):
                 out = out * np.outer(self.covered, other.covered)
             return out
+
+        # ⚑ MIXED PAIR — one one-hot leg, one averaging leg. This is the
+        # MF33<->MF34 cross term: overlap `W` on the magnitude side, nearest-bin
+        # on the shape side. Doing it as the full triple product costs a
+        # (N', M') temporary AND an (N, M') @ (M', N') matmul, which for
+        # Cierjacks against the shipped grids is 28631 x 703 x 28631 = 5.8e11
+        # flops and OOM-killed a 12-core box outright.
+        #
+        # A one-hot factor is a column gather, so the second matmul is pure
+        # waste: (A @ B.T)[j, l] = sum_c A[j, c] * B[l, c] = A[j, idx[l]] when
+        # row l is covered, and every dropped term is EXACTLY 0.0 * A, which
+        # adds nothing at any precision. So this is bit-identical to the dense
+        # product, not an approximation of it -- the same argument the one-hot
+        # pair above rests on, and `test_point_map.py` asserts it as an
+        # identity rather than a tolerance.
+        if other.is_one_hot:
+            out = (self.dense() @ m)[:, other._idx]
+            if not other.covered.all():
+                out = out * other.covered[None, :]
+            return out
+        if self.is_one_hot:
+            out = m[self._idx, :] @ other.dense().T
+            if not self.covered.all():
+                out = out * self.covered[:, None]
+            return out
         return self.dense() @ m @ other.dense().T
 
     def sandwich_diag(self, mat: np.ndarray) -> np.ndarray:

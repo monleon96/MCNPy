@@ -53,17 +53,51 @@ def test_the_fast_path_is_exact_with_points_off_the_grid(rng):
         pm.sandwich(mat), pm.dense() @ mat @ pm.dense().T, rtol=0, atol=1e-13)
 
 
-def test_mixed_rules_fall_back_and_stay_consistent(rng):
-    """A cross block pairs an overlap map with a nearest map — the case the
-    whole refactor exists for, so it must go through the dense path correctly."""
+@pytest.mark.parametrize("pad", [0.3e6, 2.5e6])
+def test_the_mixed_gather_is_exactly_the_dense_product(rng, pad):
+    """⚑ A cross block pairs an overlap map with a nearest map, and the one-hot
+    leg is a column gather — so the second matmul must be skipped, EXACTLY.
+
+    Not a speed test dressed as a correctness test. The triple product costs an
+    (N, M') temporary plus an (N, M') @ (M', N') matmul; at the shipped geometry
+    that is 28631 x 703 x 28631 = 5.8e11 flops with three 6.6 GB temporaries,
+    and it OOM-killed a 12-core box. Skipping it is only legitimate if the
+    answer does not move by one bit, which is why `atol=0`: every term the
+    gather drops is exactly ``0.0 * A``.
+
+    `pad = 2.5e6` widens the window past both ends of the grid so rows are
+    partly and wholly uncovered — the masking branch, which is where an
+    off-by-one would hide.
+    """
     e = rng.uniform(GRID[0], GRID[-1], 30)
-    lo, hi = e - 0.3e6, e + 0.3e6
-    pm_mag = PointMap.overlap(GRID, lo, hi)
+    pm_mag = PointMap.overlap(GRID, e - pad, e + pad)
     pm_shape = PointMap.nearest(GRID, e)
     mat = rng.normal(size=(pm_mag.n_bins, pm_shape.n_bins))
-    np.testing.assert_allclose(
+
+    np.testing.assert_array_equal(
         pm_mag.sandwich(mat, pm_shape),
-        pm_mag.dense() @ mat @ pm_shape.dense().T, rtol=0, atol=1e-13)
+        pm_mag.dense() @ mat @ pm_shape.dense().T)
+    # ... and the other orientation, which the transpose leg of the cross term
+    # exercises.
+    np.testing.assert_array_equal(
+        pm_shape.sandwich(mat.T, pm_mag),
+        pm_shape.dense() @ mat.T @ pm_mag.dense().T)
+
+
+def test_the_mixed_gather_masks_points_off_the_one_hot_grid(rng):
+    """Off-grid on the ONE-HOT leg must still be an all-zero column.
+
+    `PointMap.nearest` clips its index, so without the mask a point below the
+    grid would silently borrow the first bin — §10.7-6's JEFF (2,6) defect,
+    which fabricated Cov(a_2, a_6) for every point under 1 MeV.
+    """
+    e = np.array([0.5e6, 2.5e6, 9.0e6])          # outside, inside, outside
+    pm_mag = PointMap.overlap(GRID, e - 0.2e6, e + 0.2e6)
+    pm_shape = PointMap.nearest(GRID, e)
+    mat = rng.normal(size=(pm_mag.n_bins, pm_shape.n_bins))
+    out = pm_mag.sandwich(mat, pm_shape)
+    assert not out[:, 0].any() and not out[:, 2].any()
+    assert out[1, 1] != 0.0
 
 
 def test_sandwich_diag_matches_the_full_sandwich(rng):
