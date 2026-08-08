@@ -293,7 +293,8 @@ def test_both_folds_are_congruences_and_agree(psd_setup, rng):
         + build_mf33_mf34_cross_block(cross_blocks, s.e_mev, s.mu,
                                       s.c0, s.a_l, s.y,
                                       mf33_grid_ev=s.grid_sigma,
-                                      energies_mf4_mev=s.energies_mf4_mev)
+                                      energies_mf4_mev=s.energies_mf4_mev,
+                                      a_is_relative=True)
     )
 
     scale_new = max(np.abs(np.diag(sigma_new)).max(), 1e-300)

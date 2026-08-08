@@ -293,6 +293,7 @@ def build_mf33_mf34_cross_block(
     *,
     mf33_grid_ev: Optional[np.ndarray] = None,
     energies_mf4_mev: Optional[np.ndarray] = None,
+    a_is_relative: Optional[bool] = None,
 ) -> np.ndarray:
     """Dense N×N MF33↔MF34 cross contribution (magnitude ↔ shape).
 
@@ -323,6 +324,11 @@ def build_mf33_mf34_cross_block(
         :func:`build_mf33_block` is given.  Required whenever ``cross`` is
         non-empty; the magnitude leg is built from them through
         :func:`_mf33_magnitude_map`, the same call the self block makes.
+    a_is_relative
+        The **MF34 family's** convention, i.e. ``mf34.is_relative``.  Required
+        whenever ``cross`` is non-empty.  The shape leg is scaled by it — not by
+        the cross block's own flag — and a block that disagrees is refused.
+        See §L13 below.
 
     Notes
     -----
@@ -344,6 +350,26 @@ def build_mf33_mf34_cross_block(
     is now rejected loudly instead of folded wrongly — which is the honest
     reading of §10.1: ``Cx`` is Cauchy–Schwarz-compatible only with the
     marginals it was built from.
+
+    ⚑⚑ **§L13, THE UNITS, and why the fix is a guard rather than a conversion.**
+    The second of the two independent fold defects (§10.7-2(b)).  A *relative*
+    MF34 declares ``Cov(a_L/a_L_nom, ...)``, and ENDF's reading of that is a
+    multiplicative perturbation of the pointwise MF4 — so the parameter is
+    ``delta_L(g) = a_L(g)/a_L_nom(g) - 1`` and the sensitivity carries
+    ``a_L(E_j)``, which is what :func:`build_mf34_block` applies.  This function
+    used to apply the same factor **keyed on the cross block's own
+    ``is_relative``**, which the stored sidecar sets to ``False``.  Two
+    conventions for one parameter, so ``Sigma_eval`` was not ``M J M^T`` and the
+    joint's PSD certificate meant nothing.
+
+    It is now keyed on ``a_is_relative`` — the MF34 family's flag — and a cross
+    block declaring the other convention is **refused**.  Refused rather than
+    converted on purpose: converting an absolute cross into the relative frame
+    means dividing by ``a_L_nom``, which passes through zero, so the correct
+    repair is upstream — build the cross from the SAME replicas as the
+    marginals, in their coordinates (§10.7-8 does exactly that and gets a PSD
+    joint).  A fold cannot rescue blocks that were never draws from one
+    distribution.
 
     Sensitivities: dy/dsigma = ``y_eval`` (magnitude side), dy/da_L1 =
     ``c0*(2L1+1)*P_L1`` (shape side; scaled by the nominal a_L1 for relative
@@ -373,6 +399,13 @@ def build_mf33_mf34_cross_block(
             "through the SAME map as `build_mf33_block`, or Sigma_eval is not "
             "a congruence and PSD does not transfer (roadmap §10.7-2(a))."
         )
+    if a_is_relative is None:
+        raise ValueError(
+            "a non-empty cross term needs `a_is_relative`, the MF34 family's "
+            "convention. Keying the shape leg on the cross block's own flag is "
+            "§L13: two units for one parameter (roadmap §10.7-2(b))."
+        )
+    a_is_relative = bool(a_is_relative)
 
     base_sens = _legendre_base_sens(mu, c0, L_max)  # (L_max, N)
     y = np.asarray(y_eval, dtype=float).ravel()
@@ -398,6 +431,21 @@ def build_mf33_mf34_cross_block(
                 f"built from (§10.1); rebuild it on the MF33 grid rather than "
                 f"regridding it here."
             )
+        # §L13. The shape leg belongs to the MF34 family, so it is scaled by
+        # THAT family's convention. A block declaring the other one is not a
+        # unit to be converted — it is evidence the cross was not drawn from the
+        # same distribution as the marginals, and folding it anyway is what
+        # produced a certified-PSD joint with an indefinite Sigma_eval.
+        blk_rel = bool(blk.get("is_relative", True))
+        if blk_rel != a_is_relative:
+            raise ValueError(
+                f"cross block l={L} declares is_relative={blk_rel} but the "
+                f"MF34 family is is_relative={a_is_relative}. One parameter "
+                f"cannot carry two units (§L13). Rebuild the cross in the "
+                f"marginals' coordinates -- from the same replicas -- rather "
+                f"than rescaling it here, which would divide by an a_L_nom "
+                f"that passes through zero."
+            )
         # THE shape map — identical to `build_mf34_block`'s, off-grid masking
         # included, so a block that does not span a point contributes zero
         # there on this axis too.
@@ -405,7 +453,7 @@ def build_mf33_mf34_cross_block(
         C = pm_mag.sandwich(mat, pm_shape)  # (N, N): Cov(sigma_j, a_L k)
 
         sens_L = base_sens[L - 1].copy()
-        if blk.get("is_relative", True):
+        if a_is_relative:
             sens_L *= a_l_per_pt[:, L - 1]
 
         sigma += y[:, None] * C * sens_L[None, :]
@@ -415,6 +463,28 @@ def build_mf33_mf34_cross_block(
 
 
 # ── Orchestrator ──────────────────────────────────────────────────────────────
+
+def _mf34_family_is_relative(mf34) -> Optional[bool]:
+    """The one convention the whole Legendre family is folded under (§L13).
+
+    ``None`` when there is no MF34 at all, which is fine — a cross term is
+    meaningless without one and the caller only needs the flag when it has one.
+
+    Raises when the file mixes conventions across blocks: guessing which one the
+    cross term belongs to is exactly the class of mistake §L13 is.
+    """
+    if mf34 is None:
+        return None
+    flags = {bool(f) for f in mf34.is_relative} if len(mf34.is_relative) else set()
+    if not flags:
+        return None
+    if len(flags) != 1:
+        raise ValueError(
+            f"MF34 mixes relative and absolute blocks {flags}; the Legendre "
+            f"family is folded under ONE convention and there is no safe guess "
+            f"(roadmap §L13)."
+        )
+    return flags.pop()
 
 def build_eval_cov_for_groups(
     df,
@@ -502,10 +572,13 @@ def build_eval_cov_for_groups(
         # The MF33 grid and the MF4 grid go in because the cross term's
         # magnitude leg is built from them by the SAME call the self block
         # makes — that is the whole of §10.7-2(a).
+        # §L13: the shape leg is scaled by the MF34 family's convention, so it
+        # has to be read off the family rather than off the cross block.
         sigma_cross = build_mf33_mf34_cross_block(
             lib.get("mf33_mf34_cross"), e_mev, mu, c0, a_l_per_pt, y_eval,
             mf33_grid_ev=lib.get("mf33_grid_ev"),
             energies_mf4_mev=lib.get("energies_mf4_mev"),
+            a_is_relative=_mf34_family_is_relative(lib.get("mf34")),
         )
         eval_cov[key] = (sigma_mf34 + sigma_mf33 + sigma_cross).astype(np.float32)
     return eval_cov

@@ -268,6 +268,7 @@ def test_cross_block_single_point_analytic():
     sigma = build_mf33_mf34_cross_block(
         cross, e_mev, mu, c0, a_l, y,
         mf33_grid_ev=mf33_grid_ev, energies_mf4_mev=mf4_mev,
+        a_is_relative=True,
     )
     sens_L = c0[0] * (2 * 1 + 1) * mu[0] * a_l[0, 0]  # P_1(mu)=mu; relative → *a_L
     expected = 2.0 * y[0] * c_val * sens_L
@@ -293,7 +294,7 @@ def test_cross_block_symmetric_and_order_filtered():
     ]
     sigma = build_mf33_mf34_cross_block(
         cross, e_mev, mu, c0, a_l, y,
-        mf33_grid_ev=grid, energies_mf4_mev=mf4_mev,
+        mf33_grid_ev=grid, energies_mf4_mev=mf4_mev, a_is_relative=True,
     )
     assert np.allclose(sigma, sigma.T, atol=1e-15)
     assert np.any(np.abs(sigma) > 0)  # L=1 block contributes

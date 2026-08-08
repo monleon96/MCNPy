@@ -166,7 +166,8 @@ def test_loaded_blocks_are_accepted_by_the_builder_and_move_sigma(run_dir):
     zero = build_mf33_mf34_cross_block(None, e_mev, mu, c0, a_l, y)
     got = build_mf33_mf34_cross_block(blocks, e_mev, mu, c0, a_l, y,
                                       mf33_grid_ev=grid,
-                                      energies_mf4_mev=grid / 1e6)
+                                      energies_mf4_mev=grid / 1e6,
+                                      a_is_relative=False)
 
     assert zero.shape == got.shape == (n, n)
     assert np.all(zero == 0.0)
@@ -186,7 +187,8 @@ def test_scaling_the_block_scales_the_assembled_sigma(run_dir):
 
     b1, _ = load_mf33_mf34_cross(str(d), l_max=L_MAX, scale=1.0)
     b2, _ = load_mf33_mf34_cross(str(d), l_max=L_MAX, scale=0.25)
-    kw = dict(mf33_grid_ev=grid, energies_mf4_mev=grid / 1e6)
+    kw = dict(mf33_grid_ev=grid, energies_mf4_mev=grid / 1e6,
+              a_is_relative=False)
     s1 = build_mf33_mf34_cross_block(b1, e_mev, mu, c0, a_l, y, **kw)
     s2 = build_mf33_mf34_cross_block(b2, e_mev, mu, c0, a_l, y, **kw)
     np.testing.assert_allclose(s2, 0.25 * s1, rtol=1e-12, atol=1e-20)
@@ -245,7 +247,8 @@ def test_sigma_eval_is_linear_in_the_scale():
                  "matrix": np.diag(scale * cov[:, L - 1]), "is_relative": False}
                 for L in range(1, l_max + 1)]
 
-    kw = dict(mf33_grid_ev=grid, energies_mf4_mev=grid / 1e6)
+    kw = dict(mf33_grid_ev=grid, energies_mf4_mev=grid / 1e6,
+              a_is_relative=False)
     base = build_mf33_mf34_cross_block(blocks(1.0), e_mev, mu, c0, a_l, y, **kw)
     for s in (0.0, 0.25, 0.5, 2.0):
         got = build_mf33_mf34_cross_block(blocks(s), e_mev, mu, c0, a_l, y, **kw)
@@ -402,6 +405,7 @@ def test_a_group_block_against_the_fine_mf33_is_refused(group_run_dir):
             np.full(12, 0.2), np.tile(np.array([0.3, 0.1, 0.05]), (12, 1)),
             np.full(12, 0.2),
             mf33_grid_ev=fine_ev, energies_mf4_mev=fine_ev / 1e6,
+            a_is_relative=False,
         )
 
 
@@ -441,6 +445,7 @@ def test_group_block_reaches_sigma_eval_with_both_axes_binned(group_run_dir):
     sigma = build_mf33_mf34_cross_block(
         blocks, e_mev, mu, c0, a_l, y_eval=np.full(12, 0.2),
         mf33_grid_ev=mag_ev, energies_mf4_mev=mag_ev / 1e6,
+        a_is_relative=False,
     )
     assert sigma.shape == (12, 12)
     np.testing.assert_allclose(sigma, sigma.T, rtol=0, atol=1e-18)

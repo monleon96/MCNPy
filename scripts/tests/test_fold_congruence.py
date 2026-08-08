@@ -35,6 +35,7 @@ from kika.cov.legendre_covariance import LegendreCovariance
 
 from scripts.eval_covariance import (
     build_mf33_block,
+    _mf34_family_is_relative,
     build_mf33_mf34_cross_block,
     build_mf34_block,
 )
@@ -107,14 +108,67 @@ def world():
 
 
 def _lam_min_norm(w, a_l_per_pt):
+    """Sigma_eval with §L13's units mismatch deliberately switched ON.
+
+    ⚑ `a_is_relative=False` is what makes this the DEFECT and not the fix. The
+    MF34 family here is relative, so its self block carries `a_l(E_j)`; passing
+    False keys the cross term's shape leg on the block's own flag instead, which
+    is what `build_mf33_mf34_cross_block` used to do unconditionally
+    (§10.7-2(b)). Two units for one parameter.
+
+    The production orchestrator can no longer assemble this — it reads the flag
+    off the MF34 family and the mismatch raises. See
+    `test_the_production_fold_now_refuses_the_units_mismatch`. These tests keep
+    reaching past that guard on purpose, because the dose-response below is the
+    evidence that the guard is guarding something real.
+    """
     s34 = build_mf34_block(w["mf34"], w["e_mev"], w["mu"], w["c0"], a_l_per_pt)
     s33 = build_mf33_block(w["grp_ev"], w["c33"], w["mf4_mev"], w["e_mev"], w["y"])
     sx = build_mf33_mf34_cross_block(
         w["cross"], w["e_mev"], w["mu"], w["c0"], a_l_per_pt, w["y"],
-        mf33_grid_ev=w["grp_ev"], energies_mf4_mev=w["mf4_mev"])
+        mf33_grid_ev=w["grp_ev"], energies_mf4_mev=w["mf4_mev"],
+        a_is_relative=False)
     S = s34 + s33 + sx
     lam = float(np.linalg.eigvalsh(0.5 * (S + S.T))[0])
     return lam / float(np.max(np.abs(np.diag(S)))), S
+
+
+def test_the_production_fold_now_refuses_the_units_mismatch(world):
+    """⚑ §L13's HALF OF THE FIX. The fold no longer keys the shape leg on the
+    cross block's own flag, so an absolute cross against a relative MF34 is
+    refused instead of folded into an indefinite Sigma_eval.
+
+    Refused rather than converted: the repair is to build the cross in the
+    marginals' coordinates, because converting means dividing by an `a_l_nom`
+    that `test_a_l_crossing_zero_is_the_unbounded_case` shows passes through
+    zero.
+    """
+    a_pt = world["a_nom"][world["g_pt"]]
+    with pytest.raises(ValueError, match="two units"):
+        build_mf33_mf34_cross_block(
+            world["cross"], world["e_mev"], world["mu"], world["c0"], a_pt,
+            world["y"], mf33_grid_ev=world["grp_ev"],
+            energies_mf4_mev=world["mf4_mev"],
+            a_is_relative=True,          # what the MF34 family actually declares
+        )
+
+
+def test_the_orchestrator_reads_the_convention_off_the_family(world):
+    """The guard is only worth having if the orchestrator cannot bypass it, so
+    pin where the flag comes from."""
+    assert _mf34_family_is_relative(world["mf34"]) is True
+    assert _mf34_family_is_relative(None) is None
+
+    # A file mixing conventions across blocks has no family answer, and
+    # guessing which one the cross term belongs to is the §L13 mistake itself.
+    mixed = LegendreCovariance()
+    for lr, rel in ((1, True), (2, False)):
+        mixed.add_matrix(isotope_row=26056, reaction_row=2, l_row=lr,
+                         isotope_col=26056, reaction_col=2, l_col=lr,
+                         matrix=np.eye(G), energy_grid=list(world["grp_ev"]),
+                         is_relative=rel, frame="LAB")
+    with pytest.raises(ValueError, match="mixes relative and absolute"):
+        _mf34_family_is_relative(mixed)
 
 
 def test_congruence_holds_when_both_legs_share_the_factor(world):

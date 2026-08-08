@@ -159,7 +159,8 @@ def _fold(w, mf33_grid, mf33_cov):
          + build_mf33_mf34_cross_block(w["cross"], w["e_mev"], w["mu"],
                                        w["c0"], w["a_pt"], w["y"],
                                        mf33_grid_ev=mf33_grid,
-                                       energies_mf4_mev=w["mf4_mev"]))
+                                       energies_mf4_mev=w["mf4_mev"],
+                                       a_is_relative=True))
     return 0.5 * (S + S.T)
 
 
