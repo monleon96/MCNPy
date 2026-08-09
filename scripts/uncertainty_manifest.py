@@ -510,8 +510,19 @@ def resolve_for_dataset(
             label_promoted_total = True
 
     # Split sys into energy-independent (scalar) and energy-dependent (piecewise_E)
-    # parts. Pipeline can then draw two factors: one per-experiment for indep,
-    # one per-(experiment, energy) for dep.
+    # parts.
+    #
+    # ⚠ This comment used to read "Pipeline can then draw two factors: one
+    # per-experiment for indep, one per-(experiment, energy) for dep." **No code
+    # does that.** Both consumers — ``resample_AD._weighted_ridge_fit_gls`` and
+    # ``chi2_metrics._per_group_sigma`` — fold BOTH slots as rank-1 modes
+    # correlated across the whole experiment, with amplitude ∝ y:
+    #     Σ_ij = [σ²_indep + σ_dep,i·σ_dep,j] · y_i y_j   (i, j in the same experiment)
+    # So when σ_dep is near-constant the two are near-collinear and their sum of
+    # outer products reconstructs the declared correlated block. The split is a
+    # *labelling* of one correlated budget, not two different covariance roles.
+    # Corrected 2026-08-09 after the stale wording caused a defect to be
+    # diagnosed that the numbers then showed was worth ≤0.07 % of χ².
     indep_rel, dep_rel = _split_sys_spec(sys_spec, values_b_sr, energies_mev, defaults)
     sigma_sys_indep_b_sr = np.abs(values_b_sr) * indep_rel
     sigma_sys_dep_b_sr = np.abs(values_b_sr) * dep_rel
