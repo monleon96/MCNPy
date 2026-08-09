@@ -922,6 +922,13 @@ def _mc_one_bin(args):
     )
 
     results = {}
+    # Positivity-projection counter. Pure bookkeeping: it is incremented only
+    # where `check_angular_distribution_positivity` is ALREADY being called and
+    # has ALREADY returned False, so it adds no computation, no RNG draw and no
+    # branch. The sampled coefficients are bit-identical with and without it.
+    # Returned to the parent because `_mc_one_bin` runs in a `Pool` — a module
+    # global would be counted in the child and lost. Roadmap §6.5.
+    n_positivity_projected = 0
     try:
         if use_degree_sampling:
             degrees = list(nr_degree_weights.keys())
@@ -984,6 +991,7 @@ def _mc_one_bin(args):
                                 sample_coeffs[l] = nr_nominal_coeffs[l]
                     if _apply_positivity_projection:
                         if not check_angular_distribution_positivity(sample_coeffs, _positivity_check_points):
+                            n_positivity_projected += 1
                             frozen = {}
                             if freeze_c0:
                                 frozen[0] = sample_coeffs[0]
@@ -1033,6 +1041,7 @@ def _mc_one_bin(args):
                 sample_coeffs = coef_df.iloc[s_idx].to_numpy()
                 if _apply_positivity_projection:
                     if not check_angular_distribution_positivity(sample_coeffs, _positivity_check_points):
+                        n_positivity_projected += 1
                         frozen = {}
                         if freeze_c0:
                             frozen[0] = sample_coeffs[0]
@@ -1046,7 +1055,8 @@ def _mc_one_bin(args):
                     endf_coeffs = padded
                 results[s_idx] = endf_coeffs
 
-        return (energy_idx, False, results, True, None, c0_by_sample)
+        return (energy_idx, False, results, True, None, c0_by_sample,
+                n_positivity_projected)
 
     except Exception as exc:
         endf_coeffs = endf_normalize_legendre_coeffs(nr_nominal_coeffs, include_a0=False)
@@ -1057,6 +1067,56 @@ def _mc_one_bin(args):
         )
         return (energy_idx, False, results, False,
                 f"{type(exc).__name__}: {exc}", c0_fallback)
+
+
+def _log_positivity_projections(bin_results, nominal_results, n_samples, logger):
+    """Report how often the positivity projection fired, and in WHICH bins.
+
+    The projection (`project_to_positive_distribution`) silently modifies any MC
+    sample whose Legendre expansion goes negative somewhere in mu. It is the
+    right thing to do — a negative angular distribution is unphysical — but it
+    means the covariance we publish is that of a *projected* sample set, and
+    ENDF-6 MF34 has no syntax for a positivity constraint, so a consumer drawing
+    a Gaussian from it is not protected the same way.
+
+    How often that happens was never recorded, which left the size of the effect
+    unknown in both directions. This logs it: the overall rate, and the bins
+    where it concentrates so they can be located in energy. Roadmap §6.5.
+    """
+    energy_by_idx = {nr.energy_index: nr.energy_mev for nr in nominal_results}
+    per_bin = {}
+    total = 0
+    for rec in bin_results:
+        energy_idx = rec[0]
+        n_proj = rec[6] if len(rec) > 6 else 0
+        if n_proj:
+            per_bin[energy_idx] = n_proj
+            total += n_proj
+
+    n_bins = len(bin_results)
+    denom = max(n_bins * max(n_samples, 1), 1)
+    if total == 0:
+        logger.info(
+            f"  [POSITIVITY] projection never fired "
+            f"({n_bins} bins x {n_samples} samples)"
+        )
+        return per_bin
+
+    logger.info(
+        f"  [POSITIVITY] projection fired on {total}/{denom} samples "
+        f"({100.0 * total / denom:.3f} %) in {len(per_bin)}/{n_bins} bins"
+    )
+    ranked = sorted(per_bin.items(), key=lambda kv: kv[1], reverse=True)
+    logger.info("  [POSITIVITY] bins where it fires, worst first "
+                "(energy MeV: samples projected of %d):" % n_samples)
+    for energy_idx, n_proj in ranked[:40]:
+        e = energy_by_idx.get(energy_idx)
+        e_str = f"{e:.6f}" if e is not None else f"idx {energy_idx}"
+        logger.info(f"  [POSITIVITY]    {e_str} : {n_proj} "
+                    f"({100.0 * n_proj / max(n_samples, 1):.1f} %)")
+    if len(ranked) > 40:
+        logger.info(f"  [POSITIVITY]    ... and {len(ranked) - 40} further bins")
+    return per_bin
 
 
 def _log_mc_bin_failures(bin_results, nominal_results, warning_counts, logger):
@@ -2960,8 +3020,10 @@ def run_exfor_to_endf_sampling_v2(
             bin_results = [_mc_one_bin(a) for a in bin_args_list]
 
         _log_mc_bin_failures(bin_results, nominal_results, _warning_counts, _logger)
+        _log_positivity_projections(bin_results, nominal_results, n_samples, _logger)
         all_samples_stochastic = {s_idx: {} for s_idx in range(n_samples)}
-        for energy_idx, is_interpolated, results_by_sample, success, error_msg, _c0 in bin_results:
+        for _rec in bin_results:
+            energy_idx, is_interpolated, results_by_sample, success, error_msg, _c0 = _rec[:6]
             for s_idx, endf_coeffs in results_by_sample.items():
                 all_samples_stochastic[s_idx][energy_idx] = endf_coeffs
 
@@ -3161,9 +3223,11 @@ def run_exfor_to_endf_sampling_v2(
                 bin_results = [_mc_one_bin(a) for a in bin_args_list]
 
             _log_mc_bin_failures(bin_results, nominal_results, _warning_counts, _logger)
+            _log_positivity_projections(bin_results, nominal_results, n_samples, _logger)
             all_samples_perbin = {s_idx: {} for s_idx in range(n_samples)}
             c0_samples_perbin = {s_idx: {} for s_idx in range(n_samples)} if record_c0_channel else None
-            for energy_idx, is_interpolated, results_by_sample, success, error_msg, c0_by_sample in bin_results:
+            for _rec in bin_results:
+                energy_idx, is_interpolated, results_by_sample, success, error_msg, c0_by_sample = _rec[:6]
                 for s_idx, endf_coeffs in results_by_sample.items():
                     all_samples_perbin[s_idx][energy_idx] = endf_coeffs
                 if record_c0_channel:
