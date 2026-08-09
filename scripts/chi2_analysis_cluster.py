@@ -519,6 +519,71 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
         "title":      "χ² analysis — MF33↔MF34 cross term read from MF34's a_0 blocks",
         "systematic_block_col": None,
     },
+    # ── ITEM 6: Cierjacks' backward points CORRECTED (roadmap §10.8-14) ──────
+    #
+    # Same evaluation, same Σ_eval, same everything — only the DATA move. The
+    # parquets are written by `myworkspace/chi2/correct_cierjacks_backward.py`
+    # from `chi2_data_predictive_91_cross.parquet`, and they must be scored
+    # with KIKA_CHI2_EVAL_COV pointing at that file's existing 11 GB sidecar:
+    # Σ_eval never sees y_exp, so re-precomputing would spend an hour and 11 GB
+    # to reproduce it byte for byte.
+    #
+    # y_exp and sigma_exp_stat are multiplied by 1/(1+A) beyond 90°; the
+    # RELATIVE systematics are untouched, so Cierjacks keeps its declared 5 %
+    # normalization and 7 % ERR-T exactly. No global rescale (k = 1): the
+    # forward-support magnitude agreement of §10.8-12 1c (+4.3 % against 5 %
+    # declared, null control 2.2 %) pins k to ~1, and spending it would buy
+    # shape amplitude at the price of that agreement.
+    #
+    # ⚠ THE CORRECTION IS APPLIED TO ALL THREE LIBRARIES' ROWS, because it is a
+    # correction to the measurement. JEFF's and JENDL's χ² move too, and that is
+    # the property that makes it non-self-serving. Report raw AND corrected.
+    #
+    # ⚠ `no_Cierjacks` MUST come back EXACTLY unchanged — it excludes every row
+    # this touches. If it moves, the wrong rows were modified. That is the
+    # control, and it is free.
+    #
+    # A = 0.30 is where the angle-integrated σ_el lands on the corpus consensus
+    # with no rescale (six determinations, median 0.275); it delivers 31 % of
+    # §10.8-10's measured Δa₁. A = 0.55 is the dose-response point: 46 % of the
+    # displacement, and it takes the integral ~5 % BELOW the consensus.
+    "predictive_91_cj030": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_91_cj030.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run 91 + Cierjacks backward corrected, A = 0.30",
+        "systematic_block_col": None,
+    },
+    "predictive_91_cj055": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_91_cj055.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run 91 + Cierjacks backward corrected, A = 0.55",
+        "systematic_block_col": None,
+    },
+    # ── ITEM 7: the cross-term dose-response (roadmap §10.8-5 step 4) ────────
+    #
+    # KIKA_MF33_MF34_CROSS_SCALE damps the whole cross block by s ∈ [0, 1] — a
+    # convex combination of the joint and its block diagonal, hence PSD wherever
+    # the joint is. ⚠ It is read inside `precompute_chi2_predictive.py`, so each
+    # s needs its OWN precompute and its own 11 GB sidecar; the roadmap's
+    # "re-scoring only" meant "no re-evaluation", not "no precompute".
+    #
+    # The endpoints are already measured: s = 0 is 91_rewrite (no_Cierjacks V4
+    # 6.308) and s = 1 is 91_cross (8.444). One interior point therefore tests
+    # linearity. LINEAR PREDICTION AT s = 0.5: 7.376. If the measurement comes
+    # back materially above that, the chain amplifies and §10.8-1's certificate
+    # has to be re-read before +33.9 % is quoted again.
+    "predictive_91_cross_s50": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_91_cross_s50.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — cross term damped to s = 0.50",
+        "systematic_block_col": None,
+    },
+    "predictive_91_cross_s25": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_91_cross_s25.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — cross term damped to s = 0.25",
+        "systematic_block_col": None,
+    },
     # Fold-mode sweep. Identical to `predictive` in every respect except which
     # part of the forward model is resolution-averaged (FOLD_MODE in
     # precompute_chi2_predictive.py). Compare V2 across these to decide, over
@@ -737,6 +802,25 @@ def build_paths(methodology: str) -> RunPaths:
     cfg = PATHS[methodology]
     parquet_path = Path(cfg["parquet"])
     eval_cov_path = parquet_path.with_suffix(parquet_path.suffix + ".eval_cov.npz")
+    # ⚑ A change confined to the DATA columns -- y_exp, sigma_exp_stat, the
+    # relative systematics -- leaves Sigma_eval byte-identical, because
+    # Sigma_eval is folded from (mu, E, c_0, a_l) and never sees y_exp. Such a
+    # re-score therefore needs no precompute and no new 11 GB sidecar: point the
+    # entry's parquet at the modified copy and this variable at the sidecar the
+    # unmodified parquet already has. Roadmap §10.8-12 Phase 2 and §10.8-14.
+    #
+    # ⚠ It applies to EVERY methodology in one invocation, so run exactly one.
+    override = os.environ.get("KIKA_CHI2_EVAL_COV", "").strip()
+    if override:
+        if len(METHODOLOGIES_TO_RUN) != 1:
+            raise SystemExit(
+                f"KIKA_CHI2_EVAL_COV is set but {len(METHODOLOGIES_TO_RUN)} "
+                f"methodologies are selected ({METHODOLOGIES_TO_RUN}). One "
+                f"sidecar cannot be right for several parquets — run them "
+                f"one at a time."
+            )
+        eval_cov_path = Path(override)
+        print(f"[EVAL_COV] overridden by KIKA_CHI2_EVAL_COV: {eval_cov_path}")
     run_dir = Path(cfg["report_dir"]) / f"run_{RUN_ID}"
     return RunPaths(
         parquet=parquet_path,
