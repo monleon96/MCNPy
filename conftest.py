@@ -48,6 +48,16 @@ REPO_ROOT = Path(__file__).resolve().parent
 #: the roots returned by :func:`_search_roots`.
 _DEFAULT_TAPE_ROOT = "/share_snc/snc/JuanMonleon"
 
+#: The shared *library* tree, one level up from the personal one: whole
+#: evaluated libraries as distributed, in per-library directories
+#: (``endfb81/``, ``jeff40/``, ``jendl5/`` …). The personal root holds working
+#: copies and grafts; this one holds the pristine originals, and the PFNS work
+#: is the first to need a tape that exists only here (ENDF/B-VIII.1 has no
+#: counterpart under ``JuanMonleon/``). Kept as a second root rather than
+#: reached by ``../../lib/endf`` from the first, which would break the moment
+#: ``KIKA_TAPES`` points somewhere else.
+_DEFAULT_LIB_ROOT = "/share_snc/lib/endf"
+
 
 def _search_roots() -> Tuple[Path, ...]:
     """Directories searched for tapes, most specific first.
@@ -60,6 +70,7 @@ def _search_roots() -> Tuple[Path, ...]:
     env_endf = os.environ.get("KIKA_ENDF_FILES")
     if env_endf:
         roots.append(Path(env_endf))
+    roots.append(Path(os.environ.get("KIKA_LIB_TAPES", _DEFAULT_LIB_ROOT)))
     roots.append(REPO_ROOT / "files" / "endf")
     roots.append(REPO_ROOT / "files")
     return tuple(roots)
@@ -87,6 +98,14 @@ _TAPES: Dict[str, Sequence[str]] = {
         "JENDL-5/260560.jendl5",
     ),
     "u235": ("jeff40-endf/92-U-235g.txt", "92-U-235g.txt"),
+    # PFNS: the two U-235 evaluations the MF5/MF35 work is gated against, plus
+    # Cf-252 as the cheap one. ``u235`` above is the same JEFF-4.0 material
+    # reached through the personal root; ``u235_b81`` is a different evaluation
+    # and both are needed, because the padding divergence and the outgoing-grid
+    # mismatch only show up on ENDF/B-VIII.1.
+    "u235_b81": ("endfb81/n-092_U_235.endf", "n-092_U_235.endf"),
+    "cf252_b81": ("endfb81/n-098_Cf_252.endf", "n-098_Cf_252.endf"),
+    "pu239_b81": ("endfb81/n-094_Pu_239.endf", "n-094_Pu_239.endf"),
     "th232": ("jeff40-endf/90-Th-232g.txt", "90-Th-232g.txt"),
     "pu241": ("jeff40-endf/94-Pu-241g.txt", "94-Pu-241g.txt"),
     "u238": ("jeff40-endf/92-U-238g.txt", "U238_jeff4.0_n.endf"),
@@ -282,6 +301,9 @@ u235_tape = _tape_fixture("u235")
 th232_tape = _tape_fixture("th232")
 pu241_tape = _tape_fixture("pu241")
 u238_tape = _tape_fixture("u238")
+u235_b81_tape = _tape_fixture("u235_b81")
+cf252_b81_tape = _tape_fixture("cf252_b81")
+pu239_b81_tape = _tape_fixture("pu239_b81")
 u5_nubar_covfil_tape = _tape_fixture("u5_nubar_covfil")
 u5_boxer_tape = _tape_fixture("u5_boxer")
 
@@ -350,6 +372,35 @@ def micro_tape() -> Path:
 def micro_cov_tape() -> Path:
     """Committed synthetic tape carrying MF33/MT2 and MF34/MT2 on a small grid."""
     path = MICRO_TAPE_DIR / "micro_fe56_cov.endf"
+    if not path.is_file():  # pragma: no cover - fixture is committed
+        pytest.fail(f"committed micro-tape is missing: {path}")
+    return path
+
+
+@pytest.fixture(scope="session")
+def micro_pfns_tape() -> Path:
+    """Committed Cf-252 slice: MF1/451, MF3/MT18, MF5/MT18+455, MF35/MT18.
+
+    Cut from ENDF/B-VIII.1 the same way as ``micro_fe56_structural.endf`` —
+    whole sections dropped, not one record reformatted. Cf-252 rather than
+    U-235 because it is the smallest real evaluation carrying the full PFNS
+    set, and it brings a real LF=1 MT18, a real LF=5 MT455 and four real LB=7
+    covariance bands for ~770 kB.
+    """
+    path = MICRO_TAPE_DIR / "micro_cf252_pfns.endf"
+    if not path.is_file():  # pragma: no cover - fixture is committed
+        pytest.fail(f"committed micro-tape is missing: {path}")
+    return path
+
+
+@pytest.fixture(scope="session")
+def micro_pfns_cov_tape() -> Path:
+    """Committed synthetic tape carrying a tiny MF5/MT18 and its MF35/MT18.
+
+    The sampler's fast lane: eight outgoing groups over two incident bands,
+    small enough that a test can assert on the whole covariance by hand.
+    """
+    path = MICRO_TAPE_DIR / "micro_pfns_cov.endf"
     if not path.is_file():  # pragma: no cover - fixture is committed
         pytest.fail(f"committed micro-tape is missing: {path}")
     return path

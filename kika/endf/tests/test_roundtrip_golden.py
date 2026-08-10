@@ -53,6 +53,24 @@ CLEAN_SECTIONS = [(3, 1), (3, 2), (3, 102)]
 #: unexamined.
 DIVERGENT_SECTIONS = [(1, 451), (2, 151), (4, 2), (34, 2)]
 
+#: The PFNS fixture gets its **own** pair, not extra entries in the two above.
+#: The lists are asserted to cover their fixture exhaustively, and the Fe-56
+#: slice carries neither MF5 nor MF35, so folding them together fails at once.
+#:
+#: **Measured at 75 columns, and that is not a weaker gate here — it is the
+#: only one available.** ENDF/B-VIII.1 writes 75-character records with no
+#: sequence numbers at all, while kika always emits the 5-digit field. So on
+#: this fixture columns 76-80 cannot match by construction, exactly as they
+#: cannot for MF34 on the Fe-56 slice. Columns 1-75 carry every value in the
+#: file. The 80-column gate lives on JEFF-4.0 U-235 in
+#: ``test_mf5_roundtrip.py``, where it does hold.
+PFNS_CLEAN_SECTIONS = [(1, 451), (3, 18), (5, 18), (5, 455), (35, 18)]
+
+#: Empty on purpose, and meaningful: every section of the PFNS fixture comes
+#: back byte-for-byte in columns 1-75, including the LF=5 MT455 laws that MF5
+#: keeps verbatim and the four LB=7 covariance bands.
+PFNS_DIVERGENT_SECTIONS: list[tuple[int, int]] = []
+
 
 def data_lines(text: str, mf: int, mt: int) -> list[str]:
     """The data lines of one (MF, MT) section, SEND and FEND excluded."""
@@ -114,6 +132,74 @@ def test_section_roundtrip_is_byte_identical(micro_tape, mf, mt):
     endf = read_endf(str(micro_tape))
     source = data_lines(micro_tape.read_text(), mf, mt)
     assert not first_difference(source, rendered(endf, mf, mt))
+
+
+def test_the_two_pfns_section_lists_cover_the_whole_fixture(micro_pfns_tape):
+    """Same rule as the Fe-56 pair: no section escapes examination."""
+    endf = read_endf(str(micro_pfns_tape))
+    present = {
+        (mf, mt) for mf, file_ in endf.files.items() for mt in file_.sections
+    }
+    assert present == set(PFNS_CLEAN_SECTIONS) | set(PFNS_DIVERGENT_SECTIONS)
+
+
+@pytest.mark.parametrize("mf,mt", PFNS_CLEAN_SECTIONS)
+def test_pfns_section_roundtrip_is_byte_identical_to_column_75(
+    micro_pfns_tape, mf, mt,
+):
+    """parse -> str() reproduces the source values exactly. The MF5/MF35 gate."""
+    endf = read_endf(str(micro_pfns_tape))
+    source = [line[:75] for line in data_lines(micro_pfns_tape.read_text(), mf, mt)]
+    got = [line[:75] for line in rendered(endf, mf, mt)]
+    assert not first_difference(source, got)
+
+
+def test_replace_pfns_mf5_section_with_itself_changes_only_the_send_record(
+    micro_pfns_tape, tmp_path,
+):
+    """The splice the PFNS pipeline performs, fed an unmodified MF5/MT18.
+
+    ``perturb_pfns_files`` parses MF5/MT18, rewrites its tables and splices the
+    section back. If that path is not value-preserving when the section did not
+    change, no perturbation it produces can be trusted to be the perturbation
+    it computed. Asserted on columns 1-75 of the **whole file**, not just the
+    spliced section: the surrounding sections are what would reveal a splice
+    that cut in the wrong place.
+
+    **One line moves, and it is the tape that deviates rather than kika.**
+    ENDF/B-VIII.1 leaves all six data fields of a SEND record blank;
+    ENDF-6 §0.6.3 types them as two floating-point zeros and four integer
+    zeros, which is what ``format_endf_send_record`` writes. So a spliced
+    ENDF/B-VIII.1 tape gains a conformant SEND where it had a blank one. This
+    is a **dialect difference, not the SEND defect** recorded in the module
+    docstring, which is about kika writing a bare ``0`` for a float field.
+
+    Consequence to keep in view: every perturbed PFNS tape written from an
+    ENDF/B-VIII.1 source differs from its parent in the SEND record of each
+    touched section. NJOY reads both. The test asserts the difference is
+    exactly that one line and nothing else — and asserts it is still there, so
+    that teaching the writer this dialect forces a visit here.
+    """
+    work = tmp_path / micro_pfns_tape.name
+    shutil.copy2(micro_pfns_tape, work)
+    before = [line[:75] for line in work.read_text().splitlines()]
+
+    endf = read_endf(str(work))
+    writer = ENDFWriter(str(work))
+    assert writer.replace_mt_section(
+        endf.files[5].sections[18], 5, str(work), update_directory=False
+    ) is True
+
+    after = [line[:75] for line in work.read_text().splitlines()]
+    assert len(after) == len(before), "the splice changed the line count"
+
+    moved = [i for i, (a, b) in enumerate(zip(before, after)) if a != b]
+    assert len(moved) == 1, first_difference(before, after)
+
+    was, now = before[moved[0]], after[moved[0]]
+    assert parse_endf_id(was)[1:] == (5, 0), f"not the MF5 SEND record: {was!r}"
+    assert was[:66].strip() == "", "source SEND was not blank after all"
+    assert now[:66].split() == ["0.000000+0", "0.000000+0", "0", "0", "0", "0"]
 
 
 @pytest.mark.slow
