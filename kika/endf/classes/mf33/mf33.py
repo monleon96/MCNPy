@@ -1088,7 +1088,14 @@ class MF33MT(MT):
         )
 
         mat = self._mat if self._mat is not None else 0
-        mf = 33
+        # **Not the literal 33.** MF31 reuses these records verbatim (§31.1:
+        # the MT452/455/456 formats "are directly analogous to those of File
+        # 33"), which is why `parse_mf31` builds `MF33MT` objects and tags them
+        # `_mf = 31`. Writing the literal 33 here stamped every line of an MF31
+        # section with MF33 in columns 71-72, while `_section_writer` placed it
+        # correctly in the MF31 block -- a file that is wrong only in the
+        # identifier columns, which nothing but a parser would notice.
+        mf = int(self._mf) if self._mf is not None else 33
         mt = self.number
         lines = []
 

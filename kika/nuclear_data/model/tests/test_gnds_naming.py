@@ -51,6 +51,15 @@ GNDS_NODES: dict[str, tuple[str, ...]] = {
     # §19.3.4 channel
     "Channel": ("label", "resonanceReaction", "L", "channelSpin", "columnIndex",
                 "scatteringRadius"),
+    # §17.3 multiplicity / §18.4 delayedNeutron / §21.3 multiplicitySum
+    "Multiplicity": ("constant", "function", "label"),
+    "DelayedNeutron": ("label", "rate", "product"),
+    "DelayedNeutrons": ("delayedNeutrons",),
+    "FissionFragmentData": ("delayedNeutrons", "fissionEnergyReleases",
+                            "productYields"),
+    "MultiplicitySum": ("label", "multiplicity", "summands", "ENDF_MT"),
+    "MultiplicitySums": ("multiplicitySums",),
+    "Add": ("href",),
     # §7
     "Uncertainty": ("standard", "covariance", "listOfCovariances"),
     "Covariance": ("href", "label"),

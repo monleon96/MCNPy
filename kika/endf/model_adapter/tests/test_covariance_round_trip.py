@@ -123,20 +123,22 @@ def test_the_links_say_which_endf_section_they_came_from(suite):
 
 
 def test_the_report_declares_the_covariance_files_it_does_not_read(covEndf):
-    """MF31 and MF32 are covariances this adapter does not convert.
+    """MF32 is the only covariance file this adapter still does not convert.
 
-    The MF32 half of this was unverifiable until MF32 got a parser: the branch
-    that raises the notice keys off ``endf.mf[32]``, which the registry could
-    never populate, so the docstring claimed a behaviour no assertion reached.
+    This was unverifiable until MF32 got a parser: the branch that raises the
+    notice keys off ``endf.mf[32]``, which the registry could never populate, so
+    the docstring claimed a behaviour no assertion reached. **MF31 used to be
+    named here too** and is not any more — it is decoded, and a notice saying
+    otherwise would now be the false statement.
     """
     from kika.nuclear_data.model import ConversionReport
 
     class _Endf:
-        mf = {31: object(), 32: object(), 33: covEndf.mf[33]}
+        mf = {32: object(), 33: covEndf.mf[33]}
 
     _, report = decodeCovarianceSuite(_Endf(), ConversionReport())
-    assert any("MF31" in entry for entry in report.unsupported)
     assert any("MF32" in entry for entry in report.unsupported)
+    assert not any("MF31" in entry for entry in report.unsupported)
 
 
 def test_a_file_carrying_only_unconvertible_covariances_does_not_claim_it_has_none(covEndf):
@@ -154,7 +156,7 @@ def test_a_file_carrying_only_unconvertible_covariances_does_not_claim_it_has_no
 
     suiteOut, report = decodeCovarianceSuite(_Endf(), ConversionReport())
     assert len(suiteOut) == 0
-    assert any("the only covariances" in entry and "MF32" in entry
+    assert any("the only covariance" in entry and "MF32" in entry
                for entry in report.losses)
     assert not any(entry.endswith("carries no covariances")
                    for entry in report.losses)
@@ -168,10 +170,10 @@ def test_a_file_with_no_covariances_says_so():
 
     suiteOut, report = decodeCovarianceSuite(_Empty(), ConversionReport())
     assert len(suiteOut) == 0
-    # The message names all three covariance files the adapter now reads. MF35
-    # joined MF33 and MF34 with the PFNS work; a tape carrying only MF35 must
-    # not be reported as carrying no covariances.
-    assert any("no MF33, MF34 or MF35" in entry for entry in report.losses)
+    # The message names all four covariance files the adapter now reads. MF35
+    # joined MF33 and MF34 with the PFNS work and MF31 with the nu-bar work; a
+    # tape carrying only one of them must not be reported as carrying none.
+    assert any("no MF31, MF33, MF34 or MF35" in entry for entry in report.losses)
 
 
 def test_an_a0_section_reaches_the_model_with_its_order_zero_blocks():

@@ -32,7 +32,7 @@ nothing decodes an ENDF file into them yet, which is phase 3c.
 """
 from __future__ import annotations
 
-from .axes import Axes, Axis, Grid, crossSectionAxes
+from .axes import Axes, Axis, Grid, crossSectionAxes, multiplicityAxes
 from .enums import (
     ENDF_INT_TO_INTERPOLATION,
     INTERPOLATION_TO_ENDF_INT,
@@ -92,7 +92,9 @@ from .distributions import (
     Uncorrelated,
     Unspecified,
 )
-from .output_channel import Multiplicity, OutputChannel, Product, Products, Q
+from .output_channel import (DelayedNeutron, DelayedNeutrons,
+                             FissionFragmentData, Multiplicity, OutputChannel,
+                             Product, Products, Q)
 from .pops import Nuclide, Particle, PoPs
 from .provenance import AceProvenance, EndfProvenance, Provenance
 from .quantities import PhysicalQuantity
@@ -121,6 +123,7 @@ from .resonances import (
     TabulatedWidths,
     UnresolvedRegion,
 )
+from .sums import Add, MultiplicitySum, MultiplicitySums, Summands
 from .styles import (
     AngularDistributionReconstructed,
     CrossSectionReconstructed,
@@ -148,7 +151,7 @@ __all__ = [
     "Frame", "Interpolation", "InterpolationQualifier", "GridStyle", "ValueType",
     "ENDF_INT_TO_INTERPOLATION", "INTERPOLATION_TO_ENDF_INT",
     # §5
-    "Axes", "Axis", "Grid", "crossSectionAxes", "Values",
+    "Axes", "Axis", "Grid", "crossSectionAxes", "multiplicityAxes", "Values",
     # §6
     "Function1d", "XYs1d", "Regions1d", "Constant1d", "Polynomial1d",
     "Ys1d", "Legendre", "Gridded1d",
@@ -172,6 +175,8 @@ __all__ = [
     "URR_probabilityTables1d",
     # §17-18 output channels and distributions
     "OutputChannel", "Product", "Products", "Multiplicity", "Q",
+    "FissionFragmentData", "DelayedNeutron", "DelayedNeutrons",
+    "Add", "Summands", "MultiplicitySum", "MultiplicitySums",
     "Distribution", "AngularTwoBody", "Isotropic2d", "Unspecified", "Uncorrelated",
     "EnergyAngular", "AngularEnergy", "KalbachMann", "NBodyPhaseSpace",
     "Recoil", "NOT_IMPLEMENTED_DISTRIBUTIONS",

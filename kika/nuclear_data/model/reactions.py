@@ -8,6 +8,7 @@ from typing import Iterator, List, Optional, Union
 from .cross_section_forms import CrossSection
 from .output_channel import OutputChannel
 from .reaction_id import ReactionId
+from .sums import MultiplicitySum, MultiplicitySums
 
 __all__ = ["Reaction", "Reactions", "Sums", "OrphanProducts",
            "FissionComponents", "Productions", "IncompleteReactions"]
@@ -135,7 +136,21 @@ class Reactions(_ReactionList):
 
 
 class Sums(_ReactionList):
-    """§14.1.1. Summed cross sections and multiplicities (MT1, MT4, ...)."""
+    """§21.1. ``crossSectionSums`` (MT1, MT4, ...) and ``multiplicitySums``.
+
+    The reaction list this inherits **is** ``crossSectionSums``: iterating a
+    ``Sums`` yields reactions, which is what every existing caller expects and
+    what the ENDF decoder fills. ``multiplicitySums`` is the second §21.1 child,
+    and it is a separate attribute rather than more entries in the same list
+    because a multiplicity sum is not a reaction — it has no cross section and
+    no output channel, and putting one in the list would break
+    ``reactionByENDF_MT``.
+    """
+
+    def __init__(self, reactions: Optional[List[Reaction]] = None,
+                 multiplicitySums: Optional[List["MultiplicitySum"]] = None) -> None:
+        super().__init__(reactions)
+        self.multiplicitySums = MultiplicitySums(list(multiplicitySums or []))
 
 
 class OrphanProducts(_ReactionList):

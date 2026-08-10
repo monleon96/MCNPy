@@ -477,6 +477,23 @@ def micro_mf32_tape(request: pytest.FixtureRequest) -> Path:
 
 
 @pytest.fixture(scope="session")
+def micro_nubar_tape() -> Path:
+    """Committed U-235 slice: MF1/451+452+455+456, MF3/MT18, MF31/452+455+456.
+
+    Cut from ENDF/B-VIII.1 the verbatim way, and it is the only fixture that
+    covers nu-bar at all. U-235 rather than a smaller fissile nuclide because
+    its MF31 carries all three MTs *and* the NC-type (LTY=0) total — the
+    covariance the file declares as a sum of MT455 and MT456 rather than
+    storing — which is the case a fixture built from stored matrices alone
+    would never exercise. 914 lines.
+    """
+    path = MICRO_TAPE_DIR / "micro_u235_nubar.endf"
+    if not path.is_file():  # pragma: no cover - fixture is committed
+        pytest.fail(f"committed micro-tape is missing: {path}")
+    return path
+
+
+@pytest.fixture(scope="session")
 def micro_pfns_cov_tape() -> Path:
     """Committed synthetic tape carrying a tiny MF5/MT18 and its MF35/MT18.
 

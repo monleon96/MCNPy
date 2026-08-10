@@ -181,16 +181,33 @@ def parse_unit(text: str) -> Unit:
     Grammar: symbols combined with ``*``, ``/`` and ``**``, spaces ignored. An
     empty string is dimensionless, which §2.3.3 makes the default for a
     ``physicalQuantity`` with no ``unit`` attribute.
+
+    **A bare ``1`` numerator is admitted**, so ``1/s`` parses. That is not a
+    convenience: it is how GNDS spells a decay rate, it is how
+    :data:`DERIVED_SI_UNITS` in this very module spells the admixture of ``Hz``,
+    and a parser that rejects the string its own tables contain would have
+    failed on the first GNDS file phase 5 reads. ``1`` carries no dimension and
+    no factor — it exists only so the string may begin with ``/``.
     """
     original = text
     text = text.replace(" ", "")
     if not text:
         return Unit("", 1.0, {})
+    if text == "1":
+        return Unit(original, 1.0, {})
 
     factor = 1.0
     dims: Dict[str, Fraction] = {}
     sign = 1
     position = 0
+
+    if text.startswith("1/"):
+        text = text[2:]
+        sign = -1
+        if not text:
+            raise UnitError(
+                f"{original!r} ends with '/'; an operator needs a symbol after it"
+            )
 
     while position < len(text):
         match = _SYMBOL.match(text, position)

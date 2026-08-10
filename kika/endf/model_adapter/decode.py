@@ -38,7 +38,6 @@ from kika.nuclear_data.model import (
     Nuclide,
     OutputChannel,
     PoPs,
-    Product,
     Q,
     Reaction,
     ReactionId,
@@ -213,9 +212,10 @@ def decodeMF1MT451(mt451, report: Optional[ConversionReport] = None):
 def decodeReactionSuite(endf, report: Optional[ConversionReport] = None):
     """A parsed ``ENDF`` object → a :class:`ReactionSuite`, plus the report.
 
-    MF1, MF2, MF3 and MF4 are read. The covariances are **not** part of a
-    ``reactionSuite``: §25.1.1 makes ``covarianceSuite`` a root node in its own
-    right, linked through ``externalFiles``, so MF31/33/34 go through
+    MF1 (451 and the nu-bars), MF2, MF3 and MF4 are read. The covariances are
+    **not** part of a ``reactionSuite``: §25.1.1 makes ``covarianceSuite`` a
+    root node in its own right, linked through ``externalFiles``, so
+    MF31/33/34/35 go through
     :func:`~kika.endf.model_adapter.covariances.decodeCovarianceSuite` instead.
     Every MF present in the file that neither decoder reads is **declared**
     unsupported, which is the whole reason the report exists.
@@ -248,6 +248,13 @@ def decodeReactionSuite(endf, report: Optional[ConversionReport] = None):
             suite.reactions.append(reaction)
     else:
         report.lost("no MF3: the evaluation carries no cross sections")
+
+    # After MF3, and it has to be: the nu-bars hang off the fission reaction,
+    # which does not exist until MF3/MT18 has been decoded.
+    if mf1 is not None:
+        from .multiplicity import attachNubar
+
+        report = attachNubar(suite, mf1, report)
 
     mf2 = endf.mf.get(2) if hasattr(endf, "mf") else None
     if mf2 is not None and 151 in getattr(mf2, "mt", {}):
@@ -319,8 +326,13 @@ def _attachAngularDistribution(suite: ReactionSuite, mf4mt, mt: int,
 
     channel = reaction.outputChannel
     channel.genre = "twoBody"
-    product = Product(pid="n", label="n", provenance=provenance,
-                      distribution=Distribution())
+    # `ensureProduct`, not a fresh `Product`: MF1's nu-bar may already have put
+    # a neutron on this channel, and §17.2.1 gives one product one multiplicity
+    # *and* one distribution. Appending here produced two neutrons on the
+    # fission channel of every fissile tape -- see `OutputChannel.ensureProduct`.
+    product = channel.ensureProduct("n")
+    product.provenance = provenance
+    if product.distribution is None:
+        product.distribution = Distribution()
     product.distribution[EVAL_LABEL] = distribution
-    channel.products.products.append(product)
     return report

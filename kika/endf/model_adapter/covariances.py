@@ -1,4 +1,4 @@
-"""MF33, MF34, MF35 → :class:`~kika.nuclear_data.model.covariances.CovarianceSuite`.
+"""MF31, MF33, MF34, MF35 → :class:`~kika.nuclear_data.model.covariances.CovarianceSuite`.
 
 **The mapping that matters, and the one this module exists to get right.**
 §25.2.5-6 give a ``rowData``/``columnData`` an optional ``slices``, and a slice
@@ -16,7 +16,11 @@ angular distribution. So the row and column links are built through
 order.
 
 MF33 is the simpler case: a covariance between two cross sections, which are
-already whole quantities, so the links carry no slices.
+already whole quantities, so the links carry no slices. **MF31 is MF33's records
+pointed somewhere else**: §31.1 makes the MT452/455/456 formats "directly
+analogous to those of File 33", so the matrices arrive by the same route, but a
+nu-bar covariance is about a multiplicity and the three MTs live on three
+different nodes — see :mod:`kika.endf.model_adapter.multiplicity`.
 
 **MF35 is the same idea one step further**, and is why this module is worth
 having rather than three bespoke containers. An MF35 band is a covariance about
@@ -48,11 +52,11 @@ from kika.nuclear_data.model import (
     EndfProvenance,
 )
 
-__all__ = ["decodeMF33MT", "decodeMF34MT", "decodeMF35MT",
+__all__ = ["decodeMF31MT", "decodeMF33MT", "decodeMF34MT", "decodeMF35MT",
            "decodeCovarianceSuite",
-           "encodeMF33MT", "encodeMF34MT",
+           "encodeMF31MT", "encodeMF33MT", "encodeMF34MT",
            "reactionHref", "angularDistributionHref",
-           "energyDistributionHref"]
+           "energyDistributionHref", "nubarShims"]
 
 
 def reactionHref(mt: int) -> str:
@@ -163,6 +167,124 @@ def decodeMF33MT(mf33mt, report: Optional[ConversionReport] = None):
 
     if not sections:
         report.lost(f"MF33/MT{mf33mt.number}: no covariance blocks decoded")
+    return sections, report
+
+
+class _NubarShim:
+    """``(energies, values)`` of one nu-bar, in the shape ``resolve_nc_lty0`` wants.
+
+    MF31/452 is an **NC-type** sub-subsection on every evaluation checked: the
+    total nu-bar covariance is not stored, it is declared to be the sum of MT455
+    and MT456 (ENDF/B-VIII.1 U-235 writes exactly ``LTY=0`` with ``c=1`` for
+    both). Resolving that sum needs more than the two child matrices — the
+    children are *relative* covariances, so combining them requires the values
+    they are relative to.
+
+    ``MF33MT.resolve_nc_lty0`` already does the algebra and already accepts
+    either an ``MF3MT`` or anything exposing ``energies``/``values``. For MF33
+    the values are cross sections; for MF31 they are nu-bars. Passing the
+    nu-bars is what makes the total's variance right instead of merely
+    plausible — a straight sum of the two relative matrices would weight prompt
+    and delayed equally, when delayed is under one per cent of the total.
+    """
+
+    __slots__ = ("energies", "values")
+
+    def __init__(self, energies, values):
+        self.energies = np.asarray(energies, dtype=float)
+        self.values = np.asarray(values, dtype=float)
+
+    @classmethod
+    def fromMF1(cls, section) -> Optional["_NubarShim"]:
+        """``None`` for an LNU=1 polynomial, which has no tabulated values."""
+        energies = getattr(section, "energies", None)
+        values = getattr(section, "nubar_values", None)
+        if not energies or not values:
+            return None
+        return cls(energies, values)
+
+
+def nubarShims(mf1) -> dict:
+    """``{MT: _NubarShim}`` for whichever of MT452/455/456 a parsed MF1 carries."""
+    from .multiplicity import NUBAR_MT
+
+    shims = {}
+    for mt in NUBAR_MT:
+        section = getattr(mf1, "mt", {}).get(mt) if mf1 is not None else None
+        if section is None:
+            continue
+        shim = _NubarShim.fromMF1(section)
+        if shim is not None:
+            shims[mt] = shim
+    return shims
+
+
+def decodeMF31MT(mf31mt, report: Optional[ConversionReport] = None,
+                 separatePrompt: bool = True, siblingSections=None,
+                 nubarValues=None):
+    """One MF31/MT section → a list of :class:`CovarianceSection`.
+
+    Structurally this is :func:`decodeMF33MT`: §31.1 says the MT452/455/456
+    formats *"are directly analogous to those of File 33"* and kika's parser
+    already reads MF31 with the MF33 record machinery, so the matrices arrive by
+    the same route. What differs is the **href**, and only the href — a nu-bar
+    covariance is about a multiplicity, not about a cross section, and the three
+    MTs land on three different nodes. See
+    :func:`~kika.endf.model_adapter.multiplicity.nubarHref`.
+
+    ``siblingSections`` and ``nubarValues`` are what the NC-type total needs;
+    without them an MF31/452 that is declared as a sum decodes to nothing and
+    says so in the report rather than quietly returning an empty list.
+    """
+    from .multiplicity import nubarHref
+
+    report = report if report is not None else ConversionReport()
+    mt = int(getattr(mf31mt, "number", 0))
+    covmat = mf31mt.to_xs_covmat(
+        sibling_sections=siblingSections, mf3_sections=nubarValues
+    )
+    provenance = _sectionProvenance(mf31mt)
+    derived = any(
+        nc.lty == 0
+        for subsection in getattr(mf31mt, "_subsections", [])
+        for nc in getattr(subsection, "nc_records", [])
+    )
+    if derived:
+        # Not physics, and not recoverable from a matrix: the file said "this
+        # covariance IS the sum of MT455 and MT456" rather than storing it, and
+        # the encoder has to be able to say that it is writing back something
+        # the file never wrote explicitly.
+        provenance.headerFields["wasDerived"] = True
+
+    sections = []
+    for index, matrix in enumerate(covmat.matrices):
+        rowMT = int(covmat.reaction_rows[index])
+        colMT = int(covmat.reaction_cols[index])
+        grid = covmat.energy_grids[index] if index < len(covmat.energy_grids) else None
+
+        sections.append(CovarianceSection(
+            label=f"MF31-MT{rowMT}" + (f"-MT{colMT}" if colMT != rowMT else ""),
+            rowData=DataLink(href=nubarHref(rowMT, separatePrompt),
+                             ENDF_MFMT=f"31/{rowMT}"),
+            columnData=(
+                DataLink(href=nubarHref(colMT, separatePrompt),
+                         ENDF_MFMT=f"31/{colMT}")
+                if colMT != rowMT else None
+            ),
+            form=_matrixForm(matrix, grid, covmat.is_relative[index]),
+            provenance=provenance,
+        ))
+
+    if not sections:
+        if derived and siblingSections is None:
+            report.lost(
+                f"MF31/MT{mt}: the covariance is NC-type (LTY=0) — the file "
+                f"declares it as a sum of other MTs rather than storing it — "
+                f"and no sibling sections were passed, so it could not be "
+                f"resolved"
+            )
+        else:
+            report.lost(f"MF31/MT{mt}: no covariance blocks decoded")
     return sections, report
 
 
@@ -410,6 +532,72 @@ def encodeMF33MT(source, mt: int, mat: Optional[int] = None,
     return built, report
 
 
+def encodeMF31MT(source, mt: int, mat: Optional[int] = None,
+                 report: Optional[ConversionReport] = None):
+    """A :class:`CovarianceSuite` → an ``MF31MT`` for one nu-bar MT.
+
+    The records are MF33's — §31.1 again — so this goes through the same writer
+    and then **stamps the section as MF31**. That stamp is load-bearing in two
+    places: ``kika.endf.writers._section_writer`` places the section by
+    ``section._mf``, and ``MF33MT.__str__`` reads it for columns 71-72. The
+    second of those only started reading it when this function was written; it
+    used to write the literal ``33``, which would have put MF33 identifiers on
+    every line of a section sitting in the MF31 block.
+    """
+    from kika.endf.writers.mf33_writer import create_mf33_from_covariance
+
+    report = report if report is not None else ConversionReport()
+    sections = _covarianceSections(source, "31/", mt)
+    provenance = sections[0].provenance
+
+    za = getattr(provenance, "za", None)
+    awr = getattr(provenance, "awr", None)
+    if za is None or awr is None:
+        raise ValueError(
+            f"MF31/MT{mt} carries no ZA/AWR, so the section header would be "
+            f"invented. Decode from ENDF, where the header comes from the file."
+        )
+    resolvedMat = mat if mat is not None else getattr(provenance, "mat", None)
+
+    built = None
+    for section in sections:
+        form = section.form
+        colMT = _endfMT(section.columnData) if section.columnData is not None else mt
+        if not form.isRelative:
+            report.approximated(
+                f"MF31/MT{mt}-MT{colMT}: the block is absolute and is written "
+                f"as LB=5/LB=6, which ENDF-6 reads as relative"
+            )
+        one = create_mf33_from_covariance(
+            cov_matrix=np.asarray(form.matrix, dtype=float),
+            energy_grid_ev=np.asarray(form.rowGrid, dtype=float),
+            za=float(za), awr=float(awr), mat=int(resolvedMat or 0),
+            mt=mt, mt1=colMT,
+            lb=5 if colMT == mt else 6,
+            col_energy_grid_ev=(
+                None if colMT == mt else np.asarray(form.columnGrid, dtype=float)
+            ),
+        )
+        if built is None:
+            built = one
+        else:
+            built.add_subsection(one.subsections[0])
+
+    built._nl = len(built.subsections)
+    built._mf = 31
+    if any(
+        (getattr(s.provenance, "headerFields", None) or {}).get("wasDerived")
+        for s in sections
+    ):
+        report.approximated(
+            f"MF31/MT{mt}: the file stated this covariance as an NC-type sum "
+            f"(LTY=0) and it is written back as an explicit LB=5 matrix. The "
+            f"numbers are the resolved sum; the declaration that it *is* a sum "
+            f"is not recoverable from the model"
+        )
+    return built, report
+
+
 def decodeCovarianceSuite(endf, report: Optional[ConversionReport] = None,
                           evaluation: Optional[str] = None):
     """Every MF33 and MF34 section in a parsed ENDF → one :class:`CovarianceSuite`.
@@ -422,6 +610,29 @@ def decodeCovarianceSuite(endf, report: Optional[ConversionReport] = None,
     """
     report = report if report is not None else ConversionReport()
     suite = CovarianceSuite(evaluation=evaluation, projectile="n", interaction="nuclear")
+
+    mf1 = endf.mf.get(1) if hasattr(endf, "mf") else None
+
+    mf31 = endf.mf.get(31) if hasattr(endf, "mf") else None
+    if mf31 is not None:
+        # The whole MF31 file is the sibling set: §31.1's NC-type MT452 is
+        # declared as the sum of MT455 and MT456, both of which are sections of
+        # this same file. `to_xs_covmat` resolves that only when handed them.
+        siblings = {mt: mf31.mt[mt] for mt in getattr(mf31, "mt", {})}
+        values = nubarShims(mf1)
+        separatePrompt = 456 in getattr(mf1, "mt", {}) if mf1 is not None else False
+        if not values and mf1 is None:
+            report.warn(
+                "MF31 is present but MF1 is not, so the nu-bar values a "
+                "relative covariance is relative to are unavailable and an "
+                "NC-type total cannot be weighted correctly"
+            )
+        for mt in sorted(siblings):
+            sections, report = decodeMF31MT(
+                mf31.mt[mt], report, separatePrompt=separatePrompt,
+                siblingSections=siblings, nubarValues=values,
+            )
+            suite.covarianceSections.extend(sections)
 
     mf33 = endf.mf.get(33) if hasattr(endf, "mf") else None
     if mf33 is not None:
@@ -448,28 +659,22 @@ def decodeCovarianceSuite(endf, report: Optional[ConversionReport] = None,
             sections, report = decodeMF35MT(mf35.mt[mt], report)
             suite.covarianceSections.extend(sections)
 
-    if mf33 is None and mf34 is None and mf35 is None:
-        # MF31 and MF32 are covariances this adapter does not convert, so an
-        # evaluation carrying only those still yields an empty suite — but
-        # saying it "carries no covariances" would be false, and the two cases
-        # want different follow-up from the reader.
-        unconverted = [mf for mf in (31, 32) if endf.mf.get(mf) is not None]
-        if unconverted:
+    if mf31 is None and mf33 is None and mf34 is None and mf35 is None:
+        # MF32 is a covariance this adapter does not convert, so an evaluation
+        # carrying only it still yields an empty suite — but saying it "carries
+        # no covariances" would be false, and the two cases want different
+        # follow-up from the reader.
+        if endf.mf.get(32) is not None:
             report.lost(
-                "no MF33, MF34 or MF35: the only covariances this evaluation "
-                f"carries are {', '.join(f'MF{mf}' for mf in unconverted)}, "
-                "which this adapter does not convert"
+                "no MF31, MF33, MF34 or MF35: the only covariance this "
+                "evaluation carries is MF32, which this adapter does not convert"
             )
         else:
             report.lost(
-                "no MF33, MF34 or MF35: this evaluation carries no covariances"
+                "no MF31, MF33, MF34 or MF35: this evaluation carries no "
+                "covariances"
             )
 
-    if endf.mf.get(31) is not None:
-        report.unsupportedNode(
-            "MF31 (nubar covariances) is present and parsed by kika, but this "
-            "adapter covers MF33 and MF34 only"
-        )
     if endf.mf.get(32) is not None:
         report.unsupportedNode(
             "MF32 (resonance parameter covariances) is present and parsed by "

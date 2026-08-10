@@ -1,0 +1,914 @@
+ ENDF/B-VIII.1                                                         0  0
+ 9.223500+4 2.330248+2          1          1          0          19228 1451    1
+ 0.000000+0 0.000000+0          0          0          0          69228 1451    2
+ 1.000000+0 3.000000+7          1          0         10          89228 1451    3
+ 0.000000+0 0.000000+0          0          0        337          89228 1451    4
+ 92-U -235 IAEA       EVAL-FEB23 LANL/INDEN Collaboration         9228 1451    5
+                      DIST-AUG24 REV1-JUN24            20240830   9228 1451    6
+---- ENDF/B-VIII.1    MATERIAL 9228         REVISION 1            9228 1451    7
+----- INCIDENT-NEUTRON DATA                                       9228 1451    8
+------ ENDF-6                                                     9228 1451    9
+****************************************************************  9228 1451   10
+Changes in ENDF/B-VIII.1, see B81 big paper(NUCL DATA SHEETS 2025)9228 1451   11
+                                                                  9228 1451   12
+RRR: Updated res. par. below 20 eV (ORNL+IAEA) to fit RPI data    9228 1451   13
+Changes in nubar driven by new LANL evaluation + INDEN insights   9228 1451   14
+PFNS: New LANL evaluation + INDEN tweaks in the RRR/URR           9228 1451   15
+INDEN file: u235ib46o28t6DNcnu5ef0ST25t MAR23                     9228 1451   16
+Cross section calculations from:                                  9228 1451   17
+R. Capote, A. Trkov, M. Sin, M.T. Pigni, et al., 'IAEA CIELO      9228 1451   18
+Evaluation of Neutron-induced Reactions on U-235 and U-238        9228 1451   19
+targets up to 30~MeV', Nucl. Data Sheets 148 (2018) 254-292       9228 1451   20
+                                                                  9228 1451   21
+*** Remove correlations with RRR ***  (A. Trkov 18 Jan 2023)      9228 1451   22
+*** RRR from ENDF/B-VII.1 + bgnd(n,f) *** (A. Trkov 2 Nov 2021)   9228 1451   23
+****************************************************************  9228 1451   24
+Missing exit distributions imported from TENDL2019                9228 1451   25
+by I.J. Thompson (LLNL) on 2023-04-21T21:41:38                    9228 1451   26
+Some neutron exit distributions, as noted, may be imported so all 9228 1451   27
+exit distributions have the same reference frame.                 9228 1451   28
+Changes by program patchGNDS.py:                                  9228 1451   29
+  He4 distribution for MT=800: He4 + Th232.                       9228 1451   30
+  He4 distribution for MT=801: He4 + (Th232_e1 -> Th232 + photon).9228 1451   31
+  He4 distribution for MT=802: He4 + (Th232_e2 -> Th232 + photon).9228 1451   32
+  He4 distribution for MT=803: He4 + (Th232_e3 -> Th232 + photon).9228 1451   33
+  He4 distribution for MT=804: He4 + (Th232_e4 -> Th232 + photon).9228 1451   34
+  He4 distribution for MT=805: He4 + (Th232_e5 -> Th232 + photon).9228 1451   35
+  He4 distribution for MT=806: He4 + (Th232_e6 -> Th232 + photon).9228 1451   36
+  He4 distribution for MT=807: He4 + (Th232_e7 -> Th232 + photon).9228 1451   37
+  He4 distribution for MT=808: He4 + (Th232_e8 -> Th232 + photon).9228 1451   38
+  He4 distribution for MT=809: He4 + (Th232_e9 -> Th232 + photon).9228 1451   39
+  He4 distribution for MT=810: He4 + (Th232_e10 -> Th232 +        9228 1451   40
+    photon).                                                      9228 1451   41
+  He4 distribution for MT=811: He4 + (Th232_e11 -> Th232 +        9228 1451   42
+    photon).                                                      9228 1451   43
+  He4 distribution for MT=812: He4 + (Th232_e12 -> Th232 +        9228 1451   44
+    photon).                                                      9228 1451   45
+  He4 distribution for MT=813: He4 + (Th232_e13 -> Th232 +        9228 1451   46
+    photon).                                                      9228 1451   47
+  He4 distribution for MT=814: He4 + (Th232_e14 -> Th232 +        9228 1451   48
+    photon).                                                      9228 1451   49
+  He4 distribution for MT=815: He4 + (Th232_e15 -> Th232 +        9228 1451   50
+    photon).                                                      9228 1451   51
+  He4 distribution for MT=816: He4 + (Th232_e16 -> Th232 +        9228 1451   52
+    photon).                                                      9228 1451   53
+  He4 distribution for MT=817: He4 + (Th232_e17 -> Th232 +        9228 1451   54
+    photon).                                                      9228 1451   55
+  He4 distribution for MT=818: He4 + (Th232_e18 -> Th232 +        9228 1451   56
+    photon).                                                      9228 1451   57
+  He4 distribution for MT=819: He4 + (Th232_e19 -> Th232 +        9228 1451   58
+    photon).                                                      9228 1451   59
+  He4 distribution for MT=820: He4 + (Th232_e20 -> Th232 +        9228 1451   60
+    photon).                                                      9228 1451   61
+  He4 distribution for MT=821: He4 + (Th232_e21 -> Th232 +        9228 1451   62
+    photon).                                                      9228 1451   63
+  He4 distribution for MT=822: He4 + (Th232_e22 -> Th232 +        9228 1451   64
+    photon).                                                      9228 1451   65
+  He4 distribution for MT=823: He4 + (Th232_e23 -> Th232 +        9228 1451   66
+    photon).                                                      9228 1451   67
+  He4 distribution for MT=824: He4 + (Th232_e24 -> Th232 +        9228 1451   68
+    photon).                                                      9228 1451   69
+  He4 distribution for MT=825: He4 + (Th232_e25 -> Th232 +        9228 1451   70
+    photon).                                                      9228 1451   71
+  He4 distribution for MT=826: He4 + (Th232_e26 -> Th232 +        9228 1451   72
+    photon).                                                      9228 1451   73
+  He4 distribution for MT=827: He4 + (Th232_e27 -> Th232 +        9228 1451   74
+    photon).                                                      9228 1451   75
+  He4 distribution for MT=828: He4 + (Th232_e28 -> Th232 +        9228 1451   76
+    photon).                                                      9228 1451   77
+  He4 distribution for MT=829: He4 + (Th232_e29 -> Th232 +        9228 1451   78
+    photon).                                                      9228 1451   79
+  He4 distribution for MT=830: He4 + (Th232_e30 -> Th232 +        9228 1451   80
+    photon).                                                      9228 1451   81
+  He4 distribution for MT=831: He4 + (Th232_e31 -> Th232 +        9228 1451   82
+    photon).                                                      9228 1451   83
+  He4 distribution for MT=832: He4 + (Th232_e32 -> Th232 +        9228 1451   84
+    photon).                                                      9228 1451   85
+  He4 distribution for MT=833: He4 + (Th232_e33 -> Th232 +        9228 1451   86
+    photon).                                                      9228 1451   87
+  He4 distribution for MT=834: He4 + (Th232_e34 -> Th232 +        9228 1451   88
+    photon).                                                      9228 1451   89
+  He4 distribution for MT=835: He4 + (Th232_e35 -> Th232 +        9228 1451   90
+    photon).                                                      9228 1451   91
+                                                                  9228 1451   92
+Version    ib46o28t6DNcnu5ef0ST25q                                9228 1451   93
+Source     Roberto\ib50\u235_20220923.out                         9228 1451   94
+Resonance                                                         9228 1451   95
+Delayed    Resonance\U235_dlyd_e71.end                            9228 1451   96
+Fission    Resonance\U235_fissp1_gbDNnu5jr.end                    9228 1451   97
+Fission xs Resonance\U235_fisxs_STD-2017-final-11Feb17-vp-at2.end 9228 1451   98
+Mod.Fis.xs                                                        9228 1451   99
+Fiss.E     Resonance\fis_energy_30.endf                           9228 1451  100
+Fiss.gamma Fission_gamma\u5-mf6mt18-pnu-ng_Ionel20171116.endf     9228 1451  101
+Covariance Covariance\u235_cov_zg.endf                            9228 1451  102
+Inel.Cov.  Covariance\u235_cov-inel.endf                          9228 1451  103
+                                                                  9228 1451  104
+General information for Version u235ib46o28t6DNcnu5ef0ST25q       9228 1451  105
+                                                                  9228 1451  106
+- The basis is the Empire calculation 'ib50' (with capture at the 9228 1451  107
+  upper limit of Jandel data, tuned to better fit Wallner and     9228 1451  108
+  Allmond data). The model parameters are tuned to improve        9228 1451  109
+  agreement with Kammerdiener ddx at 14 MeV.                      9228 1451  110
+  Non-threshold reactions e.g. (n,a), (n,x) are extrapolated      9228 1451  111
+  down to thermal energies as 1/v.                                9228 1451  112
+- Resonance parameters are ORNL version:                          9228 1451  113
+ECHO is off.                                                      9228 1451  114
+- Prompt nu-bar near thermal energies is evaluated by Pronyaev,   9228 1451  115
+  The prompt nu-bar (nu_p) values follow Reed data taken from the 9228 1451  116
+  EXFOR extry 10427003 up to 26.4 eV. Simon and Frehaut data      9228 1451  117
+  shapes are identical; they were normalized to Reed data in the  9228 1451  118
+  interval 10-27 eV; Simon data were adopted from 30 eV to 75 eV. 9228 1451  119
+  Subsequently, all nubar data were renormalized to the thermal   9228 1451  120
+  value of 2.41161, which agrees with Standards-2017 within       9228 1451  121
+  quoted uncertainties.                                           9228 1451  122
+    The energy grid of Reed data is modified slightly by shifting 9228 1451  123
+  the energies at 1.135 eV to 1.5 eV and 2.370 eV to 2.25 eV      9228 1451  124
+  decreasing slightly the nu_p value, at 2.04 eV to 2.36,         9228 1451  125
+  thus narrowing the dip order to prevent a positive trend in     9228 1451  126
+  reactivity with above-thermal leakage fraction in thermal       9228 1451  127
+  solution systems.                                               9228 1451  128
+    The nu_prompt in the range 30-70 keV is reduced, similarly    9228 1451  129
+  like in the JENDL-4.0 evaluation.                               9228 1451  130
+    Additionally, the revised interpretation of Standards-2017    9228 1451  131
+  (Jul.2017) caused an increase in the fission cross section      9228 1451  132
+  in the URR, which is compensated by a decrease in nu_prompt     9228 1451  133
+  starting at 100 eV, reaching the minimum value at 20 keV.       9228 1451  134
+  The nu_prompt is also reduced by up to 0.28 in the energy       9228 1451  135
+  range 1.2-2.4 MeV to improve the performance in integral        9228 1451  136
+  benchmarks. This is thought to counteract the adjustment done   9228 1451  137
+  to nu_p in ENDF/B-VII.1, but the details are not known.         9228 1451  138
+    At higher energies the evaluation by D. Neudecker is adopted. 9228 1451  139
+  (Private communication, D. Neudecker, 24 Feb. 2022              9228 1451  140
+  File: "U235nubar_tweak_LA-UR-22-21516.endf.txt").               9228 1451  141
+                                                                  9228 1451  142
+- Fission cross section is consistent with Standards-2017.        9228 1451  143
+  Above the resolved resonance range several high-resolution      9228 1451  144
+  measurements are available, which show very good consistency,   9228 1451  145
+  but the structure is not represented in earlier evaluations.    9228 1451  146
+  The fission cross section with fluctuations was provided by     9228 1451  147
+  I. Duran (private communication, Sept.2017), renormalized       9228 1451  148
+  over broad energy ranges to agree with Standards-2017.          9228 1451  149
+- Other fission data (except PFNS and cross sections) are         9228 1451  150
+  from ENDF/B-VII.1                                               9228 1451  151
+- Delayed nu-bar and spectra are taken from ENDF/B-VII.1          9228 1451  152
+- PFNS is as provided by D. Neudecker (private communication,     9228 1451  153
+  file "VIII1beta1_MF31MT452455456_LA-UR-23-20728.endf",          9228 1451  154
+  3 Feb. 2023).                                                   9228 1451  155
+- Covariances of the cross sections in the resonance region       9228 1451  156
+  were determined from the covariances of the resonance           9228 1451  157
+  parameters because the latter is impractical due to the         9228 1451  158
+  large size (1.7 MB). The reactions cross sections with          9228 1451  159
+  covariances include elastic, fission, capture and the           9228 1451  160
+  corresponding cross-reaction covariances.                       9228 1451  161
+  The total is defined as the sum of the partials.                9228 1451  162
+- The covariance matrix prior for the cross sections and          9228 1451  163
+  Legendre coefficients of the angular distributions above        9228 1451  164
+  the resolved resonance range is generated using the Monte       9228 1451  165
+  Carlo technique by statistical sampling of the model            9228 1451  166
+  parameter in the Empire calculations. About 3000 ENDF           9228 1451  167
+  files were generated in the process. The first discrete         9228 1451  168
+  inelastic cross section is treated explicitly while all         9228 1451  169
+  the others are lumped into MT 851. Similarly, absorption        9228 1451  170
+  reactions MT649 (m,p) and the MT800 series discrete level       9228 1451  171
+  (n,alpha) are lumped into MT 852. This is necessary to          9228 1451  172
+  preserve unitarity without defining the covariances for         9228 1451  173
+  each reaction channel separately.                               9228 1451  174
+- The final covariance matrices for all reactions (including      9228 1451  175
+  cross reaction correlations) were obtained by the generalised   9228 1451  176
+  least-squares method in the GANDR system using measured         9228 1451  177
+  data from the EXFOR data base, except for fission,              9228 1451  178
+  in which case the Standards-2017 was input to GANDR             9228 1451  179
+  instead of the experimental data. A fully-correlated            9228 1451  180
+  uncertainty of 1.2 percent was included to account for the      9228 1451  181
+  unrecognised sources of uncertainty.                            9228 1451  182
+  Experimental data marked with * were renormalized to the        9228 1451  183
+  IRDFF-1.05 cross sections @ https://www-nds.iaea.org/IRDFF/.    9228 1451  184
+  Total cross section                                             9228 1451  185
+  Selected data for fitting the total were the following:         9228 1451  186
+       Author               Year  EXFOR entry & subentry          9228 1451  187
+    1. C.A.UTTLEY,ET.AL. (66)     X4 21088  4 (60<E<960 keV)      9228 1451  188
+    2. V.P.VERTEBNYY,ET.AL. (80)  X4 40609  2 E=24.5 keV          9228 1451  189
+    3. W.P.POENITZ,ET.AL. (81)    X4 10935  6 E>200 keV           9228 1451  190
+    4. J.Cabe,ET.AL. (73)         X4 20480 17                     9228 1451  191
+    6. R.B.Schwartz,ET.AL. (74)   X4 10280  5 *2                  9228 1451  192
+    7. F.L.Green,ET.AL. (73)      X4 10588  2                     9228 1451  193
+    8. J.Cabe,ET.AL. (73)         X4 20480 18                     9228 1451  194
+    9. W.P.POENITZ,ET.AL. (83)    X4 12853 54                     9228 1451  195
+   10. D.G.FOSTER JR,ET.AL. (71)  X4 10047 96                     9228 1451  196
+   11. J.M.PETERSON,ET.AL. (60)   X4 11108 44                     9228 1451  197
+                                                                  9228 1451  198
+   Capture cross section                                          9228 1451  199
+   Capture cross sections in EXFOR were measured mainly as        9228 1451  200
+   ratios. At present we could not include them in the            9228 1451  201
+   analysis. the Gwin data (EXFOR entry 14149003) are             9228 1451  202
+   labelled as "derived" and do not have the uncertainties.       9228 1451  203
+   Selected data for fitting were only:                           9228 1451  204
+       M.Jandel,ET.AL.      (12)  X4 14149  3  2<E<60 keV         9228 1451  205
+                                                                  9228 1451  206
+  (n,2n)                                                          9228 1451  207
+  The EXFOR entry #21568004 by J. Frehaut, which includes the     9228 1451  208
+  normalisation correction for new Standards, was selected.       9228 1451  209
+  Furthermore the data points below 8.5 MeV were rejected         9228 1451  210
+  because of experimental uncertainties due to the difficulty     9228 1451  211
+  in discriminating between neutrons from the (n,2n) and the      9228 1451  212
+  fission reaction.                                               9228 1451  213
+  The measurement #20795010 by D.S. Mather was rejected due       9228 1451  214
+  to unreasonably large discrepancy with the Frehaut data         9228 1451  215
+  and the shape, which was in contradiction with the model        9228 1451  216
+  calculation.                                                    9228 1451  217
+  Hence, selected data for fitting (n,2n) were only:              9228 1451  218
+      J.Frehaut          (2016) X4 entry 21568004  E>8 MeV        9228 1451  219
+                                                                  9228 1451  220
+  (n,3n)                                                          9228 1451  221
+  There are only two data sets in EXFOR. Only the data in the     9228 1451  222
+  EXFOR entry 10795002 by Veeser were adopted, while the data     9228 1451  223
+  in the EXFOR entry #20795011 by Mather were rejected.           9228 1451  224
+  Hence, selected data for fitting (n,3n) were only:              9228 1451  225
+      L.R.Veeser,ET.AL.    (78)  X4 10795  2                      9228 1451  226
+                                                                  9228 1451  227
+- Cross-material covariances were prepared manually from the      9228 1451  228
+  Standards-2017 file. Unrecognised sources of uncertainties      9228 1451  229
+  (USU) of 1.2 percent were added to the cross-covariances of     9228 1451  230
+  the fission cross sections between different materials.         9228 1451  231
+                                                                  9228 1451  232
+- The uncertainties of the delayed neutron multiplicities were    9228 1451  233
+  taken from Keepin rather than Tuttle, but taken from the        9228 1451  234
+  publication by Tuttle, which includes a comparative analysis:   9228 1451  235
+  R. J. Tuttle (1975) Delayed-Neutron Data for Reactor-Physics    9228 1451  236
+  Analysis, Nuclear Science and Engineering, 56:1, 37-71,         9228 1451  237
+  DOI: 10.13182/NSE75-A26620                                      9228 1451  238
+                                                                  9228 1451  239
+- The initial covariances for the prompt fission neutron          9228 1451  240
+  multiplicities were taken from ENDF/B-VII.1, which originated   9228 1451  241
+  from P. Young least-square fit of available nubar data.         9228 1451  242
+  The following modifications were made:                          9228 1451  243
+  * Below 0.7 eV an additional uncertainty component was added    9228 1451  244
+    so as to make the uncertainty match the raw value             9228 1451  245
+    recommended by Standards-2017.                                9228 1451  246
+  * Between 0.7 eV and 73 eV the uncertainties were essentially   9228 1451  247
+    taken from the experimental data, assuming they were          9228 1451  248
+    statistical. In the range 5.6 eV to 75 eV an additional       9228 1451  249
+    fully correlated component of 0.5 percent was assigned        9228 1451  250
+    to account for the systematic uncertainty.                    9228 1451  251
+  * Above 73 eV up to 20 keV no data experimental exist, hence    9228 1451  252
+    a 2 percent uncertainty was assigned over energy subregions   9228 1451  253
+    73, 100, 200, 400, 1000, 2000, 4000, 10000 and 20000 eV.      9228 1451  254
+  * An additional 0.4 percent fully correlated uncertainty was    9228 1451  255
+    added over the entire energy range from 1.E-5 eV to 30 MeV    9228 1451  256
+    to account for the unrecognized systematic uncertaities of    9228 1451  257
+    nubar measurements as recommended in Standards 2017.          9228 1451  258
+  * Cross-material covariances are given for the nu-bar of        9228 1451  259
+    U-233, Pu-239 and Pu-241 as evaluated with Standards-2017.    9228 1451  260
+    The covariances are assumed energy-independent, although      9228 1451  261
+    the values in Standards-2017 are applicable to the thermal    9228 1451  262
+    energy region only.                                           9228 1451  263
+                                                                  9228 1451  264
+- The covariances of the Legendre elastic scattering component    9228 1451  265
+  up to order P2 with cross-correlations as obtained in the       9228 1451  266
+  prior are available in MF34.                                    9228 1451  267
+                                                                  9228 1451  268
+- The PFNS covariances were evaluated with the spectra. In the    9228 1451  269
+  thermal range they correspond to Standards-2017. At higher      9228 1451  270
+  energies the covariance evaluation was done at LANL together    9228 1451  271
+  with the evaluation of the spectra.                             9228 1451  272
+                                                                  9228 1451  273
+                                                                  9228 1451  274
+General references to the U-235 evaluation                        9228 1451  275
+1) A.Trkov, R. Capote, M. T. Pigni, V.G. Pronyaev, M. Sin,        9228 1451  276
+   E.S. Soukhovitski,'Evaluation of the neutron induced reactions 9228 1451  277
+   on U-235 from 2.25 keV up to 30 MeV', Proc. ND2016,            9228 1451  278
+   EPJ Web of Conf. 146, 02029 (2017).                            9228 1451  279
+                                                                  9228 1451  280
+2) R. Capote, A. Trkov, M. Sin, M.T. Pigni, et al., 'IAEA CIELO   9228 1451  281
+   Evaluation of Neutron-induced Reactions on U-235 and U-238     9228 1451  282
+   targets up to 30~MeV', Nucl. Data Sheets 148 (2018) 254-292    9228 1451  283
+                                                                  9228 1451  284
+References to RR and URR:                                         9228 1451  285
+3) V.G. Pronyaev, R. Capote, A. Trkov, A. Wallner,                9228 1451  286
+   'New fit of neutron thermal constants for U-233,235,Pu-239,241 9228 1451  287
+   and Cf-252: microscopic vs integral data', Proc. ND2016,       9228 1451  288
+   EPJ Web of Conf. 146, 02011 (2017).                            9228 1451  289
+                                                                  9228 1451  290
+4) M.T. Pigni, R. Capote, A. Trkov, V. G. Pronyaev,               9228 1451  291
+   'U-235 Resonance Parameters and Neutron Multiplicities in the  9228 1451  292
+   Neutron Energy Region below 100 eV', Proc. ND2016,             9228 1451  293
+   EPJ Web of Conf. 146, 02011 (2017).                            9228 1451  294
+                                                                  9228 1451  295
+References to the fast energy region:                             9228 1451  296
+* OMP: RIPL 2408 potential with extended coupling scheme.         9228 1451  297
+5) R. Capote, E.Sh. Soukhovitskii, J.M. Quesada, S. Chiba,        9228 1451  298
+   Phys. Rev. C72, 064610 (2005)                                  9228 1451  299
+                                                                  9228 1451  300
+6) R. Capote, S. Chiba, E.Sh. Soukhovitski, J.M. Quesada, E.Bauge 9228 1451  301
+   J. Nucl. Sci. Tech. 45, 333-340 (2008).                        9228 1451  302
+                                                                  9228 1451  303
+7) F.S. Dietrich, I.J. Thompson, and T. Kawano,                   9228 1451  304
+   Phys. Rev. C85, 044611 (2012).                                 9228 1451  305
+                                                                  9228 1451  306
+* Cross section calculation:                                      9228 1451  307
+8) M. Sin, R. Capote, M. W. Herman, and A. Trkov, Phys. Rev. C 93,9228 1451  308
+   034605 (2016), 'Extended optical model for fission'            9228 1451  309
+                                                                  9228 1451  310
+9) M. Sin, R. Capote, M.W. Herman, and A. Trkov, 'Modelling       9228 1451  311
+   Neutron-induced Reactions on  {232-237}U from 10 keV up to     9228 1451  312
+   30 MeV', Nucl. Data Sheets 139, 138-170 (2017).                9228 1451  313
+                                                                  9228 1451  314
+References to the PFNS evaluation                                 9228 1451  315
+10) A.Trkov, R. Capote, V.G. Pronyaev, Nucl. Data Sheets 123      9228 1451  316
+   (2015) 8-15, 'Current Issues in Nuclear Data Evaluation        9228 1451  317
+   Methodology: U-235 Prompt Fission Neutron Spectra and          9228 1451  318
+   Multiplicity for Thermal Neutrons'                             9228 1451  319
+                                                                  9228 1451  320
+11) A.Trkov, R. Capote, 'Evaluation of the Prompt Fission Neutron 9228 1451  321
+   Spectrum of Thermal-neutron Induced Fission in U-235',         9228 1451  322
+   Phys. Proc. 64, 48-54 (2015).                                  9228 1451  323
+                                                                  9228 1451  324
+12) M.E.Rising, P.Talou, T.Kawano amd A.K.Prinja,                 9228 1451  325
+   Nucl. Sci. Eng. 175, 81-93 (2013), 'Evaluation and Uncertainty 9228 1451  326
+   Quantification of Prompt Fission Neutron Spectra of Uranium    9228 1451  327
+   and Plutonium Isotopes'.                                       9228 1451  328
+                                                                  9228 1451  329
+13) D. Neudecker, P. Talou, A.C. Kahler, M.C. White and T. Kawano,9228 1451  330
+   Evaluation of the 235U prompt fission neutron spectrum         9228 1451  331
+   including a detailed analysis of experimental data and         9228 1451  332
+   improved model information, ND2016,                            9228 1451  333
+   EPJ Web of Conf. 146, 04012 (2017).                            9228 1451  334
+                                                                  9228 1451  335
+ 92-U -235 IAEA       2020_Apr   IAEA CIELO Collaboration         9228 1451  336
+ **************** Program DICTIN (VERSION 2018-1) ****************9228 1451  337
+ **************** Program DICTIN (VERSION 2018-1) ****************9228 1451  338
+ **************** Program DICTIN (VERSION 2018-1) ****************9228 1451  339
+ **************** Program DICTIN (VERSION 2018-1) ****************9228 1451  340
+ **************** Program DICTIN (VERSION 2023-1) ****************9228 1451  341
+                                1        451        349          09228 1451  342
+                                1        452         35          09228 1451  343
+                                1        455          7          09228 1451  344
+                                1        456         35          09228 1451  345
+                                3         18        270          09228 1451  346
+                               31        452          5          09228 1451  347
+                               31        455          4          09228 1451  348
+                               31        456         94          09228 1451  349
+ 0.000000+0 0.000000+0          0          0          0          09228 1  099999
+ 9.223500+4 2.330248+2          0          2          0          09228 1452
+ 0.000000+0 0.000000+0          0          0          1         969228 1452
+         96          2          0          0          0          09228 1452
+ 1.000000-5 2.429850+0 2.000000-1 2.429850+0 3.000000-1 2.433350+09228 1452
+ 1.105000+0 2.433350+0 2.040000+0 2.355850+0 3.350000+0 2.425850+09228 1452
+ 3.610000+0 2.423850+0 4.850000+0 2.376650+0 6.390000+0 2.388950+09228 1452
+ 7.080000+0 2.401850+0 8.790000+0 2.395850+0 9.300000+0 2.395850+09228 1452
+ 1.016000+1 2.386850+0 1.239000+1 2.398850+0 1.545000+1 2.398850+09228 1452
+ 1.610000+1 2.395850+0 1.667000+1 2.405850+0 1.805000+1 2.398850+09228 1452
+ 1.930000+1 2.396850+0 2.110000+1 2.405850+0 2.200000+1 2.420750+09228 1452
+ 2.295000+1 2.423850+0 1.000000+2 2.437850+0 2.000000+2 2.443850+09228 1452
+ 5.000000+2 2.440160+0 5.500000+2 2.443860+0 6.000000+2 2.432560+09228 1452
+ 6.500000+2 2.417560+0 7.000000+2 2.432560+0 7.500000+2 2.451460+09228 1452
+ 8.000000+2 2.425060+0 8.500000+2 2.400560+0 9.000000+2 2.413770+09228 1452
+ 9.500000+2 2.418770+0 1.000000+3 2.418870+0 1.500000+3 2.437180+09228 1452
+ 2.000000+3 2.435580+0 2.500000+3 2.447490+0 3.000000+3 2.425400+09228 1452
+ 3.500000+3 2.406210+0 4.000000+3 2.409520+0 4.500000+3 2.401630+09228 1452
+ 5.000000+3 2.416330+0 5.500000+3 2.429040+0 6.000000+3 2.426750+09228 1452
+ 7.000000+3 2.429770+0 7.500000+3 2.429380+0 8.000000+3 2.436490+09228 1452
+ 8.500000+3 2.446490+0 9.000000+3 2.437600+0 9.500000+3 2.431910+09228 1452
+ 1.000000+4 2.432420+0 1.500000+4 2.423100+0 2.500000+4 2.423870+09228 1452
+ 3.000000+4 2.416460+0 3.500000+4 2.405240+0 4.500000+4 2.428010+09228 1452
+ 5.000000+4 2.416350+0 5.500000+4 2.404600+0 6.500000+4 2.433700+09228 1452
+ 7.000000+4 2.418700+0 7.500000+4 2.392400+0 8.000000+4 2.430900+09228 1452
+ 1.700000+5 2.461400+0 3.000000+5 2.473900+0 4.000000+5 2.478500+09228 1452
+ 6.000000+5 2.493600+0 8.500000+5 2.509800+0 1.000000+6 2.517800+09228 1452
+ 1.200000+6 2.540900+0 1.600000+6 2.596280+0 1.800000+6 2.619540+09228 1452
+ 2.600000+6 2.729760+0 3.000000+6 2.774350+0 3.500000+6 2.831950+09228 1452
+ 4.000000+6 2.905480+0 4.500000+6 2.986340+0 5.000000+6 3.045330+09228 1452
+ 5.500000+6 3.148650+0 6.000000+6 3.233070+0 6.500000+6 3.354580+09228 1452
+ 7.000000+6 3.445800+0 7.500000+6 3.509800+0 8.000000+6 3.568600+09228 1452
+ 9.000000+6 3.698700+0 9.500000+6 3.765800+0 1.050000+7 3.891200+09228 1452
+ 1.200000+7 4.110300+0 1.250000+7 4.197900+0 1.300000+7 4.280200+09228 1452
+ 1.450000+7 4.469300+0 1.650000+7 4.763750+0 1.700000+7 4.833400+09228 1452
+ 1.800000+7 4.964850+0 1.900000+7 5.090170+0 3.000000+7 6.249000+09228 1452
+                                                                  9228 1  0
+ 9.223500+4 2.330248+2          0          2          0          09228 1455
+ 0.000000+0 0.000000+0          0          0          6          09228 1455
+ 1.333600-2 3.273900-2 1.207800-1 3.027800-1 8.494900-1 2.853000+09228 1455
+ 0.000000+0 0.000000+0          0          0          1          59228 1455
+          5          2          0          0          0          09228 1455
+ 1.000000-5 1.585000-2 5.000000+4 1.670000-2 4.000000+6 1.670000-29228 1455
+ 7.000000+6 9.000000-3 3.000000+7 9.000000-3                      9228 1455
+                                                                  9228 1  0
+ 9.223500+4 2.330248+2          0          2          0          09228 1456
+ 0.000000+0 0.000000+0          0          0          1         959228 1456
+         95          2          0          0          0          09228 1456
+ 1.000000-5 2.414000+0 2.000000-1 2.414000+0 3.000000-1 2.417500+09228 1456
+ 1.105000+0 2.417500+0 2.040000+0 2.340000+0 3.350000+0 2.410000+09228 1456
+ 3.610000+0 2.408000+0 4.850000+0 2.360800+0 6.390000+0 2.373100+09228 1456
+ 7.080000+0 2.386000+0 8.790000+0 2.380000+0 9.300000+0 2.380000+09228 1456
+ 1.016000+1 2.371000+0 1.239000+1 2.383000+0 1.545000+1 2.383000+09228 1456
+ 1.610000+1 2.380000+0 1.667000+1 2.390000+0 1.805000+1 2.383000+09228 1456
+ 1.930000+1 2.381000+0 2.110000+1 2.390000+0 2.200000+1 2.404900+09228 1456
+ 2.295000+1 2.408000+0 1.000000+2 2.422000+0 2.000000+2 2.428000+09228 1456
+ 5.000000+2 2.424300+0 5.500000+2 2.428000+0 6.000000+2 2.416700+09228 1456
+ 6.500000+2 2.401700+0 7.000000+2 2.416700+0 7.500000+2 2.435600+09228 1456
+ 8.000000+2 2.409200+0 8.500000+2 2.384700+0 9.000000+2 2.397900+09228 1456
+ 9.500000+2 2.402900+0 1.000000+3 2.403000+0 1.500000+3 2.421300+09228 1456
+ 2.000000+3 2.419700+0 2.500000+3 2.431600+0 3.000000+3 2.409500+09228 1456
+ 3.500000+3 2.390300+0 4.000000+3 2.393600+0 4.500000+3 2.385700+09228 1456
+ 5.000000+3 2.400400+0 5.500000+3 2.413100+0 6.000000+3 2.410800+09228 1456
+ 7.000000+3 2.413800+0 7.500000+3 2.413400+0 8.000000+3 2.420500+09228 1456
+ 8.500000+3 2.430500+0 9.000000+3 2.421600+0 9.500000+3 2.415900+09228 1456
+ 1.000000+4 2.416400+0 1.500000+4 2.407000+0 2.500000+4 2.407600+09228 1456
+ 3.000000+4 2.400100+0 3.500000+4 2.388800+0 4.500000+4 2.411400+09228 1456
+ 5.500000+4 2.387900+0 6.500000+4 2.417000+0 7.000000+4 2.402000+09228 1456
+ 7.500000+4 2.375700+0 8.000000+4 2.414200+0 1.700000+5 2.444700+09228 1456
+ 3.000000+5 2.457200+0 4.000000+5 2.461800+0 6.000000+5 2.476900+09228 1456
+ 8.500000+5 2.493100+0 1.000000+6 2.501100+0 1.200000+6 2.524200+09228 1456
+ 1.600000+6 2.579580+0 1.800000+6 2.602840+0 2.600000+6 2.713060+09228 1456
+ 3.000000+6 2.757650+0 3.500000+6 2.815250+0 4.000000+6 2.888780+09228 1456
+ 4.500000+6 2.970920+0 5.000000+6 3.031200+0 5.500000+6 3.135800+09228 1456
+ 6.000000+6 3.221500+0 6.500000+6 3.344300+0 7.000000+6 3.436800+09228 1456
+ 7.500000+6 3.500800+0 8.000000+6 3.559600+0 9.000000+6 3.689700+09228 1456
+ 9.500000+6 3.756800+0 1.050000+7 3.882200+0 1.200000+7 4.101300+09228 1456
+ 1.250000+7 4.188900+0 1.300000+7 4.271200+0 1.450000+7 4.460300+09228 1456
+ 1.650000+7 4.754750+0 1.700000+7 4.824400+0 1.800000+7 4.955850+09228 1456
+ 1.900000+7 5.081170+0 3.000000+7 6.240000+0                      9228 1456
+                                                                  9228 1  0
+                                                                  9228 1  0
+                                                                  9228 0  0
+                                                                  9228 0  0
+ 9.223500+4 2.330248+2          0          0          0          09228 3 18
+ 1.940770+8 1.940770+8          0          0          1        8019228 3 18
+        801          2          0          0          0          09228 3 18
+ 1.000000-5 0.000000+0 2.250000+3 0.000000+0 2.250000+3 5.310210+09228 3 18
+ 2.250300+3 6.033217+0 2.253600+3 6.391060+0 2.256100+3 6.457323+09228 3 18
+ 2.256600+3 6.174486+0 2.259600+3 5.344049+0 2.265100+3 5.655028+09228 3 18
+ 2.269900+3 3.698311+0 2.271500+3 3.950666+0 2.276400+3 6.368010+09228 3 18
+ 2.279000+3 7.094804+0 2.289100+3 5.290809+0 2.293700+3 3.742021+09228 3 18
+ 2.296900+3 4.129511+0 2.299400+3 5.267844+0 2.302000+3 5.410653+09228 3 18
+ 2.304600+3 4.624100+0 2.305700+3 4.518702+0 2.313400+3 6.780698+09228 3 18
+ 2.313900+3 6.353246+0 2.318700+3 3.708321+0 2.321400+3 2.802609+09228 3 18
+ 2.332100+3 6.093548+0 2.337500+3 8.371588+0 2.344600+3 7.101107+09228 3 18
+ 2.347700+3 8.225215+0 2.348300+3 7.981755+0 2.351000+3 7.982793+09228 3 18
+ 2.353700+3 7.147247+0 2.359100+3 7.967259+0 2.365400+3 4.482628+09228 3 18
+ 2.369800+3 2.996872+0 2.372700+3 3.457469+0 2.373500+3 3.214036+09228 3 18
+ 2.378900+3 3.534641+0 2.381600+3 3.956713+0 2.385800+3 3.206312+09228 3 18
+ 2.392300+3 3.632995+0 2.395300+3 3.532640+0 2.405300+3 6.483414+09228 3 18
+ 2.406300+3 6.176616+0 2.411300+3 5.738057+0 2.415600+3 6.352987+09228 3 18
+ 2.421700+3 5.573825+0 2.427000+3 6.616920+0 2.428800+3 7.170110+09228 3 18
+ 2.433600+3 6.099078+0 2.436400+3 5.926974+0 2.441500+3 7.589386+09228 3 18
+ 2.442700+3 7.816156+0 2.445400+3 7.220016+0 2.448300+3 8.150952+09228 3 18
+ 2.451200+3 8.372684+0 2.461700+3 3.907815+0 2.465500+3 4.281632+09228 3 18
+ 2.470300+3 5.142444+0 2.477000+3 6.878091+0 2.485400+3 7.493152+09228 3 18
+ 2.487400+3 5.479887+0 2.491500+3 5.296572+0 2.496000+3 6.512126+09228 3 18
+ 2.500000+3 5.926996+0 2.501800+3 5.662322+0 2.503200+3 5.300895+09228 3 18
+ 2.514900+3 6.049087+0 2.520000+3 4.666415+0 2.523500+3 4.190967+09228 3 18
+ 2.525500+3 4.909083+0 2.527800+3 4.472569+0 2.532800+3 6.202660+09228 3 18
+ 2.537600+3 7.145625+0 2.548200+3 7.001940+0 2.550800+3 5.465798+09228 3 18
+ 2.552400+3 4.819473+0 2.562500+3 8.098272+0 2.566100+3 8.821023+09228 3 18
+ 2.568900+3 9.119517+0 2.570300+3 8.653545+0 2.576900+3 5.072750+09228 3 18
+ 2.578100+3 6.259825+0 2.581100+3 6.461293+0 2.586700+3 5.593003+09228 3 18
+ 2.591300+3 3.260362+0 2.595700+3 2.998330+0 2.598700+3 3.515905+09228 3 18
+ 2.604600+3 6.603433+0 2.610700+3 7.204438+0 2.617800+3 6.003664+09228 3 18
+ 2.631800+3 4.820400+0 2.636400+3 5.598462+0 2.639900+3 5.786952+09228 3 18
+ 2.644900+3 4.297675+0 2.653100+3 3.385507+0 2.658300+3 3.456680+09228 3 18
+ 2.666600+3 6.317505+0 2.674600+3 4.233712+0 2.678000+3 4.723683+09228 3 18
+ 2.690000+3 3.745698+0 2.699300+3 2.547808+0 2.702000+3 3.009351+09228 3 18
+ 2.705200+3 2.896463+0 2.705500+3 2.846199+0 2.718500+3 3.891134+09228 3 18
+ 2.724600+3 4.004434+0 2.733700+3 6.994421+0 2.736400+3 6.508467+09228 3 18
+ 2.740000+3 7.389735+0 2.743100+3 7.350595+0 2.746300+3 6.361692+09228 3 18
+ 2.751500+3 6.215535+0 2.758800+3 7.135325+0 2.762200+3 7.992079+09228 3 18
+ 2.763500+3 6.472726+0 2.778100+3 5.194599+0 2.783600+3 5.620092+09228 3 18
+ 2.790900+3 5.618341+0 2.794100+3 5.776034+0 2.800600+3 4.314567+09228 3 18
+ 2.807000+3 4.030184+0 2.809000+3 5.069763+0 2.813200+3 5.244760+09228 3 18
+ 2.813900+3 5.578171+0 2.820000+3 3.981568+0 2.824400+3 3.503236+09228 3 18
+ 2.828000+3 3.786898+0 2.833900+3 4.922679+0 2.837700+3 5.398230+09228 3 18
+ 2.842100+3 5.209637+0 2.843200+3 5.286784+0 2.848700+3 4.233712+09228 3 18
+ 2.858200+3 5.894278+0 2.862400+3 7.206292+0 2.869100+3 5.825577+09228 3 18
+ 2.879100+3 6.072983+0 2.885700+3 4.249162+0 2.892500+3 3.709133+09228 3 18
+ 2.896100+3 3.669684+0 2.907100+3 4.854699+0 2.909000+3 4.126077+09228 3 18
+ 2.912400+3 4.054183+0 2.921800+3 6.965684+0 2.925500+3 8.356081+09228 3 18
+ 2.939300+3 4.639841+0 2.948900+3 3.223179+0 2.956300+3 4.489564+09228 3 18
+ 2.962200+3 3.132848+0 2.966500+3 3.204021+0 2.971200+3 4.017618+09228 3 18
+ 2.976700+3 4.341965+0 2.978100+3 4.056758+0 2.985700+3 4.138128+09228 3 18
+ 2.998200+3 4.823387+0 3.004400+3 6.237474+0 3.008300+3 6.894099+09228 3 18
+ 3.012700+3 6.458203+0 3.020400+3 4.979844+0 3.028100+3 5.241052+09228 3 18
+ 3.031300+3 6.277026+0 3.035600+3 6.512999+0 3.042600+3 4.874372+09228 3 18
+ 3.047800+3 4.503366+0 3.049800+3 4.953167+0 3.059700+3 4.050887+09228 3 18
+ 3.070800+3 7.660316+0 3.072100+3 6.627535+0 3.085000+3 5.400393+09228 3 18
+ 3.091000+3 3.881761+0 3.092100+3 4.971604+0 3.099700+3 5.110551+09228 3 18
+ 3.103800+3 5.377939+0 3.109900+3 4.001962+0 3.114900+3 3.670920+09228 3 18
+ 3.127900+3 5.087376+0 3.134200+3 6.469636+0 3.138700+3 6.556877+09228 3 18
+ 3.142300+3 4.312095+0 3.149600+3 4.556926+0 3.153600+3 5.192642+09228 3 18
+ 3.158500+3 4.209713+0 3.173300+3 2.573249+0 3.178700+3 3.212364+09228 3 18
+ 3.193100+3 6.109342+0 3.194800+3 5.413577+0 3.213200+3 3.237599+09228 3 18
+ 3.216100+3 3.365216+0 3.224600+3 5.072441+0 3.228900+3 5.804462+09228 3 18
+ 3.233200+3 5.430057+0 3.234700+3 5.070999+0 3.245300+3 6.120260+09228 3 18
+ 3.251700+3 5.073574+0 3.258500+3 4.717503+0 3.260300+3 4.758188+09228 3 18
+ 3.264100+3 5.604539+0 3.270600+3 4.928035+0 3.272300+3 4.515314+09228 3 18
+ 3.284800+3 6.671207+0 3.290000+3 5.014658+0 3.301800+3 1.003416+19228 3 18
+ 3.310900+3 5.938053+0 3.316200+3 4.052638+0 3.317600+3 4.981080+09228 3 18
+ 3.322900+3 4.566196+0 3.330100+3 5.222718+0 3.332100+3 4.913409+09228 3 18
+ 3.336200+3 5.161021+0 3.344200+3 4.512430+0 3.348100+3 4.929271+09228 3 18
+ 3.358800+3 3.525896+0 3.369400+3 2.953422+0 3.374800+3 3.002656+09228 3 18
+ 3.376500+3 2.564391+0 3.396800+3 5.546241+0 3.412500+3 5.738542+09228 3 18
+ 3.418800+3 6.380026+0 3.429800+3 4.053565+0 3.440800+3 3.199798+09228 3 18
+ 3.448100+3 3.314437+0 3.461400+3 4.473290+0 3.465400+3 3.874860+09228 3 18
+ 3.470600+3 4.960789+0 3.487600+3 4.310653+0 3.497400+3 6.309883+09228 3 18
+ 3.505500+3 6.490648+0 3.529800+3 4.061393+0 3.543600+3 5.425731+09228 3 18
+ 3.551100+3 5.229310+0 3.562900+3 3.429900+0 3.574600+3 5.470536+09228 3 18
+ 3.580600+3 6.040641+0 3.586500+3 5.203869+0 3.591300+3 4.894766+09228 3 18
+ 3.602300+3 5.519255+0 3.607400+3 6.064846+0 3.616200+3 4.514284+09228 3 18
+ 3.627700+3 4.317245+0 3.634400+3 3.687503+0 3.643100+3 4.922473+09228 3 18
+ 3.650800+3 4.967278+0 3.653800+3 4.750978+0 3.658100+3 4.028845+09228 3 18
+ 3.674200+3 3.824596+0 3.684700+3 3.676585+0 3.691900+3 4.818031+09228 3 18
+ 3.704700+3 4.786410+0 3.716300+3 3.984349+0 3.727000+3 3.797610+09228 3 18
+ 3.751900+3 4.380487+0 3.758700+3 5.052768+0 3.765100+3 5.044116+09228 3 18
+ 3.773600+3 5.537692+0 3.788700+3 5.024031+0 3.803700+3 4.848828+09228 3 18
+ 3.829700+3 5.256914+0 3.847300+3 6.032298+0 3.852600+3 5.058330+09228 3 18
+ 3.863900+3 4.006906+0 3.902800+3 3.415377+0 3.923100+3 3.929038+09228 3 18
+ 3.932300+3 4.338772+0 3.937000+3 4.401808+0 3.946000+3 5.683231+09228 3 18
+ 3.955000+3 6.009638+0 3.957300+3 5.516577+0 3.964100+3 5.678699+09228 3 18
+ 3.968800+3 6.763186+0 3.974200+3 6.389090+0 3.987900+3 4.106095+09228 3 18
+ 4.000600+3 4.480500+0 4.038700+3 4.656115+0 4.098600+3 4.129476+09228 3 18
+ 4.113900+3 4.560119+0 4.125200+3 3.709339+0 4.169500+3 4.051505+09228 3 18
+ 4.190400+3 4.734807+0 4.199300+3 5.586205+0 4.202100+3 4.920413+09228 3 18
+ 4.237200+3 4.446510+0 4.244200+3 6.252306+0 4.252500+3 6.638762+09228 3 18
+ 4.267800+3 5.334576+0 4.278100+3 5.021250+0 4.288000+3 5.517607+09228 3 18
+ 4.292900+3 6.096673+0 4.294900+3 5.947735+0 4.301500+3 4.615121+09228 3 18
+ 4.321400+3 4.863042+0 4.337600+3 3.925845+0 4.344800+3 3.704189+09228 3 18
+ 4.348900+3 3.856835+0 4.356800+3 5.279265+0 4.364800+3 4.760454+09228 3 18
+ 4.385300+3 5.455292+0 4.388700+3 5.495771+0 4.395500+3 4.308799+09228 3 18
+ 4.422900+3 3.626012+0 4.428400+3 3.774229+0 4.443700+3 5.070587+09228 3 18
+ 4.454100+3 5.904887+0 4.464600+3 4.607293+0 4.474600+3 4.558574+09228 3 18
+ 4.489100+3 5.566429+0 4.513900+3 4.702053+0 4.547300+3 4.600083+09228 3 18
+ 4.557800+3 3.690696+0 4.571100+3 3.643316+0 4.596700+3 5.032374+09228 3 18
+ 4.621100+3 4.275118+0 4.633400+3 4.205902+0 4.649000+3 3.162203+09228 3 18
+ 4.655600+3 3.273237+0 4.672800+3 4.750669+0 4.680000+3 4.364625+09228 3 18
+ 4.696100+3 4.384710+0 4.715700+3 3.511991+0 4.725200+3 2.886266+09228 3 18
+ 4.746200+3 3.892370+0 4.761300+3 3.692344+0 4.773100+3 4.095280+09228 3 18
+ 4.779000+3 4.408194+0 4.800100+3 3.571216+0 4.815300+3 3.405592+09228 3 18
+ 4.822200+3 3.162409+0 4.827400+3 3.683383+0 4.847400+3 3.710678+09228 3 18
+ 4.866600+3 4.113923+0 4.894900+3 5.777579+0 4.931500+3 2.790476+09228 3 18
+ 4.957400+3 3.129655+0 4.974500+3 2.697879+0 4.980200+3 3.115647+09228 3 18
+ 4.984600+3 3.922240+0 4.997000+3 4.224648+0 5.016100+3 4.096619+09228 3 18
+ 5.026000+3 3.752908+0 5.043700+3 5.191097+0 5.054600+3 4.454750+09228 3 18
+ 5.055600+3 4.289229+0 5.059900+3 4.492551+0 5.069900+3 3.743947+09228 3 18
+ 5.093500+3 4.163569+0 5.099900+3 3.621171+0 5.119200+3 3.940059+09228 3 18
+ 5.125700+3 4.477719+0 5.131600+3 3.858483+0 5.153700+3 3.321956+09228 3 18
+ 5.160700+3 3.571628+0 5.162300+3 3.495099+0 5.179000+3 3.268705+09228 3 18
+ 5.201400+3 3.818210+0 5.203000+3 3.581310+0 5.215000+3 3.465435+09228 3 18
+ 5.227000+3 3.724995+0 5.232500+3 3.928729+0 5.241400+3 3.608708+09228 3 18
+ 5.272700+3 3.635385+0 5.277100+3 4.122987+0 5.292000+3 3.942428+09228 3 18
+ 5.299700+3 3.726128+0 5.311900+3 4.255857+0 5.322300+3 4.532412+09228 3 18
+ 5.328900+3 4.240716+0 5.356400+3 4.217541+0 5.367200+3 3.711605+09228 3 18
+ 5.385800+3 4.488122+0 5.395800+3 3.729424+0 5.404400+3 3.535063+09228 3 18
+ 5.405100+3 3.699863+0 5.415900+3 4.264097+0 5.426600+3 4.354222+09228 3 18
+ 5.437900+3 3.732205+0 5.460300+3 3.472233+0 5.470400+3 3.037779+09228 3 18
+ 5.493900+3 4.325279+0 5.516500+3 5.088303+0 5.527800+3 4.111348+09228 3 18
+ 5.545300+3 4.929271+0 5.562100+3 5.283591+0 5.585100+3 3.917193+09228 3 18
+ 5.608200+3 3.460491+0 5.614400+3 3.844269+0 5.637700+3 4.425910+09228 3 18
+ 5.655000+3 3.391893+0 5.675500+3 3.354607+0 5.690400+3 3.790503+09228 3 18
+ 5.691800+3 3.282301+0 5.751100+3 3.337921+0 5.764400+3 4.410563+09228 3 18
+ 5.771000+3 4.749330+0 5.784300+3 4.080551+0 5.828700+3 4.149149+09228 3 18
+ 5.847900+3 4.637163+0 5.858000+3 4.053668+0 5.864800+3 4.828846+09228 3 18
+ 5.866600+3 4.716473+0 5.885000+3 4.620168+0 5.910200+3 2.918196+09228 3 18
+ 5.935400+3 2.915209+0 5.972000+3 3.526720+0 6.056900+3 3.960453+09228 3 18
+ 6.063900+3 3.490464+0 6.092800+3 3.264173+0 6.126300+3 3.307227+09228 3 18
+ 6.160100+3 3.059409+0 6.176300+3 2.640096+0 6.190900+3 3.120694+09228 3 18
+ 6.211400+3 3.407343+0 6.222900+3 3.769285+0 6.237200+3 3.126050+09228 3 18
+ 6.262500+3 3.198253+0 6.275000+3 3.586872+0 6.284200+3 3.166014+09228 3 18
+ 6.304200+3 3.033762+0 6.326500+3 3.345234+0 6.339500+3 3.770109+09228 3 18
+ 6.342400+3 3.426913+0 6.371600+3 3.532591+0 6.393700+3 3.494172+09228 3 18
+ 6.403900+3 4.050990+0 6.452800+3 3.470585+0 6.459400+3 3.516214+09228 3 18
+ 6.490100+3 2.944049+0 6.508300+3 3.244088+0 6.542600+3 3.222355+09228 3 18
+ 6.562600+3 2.983498+0 6.569600+3 3.433917+0 6.572800+3 3.312583+09228 3 18
+ 6.582700+3 3.615918+0 6.639400+3 3.219574+0 6.684000+3 2.756177+09228 3 18
+ 6.695000+3 3.032732+0 6.718200+3 2.894403+0 6.733600+3 2.629281+09228 3 18
+ 6.741400+3 3.061160+0 6.800700+3 3.685443+0 6.811400+3 4.011850+09228 3 18
+ 6.833600+3 2.779455+0 6.846900+3 2.709312+0 6.860200+3 3.318969+09228 3 18
+ 6.873500+3 3.410639+0 6.874600+3 3.258302+0 6.905500+3 3.231728+09228 3 18
+ 6.934000+3 3.741166+0 6.951500+3 4.328472+0 6.954300+3 4.099194+09228 3 18
+ 6.978200+3 3.647951+0 6.993800+3 3.126256+0 6.995200+3 3.453590+09228 3 18
+ 7.015100+3 3.546084+0 7.029600+3 4.112172+0 7.036500+3 4.553218+09228 3 18
+ 7.057300+3 4.023283+0 7.083300+3 3.902361+0 7.106100+3 3.379636+09228 3 18
+ 7.145000+3 3.146547+0 7.165600+3 2.788416+0 7.205400+3 3.596657+09228 3 18
+ 7.215200+3 3.128419+0 7.255800+3 3.059409+0 7.301200+3 3.262113+09228 3 18
+ 7.328700+3 2.659048+0 7.332500+3 2.895948+0 7.389200+3 4.235051+09228 3 18
+ 7.399300+3 4.338051+0 7.402800+3 4.323013+0 7.424500+3 2.878953+09228 3 18
+ 7.488000+3 3.265821+0 7.520600+3 3.752187+0 7.546500+3 3.535784+09228 3 18
+ 7.577300+3 2.617745+0 7.581400+3 2.965679+0 7.607600+3 3.255624+09228 3 18
+ 7.622700+3 2.917681+0 7.647400+3 3.227814+0 7.669200+3 3.332050+09228 3 18
+ 7.710400+3 2.876378+0 7.742200+3 2.470764+0 7.766900+3 3.242028+09228 3 18
+ 7.782300+3 3.526720+0 7.806400+3 3.003480+0 7.822600+3 2.833427+09228 3 18
+ 7.859600+3 3.623128+0 7.879600+3 3.115441+0 7.945200+3 2.985764+09228 3 18
+ 7.993700+3 2.563361+0 7.996200+3 2.855469+0 8.012200+3 3.010381+09228 3 18
+ 8.029200+3 2.686240+0 8.039900+3 3.070121+0 8.083900+3 3.250886+09228 3 18
+ 8.088500+3 3.365113+0 8.104000+3 2.907381+0 8.105600+3 3.002244+09228 3 18
+ 8.197700+3 2.609711+0 8.246100+3 2.637109+0 8.270400+3 2.430285+09228 3 18
+ 8.288100+3 2.831367+0 8.327800+3 2.870095+0 8.355500+3 3.037161+09228 3 18
+ 8.368200+3 3.175799+0 8.377100+3 2.881631+0 8.406800+3 3.192691+09228 3 18
+ 8.485900+3 3.327312+0 8.506500+3 2.895330+0 8.516300+3 3.145208+09228 3 18
+ 8.553300+3 2.843418+0 8.565500+3 3.170958+0 8.601900+3 3.239350+09228 3 18
+ 8.653200+3 3.640123+0 8.684600+3 3.288996+0 8.734700+3 3.633943+09228 3 18
+ 8.765000+3 3.661135+0 8.795300+3 3.408785+0 8.812300+3 2.957233+09228 3 18
+ 8.826800+3 3.338745+0 8.866500+3 2.932410+0 8.886900+3 2.634122+09228 3 18
+ 8.917600+3 2.683459+0 9.000200+3 2.384759+0 9.134200+3 3.560710+09228 3 18
+ 9.252300+3 3.361920+0 9.273600+3 3.471100+0 9.287400+3 2.920256+09228 3 18
+ 9.448900+3 3.490670+0 9.531300+3 3.200107+0 9.577500+3 2.756486+09228 3 18
+ 9.609000+3 3.022432+0 9.643800+3 2.940650+0 9.666100+3 3.109261+09228 3 18
+ 9.721900+3 2.767301+0 9.725100+3 3.015943+0 9.746100+3 3.327209+09228 3 18
+ 9.766800+3 3.413111+0 9.768700+3 3.211231+0 9.780000+3 3.140676+09228 3 18
+ 9.811800+3 3.263452+0 9.845800+3 2.898317+0 9.866100+3 2.809325+09228 3 18
+ 9.891200+3 3.181052+0 9.925500+3 3.166220+0 9.963800+3 3.426295+09228 3 18
+ 9.973800+3 3.114823+0 1.002100+4 2.738976+0 1.008100+4 2.667391+09228 3 18
+ 1.015300+4 3.153036+0 1.020900+4 2.851967+0 1.047900+4 2.656164+09228 3 18
+ 1.067500+4 3.096077+0 1.080400+4 2.783266+0 1.090700+4 2.644216+09228 3 18
+ 1.094400+4 2.758031+0 1.098600+4 2.530504+0 1.105700+4 3.054671+09228 3 18
+ 1.125200+4 2.869786+0 1.131800+4 3.071666+0 1.139400+4 2.899862+09228 3 18
+ 1.140900+4 2.760194+0 1.146600+4 2.926642+0 1.153000+4 2.829719+09228 3 18
+ 1.170000+4 2.376725+0 1.178900+4 2.630414+0 1.183400+4 2.921801+09228 3 18
+ 1.190600+4 2.659151+0 1.207900+4 2.691287+0 1.216100+4 2.870919+09228 3 18
+ 1.227400+4 2.396089+0 1.261900+4 2.457271+0 1.289600+4 2.603531+09228 3 18
+ 1.328100+4 3.022020+0 1.347700+4 2.912119+0 1.374800+4 2.452533+09228 3 18
+ 1.392800+4 2.570571+0 1.402000+4 2.714050+0 1.424500+4 2.493115+09228 3 18
+ 1.440600+4 2.555018+0 1.486200+4 2.884824+0 1.492500+4 3.046019+09228 3 18
+ 1.503300+4 2.551516+0 1.513800+4 2.281759+0 1.534000+4 2.315440+09228 3 18
+ 1.565600+4 2.417513+0 1.649100+4 2.405359+0 1.669000+4 2.447898+09228 3 18
+ 1.676700+4 2.167223+0 1.697200+4 2.365601+0 1.750200+4 2.137353+09228 3 18
+ 1.775200+4 2.398870+0 1.819000+4 2.487553+0 1.878400+4 2.471691+09228 3 18
+ 1.906300+4 2.659357+0 1.925000+4 2.337173+0 1.940700+4 2.184115+09228 3 18
+ 1.953500+4 2.351490+0 1.992500+4 2.286188+0 2.001100+4 2.372914+09228 3 18
+ 2.005400+4 2.448104+0 2.036000+4 2.120049+0 2.060700+4 2.016637+09228 3 18
+ 2.073900+4 2.160631+0 2.084400+4 2.041563+0 2.149400+4 2.082351+09228 3 18
+ 2.160500+4 2.172888+0 2.175400+4 2.438525+0 2.186800+4 2.388467+09228 3 18
+ 2.211900+4 2.630208+0 2.229000+4 2.717037+0 2.236800+4 2.684386+09228 3 18
+ 2.252600+4 2.333259+0 2.262600+4 2.394441+0 2.276500+4 2.205436+09228 3 18
+ 2.296800+4 2.144872+0 2.313200+4 1.937945+0 2.339800+4 2.067725+09228 3 18
+ 2.349500+4 1.947009+0 2.369800+4 2.131791+0 2.379900+4 2.293089+09228 3 18
+ 2.410600+4 2.140237+0 2.415300+4 1.976364+0 2.419700+4 2.278463+09228 3 18
+ 2.517600+4 2.189471+0 2.524400+4 2.254979+0 2.557600+4 2.065665+09228 3 18
+ 2.562400+4 2.203170+0 2.581700+4 2.009324+0 2.616100+4 2.130452+09228 3 18
+ 2.631000+4 2.276197+0 2.636000+4 2.085029+0 2.666200+4 2.193797+09228 3 18
+ 2.679700+4 2.067931+0 2.702400+4 2.219959+0 2.760500+4 2.148374+09228 3 18
+ 2.804000+4 2.353550+0 2.865500+4 2.220474+0 2.876900+4 2.406801+09228 3 18
+ 2.917300+4 2.372193+0 2.923200+4 2.275785+0 2.996400+4 2.112427+09228 3 18
+ 3.114500+4 2.108616+0 3.205500+4 2.170931+0 3.239400+4 1.917036+09228 3 18
+ 3.355700+4 2.015916+0 3.446800+4 1.668291+0 3.460100+4 1.915800+09228 3 18
+ 3.469400+4 1.667982+0 3.477000+4 1.789934+0 3.538600+4 1.855133+09228 3 18
+ 3.683200+4 1.734211+0 3.741800+4 1.955970+0 3.776000+4 1.721748+09228 3 18
+ 3.784600+4 1.627503+0 3.810600+4 1.812388+0 3.836800+4 1.772630+09228 3 18
+ 3.845600+4 1.928263+0 3.863400+4 1.844627+0 3.887600+4 1.981617+09228 3 18
+ 3.926400+4 1.844524+0 3.981600+4 1.823512+0 4.038100+4 1.978527+09228 3 18
+ 4.062900+4 2.121697+0 4.144700+4 1.867390+0 4.214700+4 1.759549+09228 3 18
+ 4.224900+4 1.898702+0 4.235100+4 1.799410+0 4.255500+4 1.995728+09228 3 18
+ 4.299200+4 1.889844+0 4.581600+4 1.756459+0 4.638600+4 1.907972+09228 3 18
+ 4.686700+4 1.902101+0 4.734600+4 1.687964+0 4.807900+4 1.987797+09228 3 18
+ 4.820200+4 1.796938+0 4.845100+4 1.892522+0 4.882800+4 1.805796+09228 3 18
+ 4.895500+4 1.968742+0 4.908200+4 1.864506+0 5.159400+4 1.780458+09228 3 18
+ 5.228700+4 1.923937+0 5.285200+4 1.844524+0 5.342600+4 1.918993+09228 3 18
+ 5.415000+4 1.829280+0 5.535700+4 1.886960+0 5.971700+4 1.747189+09228 3 18
+ 6.040600+4 1.930220+0 6.110800+4 1.830207+0 6.328800+4 1.795084+09228 3 18
+ 6.403900+4 1.664068+0 6.539000+4 1.791788+0 6.558600+4 1.885312+09228 3 18
+ 6.587000+4 1.739464+0 6.618000+4 1.779634+0 6.658100+4 1.608345+09228 3 18
+ 6.681600+4 1.653253+0 6.718900+4 1.805178+0 6.778100+4 1.744408+09228 3 18
+ 6.801200+4 1.840301+0 6.863900+4 1.729061+0 6.885100+4 1.785299+09228 3 18
+ 6.949000+4 1.715671+0 7.035600+4 1.798689+0 7.101600+4 1.499165+09228 3 18
+ 7.186100+4 1.686316+0 7.250000+4 1.747481+0 7.282300+4 1.771706+09228 3 18
+ 7.375300+4 1.662511+0 7.460100+4 1.668651+0 7.500000+4 1.682400+09228 3 18
+ 8.500000+4 1.598400+0 9.500000+4 1.577300+0 1.000000+5 1.587900+09228 3 18
+ 1.200000+5 1.500900+0 1.500000+5 1.436700+0 1.700000+5 1.402800+09228 3 18
+ 1.800000+5 1.396900+0 1.900000+5 1.369500+0 2.000000+5 1.346900+09228 3 18
+ 2.100000+5 1.349600+0 2.200000+5 1.324200+0 2.300000+5 1.299200+09228 3 18
+ 2.350000+5 1.304000+0 2.400000+5 1.293800+0 2.450000+5 1.293400+09228 3 18
+ 2.500000+5 1.282400+0 2.600000+5 1.264500+0 2.700000+5 1.249700+09228 3 18
+ 2.800000+5 1.234200+0 3.000000+5 1.230700+0 3.250000+5 1.235900+09228 3 18
+ 3.500000+5 1.216100+0 3.750000+5 1.218600+0 4.000000+5 1.185600+09228 3 18
+ 4.250000+5 1.202400+0 4.500000+5 1.165200+0 4.750000+5 1.140200+09228 3 18
+ 5.000000+5 1.142000+0 5.200000+5 1.140200+0 5.400000+5 1.123000+09228 3 18
+ 5.700000+5 1.139500+0 6.000000+5 1.110000+0 6.500000+5 1.120100+09228 3 18
+ 7.000000+5 1.116800+0 7.500000+5 1.132100+0 8.000000+5 1.110600+09228 3 18
+ 8.500000+5 1.119600+0 9.000000+5 1.143700+0 9.400000+5 1.172900+09228 3 18
+ 9.600000+5 1.197300+0 9.800000+5 1.206500+0 1.000000+6 1.202900+09228 3 18
+ 1.100000+6 1.194000+0 1.250000+6 1.210900+0 1.400000+6 1.227900+09228 3 18
+ 1.600000+6 1.254700+0 1.800000+6 1.273000+0 2.000000+6 1.288500+09228 3 18
+ 2.200000+6 1.279700+0 2.400000+6 1.266100+0 2.600000+6 1.256900+09228 3 18
+ 2.800000+6 1.240300+0 3.000000+6 1.216600+0 3.600000+6 1.165400+09228 3 18
+ 4.000000+6 1.137000+0 4.500000+6 1.117500+0 4.700000+6 1.101200+09228 3 18
+ 5.000000+6 1.073100+0 5.300000+6 1.057300+0 5.500000+6 1.037900+09228 3 18
+ 5.800000+6 1.038800+0 6.000000+6 1.091900+0 6.200000+6 1.179500+09228 3 18
+ 6.500000+6 1.333700+0 7.000000+6 1.543400+0 7.500000+6 1.701500+09228 3 18
+ 7.750000+6 1.738300+0 8.000000+6 1.785300+0 8.500000+6 1.792700+09228 3 18
+ 9.000000+6 1.779300+0 1.000000+7 1.758900+0 1.100000+7 1.735900+09228 3 18
+ 1.150000+7 1.703700+0 1.200000+7 1.720600+0 1.300000+7 1.886400+09228 3 18
+ 1.400000+7 2.079000+0 1.450000+7 2.089900+0 1.500000+7 2.126500+09228 3 18
+ 1.600000+7 2.153900+0 1.700000+7 2.098300+0 1.800000+7 2.059000+09228 3 18
+ 1.900000+7 2.032500+0 2.000000+7 2.021600+0 2.100000+7 2.088100+09228 3 18
+ 2.200000+7 2.115500+0 2.300000+7 2.144500+0 2.400000+7 2.089100+09228 3 18
+ 2.500000+7 2.126800+0 2.600000+7 2.128200+0 2.700000+7 2.108500+09228 3 18
+ 2.800000+7 2.134600+0 2.900000+7 2.105300+0 3.000000+7 2.155000+09228 3 18
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 3  0
+                                                                  9228 0  0
+                                                                  9228 0  0
+                                                                  9228 0  0
+                                                                  9228 0  0
+                                                                  9228 0  0
+                                                                  9228 0  0
+                                                                  9228 0  0
+                                                                  9228 0  0
+                                                                  9228 0  0
+ 9.223500+4 2.330248+2          0          0          0          1922831452
+ 0.000000+0 0.000000+0          0        452          1          0922831452
+ 0.000000+0 0.000000+0          0          0          0          0922831452
+ 1.000000-5 3.000000+7          0          0          4          2922831452
+ 1.000000+0 4.550000+2 1.000000+0 4.560000+2                      922831452
+                                                                  922831  0
+ 9.223500+4 2.330248+2          0          0          0          1922831455
+ 0.000000+0 0.000000+0          0        455          0          1922831455
+ 0.000000+0 0.000000+0          0          1          6          3922831455
+ 1.000000-5 2.025000-3 1.000000+2 2.209000-3 3.000000+7 0.000000+0922831455
+                                                                  922831  0
+ 9.223500+4 2.330248+2          0          0          0          1922831456
+ 0.000000+0 0.000000+0          0        456          0          3922831456
+ 0.000000+0 0.000000+0          0          1         60         30922831456
+ 1.000000-5 2.93604e-6 8.645388-1 2.93604e-6 1.0000E+01 1.9548E-05922831456
+ 1.5000E+01 1.7994E-05 2.0500E+01 1.7545E-05 3.3000E+01 2.7899E-05922831456
+ 4.1000E+01 2.1741E-05 6.0000E+01 2.1904E-05 5.0000E+02 3.8699E-05922831456
+ 6.0000E+02 3.9185E-05 7.0000E+02 3.8699E-05 8.0000E+02 6.2000E-05922831456
+ 9.0000E+02 6.1611E-05 1.0000E+03 9.7352E-06 2.0000E+03 2.1768E-05922831456
+ 3.0000E+03 2.2250E-05 4.0000E+03 2.2320E-05 5.0000E+03 3.9063E-05922831456
+ 6.0000E+03 3.8941E-05 7.0000E+03 3.8819E-05 8.0000E+03 3.8459E-05922831456
+ 9.0000E+03 3.8699E-05 1.0000E+04 9.7352E-06 2.0000E+04 9.7656E-06922831456
+ 3.0000E+04 6.1611E-05 4.0000E+04 2.1973E-05 5.0000E+04 2.2180E-05922831456
+ 6.0000E+04 2.1904E-05 7.0000E+04 1.7640E-05 2.0000E+05 0.0000E+00922831456
+ 0.000000+0 0.000000+0          1          5          3          2922831456
+ 1.000000-5 2.000000+5 1.764000-5                                 922831456
+ 0.00000+00 0.00000+00          1          5        465         30922831456
+ 1.000000-5 2.000000+5 3.500000+5 5.500000+5 9.000000+5 1.250000+6922831456
+ 1.350000+6 1.450000+6 1.625000+6 2.000000+6 2.625000+6 3.250000+6922831456
+ 3.750000+6 4.250000+6 4.750000+6 5.250000+6 5.750000+6 6.250000+6922831456
+ 6.750000+6 7.500000+6 8.500000+6 9.500000+6 1.050000+7 1.150000+7922831456
+ 1.250000+7 1.350000+7 1.450000+7 1.550000+7 1.700000+7 3.000000+7922831456
+ 0.00000+00 0.00000+00 0.00000+00 0.00000+00 0.00000+00 0.00000+00922831456
+ 0.00000+00 0.00000+00 0.00000+00 0.00000+00 0.00000+00 0.00000+00922831456
+ 0.00000+00 0.00000+00 0.00000+00 0.00000+00 0.00000+00 0.00000+00922831456
+ 0.00000+00 0.00000+00 0.00000+00 0.00000+00 0.00000+00 0.00000+00922831456
+ 0.00000+00 0.00000+00 0.00000+00 0.00000+00 0.00000+00 2.194478-5922831456
+ 1.849941-5 1.877521-5 1.868859-5 1.822702-5 1.913197-5 1.836221-5922831456
+ 1.863847-5 1.871580-5 1.858640-5 1.890077-5 1.809708-5 1.829694-5922831456
+ 1.809466-5 1.755173-5 1.838530-5 1.784267-5 1.841883-5 1.834674-5922831456
+ 1.790122-5 1.815573-5 1.834956-5 1.734511-5 1.847185-5 1.779494-5922831456
+ 1.808926-5 0.00000+00 0.00000+00 2.152636-5 1.988120-5 1.914594-5922831456
+ 1.866989-5 1.917635-5 1.895433-5 1.902908-5 1.891587-5 1.864952-5922831456
+ 1.942008-5 1.851917-5 1.820483-5 1.864307-5 1.826524-5 1.869371-5922831456
+ 1.830328-5 1.859602-5 1.864650-5 1.823303-5 1.844730-5 1.854228-5922831456
+ 1.792293-5 1.858040-5 1.807917-5 1.826124-5 0.00000+00 0.00000+00922831456
+ 2.177157-5 1.863127-5 1.885377-5 1.946221-5 1.901467-5 1.928533-5922831456
+ 1.912074-5 1.885651-5 1.928803-5 1.855860-5 1.836617-5 1.862304-5922831456
+ 1.830597-5 1.876738-5 1.853282-5 1.869074-5 1.865481-5 1.832209-5922831456
+ 1.851305-5 1.858952-5 1.798717-5 1.863694-5 1.819033-5 1.831099-5922831456
+ 0.00000+00 0.00000+00 2.408701-5 2.116315-5 2.048332-5 1.997686-5922831456
+ 2.046792-5 1.993945-5 1.974460-5 1.997755-5 1.958976-5 1.947911-5922831456
+ 1.960384-5 1.987638-5 1.975132-5 2.006960-5 1.959103-5 1.967176-5922831456
+ 1.917314-5 1.914327-5 1.925877-5 1.866727-5 1.926671-5 1.888233-5922831456
+ 1.916786-5 0.00000+00 0.00000+00 3.034671-5 2.012363-5 2.023013-5922831456
+ 2.201707-5 1.981498-5 1.846193-5 1.989525-5 1.839469-5 1.688909-5922831456
+ 1.767532-5 1.635570-5 1.856852-5 1.741162-5 1.818693-5 1.788499-5922831456
+ 1.792067-5 1.793965-5 1.748584-5 1.787107-5 1.690941-5 1.703604-5922831456
+ 1.831324-5 0.00000+00 0.00000+00 2.990122-5 1.899564-5 1.891279-5922831456
+ 2.078365-5 2.145857-5 2.122545-5 2.159261-5 2.060041-5 2.265772-5922831456
+ 2.411082-5 2.040697-5 2.231282-5 2.100328-5 2.192005-5 2.101957-5922831456
+ 2.046115-5 2.092093-5 1.964762-5 2.068494-5 2.056163-5 2.125520-5922831456
+ 0.00000+00 0.00000+00 2.757619-5 2.103841-5 2.131111-5 1.999323-5922831456
+ 2.152948-5 1.813203-5 1.883818-5 1.951268-5 1.946226-5 1.981024-5922831456
+ 2.008068-5 1.975300-5 1.928870-5 1.893897-5 1.894272-5 1.900578-5922831456
+ 1.860927-5 1.936696-5 1.899758-5 1.849959-5 0.00000+00 0.00000+00922831456
+ 2.701881-5 2.105751-5 2.118074-5 2.057965-5 2.080231-5 1.974233-5922831456
+ 2.131204-5 1.835859-5 2.030083-5 1.990893-5 2.015283-5 1.995297-5922831456
+ 2.028902-5 1.989659-5 1.993996-5 1.918992-5 2.000698-5 1.955732-5922831456
+ 2.004534-5 0.00000+00 0.00000+00 2.713301-5 2.185427-5 2.216478-5922831456
+ 2.025911-5 2.131058-5 2.122397-5 2.248851-5 2.122769-5 2.125246-5922831456
+ 2.109336-5 2.114501-5 2.042387-5 2.088077-5 2.109384-5 2.017675-5922831456
+ 2.076265-5 2.038140-5 2.005927-5 0.00000+00 0.00000+00 2.765052-5922831456
+ 2.430382-5 2.148087-5 2.227312-5 2.292100-5 2.227990-5 2.260337-5922831456
+ 2.199721-5 2.196602-5 2.177104-5 2.105582-5 2.217758-5 2.227769-5922831456
+ 2.141030-5 2.173526-5 2.145905-5 2.114618-5 0.00000+00 0.00000+00922831456
+ 3.595819-5 2.231347-5 2.612473-5 2.380060-5 2.507902-5 2.310999-5922831456
+ 2.454010-5 2.243267-5 2.286674-5 2.274302-5 2.401134-5 2.396849-5922831456
+ 2.264166-5 2.262507-5 2.243019-5 2.274782-5 0.00000+00 0.00000+00922831456
+ 3.143335-5 2.358820-5 2.535404-5 2.292124-5 2.487694-5 2.349554-5922831456
+ 2.344345-5 2.296940-5 2.195760-5 2.372023-5 2.415465-5 2.165199-5922831456
+ 2.459160-5 2.291245-5 2.370652-5 0.00000+00 0.00000+00 3.232003-5922831456
+ 2.650785-5 2.474683-5 2.498764-5 2.490587-5 2.375417-5 2.340644-5922831456
+ 2.254473-5 2.413640-5 2.383175-5 2.315827-5 2.279121-5 2.268532-5922831456
+ 2.215573-5 0.00000+00 0.00000+00 3.496061-5 2.390603-5 2.723245-5922831456
+ 2.338094-5 2.506803-5 2.521983-5 2.267116-5 2.506543-5 2.518226-5922831456
+ 2.284252-5 2.412497-5 2.279655-5 2.343677-5 0.00000+00 0.00000+00922831456
+ 3.527476-5 2.563985-5 2.601085-5 2.374380-5 2.355841-5 2.218819-5922831456
+ 2.422845-5 2.408554-5 2.199297-5 2.355777-5 2.082356-5 2.313666-5922831456
+ 0.00000+00 0.00000+00 3.739262-5 2.673518-5 2.675386-5 2.647485-5922831456
+ 2.489713-5 2.669404-5 2.657584-5 2.389712-5 2.516808-5 2.438232-5922831456
+ 2.372580-5 0.00000+00 0.00000+00 4.132911-5 2.450072-5 2.762372-5922831456
+ 2.430637-5 2.607923-5 2.689587-5 2.248109-5 2.477702-5 2.299040-5922831456
+ 2.327685-5 0.00000+00 0.00000+00 3.719834-5 2.508397-5 2.683083-5922831456
+ 2.789319-5 2.747555-5 2.592810-5 2.521055-5 2.524899-5 2.392736-5922831456
+ 0.00000+00 0.00000+00 3.744618-5 2.632068-5 2.964799-5 2.846046-5922831456
+ 2.736972-5 2.747274-5 2.582029-5 2.570771-5 0.00000+00 0.00000+00922831456
+ 3.853073-5 2.644274-5 2.929020-5 2.572835-5 2.786072-5 2.454431-5922831456
+ 2.500685-5 0.00000+00 0.00000+00 3.992680-5 3.052474-5 3.116449-5922831456
+ 3.178338-5 2.870758-5 2.901252-5 0.00000+00 0.00000+00 4.511793-5922831456
+ 2.901745-5 3.259023-5 2.974728-5 2.935501-5 0.00000+00 0.00000+00922831456
+ 4.256986-5 2.945626-5 2.846715-5 2.871254-5 0.00000+00 0.00000+00922831456
+ 4.557129-5 2.720125-5 3.328857-5 0.00000+00 0.00000+00 4.084138-5922831456
+ 2.118897-5 0.00000+00 0.00000+00 5.707917-5 0.00000+00 0.00000+00922831456
+ 4.451600-5 1.539000-5 8.515400-4                                 922831456
+                                                                  922831  0
+                                                                  9228 0  0
+                                                                  9228 0  0
+                                                                  9228 0  0
+                                                                  9228 0  0
+                                                                     0 0  0
+                                                                    -1 0  0

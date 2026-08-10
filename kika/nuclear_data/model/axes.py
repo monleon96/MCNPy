@@ -116,3 +116,12 @@ class Axes:
 #: The axes of a pointwise cross section, which is what most of kika's data is.
 def crossSectionAxes() -> Axes:
     return Axes.forFunction1d("crossSection", "b", "energy_in", "eV")
+
+
+#: The axes of a multiplicity — nu-bar being the case kika reads from ENDF MF1.
+#: The dependent unit is the empty string, which §2.3.3 defines as
+#: *dimensionless* rather than as unknown: a multiplicity is a count of
+#: particles per reaction, and it genuinely has no unit. Writing ``"1"`` here
+#: would be a second spelling of the same thing.
+def multiplicityAxes() -> Axes:
+    return Axes.forFunction1d("multiplicity", "", "energy_in", "eV")

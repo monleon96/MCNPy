@@ -64,6 +64,7 @@ STRUCTURAL = DATA / "micro_fe56_structural.endf"
 COV = DATA / "micro_fe56_cov.endf"
 PFNS = DATA / "micro_cf252_pfns.endf"
 PFNS_COV = DATA / "micro_pfns_cov.endf"
+NUBAR = DATA / "micro_u235_nubar.endf"
 
 
 def mf32_fixture_path(key: str) -> Path:
@@ -79,6 +80,13 @@ KEEP = {1: {451}, 2: {151}, 3: {1, 2, 102}, 4: {2}, 34: {2}}
 #: ENDF/B-VIII.1 Cf-252. MF3/MT18 comes along because the fission cross section
 #: is what MT18's spectrum belongs to, and it costs 34 lines.
 KEEP_PFNS = {1: {451}, 3: {18}, 5: {18, 455}, 35: {18}}
+
+#: What the nu-bar micro-tape keeps, cut the same verbatim way from
+#: ENDF/B-VIII.1 U-235. MF3/MT18 comes along for the same reason it does in
+#: the PFNS cut and for one more: GNDS hangs the fission multiplicities off the
+#: fission *reaction*, so without MF3/MT18 there is no node for them and
+#: `attachNubar` correctly refuses. It costs 270 lines.
+KEEP_NUBAR = {1: {451, 452, 455, 456}, 3: {18}, 31: {452, 455, 456}}
 
 #: What each MF32 micro-tape keeps. File 2 comes along rather than being cut:
 #: §32.3 makes File 32 meaningless without it — every resonance a covariance
@@ -239,6 +247,31 @@ def build_pfns(source: Path, dest: Path) -> None:
     dest.write_text(trimmed)
 
 
+def build_nubar(source: Path, dest: Path) -> None:
+    """Cut *source* down to ``KEEP_NUBAR``, verbatim.
+
+    Same machinery and same reason as :func:`build_structural`. It matters more
+    here than elsewhere that nothing is reformatted: the MF1 nu-bar sections are
+    held to **byte identity** through the model
+    (``model_adapter/tests/test_nubar_round_trip.py``), so a fixture kika had
+    rewritten would be a gate against kika's own output.
+    """
+    content = source.read_text()
+    inventory = section_inventory(content)
+
+    to_remove: list[tuple[int, int | None]] = []
+    for mf, mts in sorted(inventory.items()):
+        if mf not in KEEP_NUBAR:
+            to_remove.append((mf, None))
+            continue
+        for mt in sorted(set(mts) - KEEP_NUBAR[mf]):
+            to_remove.append((mf, mt))
+
+    trimmed, n_removed = remove_sections(content, to_remove)
+    assert n_removed, f"nothing was removed from {source} — wrong source tape?"
+    dest.write_text(trimmed)
+
+
 def build_mf32(source: Path, dest: Path) -> None:
     """Cut *source* down to ``KEEP_MF32``, verbatim.
 
@@ -380,17 +413,18 @@ def build_pfns_cov(dest: Path) -> None:
 
 
 @pytest.mark.skipif(not REGEN, reason="set REGEN_MICRO_TAPES=1 to rebuild the fixtures")
-def test_regenerate_micro_tapes(fe56_host_tape, cf252_b81_tape, request):
+def test_regenerate_micro_tapes(fe56_host_tape, cf252_b81_tape, u235_b81_tape, request):
     """Rebuild every fixture from its source. Opt-in, then commit the diff."""
     DATA.mkdir(parents=True, exist_ok=True)
     build_structural(Path(fe56_host_tape), STRUCTURAL)
     build_cov(COV)
     build_pfns(Path(cf252_b81_tape), PFNS)
     build_pfns_cov(PFNS_COV)
+    build_nubar(Path(u235_b81_tape), NUBAR)
     for key, tape in MF32_FIXTURES.items():
         source = request.getfixturevalue(f"{tape}_tape")
         build_mf32(Path(source), mf32_fixture_path(key))
-    assert all(p.stat().st_size > 0 for p in (STRUCTURAL, COV, PFNS, PFNS_COV))
+    assert all(p.stat().st_size > 0 for p in (STRUCTURAL, COV, PFNS, PFNS_COV, NUBAR))
     assert all(mf32_fixture_path(k).stat().st_size > 0 for k in MF32_FIXTURES)
 
 
@@ -455,6 +489,47 @@ def test_pfns_inventory_is_exactly_what_we_kept(micro_pfns_tape):
     )
     for mf, expected_mts in KEEP_PFNS.items():
         assert set(inventory[mf]) == expected_mts, f"MF{mf} MT set drifted"
+
+
+def test_nubar_inventory_is_exactly_what_we_kept(micro_nubar_tape):
+    """No section survived the nu-bar cut that should not have, and none was lost."""
+    inventory = section_inventory(micro_nubar_tape.read_text())
+    assert set(inventory) == set(KEEP_NUBAR), (
+        f"MF set drifted: {sorted(inventory)} != {sorted(KEEP_NUBAR)}"
+    )
+    for mf, expected_mts in KEEP_NUBAR.items():
+        assert set(inventory[mf]) == expected_mts, f"MF{mf} MT set drifted"
+
+
+def test_nubar_tape_carries_the_representations_the_fixture_exists_for(
+    micro_nubar_tape,
+):
+    """A real LNU=2 total and prompt, six real precursor families, and an
+    NC-type MF31/452.
+
+    The last of those is why this is U-235 and not something smaller: the total
+    nu-bar covariance is *declared* as the sum of MT455 and MT456 (``LTY=0``)
+    rather than stored, so it is the only fixture on which the NC resolution
+    path runs at all. A cut that dropped MT455 or MT456 would leave the total
+    unresolvable and the test that checks its weighting vacuous.
+    """
+    endf = read_endf(str(micro_nubar_tape))
+    assert endf.zaid == 92235
+
+    assert endf.files[1].sections[452].lnu == 2
+    assert endf.files[1].sections[456].lnu == 2
+
+    mt455 = endf.files[1].sections[455]
+    assert mt455.ldg == 0
+    assert len(mt455.decay_constants) == 6
+
+    mf31mt452 = endf.files[31].sections[452]
+    derived = [
+        nc.lty
+        for subsection in mf31mt452._subsections
+        for nc in subsection.nc_records
+    ]
+    assert derived == [0], "MF31/452 is no longer the NC-type case"
 
 
 def test_pfns_tape_carries_the_laws_the_fixture_exists_for(micro_pfns_tape):

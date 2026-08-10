@@ -99,10 +99,30 @@ def test_conversion_between_compatible_units():
     assert conversion_factor("b", "b") == 1.0
 
 
-@pytest.mark.parametrize("bad", ["zz", "eV**", "eV+MeV", "eV/", "1/s"])
+@pytest.mark.parametrize("bad", ["zz", "eV**", "eV+MeV", "eV/", "1/", "s/1"])
 def test_unspellable_units_raise(bad):
     with pytest.raises(UnitError):
         parse_unit(bad)
+
+
+@pytest.mark.parametrize("good, dimensions", [
+    ("1/s", {"s": -1}),
+    ("1/s**2", {"s": -2}),
+    ("1", {}),
+])
+def test_a_bare_one_numerator_is_spellable(good, dimensions):
+    """``1/s`` used to raise, and it was ``1/s`` this test used to pin as bad.
+
+    The pin was wrong, and this module was the place it was least likely to be
+    noticed: :data:`DERIVED_SI_UNITS` in ``units.py`` spells the admixture of
+    ``Hz`` as ``"1/s"``, so the parser rejected a string its own table
+    contains — and GNDS files write ``unit="1/s"`` for a decay rate, which is
+    what §18.4's ``rate`` needed when MF1/455's precursor constants landed. A
+    parser that cannot read what the format writes is not strict, it is broken.
+    """
+    unit = parse_unit(good)
+    assert {str(k): int(v) for k, v in unit.dimensions.items()} == dimensions
+    assert unit.factor == 1.0
 
 
 # ---------------------------------------------------------------------------

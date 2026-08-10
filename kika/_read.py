@@ -60,9 +60,10 @@ FORMATS = ("endf", "ace", "gnds")
 #: redirect notices it has already acted on. See :func:`_dropRedirectsWeActedOn`.
 #:
 #: MF35 joined the list when the PFNS work taught `decodeCovarianceSuite` to
-#: read it. Without the entry here the door would leave the redirect notice
-#: standing with nothing replacing it -- telling the user to call
-#: `decodeCovarianceSuite` for a file it had, in fact, just decoded.
+#: read it, and MF31 was already here before the nu-bar work taught it the same.
+#: Without the entry the door would leave the redirect notice standing with
+#: nothing replacing it -- telling the user to call `decodeCovarianceSuite` for
+#: a file it had, in fact, just decoded.
 COVARIANCE_MF = (31, 32, 33, 34, 35)
 
 
