@@ -53,14 +53,14 @@ __all__ = ["decodeMF3MT", "decodeMF1MT451", "decodeReactionSuite"]
 
 #: MF numbers kika's parser registry covers. Everything else is declared
 #: unsupported by the report rather than silently skipped.
-SUPPORTED_MF = (1, 2, 3, 4, 5, 31, 33, 34, 35)
+SUPPORTED_MF = (1, 2, 3, 4, 5, 31, 32, 33, 34, 35)
 
 #: Of those, the ones whose content belongs to the ``covarianceSuite``
 #: (§25.1.1) rather than to the ``reactionSuite``. Kept as a set of its own
 #: because MF5 broke the rule the redirect loop used to assume — that
 #: "supported and not one of 1, 2, 3, 4" meant "covariance". MF5 is neither:
 #: it is reactionSuite content that this adapter does not decode yet.
-COVARIANCE_MF = (31, 33, 34, 35)
+COVARIANCE_MF = (31, 32, 33, 34, 35)
 
 
 def _za(section) -> int:

@@ -63,7 +63,7 @@ FORMATS = ("endf", "ace", "gnds")
 #: read it. Without the entry here the door would leave the redirect notice
 #: standing with nothing replacing it -- telling the user to call
 #: `decodeCovarianceSuite` for a file it had, in fact, just decoded.
-COVARIANCE_MF = (31, 33, 34, 35)
+COVARIANCE_MF = (31, 32, 33, 34, 35)
 
 
 class UnknownFormatError(ValueError):

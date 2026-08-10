@@ -71,9 +71,27 @@ def _search_roots() -> Tuple[Path, ...]:
     if env_endf:
         roots.append(Path(env_endf))
     roots.append(Path(os.environ.get("KIKA_LIB_TAPES", _DEFAULT_LIB_ROOT)))
+    roots.append(_downloadCacheRoot())
     roots.append(REPO_ROOT / "files" / "endf")
     roots.append(REPO_ROOT / "files")
     return tuple(roots)
+
+
+def _downloadCacheRoot() -> Path:
+    """``kika.endf.remote``'s own IAEA download cache, as a search root.
+
+    The MF32 work is the first to need tapes that exist on no shared tree here
+    — every nuclide carrying a resonance-parameter covariance came down through
+    ``kika.endf.remote``. Reading the cache root from the module that owns it
+    keeps ``KIKA_ENDF_CACHE_DIR`` working for the tests as well as for the
+    downloader; an import failure just drops the root, since it is one of
+    several and a missing tape already skips.
+    """
+    try:
+        from kika.endf.remote.constants import get_cache_dir
+        return Path(get_cache_dir())
+    except Exception:  # pragma: no cover - the other roots still apply
+        return Path.home() / ".kika" / "endf_cache"
 
 
 #: Logical tape name -> candidate paths relative to each search root, in order
@@ -109,6 +127,33 @@ _TAPES: Dict[str, Sequence[str]] = {
     "th232": ("jeff40-endf/90-Th-232g.txt", "90-Th-232g.txt"),
     "pu241": ("jeff40-endf/94-Pu-241g.txt", "94-Pu-241g.txt"),
     "u238": ("jeff40-endf/92-U-238g.txt", "U238_jeff4.0_n.endf"),
+    # MF32, the resonance-parameter covariances. No Fe-56 evaluation in any
+    # library carries one, so this work is gated on other nuclides entirely,
+    # chosen to cover one sub-format each — see ``docs/mf32-notes.md`` in
+    # kika-workspace for the survey these came from. The second candidate of
+    # each pair is the ``kika.endf.remote`` cache layout, which is where they
+    # actually are on this machine.
+    #
+    # LCOMP=0, the ENDF/B-V-compatible per-L format (LRF=2):
+    "cm244_b81": ("endfb81/n-096_Cm_244.endf", "endfb8.1/n/96244.endf"),
+    "am241_b81": ("endfb81/n-095_Am_241.endf", "endfb8.1/n/95241.endf"),
+    # LCOMP=2 compact, without and with an INTG correlation block:
+    "na23_b81": ("endfb81/n-011_Na_023.endf", "endfb8.1/n/11023.endf"),
+    # Th-232 is the only tape here with two ranges: LCOMP=2 (LRF=3) and then an
+    # unresolved LRU=2 covariance, §32.2.4. It is the whole URR coverage.
+    "th232_b81": ("endfb81/n-090_Th_232.endf", "endfb8.1/n/90232.endf"),
+    # LCOMP=2 for R-Matrix Limited (LRF=7). W-186 is the smallest of the three;
+    # Cl-35 is the one whose NJS (8) differs from its NJSX (7).
+    "w186_b81": ("endfb81/n-074_W_186.endf", "endfb8.1/n/74186.endf"),
+    "cl35_b81": ("endfb81/n-017_Cl_035.endf", "endfb8.1/n/17035.endf"),
+    "cu63_b81": ("endfb81/n-029_Cu_063.endf", "endfb8.1/n/29063.endf"),
+    # LCOMP=1, the general format with a full covariance triangle. Ta-181 is
+    # here for one reason beyond its format: its MF32 is 240 131 lines, the
+    # only section on this machine long enough to wrap the sequence number.
+    "mn55_b81": ("endfb81/n-025_Mn_055.endf", "endfb8.1/n/25055.endf"),
+    "ta181_b81": ("endfb81/n-073_Ta_181.endf", "endfb8.1/n/73181.endf"),
+    "mn55_jendl": ("jendl5/n/25055.endf", "JENDL-5/Mn55_jendl5_n.endf"),
+    "pu239_jendl": ("jendl5/n/94239.endf", "JENDL-5/Pu239_jendl5_n.endf"),
     "serpent_input": ("serpent/PWRSphere.sss2", "PWRSphere.sss2"),
     # Smallest real Fe-56 ACE on the share (16 MB) is preferred over the
     # 112 MB JEFF one: the round-trip gate reads and rewrites the whole XSS,
@@ -307,6 +352,18 @@ pu239_b81_tape = _tape_fixture("pu239_b81")
 u5_nubar_covfil_tape = _tape_fixture("u5_nubar_covfil")
 u5_boxer_tape = _tape_fixture("u5_boxer")
 
+#: The eleven evaluations on this machine that carry an MF32, in the order the
+#: MF32 survey lists them. ``MF32_TAPES`` is exported so a test can parametrise
+#: over the whole set rather than naming fixtures one at a time.
+MF32_TAPES = (
+    "cm244_b81", "am241_b81", "na23_b81", "th232_b81",
+    "w186_b81", "cl35_b81", "cu63_b81",
+    "mn55_b81", "ta181_b81", "mn55_jendl", "pu239_jendl",
+)
+for _name in MF32_TAPES:
+    globals()[f"{_name}_tape"] = _tape_fixture(_name)
+del _name
+
 
 @pytest.fixture(scope="session")
 def serpent_input(request: pytest.FixtureRequest) -> Path:
@@ -389,6 +446,32 @@ def micro_pfns_tape() -> Path:
     """
     path = MICRO_TAPE_DIR / "micro_cf252_pfns.endf"
     if not path.is_file():  # pragma: no cover - fixture is committed
+        pytest.fail(f"committed micro-tape is missing: {path}")
+    return path
+
+
+#: MF32 micro-tape key -> the sub-format it is the fixture for. Kept here so a
+#: test can parametrise over the set; the cut recipe lives in
+#: ``kika/endf/tests/test_micro_tape_regen.py``.
+MICRO_MF32 = {
+    "na23": "LCOMP=2, no INTG block",
+    "cm244": "LCOMP=0, the ENDF/B-V-compatible per-L format",
+    "th232": "LCOMP=2 with INTG, plus an unresolved LRU=2 range",
+    "cl35": "LCOMP=2 for R-Matrix Limited, NJS=8 against NJSX=7",
+}
+
+
+@pytest.fixture(scope="session", params=sorted(MICRO_MF32))
+def micro_mf32_tape(request: pytest.FixtureRequest) -> Path:
+    """Each committed MF32 slice in turn: MF1/451, MF2/151, MF32/151, verbatim.
+
+    Cut section-by-section from ENDF/B-VIII.1 like the other real-slice
+    fixtures, so every surviving byte is the evaluator's. Between them the four
+    cover every MF32 sub-format reachable on this machine except LCOMP=1, whose
+    smallest evaluation is too large to commit — see ``MF32_TAPES``.
+    """
+    path = MICRO_TAPE_DIR / f"micro_{request.param}_mf32.endf"
+    if not path.is_file():  # pragma: no cover - fixtures are committed
         pytest.fail(f"committed micro-tape is missing: {path}")
     return path
 

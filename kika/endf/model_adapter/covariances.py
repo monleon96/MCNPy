@@ -449,9 +449,21 @@ def decodeCovarianceSuite(endf, report: Optional[ConversionReport] = None,
             suite.covarianceSections.extend(sections)
 
     if mf33 is None and mf34 is None and mf35 is None:
-        report.lost(
-            "no MF33, MF34 or MF35: this evaluation carries no covariances"
-        )
+        # MF31 and MF32 are covariances this adapter does not convert, so an
+        # evaluation carrying only those still yields an empty suite — but
+        # saying it "carries no covariances" would be false, and the two cases
+        # want different follow-up from the reader.
+        unconverted = [mf for mf in (31, 32) if endf.mf.get(mf) is not None]
+        if unconverted:
+            report.lost(
+                "no MF33, MF34 or MF35: the only covariances this evaluation "
+                f"carries are {', '.join(f'MF{mf}' for mf in unconverted)}, "
+                "which this adapter does not convert"
+            )
+        else:
+            report.lost(
+                "no MF33, MF34 or MF35: this evaluation carries no covariances"
+            )
 
     if endf.mf.get(31) is not None:
         report.unsupportedNode(
@@ -460,8 +472,10 @@ def decodeCovarianceSuite(endf, report: Optional[ConversionReport] = None,
         )
     if endf.mf.get(32) is not None:
         report.unsupportedNode(
-            "MF32 (resonance parameter covariances) is present; kika's parser "
-            "registry does not cover it and §25.3 parameter covariances are phase 7b"
+            "MF32 (resonance parameter covariances) is present and parsed by "
+            "kika, but the model has nowhere to put it: §25.3 parameter "
+            "covariances are phase 7b, so covarianceSuite.parameterCovariances "
+            "stays empty. Read it through endf.mf[32].mt[151]"
         )
 
     return suite, report

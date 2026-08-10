@@ -181,11 +181,31 @@ def format_endf_data_line(values: Sequence[Union[int, float, None]],
 
     # Pad to 66 characters if needed
     data_part = ''.join(parts).ljust(66)
-    
-    # Format the identification part (columns 67-80)
-    id_part = f"{mat:4d}{mf:2d}{mt:3d}{line_num:5d}"
-    
-    return data_part + id_part
+
+    return data_part + format_endf_id_columns(mat, mf, mt, line_num)
+
+
+#: Highest sequence number the five-character NS field can hold. ENDF-6 counts
+#: records from 1 within a section and wraps here rather than widening: the
+#: record after 99999 is 1 again, not 100000.
+MAX_SEQUENCE_NUMBER = 99999
+
+
+def format_endf_id_columns(mat: int, mf: int, mt: int, line_num: int) -> str:
+    """Columns 67-80: MAT, MF, MT and the wrapped sequence number.
+
+    The wrap is not cosmetic. ``f"{100000:5d}"`` is six characters wide, so a
+    section long enough to reach it used to be written 81 columns wide from that
+    line on. Only two sections on this machine are long enough to show it —
+    Ta-181's MF32 at 240 131 lines and Pu-239's at 190 445 — and both wrap
+    99999 → 1, which is ``((n - 1) % 99999) + 1``.
+
+    SEND, FEND, MEND and TEND pass their own fixed numbers through here
+    unchanged: 99999 maps to itself and 0 stays 0.
+    """
+    if line_num > MAX_SEQUENCE_NUMBER:
+        line_num = ((line_num - 1) % MAX_SEQUENCE_NUMBER) + 1
+    return f"{mat:4d}{mf:2d}{mt:3d}{line_num:5d}"
 
 
 def parse_number(text: str) -> Union[float, int, None]:
@@ -579,6 +599,123 @@ def parse_data_values(lines, start, n_values):
             if v is not None:
                 values.append(v)
     return values, idx
+
+
+# ----------------------------------------------------------------------
+# INTG records — the packed correlation matrix of an MF32 LCOMP=2 subsection
+# ----------------------------------------------------------------------
+
+#: NDIGIT → (NROW, field width, separator width after JJ).
+#:
+#: ENDF-102 §32.2.3 gives these as five Fortran FORMAT statements rather than a
+#: formula, and the widths are exactly what makes each line land on 66 columns:
+#:
+#:   NDIGIT=2  (I5, I5, 1X, 18I3, 1X)   10 + 1 + 54 + 1 = 66
+#:   NDIGIT=3  (I5, I5, 1X, 13I4, 3X)   10 + 1 + 52 + 3 = 66
+#:   NDIGIT=4  (I5, I5, 1X, 11I5)       10 + 1 + 55     = 66
+#:   NDIGIT=5  (I5, I5, 1X,  9I6, 1X)   10 + 1 + 54 + 1 = 66
+#:   NDIGIT=6  (I5, I5,      8I7)       10 +      56    = 66
+#:
+#: NDIGIT=6 is the only one with no ``1X`` after JJ, which is why the five cases
+#: are a table and not an arithmetic expression. Getting that wrong shifts every
+#: field of an NDIGIT=6 record by one column, and no tape on this machine uses
+#: NDIGIT=6 to catch it — see ``docs/mf32-notes.md``.
+_INTG_LAYOUT: Dict[int, Tuple[int, int, int]] = {
+    2: (18, 3, 1),
+    3: (13, 4, 1),
+    4: (11, 5, 1),
+    5: (9, 6, 1),
+    6: (8, 7, 0),
+}
+
+
+def intg_row_length(ndigit: int) -> int:
+    """How many correlation coefficients one INTG record of *ndigit* holds."""
+    try:
+        return _INTG_LAYOUT[ndigit][0]
+    except KeyError:
+        raise ValueError(
+            f"NDIGIT={ndigit} is not an ENDF-6 INTG width; §32.2.3 allows 2-6"
+        ) from None
+
+
+def parse_intg(lines: List[str], start: int, ndigit: int,
+               nm: int) -> Tuple[List[Tuple[int, int, List[int]]], int]:
+    """
+    Read *nm* INTG records — the packed correlation matrix of MF32 LCOMP=2.
+
+    Each record locates itself with ``(II, JJ)`` and then carries up to NROW
+    integers standing for the correlation coefficients ``C[II,JJ]``,
+    ``C[II,JJ+1]``, … A coefficient that mapped to zero may be written either as
+    a blank field or as an explicit ``0``; both read back as ``0`` here, so this
+    function is **not** enough on its own to rewrite a tape byte-identically.
+    The caller keeps the raw text for that — see
+    :class:`~kika.endf.classes.mf32.mf32mt151.IntgMatrix`.
+
+    Parameters
+    ----------
+    lines : list of str
+        ENDF lines.
+    start : int
+        Index of the first INTG record (the CONT carrying NDIGIT/NNN/NM is the
+        caller's to consume).
+    ndigit : int
+        Number of digits of the packed integers, 2-6.
+    nm : int
+        Number of INTG records to read.
+
+    Returns
+    -------
+    entries : list of (ii, jj, values)
+    next_idx : int
+    """
+    nrow, width, sep = _INTG_LAYOUT[ndigit] if ndigit in _INTG_LAYOUT else (
+        intg_row_length(ndigit), 0, 0)
+
+    entries: List[Tuple[int, int, List[int]]] = []
+    idx = start
+    for _ in range(nm):
+        if idx >= len(lines):
+            break
+        line = lines[idx]
+        idx += 1
+        ii = int(line[0:5]) if line[0:5].strip() else 0
+        jj = int(line[5:10]) if line[5:10].strip() else 0
+        values: List[int] = []
+        offset = 10 + sep
+        for n in range(nrow):
+            field = line[offset + n * width: offset + (n + 1) * width]
+            values.append(int(field) if field.strip() else 0)
+        entries.append((ii, jj, values))
+    return entries, idx
+
+
+def format_intg(entries: Sequence[Tuple[int, int, Sequence[int]]], ndigit: int,
+                mat: int, mf: int, mt: int,
+                start_line: int) -> Tuple[List[str], int]:
+    """
+    Write INTG records. Counterpart of :func:`parse_intg`.
+
+    Zeros are written as blank fields, which is what every evaluation measured
+    for ``docs/mf32-notes.md`` does; §32.2.3 permits an explicit ``0`` too, so a
+    tape written this way may differ from its source in whitespace alone. That
+    is why the round-trip path re-emits stored text instead of calling this —
+    this function is for covariance matrices kika *builds*, not ones it read.
+    """
+    nrow, width, sep = _INTG_LAYOUT[ndigit] if ndigit in _INTG_LAYOUT else (
+        intg_row_length(ndigit), 0, 0)
+
+    result_lines: List[str] = []
+    line_num = start_line
+    for ii, jj, values in entries:
+        fields = "".join(
+            (f"{int(v):{width}d}" if v else " " * width)
+            for v in list(values)[:nrow]
+        )
+        body = f"{int(ii):5d}{int(jj):5d}{' ' * sep}{fields}".ljust(66)
+        result_lines.append(f"{body}{mat:4d}{mf:2d}{mt:3d}{line_num:5d}")
+        line_num += 1
+    return result_lines, line_num
 
 
 def parse_tab1(lines, start):

@@ -123,14 +123,41 @@ def test_the_links_say_which_endf_section_they_came_from(suite):
 
 
 def test_the_report_declares_the_covariance_files_it_does_not_read(covEndf):
-    """MF31 and MF32 are covariances this adapter does not convert."""
+    """MF31 and MF32 are covariances this adapter does not convert.
+
+    The MF32 half of this was unverifiable until MF32 got a parser: the branch
+    that raises the notice keys off ``endf.mf[32]``, which the registry could
+    never populate, so the docstring claimed a behaviour no assertion reached.
+    """
     from kika.nuclear_data.model import ConversionReport
 
     class _Endf:
-        mf = {31: object(), 33: covEndf.mf[33]}
+        mf = {31: object(), 32: object(), 33: covEndf.mf[33]}
 
     _, report = decodeCovarianceSuite(_Endf(), ConversionReport())
     assert any("MF31" in entry for entry in report.unsupported)
+    assert any("MF32" in entry for entry in report.unsupported)
+
+
+def test_a_file_carrying_only_unconvertible_covariances_does_not_claim_it_has_none(covEndf):
+    """An MF32-only evaluation has covariances; it just has none this reads.
+
+    ``read()`` calls ``decodeCovarianceSuite`` for any MF in ``COVARIANCE_MF``,
+    which MF32 joined when it got a parser. Without this distinction such a tape
+    came back declaring it "carries no covariances", which is the opposite of
+    why it was routed here.
+    """
+    from kika.nuclear_data.model import ConversionReport
+
+    class _Endf:
+        mf = {32: object()}
+
+    suiteOut, report = decodeCovarianceSuite(_Endf(), ConversionReport())
+    assert len(suiteOut) == 0
+    assert any("the only covariances" in entry and "MF32" in entry
+               for entry in report.losses)
+    assert not any(entry.endswith("carries no covariances")
+                   for entry in report.losses)
 
 
 def test_a_file_with_no_covariances_says_so():

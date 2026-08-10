@@ -354,11 +354,13 @@ linearizer responds to even small σ changes), which by itself proves the
 
 ## Warnings you may see (and what they mean)
 
-- **`UserWarning: Skipping MF sections without parsers: [6, 8, 10, 12, 13, 14, 32]`**
+- **`UserWarning: Skipping MF sections without parsers: [6, 8, 10, 12, 13, 14]`**
   Emitted by `kika.endf.parsers.parse_endf` whenever an ENDF tape contains
   MF sections kika doesn't have a parser for (energy-angle distributions,
-  decay/yield, photon production, resonance covariance). Benign — the
-  pipeline only needs MF1/2/3/4/33/34 and ignores the rest.
+  decay/yield, photon production). Benign — the pipeline only needs
+  MF1/2/3/4/33/34 and ignores the rest. MF32, the resonance-parameter
+  covariance, used to appear in this list and no longer does: it is read as of
+  2026-08-10, though nothing in the sampling pipeline consumes it yet.
 
 - **`Unexpected MT152 in MF2 (only MT151 expected), skipping`**
   ENDF/B-VIII added MT152 (energy-dependent self-shielding) under MF2. The

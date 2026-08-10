@@ -65,6 +65,11 @@ COV = DATA / "micro_fe56_cov.endf"
 PFNS = DATA / "micro_cf252_pfns.endf"
 PFNS_COV = DATA / "micro_pfns_cov.endf"
 
+
+def mf32_fixture_path(key: str) -> Path:
+    """Committed MF32 micro-tape for sub-format *key*."""
+    return DATA / f"micro_{key}_mf32.endf"
+
 REGEN = bool(os.environ.get("REGEN_MICRO_TAPES"))
 
 #: What the structural micro-tape keeps. Everything else is removed.
@@ -74,6 +79,34 @@ KEEP = {1: {451}, 2: {151}, 3: {1, 2, 102}, 4: {2}, 34: {2}}
 #: ENDF/B-VIII.1 Cf-252. MF3/MT18 comes along because the fission cross section
 #: is what MT18's spectrum belongs to, and it costs 34 lines.
 KEEP_PFNS = {1: {451}, 3: {18}, 5: {18, 455}, 35: {18}}
+
+#: What each MF32 micro-tape keeps. File 2 comes along rather than being cut:
+#: §32.3 makes File 32 meaningless without it — every resonance a covariance
+#: names must be present in File 2, to a relative tolerance of 1e-5 — and it is
+#: the cheapest part of all four (31 to 1339 lines).
+KEEP_MF32 = {1: {451}, 2: {151}, 32: {151}}
+
+#: The four MF32 fixtures and the evaluation each is cut from. One sub-format
+#: apiece, chosen from the eleven tapes on this machine that carry an MF32:
+#:
+#: ``na23``    LCOMP=2 with no INTG block at all — a diagonal covariance, and
+#:             the smallest MF32 anywhere at 52 lines.
+#: ``cm244``   LCOMP=0, the ENDF/B-V-compatible per-L format. Only actinides
+#:             still use it.
+#: ``th232``   LCOMP=2 with INTG, **and** a second range with the unresolved
+#:             LRU=2 covariance of §32.2.4. The only URR coverage that exists.
+#: ``cl35``    LCOMP=2 for R-Matrix Limited. Chosen over W-186 and Cu-63
+#:             because it is the one whose NJS (8) differs from its NJSX (7),
+#:             which is what forces the spin-group loop to count NJS.
+#:
+#: LCOMP=1 has no fixture: the smallest evaluation using it is Mn-55 at 26 467
+#: MF32 lines, ~2 MB, so it stays on the ``tape``-marked tests.
+MF32_FIXTURES = {
+    "na23": "na23_b81",
+    "cm244": "cm244_b81",
+    "th232": "th232_b81",
+    "cl35": "cl35_b81",
+}
 
 #: Fe-56 identity, shared by both fixtures.
 ZA, AWR, MAT, MT = 26056.0, 55.36735, 2631, 2
@@ -206,6 +239,31 @@ def build_pfns(source: Path, dest: Path) -> None:
     dest.write_text(trimmed)
 
 
+def build_mf32(source: Path, dest: Path) -> None:
+    """Cut *source* down to ``KEEP_MF32``, verbatim.
+
+    Same machinery and same reason as :func:`build_structural`: MF32 is exactly
+    the file where a reformatted record would be a false pass, since the whole
+    gate is that kika gives the bytes back. Two of these four evaluations
+    disagree with ENDF-102 §32 in fields kika reproduces rather than corrects,
+    and a regenerated fixture would quietly agree with kika instead.
+    """
+    content = source.read_text()
+    inventory = section_inventory(content)
+
+    to_remove: list[tuple[int, int | None]] = []
+    for mf, mts in sorted(inventory.items()):
+        if mf not in KEEP_MF32:
+            to_remove.append((mf, None))
+            continue
+        for mt in sorted(set(mts) - KEEP_MF32[mf]):
+            to_remove.append((mf, mt))
+
+    trimmed, n_removed = remove_sections(content, to_remove)
+    assert n_removed, f"nothing was removed from {source} — wrong source tape?"
+    dest.write_text(trimmed)
+
+
 #: Outgoing-energy group boundaries of the synthetic MF35, in eV. Eight groups,
 #: spanning a fission spectrum's range.
 PFNS_COV_BOUNDARIES = np.array(
@@ -322,14 +380,18 @@ def build_pfns_cov(dest: Path) -> None:
 
 
 @pytest.mark.skipif(not REGEN, reason="set REGEN_MICRO_TAPES=1 to rebuild the fixtures")
-def test_regenerate_micro_tapes(fe56_host_tape, cf252_b81_tape):
+def test_regenerate_micro_tapes(fe56_host_tape, cf252_b81_tape, request):
     """Rebuild every fixture from its source. Opt-in, then commit the diff."""
     DATA.mkdir(parents=True, exist_ok=True)
     build_structural(Path(fe56_host_tape), STRUCTURAL)
     build_cov(COV)
     build_pfns(Path(cf252_b81_tape), PFNS)
     build_pfns_cov(PFNS_COV)
+    for key, tape in MF32_FIXTURES.items():
+        source = request.getfixturevalue(f"{tape}_tape")
+        build_mf32(Path(source), mf32_fixture_path(key))
     assert all(p.stat().st_size > 0 for p in (STRUCTURAL, COV, PFNS, PFNS_COV))
+    assert all(mf32_fixture_path(k).stat().st_size > 0 for k in MF32_FIXTURES)
 
 
 # ---------------------------------------------------------------------------
