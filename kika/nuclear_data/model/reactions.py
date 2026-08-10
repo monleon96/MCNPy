@@ -1,8 +1,9 @@
 """GNDS-2.1 §15.1.1 ``reaction``, and the containers that hold reactions."""
 from __future__ import annotations
 
+import numbers
 from dataclasses import dataclass, field
-from typing import Iterator, List, Optional
+from typing import Iterator, List, Optional, Union
 
 from .cross_section_forms import CrossSection
 from .output_channel import OutputChannel
@@ -75,6 +76,55 @@ class _ReactionList:
             if reaction.ENDF_MT == mt:
                 return reaction
         raise KeyError(f"no reaction with ENDF_MT {mt}")
+
+    @property
+    def ENDF_MTs(self) -> List[int]:
+        """The MTs this container holds, sorted. ``None`` — a reaction with no
+        MT equivalent, which §15.1.1 says future evaluations may carry — is
+        skipped rather than sorted against the integers."""
+        return sorted(r.ENDF_MT for r in self.reactions if r.ENDF_MT is not None)
+
+    def __contains__(self, key: Union[int, str]) -> bool:
+        try:
+            self[key]
+        except (KeyError, TypeError):
+            return False
+        return True
+
+    def __getitem__(self, key: Union[int, str]) -> Reaction:
+        """``reactions[102]`` is capture; ``reactions['capture']`` is the same object.
+
+        **An integer key is an MT, not a position.** This breaks the list
+        convention on purpose. The position of a reaction is an artefact of the
+        order the file happened to store its sections in, and nobody has ever
+        wanted "the seventh reaction"; MT is the number users actually hold in
+        their heads. Iteration stays ordered, so ``list(reactions)[0]`` is still
+        there for the rare caller who genuinely means position.
+
+        ``numbers.Integral`` rather than ``int`` because an MT that arrives out
+        of a numpy array is an ``np.int64``, which is not an ``int``, and
+        failing on it would be a papercut with no defensible reason.
+        """
+        if isinstance(key, str):
+            return self.byLabel(key)
+        if isinstance(key, numbers.Integral):
+            mt = int(key)
+            try:
+                return self.byENDF_MT(mt)
+            except KeyError:
+                raise KeyError(
+                    f"no reaction with MT{mt} in {type(self).__name__}; it holds "
+                    f"{self.ENDF_MTs}. Indexing here is by MT, not by position. "
+                    f"Summed quantities such as MT1 and MT4 are not exclusive "
+                    f"reactions and belong in `suite.sums` rather than here; "
+                    f"`suite.reactionByENDF_MT()` searches every container. "
+                    f"(Which container a given decoder actually fills is its own "
+                    f"business -- the ENDF one puts every MF3 section here.)"
+                ) from None
+        raise TypeError(
+            f"a reaction is looked up by MT (int) or by label (str), not by "
+            f"{type(key).__name__}"
+        )
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(n={len(self.reactions)})"

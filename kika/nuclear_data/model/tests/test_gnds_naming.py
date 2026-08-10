@@ -68,6 +68,12 @@ DIVERGENCES: dict[str, str] = {
     "Polynomial1d.domainMin_": "see Constant1d.domainMin_",
     "Constant1d.domainMax_": "see Constant1d.domainMin_",
     "Polynomial1d.domainMax_": "see Constant1d.domainMin_",
+    "ReactionSuite.cross_section": "a convenience *method* on the suite, not a second "
+                                   "spelling of the `Reaction.crossSection` attribute. "
+                                   "kika's convention is GNDS nouns and Python verbs, so "
+                                   "methods may be snake_case; the ratchet's concern is "
+                                   "two spellings of one attribute on one class, which "
+                                   "this is not. Written down so it is not 'corrected'",
     "ScalarUncertainty": "§2.3.3's scalar uncertainty and §7's functional "
                          "`uncertainty` are different nodes with the same name; the "
                          "scalar one is re-exported under a distinguishing alias",

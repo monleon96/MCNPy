@@ -20,10 +20,15 @@ restructures nothing.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
+import numpy as np
+
+from .conversion import ConversionReport
 from .covariances import CovarianceSuite
+from .cross_section_forms import EVAL_LABEL
 from .enums import Frame
+from .functions import Regions1d, XYs1d
 from .pops import PoPs
 from .reactions import (FissionComponents, IncompleteReactions, OrphanProducts,
                         Productions, Reaction, Reactions, Sums)
@@ -38,6 +43,33 @@ INTERACTIONS = ("nuclear", "atomic", "thermalNeutronScatteringLaw")
 #: This library targets GNDS 2.1. FUDGE 6.10.0 emits 2.0, so a file read from
 #: FUDGE will not match and the reader is expected to warn rather than pretend.
 GNDS_FORMAT = "2.1"
+
+
+def _eV(value: float) -> str:
+    """An energy in eV, rendered at a scale a human reads without counting zeros."""
+    for scale, unit in ((1e6, "MeV"), (1e3, "keV")):
+        if abs(value) >= scale:
+            return f"{value / scale:g} {unit}"
+    return f"{value:g} eV"
+
+
+def _pointwise(form: object) -> Tuple[np.ndarray, np.ndarray]:
+    """``(x, y)`` arrays out of whichever 1d container a form turned out to be.
+
+    Copies, so a caller who edits what they were handed does not edit the
+    evaluation underneath it.
+    """
+    if isinstance(form, XYs1d):
+        return form.xs.copy(), form.ys.copy()
+    if isinstance(form, Regions1d):
+        xs, ys, _ = form.toEndfRegions()
+        return xs, ys
+    raise TypeError(
+        f"a {type(form).__name__} is not a tabulated function, so it has no "
+        f"(E, sigma) pair to hand back. Forms such as ResonancesWithBackground "
+        f"and Reference have to be reconstructed or dereferenced first; reach "
+        f"for the form itself rather than this shortcut."
+    )
 
 
 @dataclass
@@ -117,6 +149,15 @@ class ReactionSuite:
     #: write it back byte for byte. See Reaction.provenance.
     provenance: Optional[object] = None
 
+    #: Not a GNDS node either. What the decode did beyond producing this object:
+    #: what it lost, approximated or refused. The decoders keep returning it as
+    #: the second element of a tuple -- that surface is unchanged -- but a tuple
+    #: element is discarded by every caller who is in a hurry, and "which MFs did
+    #: this evaluation carry that kika cannot read?" is a question the object has
+    #: to be able to answer on its own. `kika.read()` fills this in; `repr` and
+    #: `summary()` show its counts, so a partial decode announces itself.
+    report: Optional[ConversionReport] = None
+
     def __post_init__(self) -> None:
         self.projectileFrame = Frame(self.projectileFrame)
         if self.interaction not in INTERACTIONS:
@@ -165,9 +206,81 @@ class ReactionSuite:
     def styleLabels(self) -> List[str]:
         return self.styles.labels
 
-    def __repr__(self) -> str:
-        return (
-            f"ReactionSuite({self.projectile} + {self.target}, "
-            f"evaluation={self.evaluation!r}, format={self.format}, "
-            f"n_reactions={len(self.reactions)}, styles={self.styles.labels})"
+    def cross_section(
+        self, mt: int, form: str = EVAL_LABEL
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """``(E, sigma)`` for one MT, as two arrays. The 90 % journey, in one call.
+
+        The long road — ``suite.reactions[102].crossSection.evaluated.xs`` — stays
+        exactly as it is and remains the honest one, because it says which *form*
+        it is reading. This is the shortcut, and it goes through
+        :meth:`reactionByENDF_MT`, so summed quantities such as MT1 and MT4 work
+        here even though they are not in ``reactions``.
+
+        **The name.** kika's convention is GNDS nouns and Python verbs, so a
+        method may be ``snake_case`` where an attribute may not. It is registered
+        in ``tests/test_gnds_naming.py::DIVERGENCES`` so that the next reader does
+        not mistake it for a snake_case twin of ``Reaction.crossSection`` and
+        "fix" it.
+
+        A ``Regions1d`` form is flattened onto one grid by
+        :meth:`~kika.nuclear_data.model.functions.regions1d.Regions1d.toEndfRegions`,
+        which already drops the boundary point the regions share. **The regions'
+        differing interpolation rules do not survive that flattening** — the
+        returned pair is faithful at its own nodes and nowhere else, so anything
+        that needs a value *between* two nodes must call ``form.evaluate(E)``
+        instead, which interpolates each region by its own rule.
+        """
+        reaction = self.reactionByENDF_MT(mt)
+        # Raises with the available labels listed -- CrossSection.__getitem__
+        # already writes that message, so it is not rewritten here.
+        return _pointwise(reaction.crossSection[form])
+
+    def summary(self) -> str:
+        """A few lines saying what is actually in here, including what is missing."""
+        lines = [
+            f"{self.projectile} + {self.target}   "
+            f"[{self.evaluation or 'no evaluation id'}]  GNDS {self.format}",
+            f"  styles       {self.styles.labels or 'none'}",
+            f"  reactions    {len(self.reactions)}  MT{self.reactions.ENDF_MTs}",
+        ]
+        for name in ("sums", "fissionComponents", "productions",
+                     "orphanProducts", "incompleteReactions"):
+            container = getattr(self, name)
+            if len(container):
+                lines.append(f"  {name:<12} {len(container)}  MT{container.ENDF_MTs}")
+        lines.append(f"  PoPs         {len(self.PoPs)} particles")
+        if self.resonances is None:
+            lines.append("  resonances   none")
+        else:
+            domain = self.resonances.domain
+            span = "no region" if domain is None else f"{_eV(domain[0])} - {_eV(domain[1])}"
+            lines.append(
+                f"  resonances   {len(self.resonances.resolved)} resolved, "
+                f"{'1' if self.resonances.unresolved is not None else 'no'} unresolved"
+                f"   [{span}]"
+            )
+        lines.append(
+            "  covariances  none"
+            if self.covarianceSuite is None
+            else f"  covariances  {len(self.covarianceSuite)} sections"
         )
+        lines.append(
+            f"  decode       {self.report.summary()}" if self.report is not None
+            else "  decode       not recorded"
+        )
+        return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        parts = [
+            f"{self.projectile} + {self.target}",
+            f"{self.evaluation!r}" if self.evaluation else "no evaluation id",
+            f"{len(self.reactions)} reactions",
+        ]
+        if self.resonances is not None and self.resonances.domain is not None:
+            parts.append(f"resonances to {_eV(self.resonances.domain[1])}")
+        if self.covarianceSuite is not None:
+            parts.append(f"{len(self.covarianceSuite)} covariance sections")
+        if self.report is not None and not self.report.isClean:
+            parts.append(self.report.summary())
+        return f"<ReactionSuite {' | '.join(parts)}>"

@@ -15,9 +15,12 @@ became façades, ``kika.endf.model_adapter`` and ``kika.nuclear_data.model`` wer
 still absent from that list, and the desktop app would have broken the first
 time it read a cross section. They are in the spec now; keep them there.
 
-So this file is no longer "nothing imports the adapter" — it is "only these four
-modules do", which is a scoreboard for a deprecation rather than a prohibition.
-It empties when the flat classes go in 1.0.
+So this file is no longer "nothing imports the adapter" — it is "only these
+modules do", which is a scoreboard rather than a prohibition. The allowlist has
+**two halves with opposite futures**: the four flat-class façades, which empty
+when the classes go in 1.0, and the front door `kika/_read.py`, which is the
+library's public entry onto the model and stays forever. They are kept as
+separate sets so that neither is mistaken for the other.
 
 It lives under the ENDF adapter's tests and covers both adapters, rather than
 being copied into each: one place to add the third adapter to.
@@ -48,21 +51,58 @@ ADAPTERS = ("kika.endf.model_adapter", "kika.ace.model_adapter")
 #: the first time the desktop app read a cross section, with dev, tests and CI
 #: all green. They are in the spec now. **Adding a module here means checking
 #: that spec.**
-ALLOWED_IMPORTERS = {
+FACADE_IMPORTERS = {
     "kika/nuclear_data/cross_section.py",
     "kika/nuclear_data/angular_distribution.py",
     "kika/nuclear_data/resonance_parameters.py",
     "kika/nuclear_data/nuclide_info.py",
 }
 
+#: Modules that import an adapter **and are meant to, permanently**.
+#:
+#: Kept apart from ``FACADE_IMPORTERS`` because the two have opposite futures.
+#: That list is a deprecation scoreboard that empties at 1.0; this one is the
+#: library's public entry point and empties never. Merging them would mean that
+#: when the flat classes go, whoever deletes the last façade entry finds the list
+#: still non-empty and has to work out why.
+#:
+#: **Phase 3e (2026-08-10) added the front door.** ``kika/_read.py`` is
+#: ``kika.read`` — the one door onto the model — so importing the adapters is its
+#: entire job. It does so *inside* ``_readEndf``/``_readAce`` rather than at
+#: module scope, which is what keeps ``import kika`` from waking the model.
+#:
+#: **The frozen build was checked, and needs nothing.** A function-scope import
+#: is invisible to PyInstaller's modulegraph, so the rule stands: adding an entry
+#: here means checking kika-app's ``kika-api.spec``. Checked on 2026-08-10 —
+#: ``kika.nuclear_data.model``, ``kika.endf.model_adapter`` and
+#: ``kika.ace.model_adapter`` are already in ``hiddenimports`` (spec lines
+#: 143-146) from phase 3d, and **kika-app calls no ``kika.read``** (zero grep
+#: hits), so no spec change was owed. If the app ever does call it, ``kika._read``
+#: has to go in that list — it is reached through ``kika.__getattr__``, which
+#: modulegraph cannot see either.
+PERMANENT_IMPORTERS = {
+    "kika/_read.py",
+}
+
+ALLOWED_IMPORTERS = FACADE_IMPORTERS | PERMANENT_IMPORTERS
+
 
 def _importers(adapter: str, root: Path | None = None) -> list[str]:
-    """Every file under kika/ that imports ``adapter``, excluding adapter packages."""
+    """Every **shipped** module under kika/ that imports ``adapter``.
+
+    Adapter packages are skipped for the obvious reason. Test packages are
+    skipped for a stated one: both harms this ratchet guards against are harms to
+    *shipped* code — ``read_endf`` building the model on every parse, and a
+    function-scope import PyInstaller cannot see. A test module is on neither the
+    pipeline's path nor the frozen build's, and a test that checks the adapter has
+    to import the adapter. Scanning them would make the ratchet fire on its own
+    coverage, and the usual fix for that is to delete the coverage.
+    """
     root = root if root is not None else REPO_ROOT
     found: list[str] = []
     for path in sorted((root / "kika").rglob("*.py")):
         relative = path.relative_to(root)
-        if "model_adapter" in relative.parts:
+        if "model_adapter" in relative.parts or "tests" in relative.parts:
             continue
         tree = ast.parse(path.read_text(errors="replace"), filename=str(path))
         for node in ast.walk(tree):
@@ -76,19 +116,20 @@ def _importers(adapter: str, root: Path | None = None) -> list[str]:
 
 
 @pytest.mark.parametrize("adapter", ADAPTERS)
-def test_only_the_deprecated_flat_classes_import_the_adapter(adapter):
+def test_only_the_facades_and_the_front_door_import_the_adapter(adapter):
     unexpected = [
         entry for entry in _importers(adapter)
         if entry.rsplit(":", 1)[0] not in ALLOWED_IMPORTERS
     ]
     assert not unexpected, (
-        f"{adapter} is imported by a module that is not one of the four flat "
-        f"classes:\n  " + "\n  ".join(unexpected)
+        f"{adapter} is imported by a module that is neither one of the four flat "
+        f"classes nor the front door:\n  " + "\n  ".join(unexpected)
         + "\n\nIt pulls in the whole GNDS model. Code that wants the model should "
           "ask the adapter for it directly, not reach it through kika.nuclear_data. "
-          "If this really is a new façade, add it to ALLOWED_IMPORTERS *and* to "
-          "kika-app/kika-api.spec's hiddenimports -- a function-scope import is "
-          "invisible to PyInstaller."
+          "There is one public entry point onto the model and it is kika.read; a "
+          "second one is almost certainly a mistake. If it really is not, add it "
+          "to PERMANENT_IMPORTERS *and* to kika-app/kika-api.spec's hiddenimports "
+          "-- a function-scope import is invisible to PyInstaller."
     )
 
 

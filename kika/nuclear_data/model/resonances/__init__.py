@@ -85,3 +85,15 @@ class Resonances:
         if not bounds:
             return None
         return min(b[0] for b in bounds), max(b[1] for b in bounds)
+
+    def __repr__(self) -> str:
+        formalisms = ", ".join(
+            type(r.formalism).__name__ if r.formalism is not None else "unset"
+            for r in self.resolved
+        ) or "none"
+        domain = self.domain
+        span = "no region" if domain is None else f"{domain[0]:g}-{domain[1]:g} eV"
+        return (
+            f"Resonances(resolved=[{formalisms}], "
+            f"unresolved={self.unresolved is not None}, {span})"
+        )

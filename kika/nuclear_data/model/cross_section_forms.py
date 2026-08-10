@@ -128,6 +128,14 @@ class CrossSection:
     def __setitem__(self, label: str, form: object) -> None:
         self.forms[label] = form
 
+    def __repr__(self) -> str:
+        if not self.forms:
+            return "CrossSection(no forms decoded)"
+        described = ", ".join(
+            f"{label}={type(form).__name__}" for label, form in sorted(self.forms.items())
+        )
+        return f"CrossSection({described})"
+
     @property
     def evaluated(self):
         """The ``label='eval'`` form §16.1.1 requires of an evaluated file."""

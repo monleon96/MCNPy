@@ -82,3 +82,6 @@ class PoPs:
 
     def add(self, particle: Particle) -> None:
         self.particles[particle.id] = particle
+
+    def __repr__(self) -> str:
+        return f"PoPs(n={len(self.particles)}, {sorted(self.particles)})"

@@ -257,3 +257,117 @@ def test_resonances_report_their_overall_domain():
     )
     assert resonances.domain == (1e-5, 2e6)
     assert m.Resonances().domain is None
+
+
+# ---------------------------------------------------------------------------
+# Navigation — the model has to be usable, not merely correct
+# ---------------------------------------------------------------------------
+
+def _suiteWithCapture():
+    reaction = m.Reaction(id=m.ReactionId(label="capture", ENDF_MT=102))
+    reaction.crossSection["eval"] = m.XYs1d(
+        xs=np.array([1.0, 2.0, 3.0]), ys=np.array([9.0, 8.0, 7.0])
+    )
+    suite = m.ReactionSuite(evaluation="JEFF-4.0", projectile="n", target="Fe56")
+    suite.reactions.append(reaction)
+    return suite
+
+
+def test_a_reaction_is_indexed_by_mt_and_by_label():
+    suite = _suiteWithCapture()
+    assert suite.reactions[102] is suite.reactions["capture"]
+    assert 102 in suite.reactions
+    assert "capture" in suite.reactions
+    assert 16 not in suite.reactions
+
+
+def test_an_integer_index_is_an_mt_and_says_so_when_it_misses():
+    """``reactions[0]`` is not "the first reaction", and the error has to explain
+    that — otherwise it reads as a bug in kika rather than a deliberate choice."""
+    suite = _suiteWithCapture()
+    with pytest.raises(KeyError, match="by MT, not by position"):
+        suite.reactions[0]
+    # Position is still reachable for the rare caller who really means it.
+    assert list(suite.reactions)[0].ENDF_MT == 102
+
+
+def test_an_mt_out_of_a_numpy_array_still_indexes():
+    """``np.int64`` is not an ``int``; failing on it would be a papercut."""
+    suite = _suiteWithCapture()
+    mts = np.array([102])
+    assert suite.reactions[mts[0]].ENDF_MT == 102
+
+
+def test_a_reaction_cannot_be_looked_up_by_something_meaningless():
+    suite = _suiteWithCapture()
+    with pytest.raises(TypeError, match="by MT .int. or by label"):
+        suite.reactions[1.5]
+
+
+def test_cross_section_hands_back_the_two_arrays():
+    suite = _suiteWithCapture()
+    energies, sigma = suite.cross_section(102)
+    np.testing.assert_array_equal(energies, [1.0, 2.0, 3.0])
+    np.testing.assert_array_equal(sigma, [9.0, 8.0, 7.0])
+
+
+def test_cross_section_hands_back_a_copy():
+    """A caller who normalises what they were given must not edit the evaluation."""
+    suite = _suiteWithCapture()
+    _, sigma = suite.cross_section(102)
+    sigma *= 0.0
+    assert suite.cross_section(102)[1][0] == 9.0
+
+
+def test_cross_section_flattens_regions_by_reusing_the_endf_layout():
+    """``Regions1d`` shares a boundary point between consecutive regions;
+    ``toEndfRegions`` already drops it, so this must not double-count."""
+    suite = _suiteWithCapture()
+    suite.reactions[102].crossSection["eval"] = m.Regions1d.fromEndfRegions(
+        xs=[1.0, 2.0, 3.0, 4.0], ys=[10.0, 20.0, 30.0, 40.0],
+        nbtIntPairs=[(2, 2), (4, 5)],
+    )
+    energies, sigma = suite.cross_section(102)
+    np.testing.assert_array_equal(energies, [1.0, 2.0, 3.0, 4.0])
+    np.testing.assert_array_equal(sigma, [10.0, 20.0, 30.0, 40.0])
+
+
+def test_cross_section_names_the_forms_it_has_when_asked_for_one_it_lacks():
+    suite = _suiteWithCapture()
+    with pytest.raises(KeyError, match="recon"):
+        suite.cross_section(102, form="recon")
+
+
+def test_a_form_that_is_not_tabulated_says_why_it_cannot_be_flattened():
+    """``ResonancesWithBackground`` has to be reconstructed first, and the
+    shortcut must say so rather than return something plausible."""
+    suite = _suiteWithCapture()
+    suite.reactions[102].crossSection["eval"] = m.Reference(href="../another")
+    with pytest.raises(TypeError, match="not a tabulated function"):
+        suite.cross_section(102)
+
+
+def test_the_suite_repr_says_what_is_in_it():
+    suite = _suiteWithCapture()
+    suite.resonances = m.Resonances(
+        resolved=[m.ResolvedRegion(domainMin=1e-5, domainMax=8.5e5)]
+    )
+    text = repr(suite)
+    assert "n + Fe56" in text
+    assert "1 reactions" in text
+    assert "850 keV" in text, f"the resonance domain should read at human scale: {text}"
+
+
+def test_the_summary_reports_a_partial_decode_rather_than_hiding_it():
+    suite = _suiteWithCapture()
+    suite.report = m.ConversionReport()
+    suite.report.lost("MF6 was on the tape and kika has no parser for it")
+    assert "1 losses" in suite.summary()
+    assert "1 losses" in repr(suite), "a lossy decode must be visible in the repr"
+
+
+def test_a_clean_decode_does_not_clutter_the_repr():
+    suite = _suiteWithCapture()
+    suite.report = m.ConversionReport()
+    assert "clean" not in repr(suite)
+    assert "clean" in suite.summary()

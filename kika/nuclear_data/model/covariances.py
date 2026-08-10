@@ -193,3 +193,10 @@ class CovarianceSuite:
             if section.label == label:
                 return section
         raise KeyError(f"no covariance section labelled {label!r}")
+
+    def __repr__(self) -> str:
+        return (
+            f"CovarianceSuite({self.target or '?'}, "
+            f"n_sections={len(self.covarianceSections)}, "
+            f"n_parameterCovariances={len(self.parameterCovariances)})"
+        )

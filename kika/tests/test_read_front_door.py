@@ -1,0 +1,233 @@
+"""``kika.read()`` — the front door, and the invariants that keep it honest.
+
+This lives in ``kika/tests/`` rather than under a package because, like
+``test_layering.py`` beside it, what it asserts belongs to the repository as a
+whole: the door spans ``kika.endf``, ``kika.ace`` and ``kika.nuclear_data.model``
+and is owned by none of them.
+
+Three things are worth more than the rest and are called out where they appear:
+
+1. **Dormancy survives the door.** The whole safety argument for phases 3a-3d is
+   "the model is built beside the old code and nothing imports it". Adding a
+   public entry point is exactly the change that would end that quietly.
+2. **The door transforms nothing.** It must be a *route* to the adapters, not a
+   second decoder. The moment it computes something the manual path does not,
+   two answers to the same question exist.
+3. **The report is not silently emptied.** Its whole value is that a partial
+   decode announces itself.
+
+Everything runs on the committed micro-tapes (~1 s). The full Fe-56 tape takes
+minutes to parse and belongs in no test that runs by default.
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+import textwrap
+
+import numpy as np
+import pytest
+
+import kika
+from kika import sniff_format
+from kika._read import UnknownFormatError
+
+ACE_FILE = "kika/ace/files/260560_80.02c"
+
+
+# ----------------------------------------------------------------------
+# Sniffing
+# ----------------------------------------------------------------------
+
+def test_endf_tapes_are_recognised(micro_tape, micro_cov_tape):
+    assert sniff_format(micro_tape) == "endf"
+    assert sniff_format(micro_cov_tape) == "endf"
+
+
+def test_an_ace_file_is_recognised():
+    assert sniff_format(ACE_FILE) == "ace"
+
+
+def test_gnds_xml_is_recognised_before_it_can_be_read(tmp_path):
+    """Recognised and refused are different answers, and the difference is the point.
+
+    A user handed a GNDS file should be told kika cannot read GNDS *yet*, naming
+    the phase — not told their file is unrecognisable, which would send them
+    looking for a corrupt download.
+    """
+    path = tmp_path / "Fe56.xml"
+    path.write_text('<?xml version="1.0"?>\n<reactionSuite projectile="n"/>\n')
+    assert sniff_format(path) == "gnds"
+    with pytest.raises(NotImplementedError, match="phase 5"):
+        kika.read(path)
+
+
+def test_an_unknown_file_names_what_was_tried(tmp_path):
+    path = tmp_path / "notes.txt"
+    path.write_text("this is not a nuclear data file\n")
+    with pytest.raises(UnknownFormatError) as excinfo:
+        sniff_format(path)
+    message = str(excinfo.value)
+    for expected in ("ENDF", "ACE", "GNDS", "format="):
+        assert expected in message
+
+
+def test_a_binary_file_is_rejected_rather_than_raising_from_the_decoder(tmp_path):
+    """``errors='replace'`` in the sniffer exists for this; without it the user
+    gets a ``UnicodeDecodeError`` from inside kika instead of an answer."""
+    path = tmp_path / "blob.bin"
+    path.write_bytes(bytes(range(256)) * 8)
+    with pytest.raises(UnknownFormatError):
+        sniff_format(path)
+
+
+def test_a_missing_file_says_so(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        sniff_format(tmp_path / "absent.endf")
+
+
+def test_format_can_be_forced_past_the_sniffer(micro_tape):
+    """For the malformed header, and for the ACE 2.0 file the sniffer cannot place."""
+    assert kika.read(micro_tape, format="endf").reactions.ENDF_MTs
+    with pytest.raises(ValueError, match="format must be one of"):
+        kika.read(micro_tape, format="gibberish")
+
+
+# ----------------------------------------------------------------------
+# The door decodes, and decodes the same thing the manual path does
+# ----------------------------------------------------------------------
+
+def test_reading_an_endf_tape_gives_a_populated_suite(micro_tape):
+    suite = kika.read(micro_tape)
+    assert suite.reactions.ENDF_MTs, "no reactions decoded"
+    assert suite.report is not None, "the report was not attached"
+    assert suite.styles.labels, "no style decoded from MF1/451"
+
+
+def test_reading_an_ace_file_gives_a_populated_suite():
+    suite = kika.read(ACE_FILE)
+    assert 102 in suite.reactions
+    assert suite.report is not None
+
+
+def test_the_door_is_a_route_not_a_second_decoder(micro_tape):
+    """Array-identical to ``read_endf`` -> ``decodeReactionSuite``, by hand.
+
+    If this ever fails, the door has started computing something of its own and
+    there are two answers to "what is the Fe-56 capture cross section".
+    """
+    from kika.endf.model_adapter.decode import decodeReactionSuite
+    from kika.endf.read_endf import read_endf
+
+    byHand, _ = decodeReactionSuite(read_endf(str(micro_tape)))
+    throughDoor = kika.read(micro_tape)
+
+    assert throughDoor.reactions.ENDF_MTs == byHand.reactions.ENDF_MTs
+    for mt in byHand.reactions.ENDF_MTs:
+        expectedE, expectedXs = byHand.cross_section(mt)
+        gotE, gotXs = throughDoor.cross_section(mt)
+        np.testing.assert_array_equal(gotE, expectedE, err_msg=f"MT{mt} energies")
+        np.testing.assert_array_equal(gotXs, expectedXs, err_msg=f"MT{mt} sigma")
+
+
+def test_covariances_are_decoded_by_default(micro_cov_tape):
+    suite = kika.read(micro_cov_tape)
+    assert suite.covarianceSuite is not None
+    assert len(suite.covarianceSuite) > 0
+
+
+def test_covariances_can_be_declined(micro_cov_tape):
+    suite = kika.read(micro_cov_tape, covariances=False)
+    assert suite.covarianceSuite is None
+
+
+# ----------------------------------------------------------------------
+# The report
+# ----------------------------------------------------------------------
+
+def test_decoding_the_covariances_clears_the_redirect_that_told_us_to(micro_cov_tape):
+    """The notice says "call decodeCovarianceSuite for it". The door did.
+
+    Leaving it would make ``isClean`` false for every ordinary covariance tape,
+    which is how a report teaches its reader to ignore it. The corresponding
+    half — that declining covariances *keeps* the notice — is the next test, and
+    the pair is what stops this from becoming a blanket whitewash.
+    """
+    suite = kika.read(micro_cov_tape)
+    redirects = [m for m in suite.report.unsupported if "belongs to the covarianceSuite" in m]
+    assert not redirects, f"stale redirects survived: {redirects}"
+
+
+def test_declining_the_covariances_keeps_the_redirect(micro_cov_tape):
+    suite = kika.read(micro_cov_tape, covariances=False)
+    redirects = [m for m in suite.report.unsupported if "belongs to the covarianceSuite" in m]
+    assert redirects, "the notice was dropped even though nothing decoded the covariances"
+
+
+def test_an_mf_with_no_parser_is_reported_rather_than_passed_over(tmp_path, micro_tape):
+    """``endf.mf`` holds only the MFs that *had* a parser, so the parsed object
+    cannot answer "did this tape carry an MF6?". The door rescans the tape.
+
+    Built by appending a minimal MF6 section to a real tape, so the rest of the
+    decode is unchanged and the only difference is the section under test.
+    """
+    lines = micro_tape.read_text().splitlines(keepends=True)
+    mat = int(lines[1][66:70])
+    injected = (
+        f"{' 0.000000+0 0.000000+0          0          0          0          0':<66}"
+        f"{mat:>4}{6:>2}{5:>3}{1:>5}\n"
+    )
+    doctored = tmp_path / "with_mf6.endf"
+    doctored.write_text("".join(lines[:-1] + [injected] + lines[-1:]))
+
+    report = kika.read(doctored).report
+    assert any("MF6" in m for m in report.unsupported), (
+        f"MF6 was on the tape and no parser read it, yet the report is silent: "
+        f"{report.unsupported}"
+    )
+
+
+# ----------------------------------------------------------------------
+# Dormancy — the invariant the door is most likely to break
+# ----------------------------------------------------------------------
+
+def _inSubprocess(body: str) -> str:
+    completed = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(body)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert completed.returncode == 0, f"{completed.stdout}\n{completed.stderr}"
+    return completed.stdout.strip()
+
+
+def test_the_door_is_visible_without_waking_the_model():
+    """Both halves at once, and they pull in opposite directions.
+
+    Discoverable (``dir``, tab-completion, ``from kika import *``) usually means
+    imported. Here it must not: resolving ``kika.read`` reaches the adapters and
+    the adapters reach the model, and the model must stay dormant for the
+    cluster, the app and every notebook that merely does ``import kika``.
+    """
+    assert _inSubprocess("""
+        import sys, kika
+        assert 'read' in dir(kika), 'read is not discoverable'
+        leaked = sorted(m for m in sys.modules if m.startswith('kika.nuclear_data.model'))
+        assert not leaked, 'import kika woke the model: ' + ', '.join(leaked)
+        print('dormant')
+    """) == "dormant"
+
+
+def test_repeated_access_keeps_returning_the_function():
+    """The submodule-shadows-function trap, which this failed on first.
+
+    ``importlib`` binds a submodule onto its package as a side effect, so a
+    module named ``kika/read.py`` would replace ``kika.read`` with itself: first
+    access a function, every later one a module. The module is ``_read`` for this
+    reason, and a rename back would be silent without this test.
+    """
+    assert _inSubprocess("""
+        import kika
+        kinds = [type(kika.read).__name__ for _ in range(3)]
+        assert kinds == ['function'] * 3, kinds
+        print('function')
+    """) == "function"
