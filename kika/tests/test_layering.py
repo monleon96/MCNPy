@@ -4,10 +4,27 @@
 directory. What lives here are invariants of the repository as a whole, which
 belong to no single package. This is the first of them.
 
-**The invariant.** ``kika.processing`` and ``kika.nuclear_data`` are the
-calculation layer. ``kika.endf`` and ``kika.ace`` are format layers. The arrow
-points one way: formats may import the calculations, the calculations may not
-import the formats.
+**The invariant.** ``kika.processing``, ``kika.nuclear_data`` and ``kika.cov``
+are the calculation layer. ``kika.endf`` and ``kika.ace`` are format layers. The
+arrow points one way: formats may import the calculations, the calculations may
+not import the formats.
+
+**``kika/cov`` joined the guarded set before phase 4, not during it.** The
+roadmap's phase 4 bullet is "extend the ratchet to ``kika/cov``: no
+``kika.endf`` imports outside the encoders", and it belongs *before* the phase
+that rewrites ``CrossSectionCovariance`` and ``LegendreCovariance`` to read and
+write through ``CovarianceSuite`` — a net is worth nothing installed after the
+fall. Nothing in ``kika/cov`` was changed to add it; the seven imports it has
+today are written down as they are, which is what a ratchet is for.
+
+The phase-4 wording needs one gloss. "Outside the encoders" is not a rule this
+test can express, because ``kika/cov`` is not cleanly one layer: MF34 encoding
+in ``legendre_covariance.py`` is format code that the roadmap explicitly keeps
+("their COVERX/COVFIL/BOXER/GENDF I/O are kept as format encoders, on the same
+footing as ENDF and ACE"), while ``parse_covmat.py`` reaching for ENDF's record
+grammar is a genuine leak. A per-file frozen count says both at once: the
+encoder's entries stay and are explained, the leak's entry stays and is
+explained, and neither may grow.
 
 **Why a ratchet and not a rule.** The arrow was inverted in places, worst of
 all ~960 lines of pure numerics living inside ``kika/endf/processing/`` and
@@ -47,7 +64,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: Packages whose modules must not import a format package.
-GUARDED_PACKAGES = ("kika/processing", "kika/nuclear_data")
+GUARDED_PACKAGES = ("kika/processing", "kika/nuclear_data", "kika/cov")
 
 #: Packages they must not import.
 FORBIDDEN_ROOTS = ("kika.endf", "kika.ace")
@@ -88,7 +105,39 @@ FORBIDDEN_ROOTS = ("kika.endf", "kika.ace")
 #: entry is ``from_endf``'s ``decodeMF1MT451``. A canonical→format method that
 #: did not name a format type would not be writing ENDF. Deferred to call time
 #: like the rest, and it goes to zero with the flat classes at 1.0.
+#:
+#: **The three ``kika/cov`` entries are seeded, not earned**, and they are not
+#: all the same kind of thing — which is the point of listing them separately
+#: rather than quoting one total for the package.
+#:
+#: ``legendre_covariance.py`` (4) is the one the roadmap protects. Three of the
+#: four are the MF34 *encoder* — ``to_mf34`` builds an ``MF34MT`` from
+#: ``_make_lb5_record``/``_make_lb6_record`` (lines 315-316) and
+#: ``write_mf34_to_file`` splices it (line 416). That is format code doing
+#: format work, kept deliberately. The fourth (line 199) is ``read_endf`` in the
+#: reading direction. All four are deferred to call time.
+#:
+#: ``parse_covmat.py`` (1) is the genuine leak, and it is the only one of the
+#: seven that runs at **import** time. It takes ENDF's record grammar —
+#: ``parse_number``, ``parse_line``, ``parse_endf_id``, ``format_endf_number``,
+#: ``format_endf_data_line``, ``ENDF_FORMAT_FLOAT``, ``ENDF_FORMAT_INT`` — to
+#: read and write COVERX/COVFIL/BOXER, which are not ENDF files. They share a
+#: fixed-width record convention, so the dependency is real rather than lazy;
+#: but it is the same species as ``interpolate_1d_endf``, which phase 2 moved
+#: down to ``kika.processing`` precisely because the interpolation laws are not
+#: ENDF's property either. If phase 4 moves this grammar down, this entry goes
+#: to zero and no other line here changes.
+#:
+#: ``multigroup/legacy_mg_plotting.py`` (1) is the weakest and the cheapest to
+#: lose: a ``try``/``except`` around a **private** helper,
+#: ``kika.endf.classes.mf4.plotting._plot_uncertainty_bands``. It already fails
+#: soft — the ``except`` sets the name to ``None`` — so nothing breaks if it is
+#: cut. Reaching through a leading underscore into another package is the part
+#: worth recording; the module is named "legacy" and this is why.
 RUNTIME_ALLOWLIST: dict[str, int] = {
+    "kika/cov/legendre_covariance.py": 4,
+    "kika/cov/multigroup/legacy_mg_plotting.py": 1,
+    "kika/cov/parse_covmat.py": 1,
     "kika/nuclear_data/angular_distribution.py": 13,
     "kika/nuclear_data/cross_section.py": 3,
     "kika/nuclear_data/nuclide_info.py": 2,
@@ -99,7 +148,13 @@ RUNTIME_ALLOWLIST: dict[str, int] = {
 }
 
 #: ``if TYPE_CHECKING:`` imports of a format package, per module.
+#:
+#: ``legendre_covariance.py``'s single entry is the ``MF34MT`` annotation on
+#: ``to_mf34``'s return. It is the vocabulary half of the same encoder the
+#: runtime list explains: a method that returns an ``MF34MT`` has to name the
+#: type it returns.
 TYPE_CHECKING_ALLOWLIST: dict[str, int] = {
+    "kika/cov/legendre_covariance.py": 1,
     "kika/nuclear_data/angular_distribution.py": 2,
     "kika/nuclear_data/cross_section.py": 3,
     "kika/nuclear_data/nuclide_info.py": 2,
@@ -291,6 +346,15 @@ def _moduleScopeImports(path: Path) -> list[tuple[int, str]]:
     "Module scope" means not lexically inside a ``def``/``async def``. A class
     body counts as module scope, because it runs at import time — that is the
     hole a nested-function-only check would leave.
+
+    **An ``if TYPE_CHECKING:`` block does not count**, because it is False at
+    run time and imports nothing. That exclusion was missing until 2026-08-10
+    and had never fired: this helper only ever ran over ``kika/processing``,
+    whose modules have no ``TYPE_CHECKING`` format import at all — the
+    ``TYPE_CHECKING`` allowlist is entirely ``kika/nuclear_data`` and
+    ``kika/cov``. So the defect was latent, and it would have surfaced as a
+    false positive on ``kika/cov/legendre_covariance.py:13`` the moment anyone
+    extended this check past ``kika/processing``. Found by trying to.
     """
     tree = ast.parse(path.read_text(), filename=str(path))
 
@@ -299,6 +363,13 @@ def _moduleScopeImports(path: Path) -> list[tuple[int, str]]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for child in ast.walk(node):
                 deferred.add(id(child))
+        elif isinstance(node, ast.If):
+            test = node.test
+            if (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+                isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+            ):
+                for child in ast.walk(node):
+                    deferred.add(id(child))
 
     hits: list[tuple[int, str]] = []
     for node in ast.walk(tree):
@@ -376,6 +447,32 @@ def test_that_check_catches_a_hoisted_import(tmp_path, monkeypatch):
     inClass = package / "in_class.py"
     inClass.write_text("class A:\n    from kika.endf import read_endf\n")
     assert _moduleScopeImports(inClass), "a class-body import is still import-time"
+
+    # An ``if TYPE_CHECKING:`` block is False at run time and imports nothing,
+    # so it is not an import-time import. Without this arm the check reports a
+    # false positive on kika/cov/legendre_covariance.py:13 — which is how the
+    # missing exclusion was found. Both spellings of the guard, because
+    # ``scan_module`` accepts both and a helper that disagreed with it would be
+    # worse than either.
+    typingOnly = package / "typing_only.py"
+    typingOnly.write_text(
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from kika.endf.classes.mf34.mf34 import MF34MT\n"
+    )
+    assert _moduleScopeImports(typingOnly) == [], (
+        "an `if TYPE_CHECKING:` import does not run at import time"
+    )
+
+    qualifiedGuard = package / "typing_only_qualified.py"
+    qualifiedGuard.write_text(
+        "import typing\n"
+        "if typing.TYPE_CHECKING:\n"
+        "    from kika.endf.classes.mf34.mf34 import MF34MT\n"
+    )
+    assert _moduleScopeImports(qualifiedGuard) == [], (
+        "`if typing.TYPE_CHECKING:` is the same guard, spelled differently"
+    )
 
     # ``__name__``, not a hardcoded dotted path: pytest may import this module
     # under a name that is not ``kika.tests.test_layering``, and patching the
