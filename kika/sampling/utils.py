@@ -238,6 +238,7 @@ def _write_isotope_parquet(
     verbose: bool = True,
     logger=None,
     extra_metadata: Optional[Dict] = None,
+    param_labels: Optional[List[str]] = None,
 ) -> Optional[Dict]:
     """
     Write per-isotope perturbation factors to a parquet file.
@@ -272,6 +273,18 @@ def _write_isotope_parquet(
         ``perturb_nubar_family`` derives it from the components and discards
         its block, so those columns are present in the parquet without being
         free parameters. Other pipelines leave it unset.
+    param_labels : list of str, optional
+        Column names for the parameter axis, overriding the
+        ``{symbol}_MT{mt}_{group}`` construction below. Must have one entry per
+        column of *factors*, in the same order.
+
+        Needed because that construction is the outer product of
+        ``mt_numbers`` and one shared ``energy_grid``, which cannot express a
+        parameter axis with any other shape. The PFNS pipeline's columns are
+        ``(incident-energy band, outgoing group)`` and its bands do not share a
+        grid — 84 groups in one and 641 in the next on ENDF/B-VIII.1 U-235 — so
+        it passes its own labels. Any future non-MT-indexed pipeline can do the
+        same; existing callers leave it unset and are unaffected.
 
     Returns
     -------
@@ -282,15 +295,24 @@ def _write_isotope_parquet(
     """
     symbol = zaid_to_symbol(zaid)
 
-    n_groups = len(energy_grid) - 1
     columns_data = {'Sample_ID': np.arange(1, factors.shape[0] + 1, dtype='int32')}
 
-    for mt_idx, mt in enumerate(mt_numbers):
-        for grp in range(n_groups):
-            energy_group_name = _format_energy_group_name(energy_grid, grp)
-            col_name = f"{symbol}_MT{mt}_{energy_group_name}"
-            start_idx = mt_idx * n_groups + grp
-            columns_data[col_name] = factors[:, start_idx]
+    if param_labels is not None:
+        if len(param_labels) != factors.shape[1]:
+            raise ValueError(
+                f"param_labels has {len(param_labels)} entries for "
+                f"{factors.shape[1]} parameter columns"
+            )
+        for index, label in enumerate(param_labels):
+            columns_data[label] = factors[:, index]
+    else:
+        n_groups = len(energy_grid) - 1
+        for mt_idx, mt in enumerate(mt_numbers):
+            for grp in range(n_groups):
+                energy_group_name = _format_energy_group_name(energy_grid, grp)
+                col_name = f"{symbol}_MT{mt}_{energy_group_name}"
+                start_idx = mt_idx * n_groups + grp
+                columns_data[col_name] = factors[:, start_idx]
 
     log = logger if logger is not None else _get_logger()
 
