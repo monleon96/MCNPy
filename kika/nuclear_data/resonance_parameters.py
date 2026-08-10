@@ -149,6 +149,13 @@ class ResonanceParameters:
 
         results: List[Union[ResonanceParameters, UnresolvedResonanceParameters]] = []
         for fields in regions:
+            if fields["kind"] in ("radiusOnly", "unsupported"):
+                # Neither contributes a resolved region, so neither may consume
+                # one from the iterator below. Since B1a both kinds *appear* in
+                # ``regions`` — an LRU=0 range used to be dropped before the
+                # append, which is why this skip did not exist before and why
+                # its absence was invisible.
+                continue
             if fields["kind"] == "unresolved":
                 if resonances.unresolved is None:
                     continue

@@ -273,3 +273,114 @@ def test_the_ratchet_catches_a_violation(tmp_path, monkeypatch):
         "kika/processing/dirty.py": 1,
         "kika/processing/sneaky.py": 1,
     }
+
+
+# ---------------------------------------------------------------------------
+# The half the count cannot see: *when* those imports run
+# ---------------------------------------------------------------------------
+
+#: ``kika/processing`` modules whose ``kika.endf`` imports must stay inside a
+#: function body. All three genuinely need ``read_endf`` to parse a PENDF tape,
+#: so the dependency is real and only its *timing* is negotiable.
+_MUST_DEFER = "kika/processing"
+
+
+def _moduleScopeImports(path: Path) -> list[tuple[int, str]]:
+    """Forbidden imports that execute when the module is imported.
+
+    "Module scope" means not lexically inside a ``def``/``async def``. A class
+    body counts as module scope, because it runs at import time — that is the
+    hole a nested-function-only check would leave.
+    """
+    tree = ast.parse(path.read_text(), filename=str(path))
+
+    deferred: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for child in ast.walk(node):
+                deferred.add(id(child))
+
+    hits: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        if id(node) in deferred:
+            continue
+        for dotted in _resolve(node, path):
+            if _is_forbidden(dotted):
+                hits.append((node.lineno, dotted))
+    return hits
+
+
+def test_processing_pulls_no_format_package_in_at_import_time():
+    """The invariant the ratchet counts around rather than through.
+
+    ``kika/processing/__init__.py`` used to import ``kika.endf`` at module
+    scope, via ``njoy_reconstruct`` and ``derived_covariance``. The consequence
+    was stronger than a bad number: **nothing in ``kika.endf`` could import from
+    ``kika.processing`` at module scope at all**, because the cycle closed and
+    ``import kika`` died with "partially initialized module". ``interpolate_1d``
+    could not be moved down, and neither could anything else, ever, until it was
+    fixed. Phase 2 fixed it by deferring three imports to call time.
+
+    **Nothing checked that it stays fixed.** The ratchet counts import
+    statements, not when they run, so re-hoisting one of the three to module
+    scope leaves every existing test green and re-closes the cycle. The GNDS
+    roadmap records this as "worth a dedicated test at some point" and notes
+    that every phase 4-9 increment touching ``kika/processing`` has to keep the
+    imports deferred — which makes this the net that belongs *before* phase 4,
+    not after it.
+
+    A subprocess check was the obvious shape and does not work: ``import
+    kika.processing`` executes ``kika/__init__.py`` first, and that imports
+    ``kika.endf.read_endf`` eagerly on line 9, so ``kika.endf`` is in
+    ``sys.modules`` before ``kika.processing`` is reached whatever the latter
+    does. The property is statically decidable, so it is decided statically.
+    """
+    offenders: dict[str, list[tuple[int, str]]] = {}
+    for path in sorted((REPO_ROOT / _MUST_DEFER).rglob("*.py")):
+        if "tests" in path.parts:
+            continue
+        hits = _moduleScopeImports(path)
+        if hits:
+            offenders[str(path.relative_to(REPO_ROOT))] = hits
+
+    assert not offenders, (
+        "these kika/processing modules import a format package at module scope, "
+        "which re-closes the import cycle phase 2 opened:\n"
+        + "\n".join(
+            f"  {name}:{line} imports {dotted}"
+            for name, hits in offenders.items()
+            for line, dotted in hits
+        )
+        + "\nMove the import inside the function that needs it."
+    )
+
+
+def test_that_check_catches_a_hoisted_import(tmp_path, monkeypatch):
+    """It bites. A module-scope import must be reported and a deferred one must not."""
+    package = tmp_path / "kika" / "processing"
+    package.mkdir(parents=True)
+
+    deferred = package / "deferred.py"
+    deferred.write_text(
+        "def go():\n    from kika.endf.read_endf import read_endf\n    return read_endf\n"
+    )
+    assert _moduleScopeImports(deferred) == []
+
+    hoisted = package / "hoisted.py"
+    hoisted.write_text("from kika.endf.read_endf import read_endf\n")
+    assert _moduleScopeImports(hoisted) == [(1, "kika.endf.read_endf")]
+
+    # A class body is not a function body, and runs at import time.
+    inClass = package / "in_class.py"
+    inClass.write_text("class A:\n    from kika.endf import read_endf\n")
+    assert _moduleScopeImports(inClass), "a class-body import is still import-time"
+
+    # ``__name__``, not a hardcoded dotted path: pytest may import this module
+    # under a name that is not ``kika.tests.test_layering``, and patching the
+    # wrong module object silently patches nothing — which looks exactly like a
+    # check that does not bite.
+    monkeypatch.setattr(f"{__name__}.REPO_ROOT", tmp_path)
+    with pytest.raises(AssertionError, match="module scope"):
+        test_processing_pulls_no_format_package_in_at_import_time()

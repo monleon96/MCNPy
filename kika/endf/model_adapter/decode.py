@@ -53,7 +53,14 @@ __all__ = ["decodeMF3MT", "decodeMF1MT451", "decodeReactionSuite"]
 
 #: MF numbers kika's parser registry covers. Everything else is declared
 #: unsupported by the report rather than silently skipped.
-SUPPORTED_MF = (1, 2, 3, 4, 31, 33, 34)
+SUPPORTED_MF = (1, 2, 3, 4, 5, 31, 33, 34, 35)
+
+#: Of those, the ones whose content belongs to the ``covarianceSuite``
+#: (§25.1.1) rather than to the ``reactionSuite``. Kept as a set of its own
+#: because MF5 broke the rule the redirect loop used to assume — that
+#: "supported and not one of 1, 2, 3, 4" meant "covariance". MF5 is neither:
+#: it is reactionSuite content that this adapter does not decode yet.
+COVARIANCE_MF = (31, 33, 34, 35)
 
 
 def _za(section) -> int:
@@ -257,12 +264,29 @@ def decodeReactionSuite(endf, report: Optional[ConversionReport] = None):
             f"MF{mf} is present in the file and kika's parser registry does not "
             f"cover it; it is absent from this reactionSuite"
         )
-    for mf in sorted((present & set(SUPPORTED_MF)) - {1, 2, 3, 4}):
+    for mf in sorted((present & set(SUPPORTED_MF)) & set(COVARIANCE_MF)):
         report.unsupportedNode(
             f"MF{mf} is present and parsed; it is a covariance file, so it "
             f"belongs to the covarianceSuite (§25.1.1) and not to this "
             f"reactionSuite. Call decodeCovarianceSuite for it."
         )
+
+    # MF5 is the case that broke the loop above. It is parsed, it is *not* a
+    # covariance file, and it has no decode here yet — so it needs its own
+    # notice. Sending the user to `decodeCovarianceSuite` for it, which is what
+    # the old `- {1,2,3,4}` set did, was simply false.
+    mf5 = endf.mf.get(5) if hasattr(endf, "mf") else None
+    if mf5 is not None:
+        report.unsupportedNode(
+            "MF5 (energy distributions) is present and parsed by kika, but "
+            "decoding it into this reactionSuite is GNDS phase 7b; the "
+            "distributions are absent from the products below. The parsed "
+            "sections are reachable as endf.mf[5] and are what the PFNS "
+            "perturbation pipeline reads."
+        )
+        for mt in sorted(getattr(mf5, "mt", {})):
+            for gap in getattr(mf5.mt[mt], "report_gaps", list)():
+                report.unsupportedNode(gap)
 
     return suite, report
 

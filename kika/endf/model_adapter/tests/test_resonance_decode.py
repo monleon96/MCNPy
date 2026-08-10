@@ -63,11 +63,12 @@ def test_the_l_dependent_radius_reaches_the_channels(decoded, mf2):
     resonances, _ = decoded
     formalism = resonances.resolved[0].formalism
     energyRange = mf2.isotopes[0].energy_ranges[0]
-    ap = energyRange.parameters.ap
 
     for group, block in zip(formalism.spinGroups, energyRange.parameters.l_values):
-        expected = energyRange.scattering_radius_for_l(block.l)
-        expected = expected if expected != ap else None
+        # The file's own APL field, not the *resolved* radius: what the model
+        # must reproduce is what was written, and the fallback to AP is a
+        # reading of a zero rather than a value in the file.
+        expected = block.apl_or_qx if block.apl_or_qx else None
         for channel in group.channels:
             assert channel.scatteringRadius == expected, (
                 f"L={block.l}: the per-l scattering radius did not survive"
@@ -77,15 +78,98 @@ def test_the_l_dependent_radius_reaches_the_channels(decoded, mf2):
     assert any(r is not None for r in perL), "every l fell back to AP"
 
 
-def test_a_radius_equal_to_ap_is_none_and_not_a_copy(decoded, mf2):
-    """"this l uses the range's AP" and "this l has a radius that equals AP" are
-    different statements, and only one of them is in the file."""
+def test_none_means_the_file_wrote_zero_not_a_radius_that_equals_ap(decoded, mf2):
+    """``None`` is a statement about the *file*, not about a comparison.
+
+    ENDF's convention is that APL = 0 means "this l uses the range's AP", so
+    ``None`` here means the field was zero. It must **not** mean "the radius
+    came out equal to AP" — those are different statements and only the first
+    is in the file.
+
+    This test used to assert the second, and it was wrong in a way its own
+    docstring already argued against. The consequence was measured in B1a and is
+    the reason the assertion was inverted rather than adjusted: **U-235, Th-232
+    and Pu-241 all write APL explicitly equal to AP**, so the old collapse
+    stored ``None`` for them and an encoder would have written ``0.0`` where the
+    file has ``9.686000-1``. Half the corpus, and byte identity lost on all of
+    it. ``test_an_apl_equal_to_ap_is_kept`` below is the real-tape half.
+    """
     resonances, _ = decoded
     formalism = resonances.resolved[0].formalism
+    blocks = mf2.isotopes[0].energy_ranges[0].parameters.l_values
     ap = mf2.isotopes[0].energy_ranges[0].parameters.ap
     assert resonances.scatteringRadius.constant == ap
-    assert not any(
-        g.channels[0].scatteringRadius == ap for g in formalism.spinGroups
+
+    wroteZero = [not block.apl_or_qx for block in blocks]
+    assert any(wroteZero) and not all(wroteZero), (
+        f"this fixture no longer has both spellings of APL: {[b.apl_or_qx for b in blocks]}"
+    )
+    for group, block, zero in zip(formalism.spinGroups, blocks, wroteZero):
+        radius = group.channels[0].scatteringRadius
+        assert (radius is None) == zero, (
+            f"L={block.l}: the file wrote APL={block.apl_or_qx!r} and the model "
+            f"holds {radius!r}; None must mean exactly 'the file wrote 0'"
+        )
+
+
+@pytest.mark.parametrize("tape", ["u235_tape", "th232_tape", "pu241_tape"])
+def test_an_apl_equal_to_ap_is_kept(request, tape):
+    """The three tapes that write APL == AP, which is where the collapse bit.
+
+    Parametrized over the tapes rather than asserted on one, because the point
+    is that this is *half the corpus* and not a curiosity of one evaluation. If
+    a future tape stops writing APL the guard below fails rather than the test
+    passing vacuously.
+    """
+    path = request.getfixturevalue(tape)
+    section = read_endf(str(path), mf_numbers=[2]).mf[2].mt[151]
+    resonances, _, _ = decodeMF2MT151(section)
+
+    energyRange = section.isotopes[0].energy_ranges[0]
+    assert energyRange.lrf == 3, f"{tape} is no longer Reich-Moore"
+    blocks = energyRange.parameters.l_values
+    ap = energyRange.parameters.ap
+    equal = [b for b in blocks if b.apl_or_qx and b.apl_or_qx == ap]
+    assert equal, (
+        f"{tape} no longer writes an APL equal to its AP={ap}; this test exists "
+        f"for that case and would now pass without checking it"
+    )
+
+    formalism = resonances.resolved[0].formalism
+    for group, block in zip(formalism.spinGroups, blocks):
+        if block.apl_or_qx and block.apl_or_qx == ap:
+            assert group.channels[0].scatteringRadius == ap, (
+                f"{tape} L={block.l}: APL was written as {ap} and equals the "
+                f"range's AP; collapsing it to None loses what the file said"
+            )
+
+
+@pytest.mark.parametrize("tape", ["u235_tape", "th232_tape", "pu241_tape"])
+def test_the_flat_lgroup_ap_changed_with_it_and_that_is_deliberate(request, tape):
+    """The public-API consequence of the APL fix, pinned rather than discovered.
+
+    ``ResonanceParameters.from_endf`` reads ``channels[0].scatteringRadius``
+    through ``interop.flatResonanceParameters``, so un-collapsing the decoder
+    changes what a *public* class returns: on these three tapes ``LGroup.ap``
+    went from ``None`` to the range's AP.
+
+    **It is numerically equivalent** — ``None`` has always meant "use the
+    range's AP", and that is the same number — so nothing downstream computes
+    anything different. It is still a visible change, and decision 3(a) of
+    ``docs/mf2-encoder-notes.md`` took it knowingly: the alternative was to
+    re-collapse in ``interop`` and keep two sources of truth for one field.
+    """
+    path = request.getfixturevalue(tape)
+    section = read_endf(str(path), mf_numbers=[2]).mf[2].mt[151]
+    flat = [f for f in ResonanceParameters.from_endf(section)
+            if isinstance(f, ResonanceParameters)]
+    assert flat, f"{tape} produced no resolved flat parameters"
+
+    ap = flat[0].scattering_radius
+    written = [group.ap for group in flat[0].l_groups]
+    assert all(value == ap for value in written), (
+        f"{tape}: LGroup.ap is {written}, expected every l to carry AP={ap}. "
+        f"If these are None again the decoder has re-collapsed APL == AP."
     )
 
 

@@ -58,7 +58,12 @@ FORMATS = ("endf", "ace", "gnds")
 #: MF numbers whose content belongs to the covarianceSuite rather than the
 #: reactionSuite (GNDS §25.1.1). Kept here because the door has to know which
 #: redirect notices it has already acted on. See :func:`_dropRedirectsWeActedOn`.
-COVARIANCE_MF = (31, 33, 34)
+#:
+#: MF35 joined the list when the PFNS work taught `decodeCovarianceSuite` to
+#: read it. Without the entry here the door would leave the redirect notice
+#: standing with nothing replacing it -- telling the user to call
+#: `decodeCovarianceSuite` for a file it had, in fact, just decoded.
+COVARIANCE_MF = (31, 33, 34, 35)
 
 
 class UnknownFormatError(ValueError):

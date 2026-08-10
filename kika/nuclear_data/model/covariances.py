@@ -82,6 +82,44 @@ class DataLink:
             slices=Slices([Slice(dimension=dimension, domainValue=float(order))]),
         )
 
+    @classmethod
+    def forIncidentEnergyBand(cls, href: str, domainMin: float, domainMax: float,
+                              ENDF_MFMT: Optional[str] = None,
+                              dimension: int = 2,
+                              domainUnit: str = "eV") -> "DataLink":
+        """An MF35-equivalent link: the incident-energy band as a slice *range*.
+
+        MF35 gives the covariance of an outgoing-energy spectrum over a range
+        of incident energies. The same reasoning as
+        :meth:`forLegendreOrder` applies, one step further: an energy
+        distribution is one function of incident and outgoing energy, so a
+        covariance about the band 5-7 MeV is that function **sliced** to that
+        band — not a covariance of eight separate quantities that happen to
+        share a name.
+
+        The difference from the Legendre case is that a band is a range rather
+        than a point, so this fills ``domainMin``/``domainMax`` where that one
+        fills ``domainValue`` (§25.2.6 admits either, and exactly one).
+        ``dimension=2`` is the incident-energy axis of ``chi(E'|E)``, matching
+        the convention :data:`LEGENDRE_DIMENSION` follows for ``P(mu|E)``.
+        """
+        return cls(
+            href=href,
+            ENDF_MFMT=ENDF_MFMT,
+            slices=Slices([Slice(dimension=dimension,
+                                 domainMin=float(domainMin),
+                                 domainMax=float(domainMax),
+                                 domainUnit=domainUnit)]),
+        )
+
+    @property
+    def incidentEnergyBand(self) -> Optional[tuple]:
+        """The ``(domainMin, domainMax)`` this link is sliced to, when it is."""
+        for entry in self.slices:
+            if entry.domainMin is not None or entry.domainMax is not None:
+                return (entry.domainMin, entry.domainMax)
+        return None
+
     @property
     def legendreOrder(self) -> Optional[int]:
         """The Legendre order this link is sliced at, when it is."""

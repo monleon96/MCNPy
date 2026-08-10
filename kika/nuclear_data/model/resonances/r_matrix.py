@@ -26,7 +26,21 @@ class Channel:
     #: lands: under Reich-Moore the radius is per l-block, which is per spin
     #: group here, so every channel of that group gets it. Phase 1 found this
     #: value was being dropped entirely.
+    #:
+    #: Under LRF=7 this is ENDF's **APT**, the *true* channel radius — the one
+    #: that enters the penetrability and shift factors.
     scatteringRadius: Optional[float] = None
+    #: §19.3.4. ENDF's **APE**, the *effective* channel radius, which sets the
+    #: hard-sphere phase shift. LRF=7 writes APE and APT as separate columns and
+    #: they are routinely different; collapsing them into one radius made an
+    #: evaluation that distinguishes them unrepresentable, so a round trip could
+    #: not reproduce the file and a reconstruction would use one radius where the
+    #: evaluator asked for two.
+    hardSphereRadius: Optional[float] = None
+    #: §19.3.4. ENDF's **BND**, the channel's R-matrix boundary condition. Read
+    #: by the parser, held by no model node until now, so an LRF=7 round trip
+    #: wrote back a boundary condition of zero whatever the file said.
+    boundaryConditionValue: Optional[float] = None
 
 
 @dataclass
@@ -93,6 +107,20 @@ class RMatrix:
     PoPs: Optional[object] = None
     label: Optional[str] = None
     boundaryCondition: Optional[str] = None
+    #: §19.3.1. ENDF's **IFG**. ``False`` — the default and the common case —
+    #: means ``widths`` are widths in eV; ``True`` means they are reduced-width
+    #: amplitudes, in eV^½, and are *not* interchangeable with them.
+    #:
+    #: This is the one place this class deviates from the written form of
+    #: decision 1(a), which listed IFG as provenance. The principle that decision
+    #: states — physics on the model, bookkeeping in provenance — puts it here:
+    #: a consumer holding ``widths`` and unable to ask what they mean is exactly
+    #: the ``c3..c6`` problem this package exists to fix, one level up. GNDS
+    #: gives it an attribute for the same reason.
+    reducedWidthAmplitudes: bool = False
+    #: §19.3.1. ENDF's **KRL**: ``True`` selects relativistic kinematics. Never
+    #: read at all before B1a — not by the model and not by the flat path.
+    relativisticKinematics: bool = False
 
     @property
     def numberOfResonances(self) -> int:

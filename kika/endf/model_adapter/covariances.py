@@ -1,4 +1,4 @@
-"""MF33 and MF34 → :class:`~kika.nuclear_data.model.covariances.CovarianceSuite`.
+"""MF33, MF34, MF35 → :class:`~kika.nuclear_data.model.covariances.CovarianceSuite`.
 
 **The mapping that matters, and the one this module exists to get right.**
 §25.2.5-6 give a ``rowData``/``columnData`` an optional ``slices``, and a slice
@@ -17,6 +17,15 @@ order.
 
 MF33 is the simpler case: a covariance between two cross sections, which are
 already whole quantities, so the links carry no slices.
+
+**MF35 is the same idea one step further**, and is why this module is worth
+having rather than three bespoke containers. An MF35 band is a covariance about
+an *energy* distribution restricted to a range of incident energy — the same
+object sliced a different way, so it is built through
+:meth:`DataLink.forIncidentEnergyBand` and needs no new container. The bands of
+one section have different orders (84, 641, 641, 641, 641 on ENDF/B-VIII.1
+U-235), which is exactly what a suite of independent sections expresses and
+what any single-matrix container gets wrong silently.
 
 **What is not converted here.** kika's ``kika/cov`` package holds 14 000 lines of
 COVERX/COVFIL/BOXER/GENDF I/O. None of it is rewritten or replaced: it stays as
@@ -39,9 +48,11 @@ from kika.nuclear_data.model import (
     EndfProvenance,
 )
 
-__all__ = ["decodeMF33MT", "decodeMF34MT", "decodeCovarianceSuite",
+__all__ = ["decodeMF33MT", "decodeMF34MT", "decodeMF35MT",
+           "decodeCovarianceSuite",
            "encodeMF33MT", "encodeMF34MT",
-           "reactionHref", "angularDistributionHref"]
+           "reactionHref", "angularDistributionHref",
+           "energyDistributionHref"]
 
 
 def reactionHref(mt: int) -> str:
@@ -63,10 +74,31 @@ def angularDistributionHref(mt: int) -> str:
     )
 
 
+def energyDistributionHref(mt: int) -> str:
+    """xPath to the energy distribution an MF35 covariance is about.
+
+    The same node as :func:`angularDistributionHref`, and deliberately so: in
+    GNDS one ``distribution`` holds the outgoing product's full dependence on
+    angle *and* energy. MF34 and MF35 are covariances about the same object,
+    distinguished by which of its dimensions they slice — order for MF34,
+    incident energy for MF35 — not by pointing at different objects.
+    """
+    return (
+        f"/reactionSuite/reactions/reaction[@label='MT{mt}']"
+        f"/outputChannel/products/product[@label='n']/distribution"
+    )
+
+
 #: Which dimension of an angular distribution the Legendre order indexes.
 #: The distribution is P(mu|E): dimension 2 is incident energy, dimension 1 is
 #: the angular variable the Legendre expansion represents.
 LEGENDRE_DIMENSION = 1
+
+#: Which dimension of an energy distribution the MF35 band restricts.
+#: The distribution is chi(E'|E): dimension 2 is incident energy, the same
+#: convention as above, and dimension 1 is the outgoing energy the LB=7 matrix
+#: is gridded on.
+INCIDENT_ENERGY_DIMENSION = 2
 
 
 def _matrixForm(matrix, grid, isRelative: bool,
@@ -178,6 +210,47 @@ def decodeMF34MT(mf34mt, report: Optional[ConversionReport] = None, mf4Data=None
 
     if not sections:
         report.lost(f"MF34/MT{mf34mt.number}: no Legendre covariance blocks decoded")
+    return sections, report
+
+
+def decodeMF35MT(mf35mt, report: Optional[ConversionReport] = None):
+    """One MF35/MT section → one :class:`CovarianceSection` per band.
+
+    **No cross-band blocks exist**, so the result is block-diagonal by
+    construction and there is deliberately nothing here that concatenates the
+    bands into a single matrix. Their orders differ — 84, 641, 641, 641, 641 on
+    ENDF/B-VIII.1 U-235 — so a container that assembled every block at one
+    dimension would produce a malformed matrix silently. That is also why MF35
+    does not go through ``kika/cov``'s ``CrossSectionCovariance`` the way MF33
+    does; the decode is direct.
+
+    **The matrix is absolute and stays absolute.** LB=7 holds the covariance of
+    group-integrated probabilities, which are already dimensionless and already
+    sum to one. There is no absolute/relative conversion here and no MF5 needed
+    to do one — unlike MF34, which needs its MF4 to convert. The measured
+    evidence for that reading, and the row-sum test that pins it, are in
+    :mod:`kika.endf.classes.mf35.mf35`.
+    """
+    report = report if report is not None else ConversionReport()
+    mt = int(getattr(mf35mt, "number", 0))
+    provenance = _sectionProvenance(mf35mt)
+
+    sections = []
+    for index, band in enumerate(getattr(mf35mt, "subsections", [])):
+        link = DataLink.forIncidentEnergyBand(
+            energyDistributionHref(mt), band.e1, band.e2,
+            ENDF_MFMT=f"35/{mt}", dimension=INCIDENT_ENERGY_DIMENSION,
+        )
+        sections.append(CovarianceSection(
+            label=f"MF35-MT{mt}-band{index}",
+            rowData=link,
+            columnData=None,
+            form=_matrixForm(band.matrix(), band.energy_grid(), isRelative=False),
+            provenance=provenance,
+        ))
+
+    if not sections:
+        report.lost(f"MF35/MT{mt}: no covariance bands decoded")
     return sections, report
 
 
@@ -369,8 +442,16 @@ def decodeCovarianceSuite(endf, report: Optional[ConversionReport] = None,
             sections, report = decodeMF34MT(mf34.mt[mt], report, mf4Data=mf4Section)
             suite.covarianceSections.extend(sections)
 
-    if mf33 is None and mf34 is None:
-        report.lost("no MF33 and no MF34: this evaluation carries no covariances")
+    mf35 = endf.mf.get(35) if hasattr(endf, "mf") else None
+    if mf35 is not None:
+        for mt in sorted(getattr(mf35, "mt", {})):
+            sections, report = decodeMF35MT(mf35.mt[mt], report)
+            suite.covarianceSections.extend(sections)
+
+    if mf33 is None and mf34 is None and mf35 is None:
+        report.lost(
+            "no MF33, MF34 or MF35: this evaluation carries no covariances"
+        )
 
     if endf.mf.get(31) is not None:
         report.unsupportedNode(

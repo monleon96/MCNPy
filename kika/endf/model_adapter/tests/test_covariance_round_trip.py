@@ -141,7 +141,10 @@ def test_a_file_with_no_covariances_says_so():
 
     suiteOut, report = decodeCovarianceSuite(_Empty(), ConversionReport())
     assert len(suiteOut) == 0
-    assert any("no MF33 and no MF34" in entry for entry in report.losses)
+    # The message names all three covariance files the adapter now reads. MF35
+    # joined MF33 and MF34 with the PFNS work; a tape carrying only MF35 must
+    # not be reported as carrying no covariances.
+    assert any("no MF33, MF34 or MF35" in entry for entry in report.losses)
 
 
 def test_an_a0_section_reaches_the_model_with_its_order_zero_blocks():

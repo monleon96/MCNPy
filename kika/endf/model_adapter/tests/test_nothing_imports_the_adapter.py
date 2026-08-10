@@ -80,8 +80,23 @@ FACADE_IMPORTERS = {
 #: hits), so no spec change was owed. If the app ever does call it, ``kika._read``
 #: has to go in that list — it is reached through ``kika.__getattr__``, which
 #: modulegraph cannot see either.
+#:
+#: **Phase P2 of the PFNS roadmap (2026-08-10) added the second.**
+#: ``kika/sampling/mf35_sampling.py`` reads MF35 into a ``CovarianceSuite``,
+#: because the library's format-agnostic covariance object is the GNDS one and
+#: a PFNS-specific container would have been the fourth. The import is inside
+#: ``build_pfns_covariance``, so ``import kika.sampling`` — which the cluster
+#: pipeline does on every run — still does not wake the model.
+#:
+#: **The frozen build was checked and needs nothing.** kika-app imports
+#: ``kika.sampling.{mf31_sampling, utils, ace_perturbation,
+#: ace_perturbation_separate, endf_perturbation, nubar_perturbation}`` and none
+#: of the PFNS modules (grep, 2026-08-10), so no path in the app reaches this
+#: import. If the app ever calls ``perturb_pfns_files``, ``kika-api.spec``'s
+#: ``hiddenimports`` is where that has to be recorded.
 PERMANENT_IMPORTERS = {
     "kika/_read.py",
+    "kika/sampling/mf35_sampling.py",
 }
 
 ALLOWED_IMPORTERS = FACADE_IMPORTERS | PERMANENT_IMPORTERS
@@ -106,13 +121,37 @@ def _importers(adapter: str, root: Path | None = None) -> list[str]:
             continue
         tree = ast.parse(path.read_text(errors="replace"), filename=str(path))
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(adapter):
-                found.append(f"{relative}:{node.lineno}")
+            if isinstance(node, ast.ImportFrom):
+                if _resolves_to(node, relative, adapter):
+                    found.append(f"{relative}:{node.lineno}")
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     if alias.name.startswith(adapter):
                         found.append(f"{relative}:{node.lineno}")
     return found
+
+
+def _resolves_to(node: ast.ImportFrom, relative: Path, adapter: str) -> bool:
+    """Does this ``from ... import`` name the adapter, absolute *or* relative?
+
+    **Relative imports used to slip through**, and that is not hypothetical:
+    ``from ..endf.model_adapter import decodeCovarianceSuite`` inside
+    ``kika/sampling/`` has ``node.module == "endf.model_adapter"``, which does
+    not start with ``kika.endf.model_adapter``, so the ratchet said nothing. A
+    module could evade the allowlist by spelling its import differently, which
+    is exactly the sort of accident this file exists to prevent. Found while
+    adding the PFNS entry above; the import there is absolute now *and* on the
+    list, but the hole is closed here so the next one cannot choose.
+    """
+    module = node.module or ""
+    if node.level == 0:
+        return module.startswith(adapter)
+    # `relative` is like kika/sampling/mf35_sampling.py; level 1 is its own
+    # package, level 2 the parent, and so on.
+    package = relative.parts[:-1]
+    base = package[: len(package) - (node.level - 1)]
+    resolved = ".".join([*base, module]) if module else ".".join(base)
+    return resolved.startswith(adapter)
 
 
 @pytest.mark.parametrize("adapter", ADAPTERS)
