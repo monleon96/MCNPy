@@ -28,7 +28,8 @@ import numpy as np
 
 __all__ = ["covariance_suite_blocks", "parameter_covariance_blocks",
            "parameter_covariance_index", "legendre_covariance_blocks",
-           "legendre_covariance_index", "assemble_joint"]
+           "legendre_covariance_index", "cross_section_covariance_blocks",
+           "cross_section_covariance_index", "assemble_joint"]
 
 
 def covariance_suite_blocks(suite, isotope: Any = None, mt: int = 18):
@@ -390,6 +391,147 @@ def legendre_covariance_index(
     return {
         (isotope, "MF34", tuple(keys)): {
             "triplets": list(keys),
+            "stride": stride,
+            "grids": {key: unions[key] for key in keys},
+            "widths": widths,
+            "dimension": len(keys) * stride,
+        }
+    }
+
+
+def _mf33_entries(suite, mt=None, relative=None):
+    """The MF33 sections of *suite*, as :func:`assemble_joint` entries.
+
+    The cross-*reaction* sibling of :func:`_mf34_entries`, and the same shape of
+    problem one level out: where MF34 partitions one distribution over Legendre
+    orders, MF33 partitions one covariance over **reactions**. A file that
+    correlates MT2 with MT102 states it as a section whose row and column links
+    name different reactions, and ``decodeMF33MT`` already emits those — one
+    ``CovarianceSection`` per ``(row MT, column MT)`` block, cross blocks
+    included.
+
+    So the component key is the ``(ZA, MT)`` pair, and there is no third
+    coordinate: the Legendre order that makes MF34's key a triplet has no MF33
+    counterpart. That is the whole difference between the two functions.
+
+    **The key is the pair ``_get_param_pairs`` uses, deliberately.**
+    :attr:`~kika.cov.cross_section_covariance.CrossSectionCovariance.covariance_matrix`
+    orders its blocks by ``sorted(pairs, key=lambda p: (p[0], p[1]))`` — isotope
+    then reaction — and ``assemble_joint`` orders by ``sorted(keys)``, which on
+    a tuple of two integers is the same order. The layouts therefore agree
+    without either side being told about the other, and
+    ``test_the_mf33_assembly_reproduces_the_carrier`` is what holds that.
+
+    *mt* and *relative* filter as they do for MF34, and for the same reasons:
+    both sides of a section must pass, because a cross block whose row survives
+    and whose column does not is an off-diagonal corner with nothing to be
+    off-diagonal to; and a caller that is about to *sample* wants
+    ``relative=True``, because the appliers multiply by what comes back.
+    """
+    mts = _selection(mt)
+
+    entries = []
+    for section in getattr(suite, "covarianceSections", suite):
+        rowData, colData = section.rowData, section.columnData
+        if rowData is None or not str(rowData.ENDF_MFMT or "").startswith("33/"):
+            continue
+        colData = rowData if colData is None else colData
+
+        if relative is not None and bool(section.form.isRelative) != bool(relative):
+            continue
+
+        if mts is not None and not (
+            _endf_mt(rowData) in mts and _endf_mt(colData) in mts
+        ):
+            continue
+
+        za = int(getattr(section.provenance, "za", None) or 0)
+        form = section.form
+        rowGrid = np.asarray(form.rowGrid, dtype=float)
+        colGrid = (rowGrid if form.columnGrid is None
+                   else np.asarray(form.columnGrid, dtype=float))
+        entries.append((
+            (za, _endf_mt(rowData)),
+            (za, _endf_mt(colData)),
+            np.asarray(form.matrix, dtype=float),
+            rowGrid,
+            colGrid,
+        ))
+    return entries
+
+
+def cross_section_covariance_blocks(
+    suite, isotope: Any = None, mt=None, relative=None, atol: float = 1e-12,
+) -> List[Tuple[Hashable, np.ndarray]]:
+    """A ``CovarianceSuite``'s MF33 sections → the one joint block they describe.
+
+    The model-side replacement for
+    :attr:`~kika.cov.cross_section_covariance.CrossSectionCovariance.covariance_matrix`,
+    and the assembly the MF33 migration needs before it can move a draw. Like
+    :func:`legendre_covariance_blocks` it returns **one block, not one per
+    section**, because a cross-MT block is not separately samplable.
+
+    **Unstated blocks are zero here and NaN there, and that is equivalence
+    rather than a change.** The carrier allocates ``np.full((N, N), np.nan)``
+    and writes only the blocks the file carries, so a pair of MTs the
+    evaluation does not correlate comes back NaN; ``generate_samples`` then
+    replaces every non-finite entry with 0 immediately before decomposing. The
+    matrix that is actually decomposed today is therefore the zero-filled one,
+    which is what :func:`assemble_joint` builds directly.
+
+    Measured, not reasoned about: on ``micro_fe56_mf33.endf`` — real JEFF-4.0
+    MF33 for MT4 and MT16, whose cross block the evaluation does not state —
+    the carrier's matrix is **50 % NaN**, and the drawn factors are finite
+    regardless.
+
+    What that fill *does* change is everything between the two points, and
+    ``docs/library-gaps.md`` D11 is the entry: on a NaN matrix every eigenvalue
+    solver fails, ``_safe_min_eigvalsh`` returns a fabricated ``0.0``, and
+    ``autofix`` accepts unconditionally because ``0.0 >= accept_tol`` for any
+    negative tolerance. Assembling zeros here makes that analysis start working,
+    which is an improvement and therefore **not** this function's business to
+    smuggle in — it moves numbers on any run that enables autofix, and it needs
+    its own before/after.
+
+    *mt* and *relative* select which components enter the joint; see
+    :func:`_mf33_entries`.
+    """
+    entries = _mf33_entries(suite, mt=mt, relative=relative)
+    keys, joint, _stride = assemble_joint(entries, atol=atol)
+    if not keys:
+        return []
+    return [((isotope, "MF33", tuple(keys)), joint)]
+
+
+def cross_section_covariance_index(
+    suite, isotope: Any = None, mt=None, relative=None, atol: float = 1e-12,
+) -> Dict[Hashable, Dict[str, Any]]:
+    """What the rows of :func:`cross_section_covariance_blocks`' block are.
+
+    The MF33 sibling of :func:`legendre_covariance_index`, and what replaces
+    ``extract_mt_param_blocks`` (``kika/sampling/mf33_sampling.py``) once the
+    draw moves: that function returns ``MT -> slice`` by multiplying an index by
+    ``num_groups``, which is only right while every component is the same width.
+    ``widths`` is what says when it is not.
+
+    ``pairs`` are in row order, each occupying ``stride`` rows; ``grids`` gives
+    the union bin boundaries per pair, and ``widths`` how many of that pair's
+    ``stride`` rows are real rather than the zero padding a uniform stride
+    implies.
+
+    Derived from the grids alone, so nothing is assembled — the same reason
+    :func:`legendre_covariance_index` does not call :func:`assemble_joint`.
+    """
+    entries = _mf33_entries(suite, mt=mt, relative=relative)
+    if not entries:
+        return {}
+    unions = _union_grids(entries, atol=atol)
+    keys = sorted(unions)
+    widths = {key: len(unions[key]) - 1 for key in keys}
+    stride = max(widths.values())
+    return {
+        (isotope, "MF33", tuple(keys)): {
+            "pairs": list(keys),
             "stride": stride,
             "grids": {key: unions[key] for key in keys},
             "widths": widths,
