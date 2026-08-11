@@ -46,10 +46,11 @@ and are perfectly correlated across blocks.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Hashable, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Hashable, Optional, Tuple
 
 import numpy as np
 
+from ..cov.conditioning import as_blocks
 from ..cov.decomposition import eigen_decomposition, svd_decomposition
 # The QMC draw, shared rather than copied. It belongs here and will move when
 # ``generate_samples`` is migrated onto this module; today the dependency runs
@@ -68,25 +69,14 @@ BLOCK_SEED_STRIDE = 1009
 DEFAULT_NULL_TOL = 1e-10
 
 
-def _as_blocks(blocks) -> List[Tuple[Hashable, np.ndarray]]:
-    """Accept a mapping, a sequence of ``(key, matrix)`` pairs, or bare matrices.
-
-    A pair is recognised by its second element being 2-D, which a key never is.
-    Ordering is taken as given and never sorted: the block index sets the seed
-    offset, so reordering the input must reorder the draws with it rather than
-    silently repairing itself.
-    """
-    if hasattr(blocks, "items"):
-        return [(key, np.asarray(m, dtype=float)) for key, m in blocks.items()]
-
-    out: List[Tuple[Hashable, np.ndarray]] = []
-    for index, entry in enumerate(blocks):
-        if isinstance(entry, tuple) and len(entry) == 2 and np.ndim(entry[1]) == 2:
-            key, matrix = entry
-        else:
-            key, matrix = index, entry
-        out.append((key, np.asarray(matrix, dtype=float)))
-    return out
+#: What a caller may hand in as *blocks*, resolved to ``(key, matrix)`` pairs.
+#:
+#: Defined in :mod:`kika.cov.conditioning` rather than here so that inspecting
+#: a set of blocks and sampling it agree on what "a set of blocks" is by
+#: construction. Two copies of this would drift the day one of them learned a
+#: fourth input shape, and the failure would be that a pre-flight passed on a
+#: different arrangement of matrices than the one that got sampled.
+_as_blocks = as_blocks
 
 
 def draw_samples(

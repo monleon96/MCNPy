@@ -6,7 +6,7 @@ CrossSectionCovariance and LegendreCovariance classes without code duplication.
 """
 
 import numpy as np
-from typing import Dict, List, Optional, Sequence, Set, Tuple, Protocol, runtime_checkable
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -180,7 +180,7 @@ _PSD_AUTO_THRESHOLD: float = 1e-2
 # the unconverged projection.
 _HIGHAM_FALLBACK_FROB_THRESHOLD: float = 1e-2
 
-_VALID_PSD_METHODS = frozenset({"auto", "higham", "clip", "none"})
+_VALID_PSD_METHODS = frozenset({"auto", "higham", "clip", "clip_rescale", "none"})
 
 
 def _validate_psd_method(psd_method: str) -> None:
@@ -1067,6 +1067,125 @@ def nearest_psd_higham(
     return Y, info
 
 
+def clip_and_rescale(
+    M: np.ndarray,
+    *,
+    eigval_floor: float = 0.0,
+    verbose: bool = False,
+    logger=None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Clip negative eigenvalues, then put the stated diagonal back.
+
+    The gap this closes. ``clip`` rebuilds ``V·clip(Λ,0)·Vᵀ``, which preserves
+    the eigenvectors — the reason it is the right projection for these matrices,
+    since the near-null direction carries a sum rule — but **not the diagonal**.
+    Every clipped negative eigenvalue adds variance, spread over the components
+    in proportion to its eigenvector, so a component the evaluation gives almost
+    no variance comes out of the projection with some. Downstream that is not
+    cosmetic: PFNS divides each drawn delta by its group probability, and the
+    lowest groups of a fission spectrum hold ~1e-17 of the total, so a
+    negligible absolute gain becomes a large perturbation ratio. The standing
+    workaround is a 5σ clamp in ``generate_pfns_samples``.
+
+    Higham is the third option and it is not the answer either, though the
+    reason first written here was wrong. "Did not finish four 122×122 bands in
+    two minutes" was contention on a loaded box: re-measured quiet, one band
+    converges in ~1900 iterations and ~13 s. Three numbers rule it out instead.
+
+    * It preserves the diagonal *in absolute norm* — the post-loop eigenvalue
+      clip below runs without restoring it, leaving ``max_diagonal_change``
+      at 1.4e-12 against a largest stated variance of 7.4e-5. Negligible, and
+      the code says so. But the same 1.4e-12 is **0.55% of the smallest stated
+      variances**, and on a covariance whose diagonal spans decades that is the
+      sense that matters. ``clip_rescale`` is exact in both senses.
+    * It degrades ``C·1`` by ~40x (4.2e-6 → 1.7e-4) where ``clip`` improves it.
+    * It costs ~10⁴x ``clip``.
+
+    Middling on both axes for four orders of magnitude more time, so ``clip``
+    stays on the PFNS path. :func:`kika.cov.conditioning.predict_psd_repairs`
+    measures all three on any given matrix, which is how these numbers were got.
+
+    The fix is one line of algebra. With ``d = sqrt(diag(C₀)/diag(C_clip))``,
+    the matrix ``diag(d)·C_clip·diag(d)`` has exactly ``diag(C₀)`` on its
+    diagonal, is a **congruence transform** of a PSD matrix and therefore still
+    PSD, and costs O(n²) against Higham's iterations. It does not preserve the
+    eigenvectors exactly — nothing that changes the diagonal can — but it
+    rescales rather than rotates, so a component with zero stated variance gets
+    an identically zero row and column, which is stronger than what ``clip``
+    gives it.
+
+    **Measured, and it does not do what it was proposed for.** On the four
+    Cf-252 MF35 bands the diagonal comes back exactly (max error 1.6e-8 → 1.4e-20)
+    and the result stays PSD (λ_min ≈ -5e-20). But the **sum rule does not
+    survive it**: the row-sum residual ``max|Σ_j C_ij| / max|C|`` goes from
+    4.2e-6 to 2.2e-3, some 500x worse, on every band.
+
+    That is structural rather than a tolerance to tune. ``C·1 ≈ 0`` says the
+    all-ones vector is a near-null eigenvector, and clipping keeps it null
+    precisely because it preserves eigenvectors. The congruence gives
+    ``(D C D)·1 = D C (D 1)``, which is zero only when ``d`` is constant — so
+    restoring a non-uniform diagonal and preserving the sum rule are, for these
+    matrices, the same choice made two ways.
+
+    The 5σ clamp in ``generate_pfns_samples`` therefore **stays**: the rescale
+    roughly halves the draws that reach it (172→113, 220→121, 274→127, 277→124
+    over the four bands at 64 samples) and removes none of them. Use this where
+    the marginals matter and no sum rule does — MF33 and MF34 — and not on a
+    normalised spectrum.
+
+    Not reachable from ``psd_method="auto"``: this is a different numerical
+    answer, and the pipelines already running on ``clip`` must not change
+    underneath because a new option was added. Ask for it by name.
+
+    Returns
+    -------
+    (matrix, info)
+        ``info`` carries ``n_negative``, ``min_eigenvalue``,
+        ``max_diagonal_error_before`` and ``max_diagonal_error_after``, so a
+        caller can assert the restoration actually happened.
+    """
+    M = np.asarray(M, dtype=float)
+    original = np.diag(M).copy()
+
+    eigvals, eigvecs = _robust_eigh(
+        M, label="clip_rescale", verbose=verbose, logger=logger,
+    )
+    n_negative = int(np.sum(eigvals < 0))
+    clipped = np.maximum(eigvals, eigval_floor)
+    projected = (eigvecs * clipped[None, :]) @ eigvecs.T
+    projected = (projected + projected.T) * 0.5
+
+    before = np.max(np.abs(np.diag(projected) - original)) if original.size else 0.0
+
+    projectedDiagonal = np.diag(projected)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scale = np.sqrt(np.where(projectedDiagonal > 0,
+                                 original / projectedDiagonal, 0.0))
+    # A non-positive projected diagonal means the component spans none of the
+    # retained subspace; zero is the only rescale that keeps the result PSD,
+    # and it states the stronger fact — that direction carries no variance.
+    scale = np.where(np.isfinite(scale) & (original > 0), scale, 0.0)
+
+    rescaled = projected * np.outer(scale, scale)
+    rescaled = (rescaled + rescaled.T) * 0.5
+
+    after = np.max(np.abs(np.diag(rescaled) - original)) if original.size else 0.0
+    if verbose:
+        _log_message(
+            f"[COV] [CLIP_RESCALE] clipped {n_negative} negative eigenvalues "
+            f"(min={float(eigvals.min()):.3e}); max diagonal error "
+            f"{before:.3e} → {after:.3e}",
+            logger, verbose,
+        )
+
+    return rescaled, {
+        "n_negative": n_negative,
+        "min_eigenvalue": float(eigvals.min()) if eigvals.size else 0.0,
+        "max_diagonal_error_before": float(before),
+        "max_diagonal_error_after": float(after),
+    }
+
+
 def cholesky_decomposition(
     cov_obj: CovarianceMatrixProtocol = None,
     *,
@@ -1355,6 +1474,9 @@ def eigen_decomposition(
     if psd_method == "higham":
         M, _info = nearest_psd_higham(M, preserve_diagonal=True, verbose=verbose, logger=logger)
         eigvals = eigvecs = None  # M changed — force recompute
+    elif psd_method == "clip_rescale":
+        M, _info = clip_and_rescale(M, verbose=verbose, logger=logger)
+        eigvals = eigvecs = None  # the rescale rotates as well as scales
 
     if eigvals is None:
         eigvals, eigvecs = _robust_eigh(M, label="eigen decomposition", verbose=verbose, logger=logger)
@@ -1434,6 +1556,8 @@ def svd_decomposition(
 
     if psd_method == "higham":
         M, _info = nearest_psd_higham(M, preserve_diagonal=True, verbose=verbose, logger=logger)
+    elif psd_method == "clip_rescale":
+        M, _info = clip_and_rescale(M, verbose=verbose, logger=logger)
     elif psd_method == "clip":
         if eigvals_auto is None:
             eigvals_auto, eigvecs_auto = _robust_eigh(M, label="SVD clip", verbose=verbose, logger=logger)
