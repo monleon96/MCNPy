@@ -51,7 +51,14 @@ from typing import Any, Dict, Hashable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .decomposition import _PSD_AUTO_THRESHOLD, clip_and_rescale, nearest_psd_higham
+from .decomposition import (
+    _PSD_AUTO_THRESHOLD,
+    cap_variance_congruence,
+    clip_and_rescale,
+    clip_projection,
+    nearest_psd_higham,
+    rescale_threshold_bins_congruence,
+)
 
 __all__ = [
     "BLOCKS",
@@ -61,16 +68,22 @@ __all__ = [
     "Finding",
     "BlockReport",
     "ConditioningReport",
+    "ConditioningPlan",
+    "PlanStep",
+    "apply_plan",
     "as_blocks",
+    "block_key_text",
     "inspect_matrix",
     "inspect_blocks",
     "predict_psd_repairs",
+    "APPLIABLE_REMEDIES",
     "INERT_VARIANCE_FLOOR",
     "DEFAULT_NULL_TOL",
     "DEFAULT_PSD_CANDIDATES",
     "OUTLIER_FACTOR",
     "PREDICT_HIGHAM_MAX_ORDER",
     "PREDICT_MAX_ORDER",
+    "ROUNDOFF_RATIO",
     "SUM_RULE_TOL",
 ]
 
@@ -94,6 +107,25 @@ DEFAULT_NULL_TOL = 1e-10
 #: Variance above this multiple of its family median is an evaluator artefact
 #: rather than heterogeneity. Matches ``flag_outlier_variance_bins``.
 OUTLIER_FACTOR = 1000.0
+
+#: A negativity ratio at or below ``order × this`` is the eigensolver, not the
+#: evaluation, and ``definiteness`` does not fire on it.
+#:
+#: **Found by closing the loop, and it is not cosmetic.** Without a tolerance the
+#: check fires on any ``λ_min < 0`` at all, so a matrix that has just been
+#: projected onto the PSD cone still reports as not PSD — clip leaves its
+#: clipped eigenvalues at zero and reconstruction puts round-off back on the
+#: wrong side. Measured on the module's own fixtures: -2.3e-17 and +3.9e-18
+#: after a clip that started from -1.4e-04. A pre-flight that cannot certify the
+#: matrix its own recommendation produced is a pre-flight nobody can act on, and
+#: ``apply_plan`` → ``inspect_blocks`` is exactly the loop a run has to close.
+#:
+#: Scaled by the order because the error in a symmetric eigendecomposition grows
+#: with it. ``order × eps`` sits two orders above what the fixtures measure and
+#: eleven below the smallest real indefiniteness seen on a file (-1.4e-04 on a
+#: Cf-252 MF35 band, -1.3e-06 on the Fe-56 MF34 joint), so nothing an evaluation
+#: actually states is anywhere near it.
+ROUNDOFF_RATIO = float(np.finfo(np.float64).eps)
 
 #: ``max|Σ_j C_ij| / max|C|`` below this means the block carries a sum rule.
 #:
@@ -283,6 +315,85 @@ class ConditioningReport:
         parts += [str(b) for b in self.blocks if b.findings]
         return "\n".join(parts).rstrip()
 
+    def recommended_plan(self) -> "ConditioningPlan":
+        """A default a human can accept or edit — never one applied unseen.
+
+        **It repairs definiteness and nothing else.** That is a position, not an
+        omission, and it is the one the three-stage design implies: a negative
+        eigenvalue is the only finding a draw cannot decline to act on, because
+        the decomposition projects the matrix somewhere PSD whether or not
+        anyone chose to. Every other repair — capping a variance, rescaling an
+        outlier bin, masking an inert row — changes what the evaluation states
+        in order to make it more pleasant to sample, and which of those is
+        admissible is a judgement about the evaluation. The pipelines make all
+        six today, silently; the point of a plan is that they stop.
+
+        So blocks with no definiteness finding get an explicit ``none`` step
+        rather than no step. A plan that names every block says *this one was
+        looked at and left alone*, which is what makes the applied log a record
+        of the whole run rather than of its exceptions. What was deliberately
+        left out is carried on :attr:`ConditioningPlan.notes`.
+
+        The PSD choice follows ``psd_method="auto"`` — clip below the module
+        threshold, Higham above it — because the plan's job here is to make the
+        current behaviour visible, not to change it. The one override is a
+        block carrying a sum rule: ``C·1 ≈ 0`` is destroyed by any congruence
+        and degraded ~500x by Higham, so those get ``clip`` with the reason
+        recorded.
+        """
+        steps: List[PlanStep] = []
+        notes: List[str] = []
+
+        for block in self.blocks:
+            definiteness = next(
+                (f for f in block.findings
+                 if f.check == "definiteness" and f.severity == DISTORTS),
+                None,
+            )
+            has_sum_rule = any(f.check == "sum_rule" for f in block.findings)
+
+            if definiteness is None:
+                # Including the case where definiteness came back at severity
+                # `blocks` — a matrix with no positive eigenvalue at all states
+                # no variance anywhere, and there is nothing for a projection to
+                # project. It falls through to the unrepaired notes below.
+                steps.append(PlanStep(
+                    key=block.key, remedy="none",
+                    reason="no PSD repair needed or none applies",
+                ))
+            else:
+                choice = definiteness.evidence["auto_would_choose"]
+                reason = (
+                    f"{definiteness.summary}; psd_method='auto' resolves to "
+                    f"{choice!r}"
+                )
+                if has_sum_rule and choice != "clip":
+                    reason = (
+                        f"{definiteness.summary}; auto would pick {choice!r}, "
+                        "overridden because this block carries a sum rule and "
+                        "clip is the only candidate that preserves C·1"
+                    )
+                    choice = "clip"
+                steps.append(PlanStep(key=block.key, remedy=choice, reason=reason))
+
+            for finding in block.findings:
+                if finding.check in ("definiteness", "sum_rule") or not finding.remedies:
+                    continue
+                notes.append(
+                    f"{block_key_text(block.key)}: {finding.check} "
+                    f"({finding.severity}) left unrepaired — "
+                    f"{finding.summary}. Available: "
+                    + ", ".join(r.name for r in finding.remedies)
+                )
+            for finding in block.blocking:
+                if not finding.remedies:
+                    notes.append(
+                        f"{block_key_text(block.key)}: {finding.check} blocks the "
+                        f"draw and no repair is offered — {finding.summary}"
+                    )
+
+        return ConditioningPlan(steps=tuple(steps), notes=tuple(notes))
+
     def to_markdown(self) -> str:
         """A table, for pasting into a run log or a notebook cell.
 
@@ -304,6 +415,146 @@ class ConditioningReport:
                     f"| {finding.check} | {finding.summary.replace('|', r'\|')} |"
                 )
         return "\n".join([self.summary(), "", *rows])
+
+
+# ---------------------------------------------------------------------------
+# The plan — stage 2 of inspect / decide / apply
+# ---------------------------------------------------------------------------
+
+def block_key_text(key: Hashable) -> str:
+    """A block key as the text a plan is written and matched by.
+
+    A plan is serialised to JSON and read back next to ``run_metadata.json``,
+    and block keys are tuples of ints — ``(26056, 2, 1)`` — which JSON has no
+    type for. Rather than inventing an encoding that round-trips tuples, a step
+    identifies its block by this text and :func:`apply_plan` matches on it. The
+    consequence is worth stating: **two blocks whose keys render alike are the
+    same block as far as a plan is concerned**, which is why the function
+    recurses into tuples instead of calling ``str`` on them. ``str`` of a tuple
+    uses ``repr`` on the elements, so a numpy integer renders as
+    ``np.int64(26056)`` under NumPy 2 and ``26056`` under NumPy 1, and a plan
+    written on one machine would not match on the other.
+    """
+    if isinstance(key, tuple):
+        return "(" + ", ".join(block_key_text(part) for part in key) + ")"
+    if isinstance(key, np.generic):
+        return str(key.item())
+    return str(key)
+
+
+def _jsonable(value):
+    """NumPy scalars and arrays → the Python types ``json`` can write."""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    return value
+
+
+@dataclass(frozen=True)
+class PlanStep:
+    """One repair, on one block, with the parameters it runs with.
+
+    *reason* is not decoration. A run directory that says ``clip`` records what
+    was done; one that says ``clip`` *because* λ_min/λ_max was -1.4e-04 and the
+    block carries a sum rule records why, and that is the difference between a
+    reproducible run and a repeatable one.
+    """
+
+    key: Hashable
+    remedy: str
+    parameters: Dict[str, Any] = field(default_factory=dict)
+    reason: str = ""
+
+    def __str__(self) -> str:
+        head = f"{block_key_text(self.key)}: {self.remedy}"
+        if self.parameters:
+            head += "(" + ", ".join(f"{k}={v!r}" for k, v in self.parameters.items()) + ")"
+        return f"{head}  — {self.reason}" if self.reason else head
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "block": block_key_text(self.key),
+            "remedy": self.remedy,
+            "parameters": _jsonable(self.parameters),
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "PlanStep":
+        return cls(
+            key=data["block"],
+            remedy=data["remedy"],
+            parameters=dict(data.get("parameters") or {}),
+            reason=data.get("reason", ""),
+        )
+
+
+@dataclass(frozen=True)
+class ConditioningPlan:
+    """The repairs a run is authorised to make, frozen before it starts.
+
+    Stage 2 of the design: a human reads a :class:`ConditioningReport`, decides,
+    and writes the decision down. The plan then goes in the run directory beside
+    ``run_metadata.json`` and, per ``run-metadata-is-the-config-authority``, **it
+    is the authority** — a script default that disagrees with a shipped plan is
+    the script's bug, not the plan's.
+
+    Two things it deliberately is not:
+
+    * **Not a policy.** There is no "recommended" flag on a step and no severity
+      here. By the time a plan exists the trade-offs have been decided; what is
+      left is a list of operations. :meth:`ConditioningReport.recommended_plan`
+      produces a starting point, and a human is expected to edit it.
+    * **Not ordered by block.** Steps are applied in the order they are listed,
+      per block, which matters: capping a variance and then projecting onto the
+      PSD cone is not the same matrix as projecting and then capping.
+
+    A round trip through :meth:`to_dict` / :meth:`from_dict` keeps the steps and
+    their order. It does **not** keep the block key's Python type — see
+    :func:`block_key_text` — because a plan identifies blocks by text.
+    """
+
+    steps: Tuple[PlanStep, ...] = ()
+    notes: Tuple[str, ...] = ()
+
+    def __str__(self) -> str:
+        if not self.steps:
+            return "empty plan — no block is authorised for any repair"
+        lines = [str(step) for step in self.steps]
+        if self.notes:
+            lines += ["", "left unrepaired:"] + [f"  {note}" for note in self.notes]
+        return "\n".join(lines)
+
+    def steps_for(self, key: Hashable) -> Tuple[PlanStep, ...]:
+        """The steps naming *key*, in plan order."""
+        text = block_key_text(key)
+        return tuple(s for s in self.steps if block_key_text(s.key) == text)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "version": 1,
+            "steps": [step.to_dict() for step in self.steps],
+            "notes": list(self.notes),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ConditioningPlan":
+        version = data.get("version", 1)
+        if version != 1:
+            raise ValueError(
+                f"conditioning plan version {version} is not readable by this "
+                "version of kika; the plan is the authority, so this is a "
+                "refusal rather than a best-effort read"
+            )
+        return cls(
+            steps=tuple(PlanStep.from_dict(s) for s in data.get("steps", ())),
+            notes=tuple(data.get("notes", ())),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -338,14 +589,18 @@ def as_blocks(blocks) -> List[Tuple[Hashable, np.ndarray]]:
 def _clipped(matrix: np.ndarray) -> np.ndarray:
     """``V·clip(Λ, 0)·Vᵀ`` — what ``psd_method="clip"`` does to a matrix.
 
-    A fourth copy of four lines that also sit inline at three places in
-    :mod:`kika.cov.decomposition`. Not consolidated here because those three
-    are on live pipelines and this one is not; the merge is recorded in the
-    refactor backlog's PSD section.
+    Was a fourth copy of the projection; now
+    :func:`kika.cov.decomposition.clip_projection`, which is where the three
+    ways the copies differed are written down.
+
+    **This one is for measurement, and the sampling one is not.** It symmetrises
+    and it rebuilds unconditionally, where ``svd_decomposition`` does neither —
+    so a prediction made here and a draw made there can disagree in the last
+    bits. That is the right way round: a prediction reporting ‖ΔC‖/‖C‖ to two
+    significant figures does not care, and a draw that must reproduce a shipped
+    ensemble does. :func:`apply_plan` uses the sampling form.
     """
-    values, vectors = np.linalg.eigh(matrix)
-    repaired = (vectors * np.clip(values, 0.0, None)[None, :]) @ vectors.T
-    return (repaired + repaired.T) / 2.0
+    return clip_projection(matrix, floor=0.0, verbose=False)[0]
 
 
 def _sum_rule_residual(matrix: np.ndarray) -> float:
@@ -639,11 +894,11 @@ def _check_definiteness(
             summary="no positive eigenvalue — the block states no variance anywhere",
             evidence={"max_eigenvalue": largest},
         )
+    order = matrix.shape[0]
     ratio = -smallest / largest
-    if ratio <= 0.0:
+    if ratio <= order * ROUNDOFF_RATIO:
         return None
 
-    order = matrix.shape[0]
     if not predict:
         remedies = [
             _unmeasured(
@@ -1007,3 +1262,193 @@ def inspect_blocks(blocks, *, families=None, square_form=None, **kwargs) -> Cond
         for key, matrix in as_blocks(blocks)
     ]
     return ConditioningReport(blocks=tuple(reports))
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 — apply
+# ---------------------------------------------------------------------------
+
+#: The remedies :func:`apply_plan` can carry out, and what each delegates to.
+#:
+#: ``preserve`` is absent on purpose. It is what the ``sum_rule`` finding
+#: offers, and it is a *constraint on the other choices* — "whatever you pick,
+#: it must not move C·1" — not an operation. A plan naming it is a plan whose
+#: author read a constraint as an instruction, so it is refused by name rather
+#: than silently doing nothing.
+APPLIABLE_REMEDIES = (
+    "none", "clip", "clip_rescale", "higham", "cap",
+    "rescale_to_family_median", "mask_inert",
+)
+
+
+def _apply_step(matrix: np.ndarray, step: PlanStep, *, verbose: bool, logger):
+    """One step. Returns ``(matrix, info)``; the arithmetic is not new here."""
+    parameters = dict(step.parameters)
+    remedy = step.remedy
+
+    if remedy == "none":
+        return matrix, {}
+
+    if remedy == "clip":
+        # Exactly `svd_decomposition`'s clip: floor 0.0, no fold-up to
+        # symmetry, and an already-PSD matrix passes through untouched. That
+        # last one is what makes conditioning-then-`psd_method="none"`
+        # bit-identical to `psd_method="clip"` rather than merely equal.
+        return clip_projection(
+            matrix, floor=0.0, symmetrise=False, passthrough_when_clean=True,
+            verbose=verbose, logger=logger, label="plan clip",
+        )
+
+    if remedy == "clip_rescale":
+        return clip_and_rescale(matrix, verbose=verbose, logger=logger, **parameters)
+
+    if remedy == "higham":
+        parameters.setdefault("preserve_diagonal", True)
+        return nearest_psd_higham(matrix, verbose=verbose, logger=logger, **parameters)
+
+    if remedy == "cap":
+        if "max_variance" not in parameters:
+            raise ValueError(
+                f"step {step} needs a max_variance parameter — a cap with no "
+                "ceiling is not a repair"
+            )
+        return cap_variance_congruence(
+            matrix, parameters.pop("max_variance"),
+            verbose=verbose, logger=logger, **parameters,
+        )
+
+    if remedy == "rescale_to_family_median":
+        missing = {"indices", "targets"} - set(parameters)
+        if missing:
+            raise ValueError(
+                f"step {step} needs {sorted(missing)}; the `variance_outliers` "
+                "finding carries both on its remedy"
+            )
+        indices = parameters.pop("indices")
+        targets = parameters.pop("targets")
+        return rescale_threshold_bins_congruence(
+            matrix, indices, targets, verbose=verbose, logger=logger, **parameters,
+        )
+
+    if remedy == "mask_inert":
+        # **Equivalent in effect to what `generate_samples` does, and not
+        # bit-identical to it.** That path drops the inert rows and decomposes
+        # the (n-k) submatrix; this one zeroes them and decomposes the full n,
+        # which leaves the same retained subspace but hands LAPACK a different
+        # matrix, so the last bits of the eigenvectors move. Zeroing is the
+        # form that belongs in a plan: a block's key indexes its rows, and a
+        # step that changed the block's order would invalidate every other
+        # step's indices and the parameter mapping the appliers read.
+        floor = float(parameters.pop("floor", INERT_VARIANCE_FLOOR))
+        if parameters:
+            raise ValueError(f"mask_inert takes only `floor`; got {sorted(parameters)}")
+        # The same absolute test `_check_inert_rows` makes, so the finding and
+        # the repair cannot disagree about which rows are inert.
+        diagonal = np.diag(matrix)
+        inert = ~(np.isfinite(diagonal) & (np.abs(diagonal) >= floor))
+        masked = matrix.copy()
+        masked[inert, :] = 0.0
+        masked[:, inert] = 0.0
+        return masked, {"n_masked": int(inert.sum()), "floor": floor}
+
+    if remedy == "preserve":
+        raise ValueError(
+            "`preserve` is a constraint the sum_rule finding places on the PSD "
+            "choice, not an operation — it says clip is admissible and a "
+            "congruence is not. Put that choice in the plan instead"
+        )
+
+    raise ValueError(
+        f"unknown remedy {step.remedy!r}; {sorted(APPLIABLE_REMEDIES)} are appliable"
+    )
+
+
+def apply_plan(
+    blocks,
+    plan: ConditioningPlan,
+    *,
+    verbose: bool = False,
+    logger=None,
+) -> Tuple[List[Tuple[Hashable, np.ndarray]], Tuple[Dict[str, Any], ...]]:
+    """Stage 3: carry out *plan* on *blocks*, and say what was carried out.
+
+    The new code here is the dispatch. Every repair is the applier that runs
+    today in :mod:`kika.cov.decomposition`, called with the parameters a human
+    approved instead of with whatever the sampler's defaults were — which is the
+    whole of the change, and the reason a conditioned draw can be compared
+    against an unconditioned one bit for bit.
+
+    Blocks come back **in the order they went in**, repaired or not. That is not
+    cosmetic: downstream the block index sets the seed offset, so a function
+    that dropped an untouched block or sorted the output would silently reseed
+    every draw after it.
+
+    A plan step naming a block that is not here **raises**. A plan is written
+    against a specific set of matrices, and one that half-fits is far more
+    likely to be a plan from another run than a plan with a typo — applying the
+    steps that happen to match would then condition some blocks and quietly
+    leave others raw.
+
+    Returns
+    -------
+    (blocks, applied)
+        *applied* has one record per step actually run, with the applier's own
+        info dict and two cheap measurements: how far the stated diagonal moved
+        and how far the whole matrix moved. **The spectrum is not measured
+        here** — that is another O(n³) per block, and the honest check that a
+        plan did what it was chosen for is to run :func:`inspect_blocks` on the
+        result, which reports it against every other criterion at the same time.
+    """
+    normalised = as_blocks(blocks)
+    present = {block_key_text(key) for key, _ in normalised}
+    unmatched = [
+        step for step in plan.steps if block_key_text(step.key) not in present
+    ]
+    if unmatched:
+        raise ValueError(
+            "the plan names block(s) that are not in this set: "
+            + ", ".join(sorted({block_key_text(s.key) for s in unmatched}))
+            + f"; blocks present: {sorted(present)}"
+        )
+
+    conditioned: List[Tuple[Hashable, np.ndarray]] = []
+    applied: List[Dict[str, Any]] = []
+
+    for key, matrix in normalised:
+        current = matrix
+        for step in plan.steps_for(key):
+            start = time.perf_counter()
+            repaired, info = _apply_step(current, step, verbose=verbose, logger=logger)
+            seconds = time.perf_counter() - start
+
+            diagonal_before, diagonal_after = np.diag(current), np.diag(repaired)
+            largest = float(np.max(np.abs(diagonal_before))) if diagonal_before.size else 0.0
+            stated = (
+                np.abs(diagonal_before) >= INERT_VARIANCE_FLOOR * largest
+                if largest > 0 else np.zeros_like(diagonal_before, bool)
+            )
+            moved = (
+                float(np.max(np.abs(
+                    (diagonal_after[stated] - diagonal_before[stated])
+                    / diagonal_before[stated]
+                ))) if np.any(stated) else 0.0
+            )
+            norm = float(np.linalg.norm(current))
+            applied.append({
+                "block": block_key_text(key),
+                "remedy": step.remedy,
+                "parameters": _jsonable(step.parameters),
+                "reason": step.reason,
+                "n": int(current.shape[0]),
+                "changed": bool(repaired is not current),
+                "stated_diagonal_max_relative_change": moved,
+                "frobenius_relative_change": (
+                    float(np.linalg.norm(repaired - current) / norm) if norm > 0 else 0.0
+                ),
+                "seconds": seconds,
+                "applier_info": _jsonable(info),
+            })
+            current = repaired
+        conditioned.append((key, current))
+
+    return conditioned, tuple(applied)
