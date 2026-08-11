@@ -1,43 +1,32 @@
 #!/usr/bin/env python
-"""Build the MF33<->MF34 cross block in the pipeline's OWN adaptive group space.
+"""Build the MF33<->MF34 cross block and write it into an ENDF tape.
 
-This is both the measurement and the production writer. `--check` reports the PSD
-diagnostics and writes nothing; `--write` emits the sidecars that
-`precompute_chi2_predictive.load_mf33_mf34_cross` consumes.
+Cov(c0, a_l) is measured across the run's own MC replicas, collapsed onto the
+grids the shipped _mg tape already carries, and written into MF34's (L=0, L1)
+blocks with the (0,0) self-block null -- that covariance belongs to MF33 and
+must not be repeated. Everything goes out RELATIVE: of the MF34 forms only
+LB=0 is absolute and it carries no off-diagonal structure.
 
-WHY THIS EXISTS (roadmap Sec 10.1.8). Runs 87-88 estimated the cross block by
-pairing replica s across energies in PASS 2, whose RNG is seeded per BIN
-(`exfor_to_endf_research.py:1535`), and glued it to marginals whose correlations
-come from PASS 1, seeded per REPLICA (`exfor_utils.py:2002`). Measured: the
-Pass-2 cross-energy correlation equals its own permutation null exactly, so that
-block carried no information; and under the Pass-1 law the correlation is large
-(median |rho| 0.18-0.59 within bin, 0.08-0.55 across energy).
+The cross term cannot ship as a sidecar and cannot be bolted onto a foreign
+MF34: it is Cauchy-Schwarz-compatible only with the marginals it was built
+with, so shipping it means rewriting MF34.
 
-WHY GROUP SPACE. The pipeline does collapse-then-assemble, and the aggregation A
-mixes bins, so corr(A C A^T) != A corr(C) A^T. Rescaling to Pass-2 sigma on the
-fine grid and collapsing afterwards leaves the cross block nothing consistent to
-attach to; on the fine grid the shipped MF34 also spans only ~41*6 of 960
-directions per window, purely because several fine bins share a group. Doing the
-rescaling AFTER the collapse makes it a single positive diagonal congruence on
-the whole joint, which is PSD by construction. And collapsing the REPLICAS is
-exactly equivalent to collapsing the covariance --
+Both the magnitude and shape channels are collapsed from the SAME replica set
+and the two-pass rescaling is applied AFTER the collapse, as one positive
+diagonal congruence on the whole joint. That is what makes the result PSD by
+construction, and collapsing replicas is exactly collapsing the covariance:
 
     C = Z^T Z / (n-1)   =>   A C A^T = (A Z^T)(Z A^T) / (n-1)
 
--- so nothing large is ever formed.
+so nothing large is ever formed.
 
-THE GRIDS ARE NOT OURS TO CHOOSE. The magnitude axis uses the run's MF33
-adaptive grid (`mf33_multigroup_grid_ev.npy`) and the shape axis the run's MF34
-adaptive grid, read back from the shipped _mg.endf. The shipped MF34 blocks sit
-on four nested grids (673 / 676 / 684 / 703 groups, all subsets of the
-703-group one); this builds on the 703-group base so the cross block has the same
-resolution as the MF34 it must satisfy Cauchy-Schwarz against. Coarser blocks are
-expanded onto it by duplication, which is what the file already means.
+Called by exfor_to_endf_research.py as Step 10b via
+``build_cross_and_write_endf``. Standalone:
 
-Run (check only, reads a run dir, writes nothing):
-  <venv>/bin/python build_group_cross.py --run-dir <dir> --check
-Write the sidecars:
-  <venv>/bin/python build_group_cross.py --run-dir <dir> --write
+    python build_group_cross.py --run-dir <dir> --check      # diagnose only
+    python build_group_cross.py --run-dir <dir> --write      # .npy sidecars
+    python build_group_cross.py --run-dir <dir> --mag-grid fine --null-fill zero \
+        --source-endf <mg.endf> --write-endf <out.endf>
 """
 from __future__ import annotations
 
@@ -49,10 +38,6 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-# `--c33-from-file` imports a sibling script as `scripts.<name>`. On the cluster
-# the deployed copy is run by path, so the package root is not on sys.path and
-# the import dies -- which is what killed step 1 of job 8452834. Same three
-# lines as null_slot_exposure.py:58-60.
 _kika_root = Path(__file__).resolve().parent.parent
 if str(_kika_root) not in sys.path:
     sys.path.insert(0, str(_kika_root))
@@ -64,27 +49,17 @@ A_COLS = [f"a_{l}" for l in range(1, L_MAX + 1)]
 ZA, MT = 26056, 2
 NULL_TOL = 1e-10
 CHUNK = 250
-SPREAD_EPS = 1e-12          # relative; matches exfor_to_endf_research.py:1393
+SPREAD_EPS = 1e-12
 
-
-# --------------------------------------------------------------------------
-# grids
-# --------------------------------------------------------------------------
 
 def shipped_mg_endf(run_dir: Path) -> Path:
     """The ONE shipped multigroup ENDF in a run dir. Ambiguity is fatal.
 
-    THIS IS NOT PEDANTRY, IT IS THE SELF-COMPARISON TRAP. `--write-endf` puts a
-    SECOND *_mg.endf in this directory, and it sorts BEFORE the shipped one
-    ("..._consistent_mg.endf" < "..._nominal_mg.endf"). A first-wins glob would
-    therefore, on the very next run, read the shape grids and `c34_ship` off our
-    OWN OUTPUT instead of the shipped file -- and then the CANDIDATE and LEGACY
-    rows would be diagnosing the candidate against itself, so every PSD number
-    would come out perfect for the one reason that makes it meaningless.
-
-    Refuse and make the caller name the file. Sec. 10.1.8-L exists because a
-    joint was verified that was not the joint being shipped; this is the same
-    mistake with the two files swapped.
+    `--write-endf` puts a SECOND *_mg.endf in the directory and it sorts BEFORE
+    the shipped one, so a first-wins glob would read the shape grids and
+    `c34_ship` off our own output and diagnose the candidate against itself --
+    every PSD number perfect, for the one reason that makes it meaningless.
+    Refuse and make the caller name the file.
     """
     hits = sorted(run_dir.glob("*_mg.endf"))
     if not hits:
@@ -110,10 +85,6 @@ def mf34_group_edges_ev(mg: Path, cache: Path) -> dict:
     Cached because the ENDF parse is the slow step and does not depend on
     anything else here.
     """
-    # Fingerprint the source in the cache name. A cache built from a DIFFERENT
-    # run's MF34 would be silently wrong -- same shapes, wrong grids -- and the
-    # result would look entirely plausible. Name and size are enough to stop a
-    # cross-run reuse; the cache is a speed-up, not a store of record.
     raw = cache / f"mf34_groups__{mg.name}__{mg.stat().st_size}.npz"
     if not raw.exists():
         from kika.cov import MF34CovMat
@@ -141,22 +112,13 @@ def c33_matrix_gate(c33_post, c33_ship, *, fatal: bool,
                     rtol: float = C33_GATE_RTOL) -> float:
     """Is the joint's magnitude block the SAME MATRIX the chi2 folds?
 
-    ⚑ THE GATE THE WHOLE PSD CHAIN RESTS ON, and the reason the older
-    marginal-identity check is not enough: that one pins the DIAGONAL, and a
-    diagonal match is not what a congruence needs. `Sigma_eval = M J M^T`
+    The marginal-identity check pins only the DIAGONAL, and `Sigma_eval = M J M^T`
     transfers J's PSD to the chi2 only if J's c33 block is the matrix
     `build_mf33_block` folds -- not merely one with the same variances.
 
-    On the FINE axis it is, by algebra: `A_mag = I`, so
-    `c33_post = corr1 (*) sigma_tar sigma_tar^T`, and the shipped MF33 is
-    `corr1 (*) sigma_ship sigma_ship^T` because
-    `regularize_near_zero_relative_covariance` is a positive diagonal
-    congruence. Same correlation matrix, same outer-product form. Measured on
-    run 86 at 4.58e-16 (roadmap §10.7-10, 0.1).
-
-    On the GROUP axis it is not, and the returned number measures exactly why:
-    `corr(A C A^T) != A corr(C) A^T`. Hence `fatal` rather than two functions --
-    the group path keeps printing the number that disqualifies it.
+    On the FINE axis it is, by algebra: A_mag = I, so both sides are
+    corr1 (*) sigma sigma^T. On the GROUP axis it is not, because
+    corr(A C A^T) != A corr(C) A^T -- hence `fatal` rather than two functions.
     """
     num = float(np.abs(np.asarray(c33_post) - np.asarray(c33_ship)).max())
     den = float(np.abs(np.asarray(c33_ship)).max())
@@ -244,10 +206,6 @@ def row_aggregator(g, widths, n_groups, valid):
     return A
 
 
-# --------------------------------------------------------------------------
-# replicas
-# --------------------------------------------------------------------------
-
 def load_pass1_c0(run_dir: Path, n_fine: int):
     t = pq.read_table(run_dir / "mf33_c0_samples.parquet",
                       columns=["sample_idx", "energy_index", "pass", "c0"],
@@ -315,28 +273,17 @@ def valid_and_collapsed(run_dir, n_fine, ids, g_shape, widths, n_gs):
     return valid, A, acc
 
 
-# --------------------------------------------------------------------------
-# shipped MF34 on the base group grid
-# --------------------------------------------------------------------------
-
 def assemble_c34_rel(c34_post, a_flat, c34_rel_ship, null_fill="zero"):
     """The RELATIVE MF34 the writer emits. One definition, used by both paths.
 
-    Rebuilt as `c34_post / outer(a, a)` wherever a_l is nonzero. What goes in
-    the ~37 % of slots where a_l is EXACTLY zero -- the (group, order) pairs
-    `row_aggregator` never populated, where c34_post is identically zero and the
-    quotient is 0/0 -- is the open question this switch exists to settle:
+    Rebuilt as `c34_post / outer(a, a)` wherever a_l is nonzero. Where a_l is
+    exactly zero -- the (group, order) pairs the aggregator never populated, ~37 %
+    of slots -- the quotient is 0/0 and `null_fill` decides:
 
-      "zero"  the parameter is dead, so it carries no covariance. Gives a true
-              null row/column, which is harmless for PSD.
-      "ship"  keep the file's own declared value. Preserves the published
-              relative sigma, but INJECTS the old construction into precisely
-              the softest directions of the new one; measured in run 90 and it
-              reproduces run 89 almost exactly (Sec. 10.1.8-L11).
-
-    `--check` diagnoses this same array, so the PSD row is what the file would
-    say rather than a re-derivation of it -- the mistake that produced runs 89
-    and 90 was diagnosing one object and shipping another.
+      "zero"  the parameter is dead, so it carries no covariance. PSD-safe.
+      "ship"  keep the file's declared value. Preserves the published relative
+              sigma but injects the old construction into the softest directions
+              of the new one; this reproduced the run-89 failure.
     """
     if null_fill not in ("zero", "ship"):
         raise SystemExit(f"unknown null_fill {null_fill!r}; use zero or ship")
@@ -350,30 +297,13 @@ def assemble_c34_rel(c34_post, a_flat, c34_rel_ship, null_fill="zero"):
 def shipped_c34_rel_on_base(blocks, base_ev):
     """Shipped RELATIVE MF34 expanded onto the base group grid.
 
-    Coarser blocks are mapped by duplication onto the base grid — that is what
-    the file asserts, not an approximation.
+    Coarser blocks are mapped by duplication, which is what the file asserts.
 
-    Kept separate from the absolute form because the relative matrix is needed
-    in its own right: it is what the rewrite must fall back on wherever the
-    absolute round trip destroys the file's content (see `write_consistent_mf34`
-    on null parameters).
-
-    ⚠⚠ THE BLOCKS DO NOT ALL SPAN THE BASE GRID, AND OUT-OF-RANGE MUST BE ZERO
-    RATHER THAN PINNED. Sec. 10.1.8-L18. `np.clip` on a `searchsorted` index
-    does not mean "outside the range there is nothing", it means "use the first
-    or last interval" -- and the blocks come back on FOUR grids, because
-    `merge_mf34` builds each (L, L1) pair on that pair's own union of JEFF's
-    grid and the pipeline overlay's. Block (2,6) starts at 0.8468 MeV and leaves
-    9 of the 703 base groups uncovered, so pinning credited the 0.1-0.7 MeV
-    region -- where JEFF publishes (2,2) but no (2,6) -- with (2,6)'s FIRST
-    interval: 5120 fabricated cross-seam cells at up to 2.07e-02, against a
-    genuine JEFF (2,2) variance and a genuine overlay (6,6) variance.
-
-    That one line is the whole of Sec. L17's "the shipped MF34 is not PSD":
-    lam_min -6.2091e-02 (1.34e-03 relative) pinned, **-5.9359e-05 (1.28e-06,
-    the ENDF round-trip floor) masked**. ENDF-6 LB=5/6 matrices are defined ON
-    their grid and assert nothing outside it, so masking is not a repair, it is
-    the file's own semantics. Do not reintroduce the clip.
+    Out-of-range must be ZERO, not pinned: the blocks come back on four nested
+    grids because `merge_mf34` builds each (L, L1) pair on that pair's own union
+    of the host grid and the overlay, so not all of them span the base grid.
+    Clipping a `searchsorted` index would silently reuse the first or last
+    interval instead.
     """
     n_g = len(base_ev) - 1
     centres = 0.5 * (base_ev[:-1] + base_ev[1:])
@@ -386,11 +316,6 @@ def shipped_c34_rel_on_base(blocks, base_ev):
             edges, mat = blocks[f"e_{key}"], blocks[f"m_{key}"]
             if lr > lc:
                 mat = mat.T
-            # THE SAME MAP the chi2 fold uses (roadmap §10.7-7). Containing-bin
-            # with an all-zero row off-grid: `PointMap.nearest` carries the
-            # masking rule this docstring spends four paragraphs on, so it
-            # cannot be reintroduced here and missed there. This was the fifth
-            # hand-written copy of that idea.
             pm = PointMap.nearest(edges, centres)
             out[np.ix_(np.arange(n_g) * L_MAX + lr - 1,
                        np.arange(n_g) * L_MAX + lc - 1)] = pm.sandwich(mat)
@@ -417,8 +342,6 @@ def shipped_c34_on_base(blocks, base_ev, a_nom_group):
     out = shipped_c34_rel_on_base(blocks, base_ev) * np.outer(a, a)
     return 0.5 * (out + out.T)
 
-
-# --------------------------------------------------------------------------
 
 def whiten(A, tol=NULL_TOL):
     w, V = np.linalg.eigh(0.5 * (A + A.T))
@@ -533,89 +456,33 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
                           null_fill="zero",
                           cross_emin_ev=None, cross_emax_ev=None,
                           mf33_file_grid=None):
-    """Emit the _mg.endf whose MF34 *is* the joint that was just diagnosed.
+    """Write the _mg tape whose MF34 is the joint that was just diagnosed.
 
-    WHY THIS EXISTS. `cx_post` is Cauchy-Schwarz-compatible with `c34_post`, not
-    with the MF34 already in the file -- the two share a diagonal but not their
-    correlations, and the violation that fact produces is first order (Sec.
-    10.1.8-L: sigma_max(K) 41.27). So the cross block can only be shipped
-    alongside the marginals it was built with, which means rewriting MF34.
+    `cx_post` is Cauchy-Schwarz-compatible with `c34_post`, not with the MF34
+    already in the file, so shipping the cross term means rewriting MF34.
 
-    EVERYTHING GOES OUT RELATIVE, because the format leaves no choice: MF34
-    admits LB = 0, 1, 2, 5 and 6 (manual Sec. 34.2), of which only LB=0 is
-    absolute and LB=0 carries no off-diagonal structure at all. The matrix forms
-    LB=5/LB=6 are defined as Cov(X_i, Y_j) = sum P F X_i Y_j, i.e. relative. (MF35
-    had to invent LB=7 to get an absolute *matrix*, and LB=7 is not allowed here.)
-    So there is no absolute option and hence nothing to mix -- the whole section
-    stays relative, exactly as the file already is.
-
-    The (L=0, L1) blocks are the format's own mechanism for this: "one expresses
-    covariances with the a0 Legendre coefficients even though a0 = 1 in the ENDF
-    system" (Sec. 34.1), with the (0,0) magnitude self-block written null because
-    that covariance belongs to MF33 and must not be repeated (Sec. 34.3).
+    Everything goes out relative: of MF34's forms (LB = 0, 1, 2, 5, 6) only LB=0
+    is absolute and it carries no off-diagonal structure. The (L=0, L1) blocks
+    are the format's own mechanism for magnitude-shape covariance, with the (0,0)
+    self-block null because that covariance belongs to MF33.
 
     Parameters
     ----------
     c34_rel_ship : np.ndarray
-        The shipped RELATIVE MF34 on the base shape grid. Used only where a_l is
-        exactly zero, i.e. where the absolute round trip is 0/0 and this rebuild
-        spans no direction; see the null-parameter note in the body. Pass the
-        same array the diagnosis derived `c34_ship` from, never a re-mapping.
+        The shipped RELATIVE MF34 on the base shape grid, used only where a_l is
+        exactly zero and the absolute round trip is 0/0. Pass the same array the
+        diagnosis used, never a re-mapping.
     """
     from kika.endf.writers.mf34_writer import (
         create_mf34_from_covariance, write_mf34_to_file,
     )
 
     n_gs = len(shape_ev) - 1
-    a_flat = a_nom_group.reshape(-1)          # (n_gs*L,), (group, order) order
+    a_flat = a_nom_group.reshape(-1)
 
-    # --- absolute -> relative -----------------------------------------------
-    # The shape blocks divide by outer(a, a) and the cross blocks by a on the
-    # shape axis only (cx_post is already relative in sigma). Where a_l is
-    # nonzero, c34_post's absolute diagonal equals the shipped one to 2.8e-17
-    # and both are divided by the same a^2, so the RELATIVE sigmas the file
-    # publishes are reproduced -- the rewrite moves correlations and nothing
-    # else.
-    #
-    # NULL PARAMETERS, WHICH ARE 37 % OF THE MATRIX AND NOT A CORNER CASE.
-    # `row_aggregator` gives an all-zero row to any (group, order) with no valid
-    # fine bin, so a_l is EXACTLY zero at ~1542 of 4218 slots (39 of 703 groups
-    # at l=1, 572 at l=6). There the collapsed replicas are identically zero, so
-    # c34_post and c34_ship are BOTH exactly zero and the relative form is 0/0 --
-    # genuinely undefined, not merely ill-conditioned.
-    #
-    # Sec. 4.3's "zero bins at any order" does NOT cover this: it measured
-    # FITTED coefficients approaching the serialisation floor, a different
-    # population from parameters the aggregator never populated at all.
-    #
-    # ⚠⚠ THE ORIGINAL JUSTIFICATION FOR PRESERVING THEM WAS WRONG, AND RUN 90
-    # MEASURED IT (Sec. 10.1.8-L11). The argument was "free in absolute space --
-    # a consumer converting back multiplies by a_l = 0 and annihilates whatever
-    # is written". That is true only for a consumer using OUR a_l. The chi2 does
-    # not: `eval_covariance.build_mf34_block` scales a relative block by
-    # `a_l_per_pt`, the coefficients interpolated from the file's own MF4 onto
-    # each EXFOR energy, and those are NONZERO here -- what is empty at these
-    # slots is the MC validity mask, not the coefficient. So the preserved
-    # values (up to 7.6 relative variance) enter at full weight, and they enter
-    # in exactly the directions where c34_post has zero variance, i.e. the
-    # softest ones, which whitening amplifies by lambda^-1/2. Run 90 came out
-    # indistinguishable from run 89: worst normalised lambda_min -37.94 vs
-    # -38.15, and 22.8 % of points bit-identical.
-    #
-    # `NULL_FILL` selects the behaviour so the alternatives can be measured
-    # against each other rather than argued about. See `assemble_c34_rel`.
     live = np.abs(a_flat) >= np.finfo(float).tiny
     both_live = np.outer(live, live)
 
-    # The one case that must still stop the run: a MATERIALLY nonzero absolute
-    # covariance sitting on a zero-mean parameter. That is not a null direction,
-    # it is an infinite relative uncertainty, and no written value represents it.
-    #
-    # The threshold is scaled, not exact. The collapse should give exactly 0.0
-    # there (an all-zero aggregator row makes the matmul, the mean and every
-    # deviation exactly zero), but tying a 40-minute job to bit-exact zero would
-    # let one denormal abort it. Anything at double-precision roundoff of the
-    # matrix scale is dust and is discarded with the rest of the null slot.
     def _check_null_block(m, mask, name, extra=""):
         scale = float(np.abs(m).max())
         atol = 1e-15 * scale
@@ -638,9 +505,6 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
                       extra=" Same inconsistency, on the cross block.")
 
     c34_rel = assemble_c34_rel(c34_post, a_flat, c34_rel_ship, null_fill)
-    # The cross blocks are NEW, so there is no shipped value to preserve and
-    # nothing to decide: a parameter with no variance has no covariance either,
-    # and zero is the correct entry.
     cx_rel = np.divide(cx_post, a_flat[None, :], out=np.zeros_like(cx_post),
                        where=live[None, :])
     n_null = int((~live).sum())
@@ -661,14 +525,6 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
     print(f"    max |c34_rel| = {np.abs(c34_rel).max():.4g}   "
           f"max |cx_rel| = {np.abs(cx_rel).max():.4g}")
 
-    # --- energy support of the cross blocks ----------------------------------
-    # Sub-subsections "need not be given for all values of L and L1" and LB=6
-    # carries its own row grid, so the cross term CAN be restricted in energy.
-    # By default it is not: the magnitude grid already spans exactly the range
-    # the evaluation covers, and the sidecar the chi2 reads is unrestricted, so
-    # anything narrower would put a different block in the file from the one
-    # being scored -- and it is the windowed version this script's PSD gate
-    # would then be certifying. Keep file and sidecar the same object.
     n_gm = len(mag_ev) - 1
     lo = mag_ev[0] if cross_emin_ev is None else cross_emin_ev
     hi = mag_ev[-1] if cross_emax_ev is None else cross_emax_ev
@@ -683,21 +539,6 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
     print(f"    cross rows: {tag} — groups {g0}:{g1} ({g1 - g0} of {n_gm}), "
           f"{cross_grid[0] / 1e6:.4g}-{cross_grid[-1] / 1e6:.4g} MeV")
 
-    # ⚑ EMBED THE CROSS ROWS IN THE FILE'S OWN MF33 GRID.
-    #
-    # The chi2 builds the magnitude leg with `_mf33_magnitude_map` on the grid
-    # MF33 comes back on -- 2317 bins for run 86, of which ours are 1738 -- and
-    # a cross block on any other axis is refused by `read_mf34_split`, because
-    # regridding it here is exactly the "Cx against marginals it was not built
-    # with" mistake run 89 shipped.
-    #
-    # Padding is SAFE where windowing is not: the added rows are parameters
-    # with no variance and no covariance, i.e. a zero-bordered embedding, and
-    # `max|cov[in, out]| = 0.000000e+00` exactly on the shipped MF33 (§10.7-10,
-    # 0.2) so they are genuinely separable rather than merely small.
-    #
-    # The grid written out is the FILE's array, not ours: same floats in, same
-    # 11 characters out, same floats back. See `mf33_file_grid_ev`.
     if mf33_file_grid is not None:
         g_file = np.asarray(mf33_file_grid, float)
         i0 = int(np.searchsorted(g_file, cross_grid[0]))
@@ -729,23 +570,6 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
     )
     sub = mf34._subsections[0]
 
-    # ⚑ THE NULL (0,0) BLOCK COSTS 36 MB OF ASCII ZEROS ON A FINE MAGNITUDE AXIS.
-    # `_create_mf34_with_cross` writes it as `np.zeros((n0, n0))` through an
-    # LB=5 record, i.e. the whole upper triangle: n0(n0+1)/2 numbers. At the
-    # 188-group axis that was 17 k numbers and nobody noticed; on the shipped
-    # 2317-bin MF33 grid it is 2.685 M numbers, and every reader decodes them
-    # and projects a 2317^2 zero matrix on the way in.
-    #
-    # One interval spanning the same range says exactly the same thing --
-    # "the magnitude self-covariance is not here, it is in MF33" (manual Sec.
-    # 34.3) -- in three numbers. NL, NL1, NSS and LTT are untouched, so the
-    # section stays conforming and `parse_mf34_mt` still finds NL(NL+1)/2
-    # sub-subsections; only the record inside one of them shrinks.
-    #
-    # Done here rather than in the writer on purpose: the cluster gets kika as
-    # an installed wheel and `scripts/` by file copy, so a library change would
-    # not reach the run this is built for. `scripts/mf34_cross_reader.py`
-    # accepts both forms.
     n_before, n_after = _compact_null_self_block(sub, cross_grid)
     if n_before:
         print(f"    (0,0) null block: {n_before} -> {n_after} values "
@@ -756,15 +580,6 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
           f"{len(sub.sub_subsections)} sub-subsections "
           f"(NL(NL+1)/2 = {sub.nl * (sub.nl + 1) // 2})")
 
-    # THE INSTALLED kika IS NOT VERIFIABLE FROM WHERE THIS RUNS, SO CHECK THE
-    # ARTEFACT INSTEAD. The NL-is-a-count and LTT=3 fixes (Sec. 10.1.8-L6) live
-    # in the LIBRARY, which the cluster gets as an installed wheel, not by file
-    # copy -- so this script can be up to date while the kika under it is not.
-    # Both old defects are SELF-CONSISTENT within kika (the old parser derives
-    # its sub-subsection count from the old NL convention and reads the file
-    # back happily), so nothing downstream would fail; the file would simply be
-    # wrong for every other code that reads it, and silently. This file is meant
-    # to leave our tooling, so refuse rather than ship it.
     n_expect = L_MAX + 1
     problems = []
     if int(mf34._ltt) != 3:
@@ -793,79 +608,82 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
           f"source {source_endf.stat().st_size})")
 
 
-def main():
+def build_cross_and_write_endf(run_dir, source_endf, out_endf, *,
+                               mag_grid="fine", null_fill="zero", cache=None):
+    """Build the joint and write the cross-term ENDF. Library entry point.
+
+    Goes through ``main`` on a constructed argv so the pipeline runs the exact
+    command that produced the shipped run-91 tape, byte for byte.
+    """
+    argv = ["--run-dir", str(run_dir),
+            "--source-endf", str(source_endf),
+            "--write-endf", str(out_endf),
+            "--mag-grid", str(mag_grid),
+            "--null-fill", str(null_fill)]
+    if cache is not None:
+        argv += ["--cache", str(cache)]
+    rc = main(argv)
+    if rc != 0:
+        raise RuntimeError(f"build_group_cross failed (rc={rc})")
+    return Path(out_endf)
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run-dir", required=True)
-    ap.add_argument("--cache", default=None)
+    ap.add_argument("--run-dir", required=True,
+                    help="Pipeline run directory: supplies the replicas, the grids and nominal_fits")
+    ap.add_argument("--cache", default=None,
+                    help="Parse cache for the source ENDF (default: <run-dir>/.group_cross_cache)")
     ap.add_argument(
         "--mag-grid", choices=["group", "fine"], default="group",
-        help="Which energy axis the MAGNITUDE family lives on. 'group' (default, "
-             "unchanged): the run's 188-bin adaptive MF33 grid. 'fine': the 1738-bin "
-             "analysis mesh, which is what the shipped file actually carries. "
-             "⚑ 'fine' is the only one that makes the fold a congruence. With "
-             "A_mag = I the joint's c33 block IS the shipped MF33 -- both are "
-             "corr1 (*) sigma sigma^T and the two-pass rescale is a positive "
-             "diagonal congruence, measured at 4.58e-16 (roadmap §10.7-10, 0.1). "
-             "At 188 groups corr(A C A^T) != A corr(C) A^T and the certified "
-             "joint is not the matrix the chi2 folds. Collapsing only the "
-             "Legendre family, A = I (+) A_34, is still a congruence, so PSD "
-             "survives and it lands on §10.7-9's vindicated representation: "
-             "MF33 fine, MF34 grouped.",
-    )
-    mode = ap.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--check", action="store_true")
-    mode.add_argument("--write", action="store_true")
-    ap.add_argument(
-        "--c33-from-file", action="store_true",
-        help="Also diagnose against the MF33 read from the SOURCE ENDF -- the "
-             "one the chi2 actually folds -- instead of only the 188-group "
-             "adaptive sidecar the joint is certified against. Roadmap "
-             "§10.6-3 item 5. Costs one extra ENDF parse.",
-    )
-    ap.add_argument(
-        "--tol-sweep", action="store_true",
-        help="With --c33-from-file: print the eigenvalue spectra of both MF33 "
-             "objects and of the shipped relative MF34, then re-diagnose rows "
-             "B and B' at NULL_TOL = 1e-10 .. 1e-4. `lam_min` must be FLAT "
-             "across the sweep; sigma_max(K) and leak_null34 will not be, and "
-             "reading them at NULL_TOL on a post-ENDF matrix is meaningless "
-             "because its smallest retained eigenvalue sits below its own "
-             "round-trip noise floor. Roadmap §10.1.8-L16.1/L16.2.",
-    )
-    ap.add_argument(
-        "--write-null-mask", metavar="OUT.npz",
-        help="Emit the (n_shape_groups, L_MAX) boolean mask of (group, order) "
-             "slots the MC never populated, with the shape grid and a_nom_group. "
-             "Works in --check too. Consumed by null_slot_exposure.py "
-             "(roadmap §10.6-1).",
+        help="Energy axis for the magnitude family. 'fine': the analysis mesh, "
+             "which is what the shipped file carries and the only choice that "
+             "makes the fold a congruence (A_mag = I, so the joint's c33 block "
+             "IS the shipped MF33). 'group': the adaptive MF33 grid, where "
+             "corr(A C A^T) != A corr(C) A^T and the certified joint is not the "
+             "matrix the chi2 folds.",
     )
     ap.add_argument(
         "--null-fill", choices=["zero", "ship"], default="zero",
-        help="What the rewritten MF34 puts where a_l is exactly zero (~37 %% of "
-             "slots). 'zero': the dead parameter carries no covariance -- a true "
-             "null direction, PSD-safe. 'ship': keep the file's declared value, "
-             "which preserves the published relative sigma but injects the old "
-             "construction into the softest directions of the new one and "
-             "reproduced run 89 almost exactly (roadmap Sec. 10.1.8-L11). "
-             "Default zero.",
+        help="What the rewritten MF34 carries where a_l is exactly zero (~37 %% "
+             "of slots). 'zero': dead parameter, no covariance, PSD-safe. "
+             "'ship': keep the file's declared value -- this reproduced the "
+             "run-89 failure.",
     )
+    mode = ap.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--check", action="store_true",
+                      help="Report the PSD diagnostics and write nothing")
+    mode.add_argument("--write", action="store_true",
+                      help="Write the .npy cross-block sidecars")
     mode.add_argument(
         "--write-endf", metavar="OUT",
-        help="Also emit a _mg.endf whose MF34 IS the consistent joint: shape "
-             "blocks from c34_post and (L=0, L1) cross blocks from cx_post. "
-             "MF3/MF4/MF33 are copied from --source-endf untouched.",
+        help="Write a _mg.endf whose MF34 is the consistent joint: shape blocks "
+             "from c34_post, (L=0, L1) cross blocks from cx_post. MF3/MF4/MF33 "
+             "are copied from --source-endf untouched.",
     )
     ap.add_argument("--source-endf", default=None,
                     help="Template for --write-endf; defaults to the run dir's *_mg.endf")
-    # Default: the WHOLE magnitude grid. The evaluation only exists over
-    # 0.8468-4.075 MeV in the first place, so the grid already IS the range the
-    # data constrain -- clipping it to a nominal 0.85-4.0 would drop real groups
-    # at both ends AND, worse, leave the file asserting a different cross block
-    # from the sidecar the chi2 reads, which is exactly the diagnose-one-thing/
-    # ship-another mistake that produced run 89. Narrow these only deliberately.
-    ap.add_argument("--cross-emin-ev", type=float, default=None)
+    ap.add_argument(
+        "--c33-from-file", action="store_true",
+        help="Also diagnose against the MF33 read from the source ENDF -- the "
+             "one the chi2 folds -- not only the adaptive sidecar the joint is "
+             "certified against. Costs one extra ENDF parse.",
+    )
+    ap.add_argument(
+        "--tol-sweep", action="store_true",
+        help="With --c33-from-file: print the eigenvalue spectra and re-diagnose "
+             "over NULL_TOL = 1e-10 .. 1e-4. lam_min must be FLAT across the "
+             "sweep; sigma_max(K) and leak_null34 will not be.",
+    )
+    ap.add_argument(
+        "--write-null-mask", metavar="OUT.npz",
+        help="Emit the (n_shape_groups, L_MAX) mask of slots the MC never "
+             "populated, with the shape grid and a_nom_group. Works in --check.",
+    )
+    ap.add_argument("--cross-emin-ev", type=float, default=None,
+                    help="Clip the cross block's magnitude axis (default: the whole grid)")
     ap.add_argument("--cross-emax-ev", type=float, default=None)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     run_dir = Path(args.run_dir)
     cache = Path(args.cache) if args.cache else run_dir / ".group_cross_cache"
@@ -874,11 +692,6 @@ def main():
     n_fine = len(fine_ev) - 1
     widths = np.diff(fine_ev) / 1e6
 
-    # THE MAGNITUDE AXIS. In 'fine' mode this is the identity collapse: the
-    # rest of the script is grid-agnostic, so `fine_to_group(fine_ev, fine_ev)`
-    # sends bin i to group i and `row_aggregator` returns I. Nothing else below
-    # needs to know which mode it is in -- which is the point, because two code
-    # paths for "collapse the magnitude family" is how §L3 happened.
     _fine_mag = args.mag_grid == "fine"
     if _fine_mag:
         mag_ev = fine_ev
@@ -906,9 +719,6 @@ def main():
         mag_ev = np.load(run_dir / "mf33_multigroup_grid_ev.npy").astype(float)
         c33_ship = np.load(run_dir / "mf33_multigroup_relative_covariance.npy")
 
-    # ONE resolved source, used for BOTH the shipped grids/c34_ship and the
-    # --write-endf template. They must be the same file or the diagnosis is not
-    # about the thing being written.
     source_endf = (Path(args.source_endf) if args.source_endf
                    else shipped_mg_endf(run_dir))
     print(f"shipped MF34 source: {source_endf}")
@@ -940,22 +750,6 @@ def main():
     a_nom_group = np.stack(
         [A_shape[l] @ a_nom_fine[:, l] for l in range(L_MAX)], axis=-1)
 
-    # THE UNSUPPORTED-PARAMETER MASK, emitted so other tools do not re-derive it.
-    # True where `row_aggregator` never populated the (group, order): no fine bin
-    # in that group carries a valid a_l, so the MC constrains nothing there.
-    #
-    # WHY IT LEAVES THIS SCRIPT. Roadmap Sec. 10.6-1. The shipped MF34 declares
-    # nonzero RELATIVE variance at ~95 % of these -- up to 7.6, sigma_rel ~ 276 %
-    # -- and Sec. 10.1.8-L11 established the chi2 folds them at FULL weight,
-    # because it scales the relative block by a_l interpolated from the file's own
-    # MF4 and that is not zero here. Run 86 folds the same file, so the BASELINE
-    # every chi2 in that document is quoted against may carry variance from
-    # parameters the fit never determined. `null_slot_exposure.py` measures it,
-    # and it needs this exact mask rather than the frozen_degree approximation
-    # (which gives 1412 against this one's 1542 -- same object, not same array).
-    #
-    # Written on request in EITHER mode: `--check` still writes no COVARIANCE, and
-    # the diagnosis this feeds should not need a 40-minute --write to run.
     if args.write_null_mask:
         mask = np.abs(a_nom_group) < np.finfo(float).tiny
         outm = Path(args.write_null_mask)
@@ -967,29 +761,6 @@ def main():
             f"a_{l+1} {int(mask[:, l].sum())}/{mask.shape[0]}"
             for l in range(L_MAX)))
 
-    # THE DENOMINATOR THE CONSUMER ACTUALLY USES. `a_nom_group` is masked to the
-    # valid bins, so it is exactly zero at ~37 % of slots -- fine for building
-    # the joint, useless for asking what the chi2 sees, because the chi2 scales
-    # a relative MF34 block by `a_l_per_pt`, the MF4 coefficients interpolated
-    # onto each EXFOR energy, which are NOT zero there (what is empty at those
-    # slots is the MC validity mask, not the coefficient).
-    #
-    # ⚠ NOT a width-weighted mean over the bins the group contains. That was the
-    # first attempt and it is exactly zero in the 39 shape groups that contain
-    # NO fine bin at all -- the MF34 grid spans 0-20 MeV while the fine grid only
-    # covers 0.8468-4.075, and nine more are sub-keV slivers between adjacent
-    # fine bins (0.9995-1.0000 MeV and friends). Those groups are not empty to
-    # the consumer: 178 of 46819 EXFOR points bin into them, measured on run
-    # 90's parquet. Dropping them would hide 0.38 % of the data.
-    #
-    # So use the consumer's OWN convention: the coefficient in the fine bin
-    # containing the group centre, nearest-bin with clamping, which is what
-    # `eval_covariance.build_mf34_block` does to place each data point
-    # (`searchsorted(grid, e) - 1`). Non-zero everywhere the fine grid has a
-    # value, so the congruence diag(I, diag(a_pt)) is invertible and a PSD
-    # verdict in relative-shape space transfers exactly to the absolute space
-    # the chi2 folds -- which the verdict against `a_nom_group` does NOT, since
-    # that one annihilates the null slots and hides whatever lives in them.
     cen = 0.5 * (shape_ev[:-1] + shape_ev[1:])
     bin_at = np.clip(np.searchsorted(fine_ev, cen, side="right") - 1,
                      0, n_fine - 1)
@@ -998,9 +769,6 @@ def main():
     print(f"  consumer-convention group coefficients a_pt: "
           f"{int(zero_pt.sum())} exact zeros of {a_pt.size}")
     if zero_pt.any():
-        # A handful at most (the fine grid has one exactly-zero c_6). Excluding
-        # them IS exact: the consumer multiplies those directions by zero too,
-        # so they cannot contribute to Sigma_eval either way.
         print(f"    excluded from the second table; the consumer annihilates "
               f"them as well, so this is exact, not a truncation")
     keep_pt = ~zero_pt
@@ -1011,25 +779,17 @@ def main():
     a_flat = a_g.reshape(n, n_gs * L_MAX)
     print(f"  replicas: {n}")
 
-    # Every block from ONE collapsed replica set: PSD by construction.
     joint = np.cov(np.hstack([c0_g, a_flat]), rowvar=False)
     c33_mc = joint[:n_gm, :n_gm]
     c34_mc = joint[n_gm:, n_gm:]
     cx_mc = joint[:n_gm, n_gm:]
 
     print("  mapping the shipped MF34 onto the base shape grid ...", flush=True)
-    # Mapped ONCE and reused: the absolute form drives the diagnosis, the
-    # relative form is what the rewrite falls back on at null parameters. Two
-    # separate mappings would be two chances to disagree about the grids.
     c34_rel_ship = shipped_c34_rel_on_base(blocks, shape_ev)
-    # NB `a_flat` is the REPLICA array (n x n_gs*L_MAX); this is the nominal.
     a_flat_nom = a_nom_group.reshape(-1)
     c34_ship = c34_rel_ship * np.outer(a_flat_nom, a_flat_nom)
     c34_ship = 0.5 * (c34_ship + c34_ship.T)
 
-    # The two-pass rescaling, done AFTER the collapse: one positive diagonal
-    # congruence on the WHOLE joint, so PSD is inherited from the control and
-    # both marginals come out equal to the shipped ones.
     d_tar = np.concatenate([np.sqrt(np.maximum(np.diag(c33_ship), 0.0)),
                             np.sqrt(np.maximum(np.diag(c34_ship), 0.0))])
     d_mc = np.sqrt(np.maximum(np.diag(joint), 0.0))
@@ -1044,39 +804,12 @@ def main():
     print(f"\n  marginal-identity gate: max abs sigma error  "
           f"MF33 {e33:.3e}   MF34 {e34:.3e}")
 
-    # ⚑⚑ THE MATRIX GATE, and it is the one the whole PSD chain rests on.
-    #
-    # The gate above pins the DIAGONAL only, and a diagonal match is not what
-    # the congruence needs. `Sigma_eval = M J M^T` transfers J's PSD to the chi2
-    # only if the c33 block of J is the SAME MATRIX `build_mf33_block` folds --
-    # not merely a matrix with the same variances.
-    #
-    # On the fine axis it is, by algebra rather than luck: A_mag = I, so
-    # c33_post = corr1 (*) sigma_tar sigma_tar^T, and the shipped MF33 is
-    # corr1 (*) sigma_ship sigma_ship^T because
-    # `regularize_near_zero_relative_covariance` is a positive diagonal
-    # congruence. Same correlation matrix, same outer-product form. Measured on
-    # run 86 at 4.58e-16 (§10.7-10, 0.1), with zero NaN c0 cells and zero
-    # zero-sigma bins -- the four ways it could fail are all empty there, and
-    # this gate is what notices if they stop being empty.
-    #
-    # On the group axis it is NOT, and the number printed here is the direct
-    # measurement of why: corr(A C A^T) != A corr(C) A^T. Informational there,
-    # fatal here.
     c33_matrix_gate(c33_post, c33_ship, fatal=_fine_mag)
 
     rows = [
         diagnose("CONTROL: all blocks from the collapsed replicas", c33_mc, c34_mc, cx_mc),
         diagnose("shipped marginals, Cx = 0", c33_ship, c34_ship, np.zeros_like(cx_post)),
         diagnose("CANDIDATE: rescaling after the collapse", c33_post, c34_post, cx_post),
-        # THE ROW RUN 89 DID NOT HAVE, AND THE ONE THAT MATTERS. The CANDIDATE
-        # is PSD as a TRIPLE; its MF34 leg is c34_post, not the MF34 in the
-        # _mg.endf. Run 89 shipped cx_post as a sidecar next to the FILE's
-        # marginals -- a joint nothing had ever diagnosed. Measured: sigma_max(K)
-        # 41.27 and lam_min/scale -0.447, i.e. worse than every construction in
-        # Sec. 10.1.8-J. The marginal-identity gate above only pins the DIAGONAL,
-        # so it cannot see this. Keep this row: it is the one that says whether
-        # the thing we are about to ship is a covariance.
         diagnose("LEGACY (run 89): shipped marginals + cx_post",
                  c33_ship, c34_ship, cx_post),
     ]
@@ -1091,16 +824,6 @@ def main():
           "still died in the chi2.\n  The table below is the one that "
           "corresponds to what the chi2 folds.")
 
-    # ── THE TABLE THAT MATCHES WHAT THE CHI2 ACTUALLY BUILDS ────────────────
-    # Same joint, expressed the way the file publishes it and the consumer reads
-    # it: MF34 RELATIVE on the shape axis, scaled at fold time by a_l_per_pt.
-    # `a_pt` stands in for that under the consumer's own nearest-bin convention,
-    # so this congruence is invertible and the verdict transfers exactly --
-    # unlike the a_nom table above.
-    #
-    # The cross block's shape axis is ABSOLUTE in the sidecar, so it must be
-    # divided by the SAME a_pt the MF34 leg will be multiplied by, or the two
-    # legs are not in the same space.
     K = keep_pt
     cxA = (cx_post / a_pt[None, :])[:, K]
     rel_post = assemble_c34_rel(c34_post, a_flat_nom, c34_rel_ship, "zero")
@@ -1112,38 +835,14 @@ def main():
     rows2 = [
         diagnose("A  shipped MF34, Cx = 0   (the run-86 baseline)",
                  c33_ship, rel_ship_K, np.zeros_like(cxA)),
-        # What run 89 shipped, in the space that can see it.
         diagnose("B  shipped MF34 + Cx      (run 89)",
                  c33_ship, rel_ship_K, cxA),
-        # What run 90 shipped: rebuilt where live, SHIPPED at the null slots.
         diagnose("C  rebuilt + null=ship    (RUN 90, AS SHIPPED)",
                  c33_ship, rel_shipfill_K, cxA),
-        # The proposed repair: rebuilt where live, ZERO at the null slots.
         diagnose("D  rebuilt + null=zero    (the proposed fix)",
                  c33_ship, rel_post_K, cxA),
-        # Isolates the OTHER gap: MF33 is still the shipped one in every row
-        # above, but the triple certified PSD used c33_post. If D is still bad
-        # while E is clean, rebuilding MF34 alone can never be enough and MF33
-        # has to be rewritten too.
         diagnose("E  rebuilt + null=zero + c33_post (MF33 rebuilt too)",
                  c33_post, rel_post_K, cxA),
-        # ⚑⚑ ROW F — THE ONE THE a_0 BLOCKS ACTUALLY PRODUCE, and the only row
-        # above that is not modelling a sidecar.
-        #
-        # Rows B-E all divide the cross block by `a_pt` while the shape blocks
-        # are divided by `a_nom`. TWO DENOMINATORS FOR ONE PARAMETER -- which is
-        # §L13 itself, reproduced inside the diagnostic, because when they were
-        # written the cross term arrived as an absolute sidecar and there was no
-        # single convention to divide by. Their sigma_max(K) ~ 1000 measures
-        # that mismatch and says nothing about the file below.
-        #
-        # `write_consistent_mf34` divides the cross by `a_nom`, the SAME
-        # denominator as the shape blocks. The published joint is then
-        # J_rel = diag(I, diag(1/a_nom)) J_post diag(I, diag(1/a_nom)),
-        # a positive diagonal congruence of a PSD matrix, and the fold applies
-        # another one (diag(I, diag(a_pt))). Congruences cannot change the sign
-        # of an eigenvalue, so this row should come out at the CONTROL's level
-        # and not at row D's. If it does not, do not ship the file.
         diagnose("F  a_0 blocks: cx/a_nom, ONE convention (WHAT WE NOW SHIP)",
                  c33_ship, rel_post_K,
                  np.divide(cx_post, a_flat_nom[None, :],
@@ -1190,21 +889,6 @@ def main():
           "                    does not, something in the chain is not a\n"
           "                    congruence and the file must not ship.")
 
-    # ── THE MF33 THE CHI2 ACTUALLY FOLDS (roadmap §10.6-3 item 5) ─────────────
-    # Every PSD row above -- and every one in §§J, K, L3, L12 -- takes `c33_ship`
-    # from `mf33_multigroup_relative_covariance.npy`, the 188-group adaptive
-    # object, which is also the cross sidecar's magnitude axis. THE CHI2 DOES NOT
-    # FOLD THAT. It reads MF33 out of the ENDF (2317 bins on run 86's file) and
-    # averages each point over its MF4 bin onto that grid via `W`
-    # (`eval_covariance.build_mf33_block`). So this is §L3's mistake with the
-    # MAGNITUDE leg in place of the shape leg: a trio verified that is not the
-    # trio folded, and nobody had checked it for MF33.
-    #
-    # The cross block's magnitude axis is expanded onto the file's grid by
-    # DUPLICATION -- under the group model the relative sigma perturbation of a
-    # file bin inside group m IS group m's, so Cov(bin, a_l) = Cov(group m, a_l).
-    # Same reading §K uses for MF34's four nested grids. Bins outside the
-    # 188-group span get zero: the cross block says nothing there.
     if args.c33_from_file:
         from scripts.precompute_chi2_library_c0 import load_library_lib_c0
 
@@ -1222,14 +906,6 @@ def main():
         cen33 = 0.5 * (g33[:-1] + g33[1:])
         m_of = np.searchsorted(mag_ev, cen33, side="right") - 1
         inside = (m_of >= 0) & (m_of < n_gm)
-        # ⚠ 2026-08-07: DIVIDE THE SHAPE AXIS BY a_pt, exactly as `cxA` does.
-        # This block previously expanded the RAW `cx_post`, whose shape axis is
-        # ABSOLUTE, against `rel_ship_K`, which is RELATIVE -- so B' differed
-        # from B in TWO things at once (the MF33 grid AND whether the cross leg
-        # was converted), and the -26.31 -> -0.42 step could not be attributed
-        # to the MF33 swap it was built to isolate. a_pt is small and crosses
-        # zero, so the division is most of the magnitude here, not a detail.
-        # With this line B' vs B moves the MF33 and nothing else.
         cx_rel_full = cx_post / a_pt[None, :]
         cx_file = np.zeros((c33_file.shape[0], cx_post.shape[1]))
         cx_file[inside] = cx_rel_full[m_of[inside]]
@@ -1292,23 +968,7 @@ def main():
         print("\n--check: nothing written.")
         return 0
 
-    # Sidecars. The magnitude axis is RELATIVE (delta_sigma/sigma) because
-    # c33_ship is the shipped relative MF33 and the chi2 builder's magnitude
-    # sensitivity is y_eval; the shape axis is ABSOLUTE because the relative
-    # form would divide by a_l_nom, which crosses zero.
     if _fine_mag:
-        # ⚑⚑ NO SIDECAR IN FINE MODE, AND THAT IS THE POINT OF ITEM 5.
-        #
-        # §L8's no-double-counting check has inverted: with the cross term in
-        # the MF34 a_0 blocks, the assertion is that the sidecar is ABSENT.
-        # `precompute_chi2_predictive` refuses to run with both
-        # KIKA_MF33_MF34_CROSS_FROM_FILE and KIKA_MF33_MF34_CROSS_DIR set, and
-        # writing one here would leave a loaded gun in the run directory --
-        # under the *_group_* filenames, on a 1738-bin axis that is not a group
-        # axis at all, next to a 188-bin file from an earlier run.
-        #
-        # It also keeps this command out of the run directory entirely: the
-        # only thing it writes is the ENDF named by --write-endf.
         print("\n  no .npy sidecar written (--mag-grid fine): the cross term "
               "ships INSIDE\n  the ENDF's MF34 a_0 blocks, and §L8 inverted "
               "says the sidecar must be absent.\n  Score with "
@@ -1323,20 +983,6 @@ def main():
               "mf33_mf34_cross_group_shape_grid_ev.npy")
 
     if args.write_endf:
-        # ⚑ SAY OUT LOUD WHAT THE REWRITE DELETES, because a chi2 read against
-        # run 86 will otherwise attribute all of it to the cross term.
-        #
-        # (a) `--null-fill zero` and the NULL MASK are the SAME 1542 slots:
-        #     this script's mask is `|a_nom_group| < tiny` and
-        #     `write_consistent_mf34`'s `live` is its exact complement. So the
-        #     rewritten file has already had §L14.2's 2.14 % of the Sigma_eval
-        #     diagonal removed, whether or not KIKA_MF34_NULL_MASK is set.
-        #     ⇒ the baseline for the chi2 is `086_nonull`, not run 86.
-        #
-        # (b) It also deletes JEFF's merged out-of-range MF34. The shape grid
-        #     spans the host's full range while the fine grid covers only
-        #     0.8468-4.075 MeV, so groups with no fine bin get a_nom = 0 and are
-        #     written zero -- but they are not empty to the consumer.
         _cen = 0.5 * (shape_ev[:-1] + shape_ev[1:])
         _outside = (_cen < fine_ev[0]) | (_cen > fine_ev[-1])
         _dead = np.abs(a_nom_group) < np.finfo(float).tiny
