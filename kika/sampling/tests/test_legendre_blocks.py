@@ -142,30 +142,44 @@ def test_the_cross_block_is_transposed_in_rather_than_stated_twice():
 
 
 def test_a_union_bin_below_a_section_gets_zero_not_its_first_bin():
-    """D10, and the live half of it.
+    """D10, the live half, and the one that did not raise.
 
-    The mirror of the test above and the more consequential one, because it does
-    not raise. `LegendreCovariance._lift_matrix` walks a cursor that starts at 0
-    and only ever moves forward, so a union bin *below* a section's first
-    boundary maps onto that section's first bin -- replicating a covariance
-    stated from 846.8 keV all the way down to 1e-5 eV on the shipped Fe-56
-    multigroup tape.
+    A cursor starting at 0 and only moving forward gave a union bin *below* a
+    section's first boundary that section's **first bin**, replicating a
+    covariance stated from 846.8 keV down to 1e-5 eV on the shipped Fe-56
+    multigroup tape -- 10 590 entries, worst 2.07e-2 against diagonals of order
+    1e-1.
 
-    The carrier's lift is asserted here too, so that this test states the
-    difference rather than merely the new behaviour.
+    **Both implementations are asserted**, and they must now agree: the carrier
+    was fixed rather than routed around, so the duplication here is a drift
+    detector. If this starts failing, one of the two lifts moved without the
+    other, and `refactor-backlog.md` names them as the pair to collapse.
     """
     from kika.cov.legendre_covariance import LegendreCovariance
+    from kika.sampling.model_blocks import _lift_matrix
 
     src = np.array([100.0, 200.0, 300.0])              # stated only from 100
     dst = np.array([0.0, 50.0, 100.0, 200.0, 300.0])   # union runs from 0
 
+    expected = np.array([[0.0, 0.0], [0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
     carrier = LegendreCovariance()._lift_matrix(src, dst)
-    np.testing.assert_array_equal(carrier[:2], [[1.0, 0.0], [1.0, 0.0]])
-
-    from kika.sampling.model_blocks import _lift_matrix
     ours = _lift_matrix(src, dst)
-    np.testing.assert_array_equal(ours[:2], [[0.0, 0.0], [0.0, 0.0]])
-    np.testing.assert_array_equal(ours[2:], carrier[2:])
+
+    np.testing.assert_array_equal(carrier, expected)
+    np.testing.assert_array_equal(ours, expected)
+
+
+def test_the_carrier_no_longer_walks_off_the_top_either():
+    """D9 on the carrier: this raised IndexError before 2026-08-11."""
+    from kika.cov.legendre_covariance import LegendreCovariance
+
+    src = np.array([0.0, 10.0, 20.0])                  # stated only to 20
+    dst = np.array([0.0, 10.0, 20.0, 150.0])           # union runs to 150
+
+    lift = LegendreCovariance()._lift_matrix(src, dst)
+    np.testing.assert_array_equal(
+        lift, np.array([[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]])
+    )
 
 
 def test_a_repeated_block_is_refused_rather_than_silently_overwritten():

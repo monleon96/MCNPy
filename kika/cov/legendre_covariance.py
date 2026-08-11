@@ -2040,9 +2040,36 @@ class LegendreCovariance:
         """
         Create a lifting matrix to map covariance from source to destination energy grid.
 
-        Constructs a mapping matrix A such that when applied, it transforms covariance
-        matrices from the source energy grid to the destination (union) energy grid.
-        Assumes destination grid is a subset or refinement of source grid.
+        Constructs a mapping matrix ``A`` such that ``A @ Sigma @ A.T`` restates
+        ``Sigma`` on the destination (union) grid. Row ``g`` selects the source
+        bin containing destination bin ``g``; a source bin split by another
+        section's boundaries becomes several destination bins carrying that
+        bin's variance and perfectly correlated, which is what the file says.
+
+        **A destination bin outside the source's stated range gets an all-zero
+        row.** The destination is the union over every section mentioning a
+        Legendre order, so it is a refinement of any one section's grid only
+        when all of them share a range -- and real files do not. This method
+        assumed otherwise until 2026-08-11 and was wrong at both ends
+        (``docs/library-gaps.md`` D9 and D10):
+
+        * **above** the source's last boundary the cursor ran past the end and
+          raised ``IndexError``. The shipped Fe-56 ``_a0cross`` tape does this:
+          its a0 blocks carry the MF33 cross term and so sit on the magnitude
+          grid out to 150 MeV while the L>=1 blocks stop at 20 MeV, and 21 of
+          its 28 sections are short of their own union.
+        * **below** the source's first boundary the cursor sat at 0 and this
+          wrote ``A[g, 0] = 1``, replicating the section's first bin downwards.
+          Silent, and therefore the one that changed numbers: on the run-86
+          multigroup tape ``L2xL6`` is stated from 846.8 keV while every other
+          section starts at 1e-5 eV, so its covariance was being repeated across
+          every bin beneath -- 10 590 entries, worst 2.07e-2 against diagonals
+          of order 1e-1.
+
+        Zero is right rather than merely safe. A section states a covariance
+        over its own bins and says *nothing* about a bin outside them, and
+        nothing is zero covariance -- not the value of the nearest bin it does
+        cover, which is what clamping the cursor would assert.
 
         Parameters
         ----------
@@ -2058,14 +2085,17 @@ class LegendreCovariance:
             and Gd = len(dst_grid)-1
         """
         # src_grid, dst_grid are boundary arrays (NE)
-        Gs, Gd = len(src_grid)-1, len(dst_grid)-1
+        src_grid = np.asarray(src_grid, dtype=float)
+        dst_grid = np.asarray(dst_grid, dtype=float)
+        Gs, Gd = len(src_grid) - 1, len(dst_grid) - 1
         A = np.zeros((Gd, Gs), dtype=float)
         j = 0
         for g in range(Gd):
-            eL, eH = dst_grid[g], dst_grid[g+1]
-            while j+1 < len(src_grid) and src_grid[j+1] <= eL + 1e-12:
+            eL, eH = dst_grid[g], dst_grid[g + 1]
+            while j + 1 < len(src_grid) and src_grid[j + 1] <= eL + 1e-12:
                 j += 1
-            # assume dst is subset/refinement of src:
+            if j >= Gs or eH <= src_grid[0] + 1e-12 or eL >= src_grid[-1] - 1e-12:
+                continue    # the section says nothing here; see D9/D10 above
             A[g, j] = 1.0
         return A
 

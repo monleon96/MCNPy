@@ -69,22 +69,28 @@ def _lift_matrix(src_grid: np.ndarray, dst_grid: np.ndarray) -> np.ndarray:
     variance and perfectly correlated with each other, which is what the file
     says about them.
 
-    **A union bin outside the source's span gets an all-zero row**, which is the
-    whole difference from
-    :meth:`~kika.cov.legendre_covariance.LegendreCovariance._lift_matrix` and is
-    not a refinement of it. That version assumes the destination refines the
-    source and walks a cursor forward without a bound, so a union extending past
-    the source's last boundary indexes off the end. On the shipped Fe-56
-    ``_a0cross`` tape it raises ``IndexError`` — see ``docs/library-gaps.md`` D9:
-    the a₀ blocks are on the MF33 magnitude grid out to 150 MeV while the L≥1
-    blocks stop at 20 MeV, so every L≥1 section is short of its own union by ten
-    boundaries.
+    **A union bin outside the source's span gets an all-zero row.** The union is
+    taken over every section mentioning a Legendre order, so it refines any one
+    section's grid only when all of them share a range — and real files do not.
+    Assuming otherwise was wrong at both ends (``docs/library-gaps.md`` D9 and
+    D10): past the source's last boundary the cursor ran off the end and raised,
+    which the shipped ``_a0cross`` tape does; below its first, the cursor sat at
+    0 and handed out that section's first bin, which the shipped multigroup tape
+    does, silently.
 
-    Zero is the right entry there and not merely the safe one. The section
-    states a covariance over its own bins; about a bin it does not cover it says
-    nothing, and nothing is zero covariance, not the value of the nearest bin it
-    does cover. Clamping the cursor instead — the other obvious repair — would
-    smear the section's top bin across 130 MeV of an axis it never mentioned.
+    Zero is right and not merely safe. A section states a covariance over its own
+    bins and says *nothing* about a bin outside them, and nothing is zero
+    covariance — not the value of the nearest bin it does cover, which is what
+    clamping the cursor would assert.
+
+    **This is byte-identical to
+    :meth:`~kika.cov.legendre_covariance.LegendreCovariance._lift_matrix`**,
+    which was fixed rather than routed around, and the duplication is knowing and
+    temporary — the migration exists to stop this package depending on that class,
+    so importing its private method would defeat the point.
+    ``test_a_union_bin_below_a_section_gets_zero_not_its_first_bin`` asserts both
+    against the same expected matrix and is the drift detector;
+    ``refactor-backlog.md`` names them as the pair to collapse.
     """
     src_grid = np.asarray(src_grid, dtype=float)
     dst_grid = np.asarray(dst_grid, dtype=float)
@@ -186,6 +192,34 @@ def assemble_joint(entries, atol: float = 1e-12):
     return keys, joint, stride
 
 
+def _endf_mt(link) -> int:
+    """The MT an ``ENDF_MFMT`` names — ``"34/2"`` → 2.
+
+    Duck-typed rather than imported from
+    ``kika.endf.model_adapter.covariances``, which has the same two helpers.
+    That import is what ``test_nothing_imports_the_adapter`` forbids and it is
+    right to: reaching the adapter from ``kika.sampling`` pulls the whole GNDS
+    model onto the sampler's import path, and this module's own docstring
+    promises it duck-types the suite for exactly that reason. Two four-line
+    readers of a documented spec field is the cheaper of the two costs.
+    """
+    if link is None or not getattr(link, "ENDF_MFMT", None):
+        raise ValueError("a covariance link with no ENDF_MFMT cannot be placed")
+    return int(str(link.ENDF_MFMT).split("/")[1])
+
+
+def _legendre_order(link) -> int:
+    """The Legendre order a link is sliced at (§25.2.5-6)."""
+    slices = getattr(getattr(link, "slices", None), "slices", None) or ()
+    for entry in slices:
+        if entry.domainValue is not None:
+            return int(entry.domainValue)
+    raise ValueError(
+        f"the link to {getattr(link, 'href', None)!r} carries no slice, so the "
+        f"Legendre order it is about is unknown"
+    )
+
+
 def _mf34_entries(suite, mt: Optional[int] = None):
     """The MF34 sections of *suite*, as ``assemble_joint`` entries.
 
@@ -193,14 +227,12 @@ def _mf34_entries(suite, mt: Optional[int] = None):
     suite from being swept in — ``covariance_suite_blocks`` does not, and on the
     committed micro-tape it emits ``MF33-MT2`` among the MF34 blocks.
     """
-    from kika.endf.model_adapter.covariances import _endfMT, _legendreOrder
-
     entries = []
     for section in getattr(suite, "covarianceSections", suite):
         rowData, colData = section.rowData, section.columnData
         if rowData is None or not str(rowData.ENDF_MFMT or "").startswith("34/"):
             continue
-        if mt is not None and _endfMT(rowData) != mt:
+        if mt is not None and _endf_mt(rowData) != mt:
             continue
         colData = rowData if colData is None else colData
 
@@ -224,8 +256,8 @@ def _mf34_entries(suite, mt: Optional[int] = None):
                 stacklevel=2,
             )
         entries.append((
-            (za, _endfMT(rowData), _legendreOrder(rowData)),
-            (za, _endfMT(colData), _legendreOrder(colData)),
+            (za, _endf_mt(rowData), _legendre_order(rowData)),
+            (za, _endf_mt(colData), _legendre_order(colData)),
             np.asarray(form.matrix, dtype=float),
             rowGrid,
             colGrid,
