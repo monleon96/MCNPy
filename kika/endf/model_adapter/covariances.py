@@ -52,9 +52,11 @@ from kika.nuclear_data.model import (
     EndfProvenance,
 )
 
-__all__ = ["decodeMF31MT", "decodeMF33MT", "decodeMF34MT", "decodeMF35MT",
-           "decodeCovarianceSuite",
-           "encodeMF31MT", "encodeMF33MT", "encodeMF34MT",
+from .parameter_covariances import decodeMF32MT
+
+__all__ = ["decodeMF31MT", "decodeMF32MT", "decodeMF33MT", "decodeMF34MT",
+           "decodeMF35MT", "decodeCovarianceSuite",
+           "encodeMF31MT", "encodeMF33MT", "encodeMF34MT", "encodeMF35MT",
            "reactionHref", "angularDistributionHref",
            "energyDistributionHref", "nubarShims"]
 
@@ -598,9 +600,103 @@ def encodeMF31MT(source, mt: int, mat: Optional[int] = None,
     return built, report
 
 
+def encodeMF35MT(source, mt: int, mat: Optional[int] = None,
+                 report: Optional[ConversionReport] = None):
+    """A :class:`CovarianceSuite` → an ``MF35MT`` for one MT.
+
+    **The one encoder here that is a record writer rather than a projection.**
+    MF33, MF34 and MF31 go back out through ``kika/cov``, because their decoders
+    came in that way and the LB structure they collapsed is not recoverable from
+    the model. MF35 never had a ``kika/cov`` path at all — ``decodeMF35MT`` reads
+    ``MF35SubSection.matrix()`` directly — so there is no policy to hand back,
+    and inventing one would mean a second place that decides what MF35 looks
+    like. Only LS=1, LB=7 exists in MF35, so there is nothing to choose anyway.
+
+    The sections are written in **band order**, sorted on the incident-energy
+    slice rather than taken in list order: §25.2 gives a suite no ordering, and
+    the bands of an MF35 file are contiguous by construction, so a suite whose
+    sections were built or filtered out of order would otherwise produce a file
+    whose bands jump around.
+
+    The gate is a numerical fixed point rather than byte identity, as for the
+    other encoders and for the same reason: ``MF35SubSection`` keeps the LIST
+    body it was read from so a *parsed* section round-trips character for
+    character, but a section rebuilt from the model has no such body and its
+    numbers are re-formatted from the matrix.
+    """
+    from kika.endf.classes.mf35.mf35 import MF35MT, MF35SubSection
+
+    report = report if report is not None else ConversionReport()
+    sections = _covarianceSections(source, "35/", mt)
+
+    provenance = sections[0].provenance
+    za = getattr(provenance, "za", None)
+    awr = getattr(provenance, "awr", None)
+    if za is None or awr is None:
+        raise ValueError(
+            f"MF35/MT{mt} carries no ZA/AWR, so the section header would be "
+            f"invented. Decode from ENDF, where the header comes from the file."
+        )
+    resolvedMat = mat if mat is not None else getattr(provenance, "mat", None)
+
+    def bandKey(section):
+        band = section.rowData.incidentEnergyBand
+        if band is None:
+            raise ValueError(
+                f"an MF35/MT{mt} section carries no incident-energy slice, so "
+                f"the band it describes is unknown; see "
+                f"DataLink.forIncidentEnergyBand"
+            )
+        return (float(band[0]), float(band[1]))
+
+    subsections = []
+    for section in sorted(sections, key=bandKey):
+        form = section.form
+        e1, e2 = bandKey(section)
+        matrix = np.asarray(form.matrix, dtype=float)
+        grid = np.asarray(form.rowGrid, dtype=float)
+
+        if form.isRelative:
+            report.approximated(
+                f"MF35/MT{mt} band {e1:g}-{e2:g} eV is marked relative, but "
+                f"LB=7 is an absolute covariance of group-integrated "
+                f"probabilities and is written as one"
+            )
+        if not np.allclose(matrix, matrix.T):
+            report.lost(
+                f"MF35/MT{mt} band {e1:g}-{e2:g} eV is not symmetric; LB=7 "
+                f"stores the upper triangle only, so the lower half is dropped"
+            )
+
+        order = matrix.shape[0]
+        triangle = np.concatenate(
+            [matrix[row, row:] for row in range(order)]
+        ) if order else np.zeros(0)
+        ne = int(grid.size)
+
+        subsections.append(MF35SubSection(
+            e1=e1, e2=e2, ls=1, lb=7,
+            nt=MF35SubSection.expected_nt(ne), ne=ne,
+            boundaries=[float(x) for x in grid],
+            upper_triangle=[float(x) for x in triangle],
+        ))
+
+    built = MF35MT(
+        number=mt, _za=float(za), _awr=float(awr), _nk=len(subsections),
+        _mat=int(resolvedMat or 0), _mf=35, subsections=subsections,
+    )
+    return built, report
+
+
 def decodeCovarianceSuite(endf, report: Optional[ConversionReport] = None,
                           evaluation: Optional[str] = None):
-    """Every MF33 and MF34 section in a parsed ENDF → one :class:`CovarianceSuite`.
+    """Every covariance file in a parsed ENDF → one :class:`CovarianceSuite`.
+
+    MF31, MF33, MF34 and MF35 become ``covarianceSections``; **MF32 becomes
+    ``parameterCovariances``**, and the two lists are separate because §25.3 is
+    a separate subsection of the standard — a matrix whose rows are resonance
+    parameters is not interchangeable with one whose rows are bins of an energy
+    grid. See :mod:`kika.endf.model_adapter.parameter_covariances`.
 
     §25.1.1 makes the suite a **root node in its own right**, linked to the
     ``reactionSuite`` through ``externalFiles`` rather than nested inside it.
@@ -659,28 +755,17 @@ def decodeCovarianceSuite(endf, report: Optional[ConversionReport] = None,
             sections, report = decodeMF35MT(mf35.mt[mt], report)
             suite.covarianceSections.extend(sections)
 
-    if mf31 is None and mf33 is None and mf34 is None and mf35 is None:
-        # MF32 is a covariance this adapter does not convert, so an evaluation
-        # carrying only it still yields an empty suite — but saying it "carries
-        # no covariances" would be false, and the two cases want different
-        # follow-up from the reader.
-        if endf.mf.get(32) is not None:
-            report.lost(
-                "no MF31, MF33, MF34 or MF35: the only covariance this "
-                "evaluation carries is MF32, which this adapter does not convert"
-            )
-        else:
-            report.lost(
-                "no MF31, MF33, MF34 or MF35: this evaluation carries no "
-                "covariances"
-            )
+    mf32 = endf.mf.get(32) if hasattr(endf, "mf") else None
+    if mf32 is not None:
+        for mt in sorted(getattr(mf32, "mt", {})):
+            parameterCovariances, report = decodeMF32MT(mf32.mt[mt], report)
+            suite.parameterCovariances.extend(parameterCovariances)
 
-    if endf.mf.get(32) is not None:
-        report.unsupportedNode(
-            "MF32 (resonance parameter covariances) is present and parsed by "
-            "kika, but the model has nowhere to put it: §25.3 parameter "
-            "covariances are phase 7b, so covarianceSuite.parameterCovariances "
-            "stays empty. Read it through endf.mf[32].mt[151]"
+    if (mf31 is None and mf33 is None and mf34 is None and mf35 is None
+            and not suite.parameterCovariances):
+        report.lost(
+            "no MF31, MF32, MF33, MF34 or MF35: this evaluation carries no "
+            "covariances"
         )
 
     return suite, report

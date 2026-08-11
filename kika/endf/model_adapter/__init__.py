@@ -12,12 +12,14 @@ from .angular import decodeMF4MT, encodeMF4MT
 from .covariances import (
     decodeCovarianceSuite,
     decodeMF31MT,
+    decodeMF32MT,
     decodeMF33MT,
     decodeMF34MT,
     decodeMF35MT,
     encodeMF31MT,
     encodeMF33MT,
     encodeMF34MT,
+    encodeMF35MT,
 )
 from .decode import decodeMF1MT451, decodeMF3MT, decodeReactionSuite
 from .encode import encodeMF1MT451, encodeMF3MT
@@ -35,9 +37,10 @@ __all__ = [
     "decodeMF3MT", "decodeMF1MT451", "decodeReactionSuite", "encodeMF3MT",
     "encodeMF1MT451",
     "decodeMF4MT", "encodeMF4MT", "decodeMF2MT151", "encodeMF2MT151",
-    "decodeMF31MT", "decodeMF33MT", "decodeMF34MT", "decodeMF35MT",
+    "decodeMF31MT", "decodeMF32MT", "decodeMF33MT", "decodeMF34MT",
+    "decodeMF35MT",
     "decodeCovarianceSuite",
-    "encodeMF31MT", "encodeMF33MT", "encodeMF34MT",
+    "encodeMF31MT", "encodeMF33MT", "encodeMF34MT", "encodeMF35MT",
     "decodeMF1Nubar", "attachNubar", "nubarHref",
     "encodeMF1MT452", "encodeMF1MT455", "encodeMF1MT456",
 ]

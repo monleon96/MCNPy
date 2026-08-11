@@ -19,7 +19,8 @@ from typing import Iterator, List, Optional
 import numpy as np
 
 __all__ = ["Slice", "Slices", "DataLink", "CovarianceMatrix", "Mixed", "Sum",
-           "CovarianceSection", "CovarianceSuite"]
+           "CovarianceSection", "CovarianceSuite",
+           "ParameterLink", "ParameterCovarianceMatrix", "ParameterCovariance"]
 
 
 @dataclass
@@ -203,6 +204,136 @@ class CovarianceSection:
     @property
     def isCrossTerm(self) -> bool:
         """A block between two *different* quantities."""
+        return self.columnData is not None
+
+
+@dataclass
+class ParameterLink:
+    """§25.3.2. One contiguous run of matrix rows, and what parameters they are.
+
+    A parameter covariance is not gridded on energy, so nothing about a row is
+    recoverable from a grid the way it is for :class:`CovarianceMatrix`: row 47
+    means *the neutron width of the twelfth resonance* or it means nothing at
+    all. This is what carries that, and it is the reason a parameter covariance
+    needs its own container rather than reusing the cross-section one with the
+    grids left empty.
+
+    The run is deliberately a *resonance*, not a single parameter: ENDF orders
+    an MF32 matrix resonance-major (every parameter of resonance 1, then every
+    parameter of resonance 2), so a run per resonance describes the file's own
+    blocking. ``parameterNames`` names the run's entries in that order, which is
+    what makes :meth:`ParameterCovarianceMatrix.rowLabels` able to say what a
+    single row is.
+    """
+
+    label: str
+    href: str
+    nParameters: int = 1
+    matrixStartIndex: int = 0
+    parameterNames: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.parameterNames and len(self.parameterNames) != self.nParameters:
+            raise ValueError(
+                f"{len(self.parameterNames)} names for {self.nParameters} "
+                f"parameters in {self.label!r}"
+            )
+
+
+@dataclass
+class ParameterCovarianceMatrix:
+    """§25.3.2. The matrix, plus the parameter list that indexes its rows.
+
+    ``parameterValues`` is the one field with no GNDS counterpart, and it is
+    here on purpose. In GNDS the central values live in the ``reactionSuite``
+    and the covariance reaches them through ``href``; in ENDF, **File 32
+    re-declares them itself** — an LCOMP=2 body writes each parameter and its
+    uncertainty in the same record, which is the whole reason that format
+    exists. Dropping the copy would mean a caller that wants to sample has to
+    go back to File 2 and re-derive the correspondence row by row, which is
+    exactly the "parsed and then dropped" mistake ``docs/library-gaps.md`` M4
+    records for nu-bar.
+
+    The two copies can disagree, and that is a property of the evaluation
+    rather than of this class: ``href`` says where the authoritative one is,
+    ``parameterValues`` says what File 32 believed when it wrote the matrix.
+    """
+
+    matrix: np.ndarray
+    parameters: List[ParameterLink] = field(default_factory=list)
+    isRelative: bool = False
+    label: Optional[str] = None
+    parameterValues: Optional[np.ndarray] = None
+
+    def __post_init__(self) -> None:
+        self.matrix = np.asarray(self.matrix, dtype=float)
+        if self.matrix.ndim != 2:
+            raise ValueError(f"a covariance matrix is 2-D, got shape {self.matrix.shape}")
+        if self.matrix.shape[0] != self.matrix.shape[1]:
+            raise ValueError(
+                f"a parameter covariance is square, got shape {self.matrix.shape}"
+            )
+        if self.parameters:
+            declared = sum(link.nParameters for link in self.parameters)
+            if declared != self.matrix.shape[0]:
+                raise ValueError(
+                    f"the parameter links account for {declared} rows, "
+                    f"the matrix has {self.matrix.shape[0]}"
+                )
+        if self.parameterValues is not None:
+            self.parameterValues = np.asarray(self.parameterValues, dtype=float)
+            if self.parameterValues.size != self.matrix.shape[0]:
+                raise ValueError(
+                    f"{self.parameterValues.size} central values for "
+                    f"{self.matrix.shape[0]} rows"
+                )
+
+    @property
+    def order(self) -> int:
+        return int(self.matrix.shape[0])
+
+    def rowLabels(self) -> List[str]:
+        """One human-readable label per row, expanded from the links."""
+        labels: List[str] = []
+        for link in self.parameters:
+            names = link.parameterNames or [
+                str(i) for i in range(link.nParameters)
+            ]
+            labels.extend(f"{link.label}/{name}" for name in names)
+        return labels
+
+    def uncertainties(self) -> np.ndarray:
+        """The stated standard deviations — the square root of the diagonal.
+
+        ``abs`` before the root rather than after: MF32 matrices are not always
+        numerically PSD (Mn-55's short-range block has a smallest eigenvalue of
+        -2.3e-9 against a largest of 1.8e7), and a negative diagonal entry is a
+        defect worth surfacing as a value rather than as a ``nan`` three call
+        frames away.
+        """
+        return np.sqrt(np.abs(np.diag(self.matrix)))
+
+
+@dataclass
+class ParameterCovariance:
+    """§25.3.1. One covariance about a set of model parameters.
+
+    The sibling of :class:`CovarianceSection`, and separate from it for the
+    reason §25.3 is a separate subsection of the standard: a covariance whose
+    rows are *parameters* cannot be interchanged with one whose rows are bins
+    of a grid, and code that treats the two alike will eventually collapse a
+    resonance index into an energy. They are kept in different lists on the
+    suite so that no consumer has to check which kind it was handed.
+    """
+
+    label: str
+    rowData: Optional[DataLink] = None
+    columnData: Optional[DataLink] = None
+    form: Optional[object] = None   # ParameterCovarianceMatrix
+    provenance: Optional[object] = None
+
+    @property
+    def isCrossTerm(self) -> bool:
         return self.columnData is not None
 
 

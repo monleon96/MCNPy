@@ -66,6 +66,9 @@ from .covariances import (
     CovarianceSuite,
     DataLink,
     Mixed,
+    ParameterCovariance,
+    ParameterCovarianceMatrix,
+    ParameterLink,
     Slice,
     Slices,
     Sum,
@@ -189,4 +192,6 @@ __all__ = [
     # §25 covariances
     "CovarianceSuite", "CovarianceSection", "DataLink", "CovarianceMatrix",
     "Mixed", "Sum", "Slice", "Slices",
+    # §25.3 parameter covariances
+    "ParameterCovariance", "ParameterCovarianceMatrix", "ParameterLink",
 ]

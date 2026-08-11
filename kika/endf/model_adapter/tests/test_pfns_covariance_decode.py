@@ -207,3 +207,92 @@ def test_the_report_fields_are_the_ones_this_module_reads():
 
     names = {f.name for f in dataclasses.fields(ConversionReport)}
     assert {"warnings", "losses", "approximations", "unsupported"} <= names
+
+
+# ---------------------------------------------------------------------------
+# The encoder — added when MF35 stopped being decode-only
+# ---------------------------------------------------------------------------
+
+def test_the_model_writes_mf35_back_as_a_numerical_fixed_point(micro_pfns_tape):
+    """decode → encode → decode returns the same matrices and the same grids.
+
+    Byte identity is not the gate and cannot be: ``MF35SubSection`` keeps the
+    LIST body it was read from, so a *parsed* section re-emits character for
+    character, while one rebuilt from the model has no such body and its
+    numbers are re-formatted from the matrix. What must survive is the content,
+    so the fixed point is asserted on the arrays.
+    """
+    import numpy as np
+
+    from kika.endf.model_adapter import decodeCovarianceSuite, decodeMF35MT
+    from kika.endf.model_adapter.covariances import encodeMF35MT
+    from kika.endf.read_endf import read_endf
+
+    endf = read_endf(str(micro_pfns_tape))
+    suite, _ = decodeCovarianceSuite(endf)
+
+    written, report = encodeMF35MT(suite, mt=18)
+    assert not report.losses
+
+    original = endf.mf[35].mt[18]
+    assert written.num_bands == original.num_bands
+    assert written._za == original._za and written._awr == original._awr
+
+    for got, want in zip(written.subsections, original.subsections):
+        assert (got.e1, got.e2) == (want.e1, want.e2)
+        assert (got.ls, got.lb, got.ne, got.nt) == (want.ls, want.lb, want.ne, want.nt)
+        np.testing.assert_allclose(got.energy_grid(), want.energy_grid())
+        np.testing.assert_allclose(got.matrix(), want.matrix())
+
+    # And once more around the loop, through the flat class this time.
+    again, _ = decodeMF35MT(written)
+    for section, want in zip(again, original.subsections):
+        np.testing.assert_allclose(np.asarray(section.form.matrix), want.matrix())
+
+
+def test_the_written_section_emits_a_parsable_record(micro_pfns_tape):
+    """``str()`` of a model-built section must re-parse to the same numbers.
+
+    The encoder fills ``boundaries`` and ``upper_triangle`` but deliberately
+    leaves ``raw_list_values`` empty, so this is the path where ``emit`` has to
+    rebuild the LIST body — untested by anything that starts from a tape.
+    """
+    import numpy as np
+
+    from kika.endf.model_adapter import decodeCovarianceSuite
+    from kika.endf.model_adapter.covariances import encodeMF35MT
+    from kika.endf.parsers.parse_mf35 import parse_mf35
+    from kika.endf.read_endf import read_endf
+
+    endf = read_endf(str(micro_pfns_tape))
+    suite, _ = decodeCovarianceSuite(endf)
+    written, _ = encodeMF35MT(suite, mt=18)
+
+    assert not written.subsections[0].raw_list_values
+
+    lines = str(written).splitlines()[:-1]     # drop the SEND record
+    reparsed = parse_mf35(lines).mt[18]
+
+    assert reparsed.num_bands == written.num_bands
+    for got, want in zip(reparsed.subsections, written.subsections):
+        np.testing.assert_allclose(got.matrix(), want.matrix(), rtol=1e-6)
+        np.testing.assert_allclose(got.energy_grid(), want.energy_grid(), rtol=1e-6)
+
+
+def test_bands_are_written_in_energy_order_whatever_the_suite_says(micro_pfns_tape):
+    """A suite carries no ordering; an MF35 file's bands are contiguous.
+
+    Reversing the sections must not reverse the file, or a suite that had been
+    filtered and rebuilt would silently write bands out of order.
+    """
+    from kika.endf.model_adapter import decodeCovarianceSuite
+    from kika.endf.model_adapter.covariances import encodeMF35MT
+    from kika.endf.read_endf import read_endf
+
+    endf = read_endf(str(micro_pfns_tape))
+    suite, _ = decodeCovarianceSuite(endf)
+    suite.covarianceSections = list(reversed(suite.covarianceSections))
+
+    written, _ = encodeMF35MT(suite, mt=18)
+    starts = [band.e1 for band in written.subsections]
+    assert starts == sorted(starts)

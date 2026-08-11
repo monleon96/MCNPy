@@ -121,6 +121,31 @@ def _rescale_energy_grid(
     return [float(x) * factor for x in grid]
 
 
+def _log_edges(edges: np.ndarray) -> np.ndarray:
+    """``log10`` of energy-bin boundaries, with a non-positive first edge handled.
+
+    A grid may start at exactly 0 eV — **every MF35 outgoing-energy grid does**,
+    and so does any MF33 grid written from threshold — and zero has no place on
+    a logarithmic axis. Clamping it to a floor like ``1e-300`` is arithmetically
+    safe and visually catastrophic: the first bin then spans 295 of the axis's
+    ~302 decades, so it covers 98 % of the figure and every real bin is crushed
+    into the remaining 2 %. That renders as a single flat block of colour, which
+    reads as "this covariance has no structure" rather than as "this axis is
+    broken".
+
+    So a non-positive edge is placed one decade below the smallest positive one
+    instead. The first bin is then drawn one decade wide, which is an honest
+    statement that its lower boundary is not representable here, and the rest of
+    the axis keeps its proportions.
+    """
+    edges = np.asarray(edges, dtype=float)
+    positive = edges[edges > 0]
+    if positive.size == 0:
+        return np.zeros_like(edges)
+    floor = positive.min() / 10.0
+    return np.log10(np.maximum(edges, floor))
+
+
 @dataclass
 class TransferResult:
     """Outcome of :meth:`CrossSectionCovariance.transfer_reactions`.
@@ -455,6 +480,101 @@ class CrossSectionCovariance:
         file_path = Path(file_path)
 
         return read_coverx(str(file_path), ascending=ascending, energy_unit=energy_unit)
+
+    @classmethod
+    def from_covariance_section(
+        cls,
+        section,
+        nuclide: int = 0,
+        mt: Optional[int] = None,
+        energy_unit: str = 'eV',
+    ) -> "CrossSectionCovariance":
+        """Create a CrossSectionCovariance from one GNDS §25.2 covariance section.
+
+        The model is treated as one more source format here, on the same footing
+        as GENDF, COVFIL, BOXER and COVERX — which is what the model layer is
+        for. The immediate reason it exists is MF35: its bands reach the model
+        directly (``decodeMF35MT``) and never pass through this class, so before
+        this there was no way to hand one to ``plot_covariance_heatmap``. It is
+        not MF35-specific: any section with a matrix and a row grid works, which
+        includes MF31, MF33 and MF34.
+
+        **One section, one matrix, on purpose.** The bands of a single MF35 file
+        have different orders (84, 641, 641, 641, 641 on ENDF/B-VIII.1 U-235)
+        and all carry the same MT, so a whole suite loaded into one object would
+        hold several matrices indistinguishable by the ``(nuclide, mt)`` key
+        every selector here uses, and a plot would quietly draw the first. Loop
+        over the sections and call this per band instead.
+
+        Parameters
+        ----------
+        section
+            A ``CovarianceSection``: anything exposing ``form.matrix``,
+            ``form.rowGrid`` and ``form.isRelative``, with an optional
+            ``rowData.ENDF_MFMT``. Duck-typed rather than imported so that
+            ``kika.cov`` keeps not depending on the model.
+        nuclide : int, optional
+            ZAID to file the matrix under. The model identifies a covariance by
+            its href rather than by a material header, so there is nothing to
+            read this from and it is the caller's to supply.
+        mt : int, optional
+            Reaction number. Defaults to the MT half of ``rowData.ENDF_MFMT``.
+        energy_unit : str, optional
+            Unit of ``form.rowGrid``. The model keeps ENDF's native eV.
+
+        Returns
+        -------
+        CrossSectionCovariance
+            A single-matrix instance, ready for ``plot_covariance_heatmap``.
+
+        Examples
+        --------
+        >>> suite, _ = decodeCovarianceSuite(endf)                # doctest: +SKIP
+        >>> band = CrossSectionCovariance.from_covariance_section(  # doctest: +SKIP
+        ...     suite.covarianceSections[0], nuclide=92235)
+        >>> plot_covariance_heatmap(band, nuclide=92235, mt=18)   # doctest: +SKIP
+        """
+        form = getattr(section, 'form', None)
+        if form is None or getattr(form, 'matrix', None) is None:
+            raise ValueError("covariance section carries no matrix")
+
+        matrix = np.asarray(form.matrix, dtype=float)
+        grid = getattr(form, 'rowGrid', None)
+        if grid is None:
+            raise ValueError(
+                "covariance section carries no rowGrid, so its matrix cannot be "
+                "placed on an energy axis; §25.3 parameter covariances are not "
+                "gridded and belong in ParameterCovarianceMatrix, not here"
+            )
+        grid = np.asarray(grid, dtype=float)
+        if grid.size != matrix.shape[0] + 1:
+            raise ValueError(
+                f"rowGrid has {grid.size} boundaries for {matrix.shape[0]} rows; "
+                f"expected one more than the rows"
+            )
+
+        if mt is None:
+            mfmt = getattr(getattr(section, 'rowData', None), 'ENDF_MFMT', None)
+            if mfmt is None or '/' not in str(mfmt):
+                raise ValueError(
+                    "no mt given and the section's rowData has no ENDF_MFMT to "
+                    "take one from"
+                )
+            mt = int(str(mfmt).split('/')[1])
+
+        # Both the shared `energy_grid` and the per-matrix `energy_grids` are
+        # filled. They are redundant only because this builds a single-matrix
+        # object, which is the one case where a shared grid is unambiguous —
+        # and the plotting path reads the shared one.
+        covariance = cls(num_groups=matrix.shape[0], energy_unit=energy_unit,
+                         energy_grid=list(grid))
+        covariance.add_matrix(
+            isotope_row=nuclide, reaction_row=mt,
+            isotope_col=nuclide, reaction_col=mt,
+            matrix=matrix, energy_grid=list(grid),
+            is_relative=bool(getattr(form, 'isRelative', False)),
+        )
+        return covariance
 
     def remove_matrix(
         self,
@@ -2053,8 +2173,7 @@ class CrossSectionCovariance:
 
         def _transform_edges(edges: np.ndarray) -> np.ndarray:
             if scale_normalized == "log":
-                safe = np.maximum(edges, 1e-300)
-                return np.log10(safe.astype(float))
+                return _log_edges(edges)
             return edges.astype(float)
 
         def _crop_edges(edges: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -2403,7 +2522,7 @@ class CrossSectionCovariance:
 
         # Transform edges based on scale
         if scale == "log":
-            transformed_edges = np.log10(np.maximum(edges_cropped, 1e-300).astype(float))
+            transformed_edges = _log_edges(edges_cropped)
         else:
             transformed_edges = edges_cropped.astype(float)
 

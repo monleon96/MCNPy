@@ -40,6 +40,7 @@ import numpy as np
 
 from ..endf.classes.mf5.partials import MF5PartialTabulated
 from .core import draw_samples
+from .model_blocks import covariance_suite_blocks
 from .pfns_positivity import check_ratios, project_ratios_to_simplex
 
 __all__ = [
@@ -188,21 +189,6 @@ def build_pfns_covariance(
 
     suite.covarianceSections = sections
     return suite, mf5.mt[mt], bands
-
-
-def covariance_suite_blocks(suite, isotope: Any = None, mt: int = 18):
-    """A ``CovarianceSuite`` → the ``(key, matrix)`` sequence the core wants.
-
-    The adapter between a format-agnostic covariance object and a
-    format-agnostic sampler. When MF31/MF33/MF34 migrate onto
-    :func:`kika.sampling.core.draw_samples` they add their own function like
-    this one and the core does not change — which is the test of whether the
-    split between processing and formatting was real.
-    """
-    blocks = []
-    for index, section in enumerate(suite):
-        blocks.append(((isotope, mt, index), np.asarray(section.form.matrix)))
-    return blocks
 
 
 def band_grids(suite) -> List[np.ndarray]:

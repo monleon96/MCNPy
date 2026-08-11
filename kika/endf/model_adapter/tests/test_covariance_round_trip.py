@@ -122,14 +122,19 @@ def test_the_links_say_which_endf_section_they_came_from(suite):
         assert section.rowData.href.startswith("/reactionSuite/")
 
 
-def test_the_report_declares_the_covariance_files_it_does_not_read(covEndf):
-    """MF32 is the only covariance file this adapter still does not convert.
+def test_no_covariance_file_is_declared_unconvertible_any_more(covEndf):
+    """Every covariance file kika parses now reaches the model.
 
-    This was unverifiable until MF32 got a parser: the branch that raises the
-    notice keys off ``endf.mf[32]``, which the registry could never populate, so
-    the docstring claimed a behaviour no assertion reached. **MF31 used to be
-    named here too** and is not any more — it is decoded, and a notice saying
-    otherwise would now be the false statement.
+    **This test used to assert the opposite for MF32**, and the notice it
+    checked for — "the model has nowhere to put it: §25.3 parameter covariances
+    are phase 7b" — was accurate right up until §25.3 existed. It is kept,
+    inverted, because the interesting failure now is a *regression*: a change
+    that dropped MF32 back out of the suite would otherwise show up only as a
+    missing list somewhere downstream.
+
+    MF32 does not appear here because it lands in ``parameterCovariances``
+    rather than ``covarianceSections`` — a different list, for the reason §25.3
+    is a different subsection of the standard.
     """
     from kika.nuclear_data.model import ConversionReport
 
@@ -137,29 +142,26 @@ def test_the_report_declares_the_covariance_files_it_does_not_read(covEndf):
         mf = {32: object(), 33: covEndf.mf[33]}
 
     _, report = decodeCovarianceSuite(_Endf(), ConversionReport())
-    assert any("MF32" in entry for entry in report.unsupported)
+    assert not any("nowhere to put it" in entry for entry in report.unsupported)
+    assert not any("does not convert" in entry for entry in report.unsupported)
     assert not any("MF31" in entry for entry in report.unsupported)
 
 
-def test_a_file_carrying_only_unconvertible_covariances_does_not_claim_it_has_none(covEndf):
-    """An MF32-only evaluation has covariances; it just has none this reads.
+def test_an_mf32_only_evaluation_converts(micro_mf32_tape):
+    """An MF32-only tape used to be routed here just to be told it had nothing.
 
-    ``read()`` calls ``decodeCovarianceSuite`` for any MF in ``COVARIANCE_MF``,
-    which MF32 joined when it got a parser. Without this distinction such a tape
-    came back declaring it "carries no covariances", which is the opposite of
-    why it was routed here.
+    It carried covariances the whole time; the adapter simply had no node for
+    them. The four committed micro-tapes carry MF1, MF2 and MF32 and no other
+    covariance file, so they are exactly this case.
     """
-    from kika.nuclear_data.model import ConversionReport
+    from kika.endf.parsers.parse_endf import parse_endf_file
 
-    class _Endf:
-        mf = {32: object()}
+    endf = parse_endf_file(str(micro_mf32_tape))
+    suiteOut, report = decodeCovarianceSuite(endf)
 
-    suiteOut, report = decodeCovarianceSuite(_Endf(), ConversionReport())
-    assert len(suiteOut) == 0
-    assert any("the only covariance" in entry and "MF32" in entry
-               for entry in report.losses)
-    assert not any(entry.endswith("carries no covariances")
-                   for entry in report.losses)
+    assert len(suiteOut) == 0            # §25.2 sections: none, correctly
+    assert suiteOut.parameterCovariances  # §25.3: the whole of what it carries
+    assert not any("carries no covariances" in entry for entry in report.losses)
 
 
 def test_a_file_with_no_covariances_says_so():
@@ -170,10 +172,12 @@ def test_a_file_with_no_covariances_says_so():
 
     suiteOut, report = decodeCovarianceSuite(_Empty(), ConversionReport())
     assert len(suiteOut) == 0
-    # The message names all four covariance files the adapter now reads. MF35
-    # joined MF33 and MF34 with the PFNS work and MF31 with the nu-bar work; a
-    # tape carrying only one of them must not be reported as carrying none.
-    assert any("no MF31, MF33, MF34 or MF35" in entry for entry in report.losses)
+    # The message names all five covariance files the adapter now reads. MF35
+    # joined MF33 and MF34 with the PFNS work, MF31 with the nu-bar work, and
+    # MF32 with §25.3; a tape carrying only one of them must not be reported as
+    # carrying none.
+    assert any("no MF31, MF32, MF33, MF34 or MF35" in entry
+               for entry in report.losses)
 
 
 def test_an_a0_section_reaches_the_model_with_its_order_zero_blocks():
