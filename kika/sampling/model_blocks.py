@@ -155,6 +155,22 @@ def assemble_joint(entries, atol: float = 1e-12):
     widths = {key: len(grid) - 1 for key, grid in unions.items()}
     stride = max(widths.values())
 
+    # A repeated (rowKey, colKey) would be written twice into the same slot and
+    # the second would win, silently. Neither this nor the carrier has a defined
+    # answer for it -- summing and overwriting are both defensible and they
+    # disagree -- so it is refused rather than guessed at. It does not arise on
+    # any file to hand: both `to_ang_covmat` and `decodeMF34MT` aggregate a
+    # pair's sub-subsections into one matrix before this sees them.
+    seen = set()
+    for rowKey, colKey, *_ in entries:
+        if (rowKey, colKey) in seen:
+            raise ValueError(
+                f"two sections both state the block ({rowKey}, {colKey}); "
+                f"assemble_joint has no defined way to combine them -- they "
+                f"must be aggregated into one matrix before they get here"
+            )
+        seen.add((rowKey, colKey))
+
     joint = np.zeros((len(keys) * stride,) * 2, dtype=float)
     for rowKey, colKey, matrix, rowGrid, colGrid in entries:
         i, j = index[rowKey], index[colKey]

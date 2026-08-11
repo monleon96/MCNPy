@@ -141,6 +141,44 @@ def test_the_cross_block_is_transposed_in_rather_than_stated_twice():
     )
 
 
+def test_a_union_bin_below_a_section_gets_zero_not_its_first_bin():
+    """D10, and the live half of it.
+
+    The mirror of the test above and the more consequential one, because it does
+    not raise. `LegendreCovariance._lift_matrix` walks a cursor that starts at 0
+    and only ever moves forward, so a union bin *below* a section's first
+    boundary maps onto that section's first bin -- replicating a covariance
+    stated from 846.8 keV all the way down to 1e-5 eV on the shipped Fe-56
+    multigroup tape.
+
+    The carrier's lift is asserted here too, so that this test states the
+    difference rather than merely the new behaviour.
+    """
+    from kika.cov.legendre_covariance import LegendreCovariance
+
+    src = np.array([100.0, 200.0, 300.0])              # stated only from 100
+    dst = np.array([0.0, 50.0, 100.0, 200.0, 300.0])   # union runs from 0
+
+    carrier = LegendreCovariance()._lift_matrix(src, dst)
+    np.testing.assert_array_equal(carrier[:2], [[1.0, 0.0], [1.0, 0.0]])
+
+    from kika.sampling.model_blocks import _lift_matrix
+    ours = _lift_matrix(src, dst)
+    np.testing.assert_array_equal(ours[:2], [[0.0, 0.0], [0.0, 0.0]])
+    np.testing.assert_array_equal(ours[2:], carrier[2:])
+
+
+def test_a_repeated_block_is_refused_rather_than_silently_overwritten():
+    """Summing and overwriting are both defensible and they disagree."""
+    grid = np.array([0.0, 1.0, 2.0])
+    entries = [
+        (("a",), ("a",), np.eye(2), grid, grid),
+        (("a",), ("a",), np.eye(2) * 3.0, grid, grid),
+    ]
+    with pytest.raises(ValueError, match="no defined way to combine"):
+        assemble_joint(entries)
+
+
 def test_an_empty_suite_returns_no_blocks_rather_than_an_empty_matrix(micro):
     """A suite with no MF34 must not produce a 0x0 block for a sampler to draw."""
     _endf, suite = micro
