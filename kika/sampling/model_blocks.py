@@ -260,19 +260,27 @@ def legendre_covariance_index(
     gives the union bin boundaries per triplet, and ``widths`` how many of that
     triplet's ``stride`` rows are real rather than the zero padding the uniform
     stride implies.
+
+    **The layout is derivable from the grids alone**, so this does not assemble
+    anything. It looked natural to call :func:`assemble_joint` and read the
+    shape off the result; on the Fe-56 ``_a0cross`` tape that is a second 2.16 GB
+    allocation and 30 s to learn a stride, and calling both functions in the
+    obvious order took the box to zero free memory.
     """
     entries = _mf34_entries(suite, mt=mt)
-    keys, joint, stride = assemble_joint(entries, atol=atol)
-    if not keys:
+    if not entries:
         return {}
     unions = _union_grids(entries, atol=atol)
+    keys = sorted(unions)
+    widths = {key: len(unions[key]) - 1 for key in keys}
+    stride = max(widths.values())
     return {
         (isotope, "MF34", tuple(keys)): {
             "triplets": list(keys),
             "stride": stride,
             "grids": {key: unions[key] for key in keys},
-            "widths": {key: len(unions[key]) - 1 for key in keys},
-            "dimension": joint.shape[0],
+            "widths": widths,
+            "dimension": len(keys) * stride,
         }
     }
 
