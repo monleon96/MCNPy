@@ -220,21 +220,79 @@ def _legendre_order(link) -> int:
     )
 
 
-def _mf34_entries(suite, mt: Optional[int] = None):
+def _selection(value) -> Optional[frozenset]:
+    """``None`` / empty / ``[-1]`` mean "everything"; anything else is a set.
+
+    ``[-1]`` is the pipeline's own spelling of "all of them"
+    (``resolve_signed_request``), and it reaches here through
+    ``perturb_ENDF_files``' ``legendre_coeffs``. Reading it as a literal order
+    would select nothing and return an empty joint.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, np.integer)):
+        return frozenset({int(value)})
+    values = [int(v) for v in value]
+    if not values or values == [-1]:
+        return None
+    return frozenset(values)
+
+
+def _mf34_entries(suite, mt=None, orders=None, relative=None):
     """The MF34 sections of *suite*, as ``assemble_joint`` entries.
 
     Filters on ``ENDF_MFMT``, which is what keeps an MF33 section in the same
     suite from being swept in — ``covariance_suite_blocks`` does not, and on the
     committed micro-tape it emits ``MF33-MT2`` among the MF34 blocks.
+
+    *mt* and *orders* accept a single value, a sequence, or ``None`` for
+    everything. **Both sides of a section must pass both tests**, which is the
+    rule :func:`~kika.sampling.endf_perturbation._filter_mf34_covariance`
+    applies and the only one that is coherent: a cross block whose row survives
+    and whose column does not is an off-diagonal corner with nothing to be
+    off-diagonal to, and placing it would state a correlation with a component
+    that is not in the matrix.
+
+    **The order filter is load-bearing, not a convenience.** It is what keeps
+    L=0 out, and on an ``_a0cross`` tape the a₀ sections are the ones carrying
+    the MF33↔MF34 cross term on the magnitude grid — 2346 bins to 150 MeV
+    against the shape grid's 703 to 20 MeV. ``perturb_ENDF_files`` passes
+    ``range(1, max_degree + 1)``, so excluding a₀ is what has always kept those
+    two grids from meeting; ``_apply_factors_to_mf4_legendre`` documents that it
+    relies on it.
+
+    *relative* filters by form, as it does in
+    :func:`parameter_covariance_blocks`: ``True`` for the relative sections,
+    ``False`` for the absolute ones, ``None`` for both. **A sampling caller
+    wants ``True``.** ``load_mf34_covariance`` has always dropped absolute MF34
+    sections before handing anything to a draw, because the appliers *multiply*
+    by what comes back and an absolute covariance does not describe a factor.
+    The default is ``None`` so that assembling a file in order to look at it
+    still shows everything the file states, and so that the byte-identity gate
+    against ``to_ang_covmat`` — which does not drop them either — keeps
+    comparing like with like.
     """
+    mts = _selection(mt)
+    ls = _selection(orders)
+
     entries = []
     for section in getattr(suite, "covarianceSections", suite):
         rowData, colData = section.rowData, section.columnData
         if rowData is None or not str(rowData.ENDF_MFMT or "").startswith("34/"):
             continue
-        if mt is not None and _endf_mt(rowData) != mt:
-            continue
         colData = rowData if colData is None else colData
+
+        if relative is not None and bool(section.form.isRelative) != bool(relative):
+            continue
+
+        if mts is not None and not (
+            _endf_mt(rowData) in mts and _endf_mt(colData) in mts
+        ):
+            continue
+        if ls is not None and not (
+            _legendre_order(rowData) in ls and _legendre_order(colData) in ls
+        ):
+            continue
 
         za = int(getattr(section.provenance, "za", None) or 0)
         form = section.form
@@ -266,7 +324,8 @@ def _mf34_entries(suite, mt: Optional[int] = None):
 
 
 def legendre_covariance_blocks(
-    suite, isotope: Any = None, mt: Optional[int] = None, atol: float = 1e-12,
+    suite, isotope: Any = None, mt=None, orders=None, relative=None,
+    atol: float = 1e-12,
 ) -> List[Tuple[Hashable, np.ndarray]]:
     """A ``CovarianceSuite``'s MF34 sections → the one joint block they describe.
 
@@ -286,8 +345,13 @@ def legendre_covariance_blocks(
     changes — a list of one. :func:`legendre_covariance_index` says what the
     rows of that one block are, which is what a caller needs to write a drawn
     perturbation back onto MF34.
+
+    *mt*, *orders* and *relative* select which components enter the joint; see
+    :func:`_mf34_entries` for why both sides of a section have to pass, why the
+    order filter is what keeps a₀ and its magnitude grid out, and why a caller
+    that is about to *sample* wants ``relative=True``.
     """
-    entries = _mf34_entries(suite, mt=mt)
+    entries = _mf34_entries(suite, mt=mt, orders=orders, relative=relative)
     keys, joint, _stride = assemble_joint(entries, atol=atol)
     if not keys:
         return []
@@ -295,7 +359,8 @@ def legendre_covariance_blocks(
 
 
 def legendre_covariance_index(
-    suite, isotope: Any = None, mt: Optional[int] = None, atol: float = 1e-12,
+    suite, isotope: Any = None, mt=None, orders=None, relative=None,
+    atol: float = 1e-12,
 ) -> Dict[Hashable, Dict[str, Any]]:
     """What the rows of :func:`legendre_covariance_blocks`' block are.
 
@@ -315,7 +380,7 @@ def legendre_covariance_index(
     allocation and 30 s to learn a stride, and calling both functions in the
     obvious order took the box to zero free memory.
     """
-    entries = _mf34_entries(suite, mt=mt)
+    entries = _mf34_entries(suite, mt=mt, orders=orders, relative=relative)
     if not entries:
         return {}
     unions = _union_grids(entries, atol=atol)

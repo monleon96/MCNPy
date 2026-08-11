@@ -89,7 +89,7 @@ def draw_samples(
     sampling_method: str = "sobol",
     seed: Optional[int] = None,
     psd_method: str = "auto",
-    null_tol: float = DEFAULT_NULL_TOL,
+    null_tol: Optional[float] = DEFAULT_NULL_TOL,
     dtype=np.float64,
     verbose: bool = True,
     logger=None,
@@ -131,6 +131,30 @@ def draw_samples(
         Threshold for counting null directions. They are counted and reported,
         never repaired: the rank deficiency is a property of the evaluation,
         and filling it in would invent uncertainty the evaluator did not claim.
+
+        ``None`` retains **every** direction, including the null ones, and is
+        there for one purpose: proving that a migrated call site draws what the
+        code it replaces drew. Truncation changes the QMC dimension from *n* to
+        the rank, so it moves every drawn column — on the Fe-56 multigroup MF34
+        joint, 4218 → 3603 — and a migration that turns it on in the same commit
+        that changes which objects the draw comes from cannot say which of the
+        two moved the numbers. Set it to ``None`` to establish byte-identity,
+        then let it default in a separate, measured commit.
+
+        It is an escape hatch for gates, not a modelling option. The diagnostics
+        still report ``n_null`` and ``rank`` at :data:`DEFAULT_NULL_TOL`, so a
+        run drawing in null directions says so rather than reporting full rank.
+
+        **The rank reported here and the rank a pre-flight reports are not the
+        same number, and neither is wrong.** This one is taken on the singular
+        values the draw actually decomposes — *after* ``psd_method`` has acted,
+        and SVD folds a negative eigenvalue to its magnitude. A direction the
+        file states as negative-variance therefore survives as a retained
+        direction here while ``conditioning.inspect_blocks``, which reads the
+        eigenvalues of the matrix as stated, counts it null. Measured on that
+        same Fe-56 joint: 615 null directions in the draw against 669 in the
+        pre-flight, the difference being directions the evaluation states as
+        unphysical.
     dtype
         Output dtype. float64 by default and on purpose; see the module
         docstring.
@@ -204,7 +228,7 @@ def _draw_one_block(
     sampling_method: str,
     seed: Optional[int],
     psd_method: str,
-    null_tol: float,
+    null_tol: Optional[float],
     verbose: bool,
     logger,
     label: str,
@@ -232,8 +256,15 @@ def _draw_one_block(
         basis = vectors[:, order]
 
     largest = float(spectrum.max()) if spectrum.size else 0.0
-    keep = spectrum > null_tol * largest if largest > 0 else np.zeros(n, bool)
-    n_null = int((~keep).sum())
+    counting_tol = DEFAULT_NULL_TOL if null_tol is None else null_tol
+    null = (spectrum <= counting_tol * largest if largest > 0
+            else np.ones(n, bool))
+    n_null = int(null.sum())
+
+    # ``null_tol=None`` draws in every direction, null ones included. The count
+    # above is still taken at the default tolerance, so the diagnostics report
+    # what is true of the matrix rather than what this draw chose to use.
+    keep = np.ones(n, bool) if null_tol is None else ~null
 
     # **Truncate to the retained rank rather than drawing in all n directions.**
     #
@@ -285,7 +316,7 @@ def _draw_one_block(
         "min_over_max_eigenvalue": (
             float(raw_eigenvalues.min() / lam_max) if lam_max > 0 else 0.0
         ),
-        "realised_covariance_error": _realised_error(y, matrix, null_tol),
+        "realised_covariance_error": _realised_error(y, matrix, counting_tol),
         "label": label,
     }
 

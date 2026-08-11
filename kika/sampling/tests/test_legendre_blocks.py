@@ -15,12 +15,16 @@ The two halves are deliberate:
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
 from kika.endf.model_adapter import decodeCovarianceSuite
 from kika.endf.read_endf import read_endf
+from kika.sampling.endf_perturbation import _filter_mf34_covariance
 from kika.sampling.model_blocks import (
+    _mf34_entries,
     assemble_joint,
     covariance_suite_blocks,
     legendre_covariance_blocks,
@@ -28,6 +32,35 @@ from kika.sampling.model_blocks import (
 )
 
 MICRO_COV = "kika/endf/tests/data/micro_fe56_cov.endf"
+
+
+def _link(mfmt: str, order: int) -> SimpleNamespace:
+    """The two fields `_mf34_entries` reads off a covariance link."""
+    return SimpleNamespace(
+        ENDF_MFMT=mfmt,
+        href=f"#{mfmt}/L{order}",
+        slices=SimpleNamespace(slices=(SimpleNamespace(domainValue=order),)),
+    )
+
+
+def _section(rowData, columnData, grid=(0.0, 1.0, 2.0)) -> SimpleNamespace:
+    grid = np.asarray(grid, dtype=float)
+    return SimpleNamespace(
+        label=f"{rowData.href}x{columnData.href}",
+        rowData=rowData,
+        columnData=columnData,
+        provenance=SimpleNamespace(za=26056),
+        form=SimpleNamespace(
+            matrix=np.eye(grid.size - 1),
+            rowGrid=grid,
+            columnGrid=grid,
+            isRelative=True,
+        ),
+    )
+
+
+def _suite(sections) -> SimpleNamespace:
+    return SimpleNamespace(covarianceSections=list(sections))
 
 
 @pytest.fixture(scope="module")
@@ -83,6 +116,90 @@ def test_the_cross_order_block_is_placed_and_is_not_negligible(micro):
     assert np.abs(off).max() > 0.0
     np.testing.assert_array_equal(off, joint[stride:, :stride].T)
     assert np.abs(off).max() / np.abs(joint).max() > 0.15
+
+
+def test_the_order_filter_agrees_with_the_carrier_it_replaces(micro):
+    """The migration gate again, this time on a *filtered* selection.
+
+    `perturb_ENDF_files` never assembles the whole file: it filters by MT and by
+    Legendre order first, and `_filter_mf34_covariance` keeps a section only when
+    **both** its sides pass. Byte-identity of the unfiltered joint says nothing
+    about whether the filtered ones agree, and the filtered one is what the
+    pipeline actually samples.
+    """
+    endf, suite = micro
+    carrier = _filter_mf34_covariance(endf.mf[34].to_ang_covmat(), [2], [1])
+    (_key, joint), = legendre_covariance_blocks(suite, mt=[2], orders=[1])
+
+    np.testing.assert_array_equal(joint, carrier.covariance_matrix)
+
+
+def test_an_excluded_order_takes_its_cross_blocks_with_it(micro):
+    """A cross block half-placed is worse than one dropped.
+
+    Keeping L=1 and dropping L=2 must drop the L1×L2 block too. Placing it would
+    state a correlation against a component that is not in the matrix, and its
+    rows would have nowhere to go.
+    """
+    _endf, suite = micro
+    (key, joint), = legendre_covariance_blocks(suite, orders=[1])
+    index = legendre_covariance_index(suite, orders=[1])[key]
+
+    assert index["triplets"] == [(26056, 2, 1)]
+    assert joint.shape == (3, 3)
+    assert key[2] == ((26056, 2, 1),)
+
+
+def test_all_orders_is_spelled_several_ways_and_they_agree(micro):
+    """`None`, `[]` and `[-1]` all mean everything.
+
+    `[-1]` is `resolve_signed_request`'s own spelling of "all of them" and it
+    reaches here through `legendre_coeffs`. Read literally it would select no
+    order at all and return an empty joint -- a pipeline drawing nothing, without
+    failing.
+    """
+    _endf, suite = micro
+    (_k, everything), = legendre_covariance_blocks(suite)
+    for spelling in ([], [-1], None):
+        (_key, joint), = legendre_covariance_blocks(suite, orders=spelling)
+        np.testing.assert_array_equal(joint, everything)
+
+
+def test_an_absolute_section_is_dropped_only_when_asked_for_relative():
+    """`load_mf34_covariance` skipped absolute sections; the sampling path must too.
+
+    A drawn MF34 sample is a multiplicative factor -- the appliers multiply a_L
+    by it -- and an absolute covariance does not describe one. Dropping them is
+    not the default here, though: assembling a file to look at it should show
+    what the file states, and the byte-identity gate against `to_ang_covmat`
+    (which drops nothing) has to keep comparing like with like.
+    """
+    relative = _section(_link("34/2", order=1), _link("34/2", order=1))
+    absolute = _section(_link("34/2", order=2), _link("34/2", order=2))
+    absolute.form.isRelative = False
+    suite = _suite([relative, absolute])
+
+    assert len(_mf34_entries(suite)) == 2
+    assert len(_mf34_entries(suite, relative=True)) == 1
+    assert len(_mf34_entries(suite, relative=False)) == 1
+
+    (_key, joint), = legendre_covariance_blocks(suite, relative=True)
+    assert joint.shape == (2, 2)
+
+
+def test_a_section_whose_column_names_an_excluded_mt_is_dropped():
+    """The MT test applies to both sides, as the order test does.
+
+    Before this, only the row's MT was checked, so a cross-*reaction* section
+    survived a filter that excluded the reaction on its column.
+    """
+    row = _link("34/2", order=1)
+    kept = _section(row, row)
+    crossed = _section(row, _link("34/102", order=1))
+    suite = _suite([kept, crossed])
+
+    assert len(_mf34_entries(suite)) == 2
+    assert len(_mf34_entries(suite, mt=[2])) == 1
 
 
 def test_the_index_says_what_the_rows_are(micro):
