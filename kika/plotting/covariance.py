@@ -421,6 +421,154 @@ def plot_mf34_covariance_heatmap(
     return fig
 
 
+def plot_mf34_uncertainties(
+    mf34_covmat: LegendreCovariance,
+    isotope: Union[int, str],
+    mt: int,
+    legendre_coeffs: Union[int, Sequence[int]],
+    *,
+    ax: Optional[plt.Axes] = None,
+    uncertainty_type: str = "relative",
+    style: str = "light",
+    figsize: Tuple[float, float] = (8, 5),
+    dpi: int = 100,
+    font_family: str = "serif",
+    legend_loc: str = "best",
+    energy_range: Optional[Tuple[float, float]] = None,
+    sigma: float = 1.0,
+    title: Optional[str] = "default",
+    show: bool = False,
+    **styling_kwargs,
+) -> plt.Figure:
+    """
+    Plot MF34 Legendre-coefficient uncertainties for one isotope/MT.
+
+    The MF34 counterpart of :func:`plot_uncertainties`, which serves
+    ``CrossSectionCovariance``. One curve per requested Legendre order, drawn
+    through ``LegendreCovariance.to_plot_data`` and ``PlotBuilder``.
+
+    Parameters
+    ----------
+    mf34_covmat : LegendreCovariance
+        The MF34 covariance object.
+    isotope : int or str
+        Isotope identifier — ZAID (``26056``) or symbol (``'Fe56'``).
+    mt : int
+        Reaction MT number.
+    legendre_coeffs : int or sequence of int
+        Legendre order(s) to plot. An empty sequence means every order
+        available for this isotope/MT.
+    ax : plt.Axes, optional
+        Axes to draw into. If None, a new figure is created.
+    uncertainty_type : {"relative", "absolute"}, default "relative"
+        Relative uncertainties are plotted as percentages.
+    style : str, default "light"
+        ``'light'`` or ``'dark'``. ``'default'`` is accepted as a synonym for
+        ``'light'`` because that is what the method wrapping this function has
+        always declared as its default; the older style names ('paper',
+        'publication', 'presentation') did not survive the move to
+        ``PlotBuilder`` and raise.
+    sigma : float, default 1.0
+        Sigma level applied to the uncertainties.
+    energy_range : tuple of float, optional
+        (min, max) for the x-axis, in the covariance's own energy unit.
+    title : str or None, default "default"
+        ``"default"`` auto-generates, ``None`` omits, a string is used as given.
+    **styling_kwargs
+        Forwarded to ``to_plot_data`` (color, linestyle, linewidth, ...).
+
+    Returns
+    -------
+    plt.Figure
+
+    Raises
+    ------
+    ValueError
+        If ``uncertainty_type`` is not recognised, if the isotope/MT pair holds
+        no Legendre orders, or if a requested order is not among them.
+
+    Examples
+    --------
+    >>> mf34 = endf.mf[34].mt[2].to_ang_covmat()
+    >>> fig = plot_mf34_uncertainties(mf34, isotope=26056, mt=2,
+    ...                               legendre_coeffs=[1, 2, 3])
+
+    See Also
+    --------
+    plot_uncertainties : the same plot for cross-section covariances
+    plot_mf34_covariance_heatmap : MF34 covariance/correlation heatmaps
+    """
+    from kika._utils import symbol_to_zaid, zaid_to_symbol
+
+    if uncertainty_type not in ("relative", "absolute"):
+        raise ValueError(
+            f"uncertainty_type must be 'relative' or 'absolute', got {uncertainty_type!r}"
+        )
+
+    zaid = symbol_to_zaid(isotope) if isinstance(isotope, str) else int(isotope)
+
+    available = sorted(
+        {t[2] for t in mf34_covmat._get_param_triplets() if t[0] == zaid and t[1] == mt}
+    )
+    if not available:
+        raise ValueError(f"No Legendre coefficients found for isotope={zaid}, MT={mt}")
+
+    if isinstance(legendre_coeffs, int):
+        requested = [legendre_coeffs]
+    else:
+        requested = list(legendre_coeffs) or list(available)
+
+    missing = [l for l in requested if l not in available]
+    if missing:
+        raise ValueError(
+            f"Legendre coefficient(s) {missing} not available for isotope={zaid}, "
+            f"MT={mt}. Available: {available}"
+        )
+
+    builder = PlotBuilder(
+        style="light" if style == "default" else style,
+        figsize=figsize,
+        dpi=dpi,
+        font_family=font_family,
+        ax=ax,
+    )
+    builder.set_scales(log_x=True, log_y=False)
+
+    for order in requested:
+        _, unc_data = mf34_covmat.to_plot_data(
+            nuclide=zaid,
+            mt=mt,
+            order=order,
+            sigma=sigma,
+            uncertainty_type=uncertainty_type,
+            **styling_kwargs,
+        )
+        builder.add_data(unc_data)
+
+    if energy_range is not None:
+        builder.set_limits(x_lim=(energy_range[0], energy_range[1]))
+
+    if title == "default":
+        orders = ",".join(str(l) for l in requested)
+        builder.set_labels(title=f"{zaid_to_symbol(zaid)} MT={mt} L={orders} uncertainties")
+    elif title is not None:
+        builder.set_labels(title=title)
+
+    fig = builder.build(show=show)
+
+    if fig.axes:
+        axis = fig.axes[0]
+        axis.legend(loc=legend_loc)
+        axis.set_xlabel(f"Energy ({mf34_covmat.energy_unit})")
+        axis.set_ylabel(
+            "Relative Uncertainty (%)"
+            if uncertainty_type == "relative"
+            else "Absolute Uncertainty"
+        )
+
+    return fig
+
+
 def plot_uncertainties(
     covmat: CrossSectionCovariance,
     nuclide: Union[int, str, Sequence[Union[int, str]]],

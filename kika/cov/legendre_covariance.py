@@ -1221,13 +1221,14 @@ class LegendreCovariance:
         ...                                     uncertainty_type="absolute")
         >>> fig.show()
         """
-        from kika.cov.mf34cov_heatmap import plot_mf34_uncertainties as _plot_unc
+        from kika.plotting.covariance import plot_mf34_uncertainties as _plot_unc
 
         return _plot_unc(
             mf34_covmat=self,
             isotope=isotope,
             mt=mt,
             legendre_coeffs=legendre_coeffs,
+            ax=ax,
             uncertainty_type=uncertainty_type,
             style=style,
             figsize=figsize,
