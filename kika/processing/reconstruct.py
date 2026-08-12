@@ -134,24 +134,58 @@ def _resolvedGroups(formalism):
 
 
 def _formula(formalism):
-    """The formula function for a resolved formalism, or ``None`` if unsupported."""
+    """The formula function for a resolved formalism, or ``None`` if unsupported.
+
+    **The approximation name is not the discriminator, and assuming it was is a
+    bug this caught.** ENDF's LRF=7 with KRM=3 *is* the Reich-Moore
+    approximation and the decoder labels it so — correctly. But an LRF=3 range
+    and an LRF=7 range are two different parameterisations of it: LRF=3 blocks
+    by l and writes a J on every resonance record, over four fixed channels;
+    LRF=7 gives the spin group one J and as many channels as the evaluator
+    declared, five of them for Fe-57. ``reich_moore_cross_sections`` implements
+    the first. Dispatching on the name alone handed it the second and it raised
+    an ``IndexError`` reaching for a per-resonance spin that is not there.
+
+    So the test is structural: per-resonance spins, and channels labelled from
+    the Reich-Moore set. Anything else is declined by name in a warning, which
+    is where LRF=7 sits until P1b implements it.
+    """
     from kika.nuclear_data.model.resonances import (BreitWigner,
                                                     BreitWignerApproximation,
                                                     RMatrix)
+
+    from .resonance_formulas import _RM_CHANNELS
 
     if isinstance(formalism, BreitWigner):
         if formalism.approximation is BreitWignerApproximation.singleLevel:
             return slbw_cross_sections
         return mlbw_cross_sections
+
     if isinstance(formalism, RMatrix) and formalism.approximation == "ReichMoore":
-        return reich_moore_cross_sections
+        blocked = all(
+            len(group.spins) == len(group.energies)
+            and all(channel.label in _RM_CHANNELS for channel in group.channels)
+            for group in formalism.spinGroups
+        )
+        return reich_moore_cross_sections if blocked else None
+
     return None
 
 
 def _formalismName(formalism) -> str:
+    """Enough to tell the two Reich-Moore parameterisations apart in a warning.
+
+    "RMatrix/ReichMoore" alone would name LRF=3 and LRF=7 identically, so the
+    channel count goes in: it is what actually differs, and it is the reason
+    the second is declined.
+    """
     approximation = getattr(formalism, "approximation", None)
-    name = getattr(approximation, "value", approximation)
-    return f"{type(formalism).__name__}/{name}"
+    name = f"{type(formalism).__name__}/{getattr(approximation, 'value', approximation)}"
+    groups = getattr(formalism, "spinGroups", None) or []
+    channels = {len(getattr(group, "channels", ())) for group in groups}
+    if channels:
+        return f"{name} over {sorted(channels)} channels per spin group"
+    return name
 
 
 def reconstruct(
