@@ -73,6 +73,7 @@ __all__ = [
     "apply_plan",
     "as_blocks",
     "block_key_text",
+    "inert_row_mask",
     "inspect_matrix",
     "inspect_blocks",
     "predict_psd_repairs",
@@ -981,9 +982,25 @@ def _check_rank(
     )
 
 
-def _check_inert_rows(matrix: np.ndarray, *, floor: float) -> Optional[Finding]:
+def inert_row_mask(
+    matrix: np.ndarray, *, floor: float = INERT_VARIANCE_FLOOR
+) -> np.ndarray:
+    """Boolean mask of the rows whose variance the evaluation does not state.
+
+    ``True`` where the diagonal is non-finite or below *floor* in magnitude —
+    a reaction below threshold, or a bin the processing code never computed.
+
+    One predicate, three callers, and that is the point: the ``inert_rows``
+    finding, the ``mask_inert`` remedy and the draw's own drop all have to
+    agree about which rows are inert, and until this existed they agreed by
+    each carrying the same expression.
+    """
     diagonal = np.diag(matrix)
-    inert = ~(np.isfinite(diagonal) & (np.abs(diagonal) >= floor))
+    return ~(np.isfinite(diagonal) & (np.abs(diagonal) >= floor))
+
+
+def _check_inert_rows(matrix: np.ndarray, *, floor: float) -> Optional[Finding]:
+    inert = inert_row_mask(matrix, floor=floor)
     count = int(inert.sum())
     if not count:
         return None
@@ -1344,8 +1361,7 @@ def _apply_step(matrix: np.ndarray, step: PlanStep, *, verbose: bool, logger):
             raise ValueError(f"mask_inert takes only `floor`; got {sorted(parameters)}")
         # The same absolute test `_check_inert_rows` makes, so the finding and
         # the repair cannot disagree about which rows are inert.
-        diagonal = np.diag(matrix)
-        inert = ~(np.isfinite(diagonal) & (np.abs(diagonal) >= floor))
+        inert = inert_row_mask(matrix, floor=floor)
         masked = matrix.copy()
         masked[inert, :] = 0.0
         masked[:, inert] = 0.0

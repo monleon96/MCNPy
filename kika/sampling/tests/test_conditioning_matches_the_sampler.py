@@ -112,3 +112,48 @@ def test_a_conditioned_draw_reports_no_repair_of_its_own(blocks):
     # deficiency, which conditioning does not and must not fill in.
     assert info["n_null"] > 0
     assert info["rank"] + info["n_null"] == info["n"]
+
+
+def test_a_derived_plan_closes_the_same_loop_as_a_psd_one():
+    """P2's acceptance, on the plan P4 actually ships.
+
+    The parametrised test above holds the loop for a plan whose only step is a
+    PSD projection, which is what ``recommended_plan`` produces. The MF33 draw
+    ships a plan derived from ``generate_samples``' repair set instead —
+    rescales and a cap, no PSD step at all — so the property has to be held
+    again for that shape, or P2's guarantee simply does not cover the first
+    caller to use it.
+
+    Deliberately the *whole* helper rather than ``apply_plan`` alone: the
+    inert-row drop sits outside the plan, and an equivalence that stopped at
+    the plan boundary would not notice it going wrong.
+    """
+    from kika.sampling.carrier_blocks import (
+        cross_section_carrier_blocks,
+        cross_section_carrier_index,
+    )
+    from kika.sampling.generators import generate_samples
+    from kika.sampling.mf33_sampling import load_mf33_covariance
+    from kika.sampling.multigroup_draw import draw_relative_factors
+
+    micro = "kika/endf/tests/data/micro_fe56_mf33.endf"
+    cov, _mf3, grid, present = load_mf33_covariance(
+        micro, None, [4, 16], energy_unit="eV",
+    )
+
+    (key, matrix), = cross_section_carrier_blocks(cov)
+    (_key, meta), = cross_section_carrier_index(cov).items()
+
+    old, _mts, _fix = generate_samples(
+        cov, 4, space="log", decomposition_method="svd", sampling_method="random",
+        seed=12345, mt_numbers=list(present), energy_grid=grid, autofix=None,
+        psd_method="auto", max_relative_std=3.0, verbose=False,
+    )
+    new, info = draw_relative_factors(
+        matrix, 4, key=key, pairs=meta["pairs"], stride=meta["stride"], bins=grid,
+        space="log", decomposition_method="svd", sampling_method="random",
+        seed=12345, psd_method="auto", max_relative_std=3.0, verbose=False,
+    )
+    np.testing.assert_array_equal(new, old)
+    assert [s.remedy for s in info["plan"].steps] == ["cap"]
+    assert info["n_inert_dropped"] > 0
