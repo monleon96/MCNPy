@@ -12,10 +12,11 @@ That pairing — "which nominal goes with which uncertainty" — is re-derived b
 hand in two places, once per pair, and it is what the GNDS model answers with a
 ``DataLink.href`` instead. Until it does, these tests are the contract.
 
-**Two of the branches freeze behaviour that is wrong**, and they say so where
-they are. A characterization test that quietly rounds off the defects it finds
-buys nothing: the move has to carry the warts across unchanged, and then they
-have to be visible enough to fix on purpose.
+**Freezing it first found two defects**, and the tests say where they are. A
+characterization test that quietly rounds off what it finds buys nothing: the
+move carried both warts across unchanged, and then the colour collision was
+fixed in the commit on top, which is what these tests were for. The MF33 band
+is still unreachable and its test still asserts the failure.
 
 The fixtures are chosen for what they carry, not for the isotope:
 ``micro_fe56_structural`` has MF3 and MF4 and MF34 but no MF33;
@@ -89,32 +90,32 @@ def test_mf4_comes_back_paired_with_its_mf34_band(structural):
     assert float(band.y[-1]) == pytest.approx(3.000000166666662, rel=0, abs=1e-12)
 
 
-def test_styling_the_curve_costs_you_the_band(structural, capsys):
-    """A second defect, frozen as one — ``color`` is passed twice.
+def test_styling_the_curve_does_not_cost_you_the_band(structural, capsys):
+    """``color`` used to be passed twice, and the band paid for it.
 
-    The container forwards ``**kwargs`` to the covariance's ``to_plot_data``
-    after stripping four keys (``order``, ``mt``, ``nuclide``,
-    ``uncertainty_type``) and then passes ``color=plot_data.color`` itself. A
-    caller who names a colour therefore supplies it twice, ``LegendreCovariance
-    .to_plot_data`` raises ``TypeError``, and endf.py:240 catches it and
-    returns ``None``.
+    ``**kwargs`` was forwarded to the covariance after stripping ``order``,
+    ``mt``, ``nuclide`` and ``uncertainty_type`` — not ``color`` — and then
+    ``color=plot_data.color`` was supplied a second time. So a caller who named
+    a colour got ``TypeError`` inside the ``except`` and an empty second
+    element, which is also what a file with no covariance returns. Both
+    functions had their own copy of the collision.
 
-    So "draw this curve in my colour" and "draw this curve with its
-    uncertainty" are mutually exclusive today, and nothing says so — the second
-    element just comes back empty, exactly as it does for a file that carries
-    no covariance. ``_mf3_plot_data`` strips three keys and has the same
-    collision on its own copy.
-
-    Nothing in kika-app hits it: all five callers style the trace afterwards,
-    from the ``PlotData`` they get back. Pinned so the move is provably
-    behaviour-preserving; the fix is a separate commit on top.
+    Nothing in kika-app hit it: all five callers style the trace afterwards,
+    from the ``PlotData`` they get back. The colour still reaches the band —
+    via the nominal, which took it from these same kwargs — so this asserts
+    both halves.
     """
     plot_data, band = structural.to_plot_data(
         mf=4, mt=2, order=1, color="#123456"
     )
     assert plot_data.color == "#123456"
-    assert band is None
-    assert "multiple values for keyword argument 'color'" in capsys.readouterr().out
+    assert band is not None
+    assert band.color == "#123456"
+    assert capsys.readouterr().out == ""
+
+    # The numbers are the ones the uncoloured call gives; only the colour moved.
+    _, plain = structural.to_plot_data(mf=4, mt=2, order=1)
+    np.testing.assert_array_equal(np.asarray(band.y), np.asarray(plain.y))
 
 
 def test_sigma_scales_the_mf34_band_and_both_labels(structural):

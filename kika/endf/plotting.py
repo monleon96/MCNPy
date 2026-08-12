@@ -23,25 +23,28 @@ the data it covaries, so nothing has to guess from an MF/MT pair. When
 stop asking the question and start following the link. That is the shape of
 the work, not this increment.
 
-**Two defects ride across this move unchanged, on purpose.**
+**Freezing the 292 lines before moving them found two defects, and only one of
+them is small enough to fix here.**
 
-1. *The MF33 band cannot be produced at all.* ``MF33MT.to_xs_covmat`` builds
-   its ``CrossSectionCovariance`` with ``add_matrix`` alone, and ``add_matrix``
-   never populates ``cross_sections`` — which
-   ``CrossSectionCovariance.to_plot_data`` needs for both halves of its answer.
-   So the MF3 branch below always raises internally, is caught, and returns
-   ``None``. Fixing it means teaching ``to_xs_covmat`` to group-average the MF3
-   sections it is already handed onto the covariance grid, which changes what
-   every other consumer of that object sees. Recorded in
-   ``docs/library-gaps.md``, not fixed here.
-2. *Naming a colour costs you the band.* ``**kwargs`` is forwarded to the
-   covariance after stripping a short list of keys that does not include
-   ``color``, and then ``color=`` is supplied a second time explicitly. Both
-   functions have their own copy of the collision.
+*Fixed, in the commit after the move.* Naming a colour cost you the band.
+``**kwargs`` was forwarded to the covariance after stripping a short list of
+keys that did not include ``color``, and then ``color=`` was supplied a second
+time explicitly — so ``TypeError``, caught, band ``None``. Both functions had
+their own copy of it. "Draw this in my colour" and "draw this with its
+uncertainty" were mutually exclusive, and the symptom was indistinguishable
+from a file that carries no covariance.
 
-Both are pinned in ``kika/endf/tests/test_endf_to_plot_data.py``. Equivalent
-first, then improve: the move is provably behaviour-preserving, and the fixes
-are commits on top of it.
+*Not fixed: the MF33 band cannot be produced at all.* ``MF33MT.to_xs_covmat``
+builds its ``CrossSectionCovariance`` with ``add_matrix`` alone, and
+``add_matrix`` never populates ``cross_sections`` — which
+``CrossSectionCovariance.to_plot_data`` needs for both halves of its answer. So
+the MF3 branch below always raises internally, is caught, and returns ``None``,
+on every tape. Fixing it means teaching ``to_xs_covmat`` to group-average the
+MF3 sections it is already handed onto the covariance grid, and that changes
+what every other consumer of that object sees — a ``kika/cov`` change with its
+own gate, not a line in a move. Recorded in ``docs/library-gaps.md`` and pinned
+in ``kika/endf/tests/test_endf_to_plot_data.py``, where the fix will have to
+delete a test that currently asserts the failure.
 """
 from __future__ import annotations
 
@@ -119,8 +122,13 @@ def endf_to_plot_data(endf: 'ENDF', mf: int, mt: int, uncertainty: bool = None,
             # Get isotope ID (ZAID)
             isotope_id = endf.zaid if endf.zaid is not None else int(mf34_mt._za)
 
-            # Prepare kwargs for LegendreCovariance.to_plot_data - remove parameters we're setting explicitly
-            styling_kwargs = {k: v for k, v in kwargs.items() if k not in ['order', 'mt', 'nuclide', 'uncertainty_type']}
+            # Prepare kwargs for LegendreCovariance.to_plot_data - remove
+            # parameters we're setting explicitly. ``color`` is one of them:
+            # the band is coloured to match the nominal below, and the nominal
+            # already took its colour from these same kwargs.
+            styling_kwargs = {k: v for k, v in kwargs.items()
+                              if k not in ['order', 'mt', 'nuclide',
+                                           'uncertainty_type', 'color']}
 
             # Get uncertainty data from MF34 (returns tuple: (None, unc_data))
             _, unc_native = mf34_covmat.to_plot_data(
@@ -252,9 +260,11 @@ def _mf3_plot_data(endf: 'ENDF', mt: int, uncertainty: bool, sigma: float,
 
             isotope_id = endf.zaid if endf.zaid is not None else int(mf33_mt._za)
 
-            # Prepare styling kwargs (remove MF3-specific params)
+            # Prepare styling kwargs (remove MF3-specific params, and the ones
+            # supplied explicitly just below — ``color`` above all)
             styling_kwargs = {k: v for k, v in kwargs.items()
-                              if k not in ['mt', 'nuclide', 'uncertainty_type']}
+                              if k not in ['mt', 'nuclide',
+                                           'uncertainty_type', 'color']}
 
             _, unc_native = mf33_covmat.to_plot_data(
                 nuclide=isotope_id,
