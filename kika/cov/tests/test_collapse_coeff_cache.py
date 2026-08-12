@@ -1,6 +1,6 @@
 """Regression test for the MF34->MG Legendre-coefficient cache.
 
-The shared ``_coeffs_cache`` in ``compute_base_cell_means`` is keyed only by
+The shared coefficient cache in ``resolve_legendre_source`` is keyed only by
 ``(id(mf4_data), cm_to_lab_alpha)`` -- not by the requested order. A first call
 for a low order populates the cache with ``extract_order == max_order`` (non-lab
 path), so a later call for a higher order used to read the under-populated cache
@@ -13,7 +13,11 @@ See ``MF34_to_MG`` / ``collapse_relative_covariance`` in
 """
 import numpy as np
 
-from kika.cov.multigroup.collapse import compute_base_cell_means, WeightingFunction
+from kika.cov.multigroup.collapse import (
+    WeightingFunction,
+    compute_base_cell_means,
+    resolve_legendre_source,
+)
 
 
 class _StubMF4:
@@ -33,10 +37,21 @@ class _StubMF4:
 
 
 def _means(mf4, grid, orders, cache):
+    """The two halves the collapse now calls in sequence.
+
+    Sampling the section and averaging the result used to be one function with
+    the cache inside it. They are separate since phase 4's P4-C2 —
+    ``resolve_legendre_source`` produces a ``LegendreSource`` and
+    ``compute_base_cell_means`` integrates one — so the defect this file pins
+    now lives in the resolver. It is the same defect and the same key: the
+    under-population is only visible when the *cache* is shared, which is why
+    the calls stay paired here rather than being tested apart.
+    """
     return compute_base_cell_means(
-        grid, mf4, orders,
+        grid,
+        resolve_legendre_source(mf4, grid, max(orders), None, cache),
+        orders,
         WeightingFunction.lethargy, WeightingFunction.lethargy_antiderivative,
-        _coeffs_cache=cache,
     )
 
 

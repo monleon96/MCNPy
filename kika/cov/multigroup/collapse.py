@@ -48,6 +48,137 @@ def _pendf_grid(section: Any) -> Tuple[np.ndarray, np.ndarray]:
     return np.asarray(energies, dtype=float), np.asarray(sigma, dtype=float)
 
 
+@dataclass
+class LegendreSource:
+    """The nominal angular distribution, as data rather than as a file.
+
+    Everything the multigroup collapse needs in order to weight and average an
+    MF34 covariance: a_l on its own energy mesh, the frame those coefficients
+    are expressed in, and the mass ratio that converts them to the lab. No
+    format type appears here, and no object is asked to evaluate anything —
+    the sampling has already happened by the time one of these exists.
+
+    That is the whole point of the container. The collapse used to take an
+    ``MF4MT`` section and call ``extract_legendre_coefficients`` on it, which
+    made a piece of mathematics depend on ENDF's class hierarchy for a set of
+    numbers. Two producers fill this in instead:
+    :func:`legendre_source_from_endf`, and — since it carries no ENDF spelling —
+    a GNDS ``AngularTwoBody``.
+
+    Attributes
+    ----------
+    native_energies : np.ndarray
+        The mesh ``coefficients`` is tabulated on, ascending.
+    coefficients : Dict[int, np.ndarray]
+        ``{l: a_l(native_energies)}``, every order the producer extracted.
+        Filtered down to what a caller asked for, never up.
+    frame : str
+        ``"CM"``, ``"LAB"`` or ``"unknown"`` — the frame of ``coefficients``.
+    awr : Optional[float]
+        Atomic weight ratio, used only for the CM->lab transformation.
+    """
+
+    native_energies: np.ndarray
+    coefficients: Dict[int, np.ndarray]
+    frame: str = "unknown"
+    awr: Optional[float] = None
+
+    @property
+    def max_order(self) -> int:
+        """Highest order this source actually carries."""
+        return max(self.coefficients) if self.coefficients else -1
+
+    def upTo(self, max_order: int) -> Dict[int, np.ndarray]:
+        """``coefficients`` restricted to ``l <= max_order``."""
+        return {l: v for l, v in self.coefficients.items() if l <= max_order}
+
+
+def legendre_source_from_endf(mf4_mt_data,
+                              fallback_grid: np.ndarray,
+                              max_order: int,
+                              cm_to_lab_alpha: Optional[float] = None) -> LegendreSource:
+    """Sample an ENDF MF4 section into a :class:`LegendreSource`.
+
+    This is the ENDF half of the seam, and it is the only place in the collapse
+    that knows how an MF4 section spells itself. ``extract_legendre_coefficients``
+    is asked once, at the section's own breakpoints, and the answer becomes
+    numbers.
+
+    The CM->lab transformation is applied *here* rather than downstream because
+    it is nonlinear and couples every order: a source built for the lab frame
+    has to be extracted at full order first, which is what ``extract_order = 64``
+    below is for.
+    """
+    # The section's own breakpoints, since integrating a_l(E) between them is
+    # what the means are for. For LTT=3 the two representations meet, so both
+    # meshes are needed to cover the range -- np.unique both sorts and drops
+    # the boundary energy the two halves share.
+    if hasattr(mf4_mt_data, 'legendre_energies'):
+        native_E = np.array(mf4_mt_data.legendre_energies, dtype=float)
+        if hasattr(mf4_mt_data, 'tabulated_energies') and mf4_mt_data.tabulated_energies:
+            tab_E = np.array(mf4_mt_data.tabulated_energies, dtype=float)
+            native_E = np.unique(np.concatenate([native_E, tab_E]))
+    else:
+        # Fallback: derive from first requested order using evaluation at base grid edges
+        native_E = np.unique(fallback_grid)
+
+    # When CM-to-lab is requested, extract ALL available Legendre orders
+    # because the nonlinear transformation couples all orders together
+    if cm_to_lab_alpha is not None:
+        extract_order = 64  # large enough; capped by file max inside extract
+    else:
+        extract_order = max_order
+
+    # Evaluate coefficients at native energies directly using MF4-provided method
+    # For mixed (LTT=3) data, disable auto-trim to avoid unnecessary overhead
+    extract_kwargs = dict(out_of_range="zero")
+    if hasattr(mf4_mt_data, 'tabulated_energies'):
+        extract_kwargs['trim'] = False
+    coeffs_native = mf4_mt_data.extract_legendre_coefficients(native_E, extract_order, **extract_kwargs)
+
+    # Apply CM→lab frame transformation if requested
+    if cm_to_lab_alpha is not None:
+        # Ensure l=0 is included for the distribution reconstruction
+        if 0 not in coeffs_native:
+            coeffs_native[0] = np.ones(len(native_E))
+        coeffs_native = cm_to_lab_legendre(coeffs_native, cm_to_lab_alpha)
+
+    return LegendreSource(
+        native_energies=native_E,
+        coefficients=coeffs_native,
+        frame=mf4_mt_data.frame if hasattr(mf4_mt_data, 'frame') else "unknown",
+        awr=getattr(mf4_mt_data, '_awr', None),
+    )
+
+
+def resolve_legendre_source(mf4_mt_data,
+                            fallback_grid: np.ndarray,
+                            max_order: int,
+                            cm_to_lab_alpha: Optional[float] = None,
+                            cache: Optional[Dict] = None) -> LegendreSource:
+    """:func:`legendre_source_from_endf`, memoised across one collapse.
+
+    ⚠ **The cache key does not encode the order, and it must not be read as
+    though it did.** A first call for a low order populates it with
+    ``extract_order == max_order`` on the non-lab path, so a later call for a
+    higher order would read an under-populated source and get zeros for every
+    missing order — which zeroed ``A_{l,i}`` and killed every Legendre order
+    above the first. Hence the ``max_order`` check on the hit, not just the key.
+    Pinned by ``kika/cov/tests/test_collapse_coeff_cache.py``.
+    """
+    key = (id(mf4_mt_data), cm_to_lab_alpha)
+    cached = cache.get(key) if cache is not None else None
+    if cached is not None and cached.coefficients and cached.max_order >= max_order:
+        return cached
+
+    source = legendre_source_from_endf(
+        mf4_mt_data, fallback_grid, max_order, cm_to_lab_alpha
+    )
+    if cache is not None:
+        cache[key] = source
+    return source
+
+
 def validate_frame_consistency(mf4_frame: str, mf34_frame: str) -> None:
     """
     Validate that MF4 and MF34 data are in consistent reference frames.
@@ -212,38 +343,42 @@ def cm_to_lab_legendre(coeffs_cm: Dict[int, np.ndarray], alpha: float,
 
 
 def compute_base_cell_means(base_energy_grid: np.ndarray,
-                          mf4_data,
+                          source: LegendreSource,
                           legendre_orders: List[int],
                           phi_func: Callable = WeightingFunction.constant,
                           phi_antiderivative: Callable = WeightingFunction.constant_antiderivative,
-                          cm_to_lab_alpha: Optional[float] = None,
                           pendf_energies: Optional[np.ndarray] = None,
-                          return_flux_integrals: bool = False,
-                          _coeffs_cache: Optional[Dict] = None) -> Union[Dict[int, np.ndarray], Tuple[Dict[int, np.ndarray], np.ndarray]]:
+                          return_flux_integrals: bool = False) -> Union[Dict[int, np.ndarray], Tuple[Dict[int, np.ndarray], np.ndarray]]:
     """
     Compute base-cell means A_{l,i} for each Legendre order.
 
     A_{l,i} = integral(phi(E) * a_l(E) dE) / integral(phi(E) dE) over [E_i, E_{i+1}]
 
-    Uses native MF4 energy breakpoints for accurate integration. For lethargy weighting,
+    Integrates on the source's own energy breakpoints. For lethargy weighting,
     applies analytic integration over linear segments. Ensures l>0 coefficients are zero
-    outside the native MF4 energy range.
+    outside the source's energy range.
+
+    ⚑ **This function is format-free**, and that is deliberate rather than
+    incidental: it used to take an ``MF4MT`` and call
+    ``extract_legendre_coefficients`` on it, so a piece of quadrature depended on
+    ENDF's class hierarchy for a set of numbers. It now takes a
+    :class:`LegendreSource`, which an ENDF section and a GNDS
+    ``AngularTwoBody`` can both produce. The CM->lab transformation moved with
+    the extraction, into :func:`legendre_source_from_endf`, because it has to be
+    applied before the orders are truncated.
 
     Parameters
     ----------
     base_energy_grid : np.ndarray
         Base energy grid edges
-    mf4_data : MF4MT object
-        MF4 angular distribution data
+    source : LegendreSource
+        a_l on its own mesh, already sampled and already in the output frame
     legendre_orders : List[int]
         List of Legendre orders to compute
     phi_func : Callable, optional
         Weighting function phi(E)
     phi_antiderivative : Callable, optional
         Antiderivative of weighting function
-    cm_to_lab_alpha : float, optional
-        If not None, apply CM→lab frame transformation with this mass ratio
-        (alpha = m_projectile / m_target = 1/AWR for neutrons) before integration.
     pendf_energies : np.ndarray, optional
         PENDF energy grid to merge into segment meshes for sigma-weighted
         integration accuracy. When provided, ensures the numerator integral
@@ -271,57 +406,8 @@ def compute_base_cell_means(base_energy_grid: np.ndarray,
 
     max_order = max(legendre_orders)
 
-    # Check coefficients cache (keyed by mf4_data identity and CM→lab alpha).
-    # Only honor a cache hit if the cached set already covers max_order. The
-    # cache key does not encode the order, so an earlier block may have
-    # populated it for a lower order (non-lab path uses extract_order ==
-    # max_order); reusing that under-populated set would silently return zeros
-    # for every missing higher order. Re-extract in that case.
-    _cache_key = (id(mf4_data), cm_to_lab_alpha)
-    _cached = _coeffs_cache.get(_cache_key) if _coeffs_cache is not None else None
-    if _cached is not None and _cached[1] and max(_cached[1]) >= max_order:
-        native_E, _all_coeffs = _cached
-        # Filter to only needed orders
-        coeffs_native = {l: v for l, v in _all_coeffs.items() if l <= max_order}
-    else:
-        # Extract full native MF4 energy grid for Legendre coefficients if available
-        if hasattr(mf4_data, 'legendre_energies'):
-            native_E = np.array(mf4_data.legendre_energies, dtype=float)
-            # For LTT=3 (mixed), include tabulated energies so the full range is covered
-            if hasattr(mf4_data, 'tabulated_energies') and mf4_data.tabulated_energies:
-                tab_E = np.array(mf4_data.tabulated_energies, dtype=float)
-                native_E = np.unique(np.concatenate([native_E, tab_E]))
-        else:
-            # Fallback: derive from first requested order using evaluation at base grid edges
-            native_E = np.unique(base_energy_grid)
-
-        # When CM-to-lab is requested, extract ALL available Legendre orders
-        # because the nonlinear transformation couples all orders together
-        if cm_to_lab_alpha is not None:
-            extract_order = 64  # large enough; capped by file max inside extract
-        else:
-            extract_order = max_order
-
-        # Evaluate coefficients at native energies directly using MF4-provided method
-        # For mixed (LTT=3) data, disable auto-trim to avoid unnecessary overhead
-        extract_kwargs = dict(out_of_range="zero")
-        if hasattr(mf4_data, 'tabulated_energies'):
-            extract_kwargs['trim'] = False
-        coeffs_native = mf4_data.extract_legendre_coefficients(native_E, extract_order, **extract_kwargs)
-
-        # Apply CM→lab frame transformation if requested
-        if cm_to_lab_alpha is not None:
-            # Ensure l=0 is included for the distribution reconstruction
-            if 0 not in coeffs_native:
-                coeffs_native[0] = np.ones(len(native_E))
-            coeffs_native = cm_to_lab_legendre(coeffs_native, cm_to_lab_alpha)
-
-        # Store in cache (all extracted orders, before filtering)
-        if _coeffs_cache is not None:
-            _coeffs_cache[_cache_key] = (native_E, coeffs_native)
-
-        # Keep only orders up to max_order
-        coeffs_native = {l: v for l, v in coeffs_native.items() if l <= max_order}
+    native_E = source.native_energies
+    coeffs_native = source.upTo(max_order)
 
     # Helper to evaluate a_l(E) piecewise linearly between native points
     def eval_coeff(l: int, energies: np.ndarray) -> np.ndarray:
@@ -901,8 +987,8 @@ def MF34_to_MG(endf_object,
     _mg_means_cache: Dict[Tuple, Dict[int, np.ndarray]] = {}
     # Cache for union-grid base-cell means + flux integrals (keyed by mf4 id, l, frame, reaction, mf34 grid)
     _union_means_cache: Dict[Tuple, Tuple[Dict[int, np.ndarray], np.ndarray]] = {}
-    # Cache for extracted+transformed Legendre coefficients (avoids re-extracting per l_order)
-    _coeffs_cache: Dict[Tuple, Tuple[np.ndarray, Dict]] = {}
+    # Cache for sampled+transformed Legendre sources (avoids re-extracting per l_order)
+    _coeffs_cache: Dict[Tuple, LegendreSource] = {}
 
     # Process each matrix in the MF34 covariance data
     for i in range(mf34_covmat.num_matrices):
@@ -936,19 +1022,14 @@ def MF34_to_MG(endf_object,
         mf4_mt_data_row = mf4_data.mt[reaction_row]
         mf4_mt_data_col = mf4_data.mt[reaction_col]
 
-        # Extract physics energy grids for accurate means computation
-        if hasattr(mf4_mt_data_row, 'legendre_energies'):
-            physics_energy_grid_row = np.array(mf4_mt_data_row.legendre_energies, dtype=float)
-        else:
-            physics_energy_grid_row = np.array(mf34_covmat.energy_grids[i], dtype=float)
+        # A section with no Legendre mesh of its own -- an isotropic MF4, LTT=0 --
+        # cannot say where its coefficients change, so the covariance's own grid
+        # is what the means get integrated on. Only the warning survives here:
+        # the grid itself is rebuilt inside the source, from the same fallback.
+        if not hasattr(mf4_mt_data_row, 'legendre_energies'):
             warnings.warn(f"Using MF34 energy grid as fallback for MT{reaction_row} (row)")
-
-        if hasattr(mf4_mt_data_col, 'legendre_energies'):
-            physics_energy_grid_col = np.array(mf4_mt_data_col.legendre_energies, dtype=float)
-        else:
-            physics_energy_grid_col = np.array(mf34_covmat.energy_grids[i], dtype=float)
-            if reaction_col != reaction_row:
-                warnings.warn(f"Using MF34 energy grid as fallback for MT{reaction_col} (col)")
+        if not hasattr(mf4_mt_data_col, 'legendre_energies') and reaction_col != reaction_row:
+            warnings.warn(f"Using MF34 energy grid as fallback for MT{reaction_col} (col)")
         mf34_energy_grid = np.array(mf34_covmat.energy_grids[i])
 
         # Build effective weighting functions: sigma(E)*phi(E) for this matrix
@@ -1020,9 +1101,13 @@ def MF34_to_MG(endf_object,
         cache_key_row = (id(mf4_mt_data_row), l_row, output_frame)
         if cache_key_row not in _mg_means_cache:
             _mg_means_cache[cache_key_row] = compute_base_cell_means(
-                mg_energy_edges, mf4_mt_data_row, legendre_orders_row,
-                phi_func, phi_antiderivative, cm_to_lab_alpha=_alpha_row,
-                pendf_energies=_pendf_energies, _coeffs_cache=_coeffs_cache
+                mg_energy_edges,
+                resolve_legendre_source(mf4_mt_data_row, mg_energy_edges,
+                                        max(legendre_orders_row), _alpha_row,
+                                        _coeffs_cache),
+                legendre_orders_row,
+                phi_func, phi_antiderivative,
+                pendf_energies=_pendf_energies
             )
         mg_base_means_row = _mg_means_cache[cache_key_row]
 
@@ -1030,9 +1115,13 @@ def MF34_to_MG(endf_object,
             cache_key_col = (id(mf4_mt_data_col), l_col, output_frame)
             if cache_key_col not in _mg_means_cache:
                 _mg_means_cache[cache_key_col] = compute_base_cell_means(
-                    mg_energy_edges, mf4_mt_data_col, legendre_orders_col,
-                    phi_func, phi_antiderivative, cm_to_lab_alpha=_alpha_col,
-                    pendf_energies=_pendf_energies, _coeffs_cache=_coeffs_cache
+                    mg_energy_edges,
+                    resolve_legendre_source(mf4_mt_data_col, mg_energy_edges,
+                                            max(legendre_orders_col), _alpha_col,
+                                            _coeffs_cache),
+                    legendre_orders_col,
+                    phi_func, phi_antiderivative,
+                    pendf_energies=_pendf_energies
                 )
             mg_base_means_col = _mg_means_cache[cache_key_col]
         else:
@@ -1070,10 +1159,13 @@ def MF34_to_MG(endf_object,
                 union_base_means_row, union_flux = _union_means_cache[_ucache_key_row]
             else:
                 union_base_means_row, union_flux = compute_base_cell_means(
-                    union_grid, mf4_mt_data_row, legendre_orders_row,
-                    phi_func, phi_antiderivative, cm_to_lab_alpha=_alpha_row,
-                    pendf_energies=_pendf_energies, return_flux_integrals=True,
-                    _coeffs_cache=_coeffs_cache
+                    union_grid,
+                    resolve_legendre_source(mf4_mt_data_row, union_grid,
+                                            max(legendre_orders_row), _alpha_row,
+                                            _coeffs_cache),
+                    legendre_orders_row,
+                    phi_func, phi_antiderivative,
+                    pendf_energies=_pendf_energies, return_flux_integrals=True
                 )
                 _union_means_cache[_ucache_key_row] = (union_base_means_row, union_flux)
             if legendre_orders_col:
@@ -1083,10 +1175,13 @@ def MF34_to_MG(endf_object,
                     union_base_means_col, _ = _union_means_cache[_ucache_key_col]
                 else:
                     union_base_means_col, _col_flux = compute_base_cell_means(
-                        union_grid, mf4_mt_data_col, legendre_orders_col,
-                        phi_func, phi_antiderivative, cm_to_lab_alpha=_alpha_col,
-                        pendf_energies=_pendf_energies, return_flux_integrals=True,
-                        _coeffs_cache=_coeffs_cache
+                        union_grid,
+                        resolve_legendre_source(mf4_mt_data_col, union_grid,
+                                                max(legendre_orders_col), _alpha_col,
+                                                _coeffs_cache),
+                        legendre_orders_col,
+                        phi_func, phi_antiderivative,
+                        pendf_energies=_pendf_energies, return_flux_integrals=True
                     )
                     _union_means_cache[_ucache_key_col] = (union_base_means_col, _col_flux)
             else:
