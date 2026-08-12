@@ -113,7 +113,7 @@ _AP = 0.5444
 _RANGE = (1.0e-5, 1.0e5)
 
 
-def _synthetic(formalism: str) -> list[ResonanceParameters]:
+def _synthetic(formalism: str, fission: bool = False) -> list[ResonanceParameters]:
     if formalism in ("SLBW", "MLBW"):
         # c3=GT, c4=GN, c5=GG, c6=GF
         s_wave = [
@@ -124,12 +124,21 @@ def _synthetic(formalism: str) -> list[ResonanceParameters]:
             ResonanceRecord(energy=7.40e4, spin=1.5, c3=0.92, c4=0.61, c5=0.31, c6=0.0),
         ]
     else:  # Reich-Moore: c3=GN, c4=GG, c5=GFA, c6=GFB
+        # The two fission widths are split unevenly and given opposite signs on
+        # one level: GFA and GFB enter as reduced-width *amplitudes*, so a sign
+        # is physics and not bookkeeping, and a lookup that swapped the two
+        # channels would be invisible if they were equal.
+        gfa = (0.21, 0.34, 0.12) if fission else (0.0, 0.0, 0.0)
+        gfb = (-0.09, 0.17, 0.05) if fission else (0.0, 0.0, 0.0)
         s_wave = [
-            ResonanceRecord(energy=1.15e3, spin=0.5, c3=1.02, c4=0.38, c5=0.0, c6=0.0),
-            ResonanceRecord(energy=2.28e4, spin=0.5, c3=1.55, c4=0.55, c5=0.0, c6=0.0),
+            ResonanceRecord(energy=1.15e3, spin=0.5, c3=1.02, c4=0.38,
+                            c5=gfa[0], c6=gfb[0]),
+            ResonanceRecord(energy=2.28e4, spin=0.5, c3=1.55, c4=0.55,
+                            c5=gfa[1], c6=gfb[1]),
         ]
         p_wave = [
-            ResonanceRecord(energy=7.40e4, spin=1.5, c3=0.61, c4=0.31, c5=0.0, c6=0.0),
+            ResonanceRecord(energy=7.40e4, spin=1.5, c3=0.61, c4=0.31,
+                            c5=gfa[2], c6=gfb[2]),
         ]
 
     return [
@@ -169,6 +178,95 @@ def test_reconstruction_golden(formalism):
     produced = reconstruct(_synthetic(formalism), tolerance=1e-3)
     assert produced, f"{formalism}: reconstruct returned nothing"
     check_golden(f"reconstruct_{formalism.lower()}", _as_arrays(produced))
+
+
+def test_reconstruction_golden_reich_moore_with_fission():
+    """The 3×3 collision-matrix branch, which no other golden reaches.
+
+    ``reich_moore_cross_sections`` builds a 1×1 R-matrix when every GFA and GFB
+    is zero and a 3×3 one otherwise, and the 3×3 arm is a different piece of
+    code: an explicit inverse per energy point, two more reduced-width
+    amplitudes, and the only place ``sigma_fission`` is non-zero. Every case
+    above and the Fe-56 one below are structural materials with no fission, so
+    the branch was frozen nowhere at all — and it is the branch where a
+    per-formalism rewrite has to get *which width is which channel* right,
+    because GFA and GFB are the two widths that ``c3..c6`` numbers and a named
+    model has to look up.
+    """
+    produced = reconstruct(_synthetic("RM", fission=True), tolerance=1e-3)
+    assert 18 in produced, "the fission case produced no MT18"
+    check_golden("reconstruct_rm_fission", _as_arrays(produced))
+
+
+#: ``(name, energy grid or None, level spacing, widths)`` for the two URR
+#: shapes the corpus actually has. Case A is energy-independent — every average
+#: is a scalar and ``_interpolate_urr_params`` returns its input untouched;
+#: case C tabulates every average against an energy grid and goes through
+#: ``np.interp``. Case B exists in ENDF and in no tape on this machine.
+_URR_GRID = np.array([1.0e5, 3.0e5, 8.5e5], dtype=float)
+
+
+def _synthetic_urr(case: str):
+    from kika.nuclear_data.resonance_parameters import (
+        URR_JGroup, URR_LGroup, UnresolvedResonanceParameters,
+    )
+
+    if case == "A":
+        grid = None
+        def j(spin, d, gn0, gg, gf, gx):
+            return URR_JGroup(j=spin, amun=1.0, d=d, gn0=gn0, gg=gg, gf=gf, gx=gx)
+        s_wave = [j(0.5, 7.2e3, 1.9e-2, 0.62, 0.0, 0.0)]
+        p_wave = [j(0.5, 4.1e3, 8.0e-3, 0.55, 0.0, 0.0),
+                  j(1.5, 2.6e3, 1.1e-2, 0.58, 0.0, 0.0)]
+    else:
+        grid = _URR_GRID
+        def j(spin, d, gn0, gg, gf, gx):
+            return URR_JGroup(
+                j=spin, amun=1.0,
+                d=np.asarray(d, dtype=float), gn0=np.asarray(gn0, dtype=float),
+                gg=np.asarray(gg, dtype=float), gf=np.asarray(gf, dtype=float),
+                gx=np.asarray(gx, dtype=float),
+            )
+        s_wave = [j(0.5, [7.2e3, 6.9e3, 6.4e3], [1.9e-2, 1.8e-2, 1.7e-2],
+                    [0.62, 0.63, 0.65], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])]
+        p_wave = [j(0.5, [4.1e3, 3.9e3, 3.6e3], [8.0e-3, 7.7e-3, 7.1e-3],
+                    [0.55, 0.56, 0.58], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+                  j(1.5, [2.6e3, 2.5e3, 2.3e3], [1.1e-2, 1.0e-2, 9.4e-3],
+                    [0.58, 0.59, 0.61], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])]
+
+    return [UnresolvedResonanceParameters(
+        nuclide_id=_ZA,
+        spin=_SPIN,
+        scattering_radius=_AP,
+        energy_range=(1.0e5, 8.5e5),
+        lssf=0,
+        l_groups=[
+            URR_LGroup(awri=_AWRI, l=0, j_groups=s_wave),
+            URR_LGroup(awri=_AWRI, l=1, j_groups=p_wave),
+        ],
+        energy_grid=grid,
+        metadata={"awr": _AWRI, "mat": 2631},
+    )]
+
+
+@pytest.mark.parametrize("case", ["A", "C"])
+def test_urr_reconstruction_golden(case):
+    """The unresolved region, which had no frozen answer of any kind.
+
+    ``urr_formulas`` is a third of the reconstruction path and no golden
+    touched it: the three synthetic cases are resolved-only and both Fe-56
+    cases run on the committed micro-tape, which carries one resolved range and
+    nothing else. So a rewrite of the URR code could have moved every
+    unresolved cross section in the library and every test would still have
+    passed.
+
+    Fed with no resolved range on purpose, so this is the URR arithmetic and
+    the geometric grid it builds for itself — nothing merged, nothing
+    interpolated onto someone else's grid.
+    """
+    produced = reconstruct(_synthetic_urr(case), tolerance=1e-3)
+    assert produced, f"URR case {case}: reconstruct returned nothing"
+    check_golden(f"reconstruct_urr_case_{case.lower()}", _as_arrays(produced))
 
 
 @pytest.mark.slow
