@@ -61,38 +61,45 @@ def test_an_rml_range_is_declined_rather_than_fed_to_the_lrf3_formula():
     fixed channels — and an RML group has one J for the whole group and as many
     channels as the evaluator declared. Dispatching on the name alone handed it
     the second shape and it raised an ``IndexError`` reaching for a
-    per-resonance spin that does not exist. Found on Fe-57 JEFF-4.0, which is
-    the reason the phase's next increment exists.
+    per-resonance spin that does not exist. Found on Fe-57 JEFF-4.0.
     """
     with pytest.warns(UserWarning, match="Unsupported formalism"):
         assert reconstruct(_rmlRegion(), atomicWeightRatio=56.44) == {}
 
 
-def test_the_warning_says_which_reich_moore_it_declined():
+def test_the_warning_says_which_reich_moore_it_declined_and_what_to_use():
     """"RMatrix/ReichMoore" names both parameterisations, so it names neither.
 
     The channel count is what differs and what makes the range unsupported, so
     it goes in the message: a user reading it can tell an unimplemented LRF=7
     from a decode that lost something.
+
+    It also has to name the alternative. This module implements three
+    formalisms and — decided 2026-08-12 — is not going to grow a fourth, so a
+    declined range is not a "coming soon" but a redirection to NJOY's RECONR,
+    which kika already calls through ``njoy_reconstruct``. A warning that says
+    only "unsupported" leaves the reader to conclude the evaluation cannot be
+    reconstructed at all, which is false.
     """
     with pytest.warns(UserWarning) as caught:
         reconstruct(_rmlRegion(), atomicWeightRatio=56.44)
 
     message = str(caught[0].message)
     assert "ReichMoore" in message and "5" in message, message
+    assert "njoy_reconstruct" in message, message
 
 
 @pytest.mark.parametrize("tape", ["fe57_host_tape"])
 def test_the_real_lrf7_evaluation_returns_nothing_and_says_so(request, tape):
     """Under ``--deep``. Fe-57 JEFF-4.0, the evaluation this is really about.
 
-    It has one resolved range and that range is LRF=7, so the reconstruction
-    has nothing left to compute and returns an empty result. **That is not the
-    fixed state** — it is the state phase 4's P1b closes, recorded here so the
-    silence is a measurement. What P1a changed is that the reason is now named:
-    the flat path returned an empty list because ``c3..c6`` could not hold a
-    five-channel spin group, which is a fact about a data structure rather than
-    about the evaluation.
+    It has one resolved range and that range is LRF=7, so this reconstructor
+    has nothing left to compute and returns an empty result. **That is the
+    settled state, not a gap** — decided 2026-08-12: kika is not writing an
+    R-Matrix-Limited reconstructor, because agreement with the evaluation is
+    what is wanted and RECONR is what delivers it. So what this pins is that
+    the empty result is *loud* and names the road out, which is the whole
+    difference from the flat path's silent ``[]``.
     """
     from kika.endf.processing.reconstruct import reconstruct as endf_reconstruct
     from kika.endf.read_endf import read_endf
@@ -102,6 +109,8 @@ def test_the_real_lrf7_evaluation_returns_nothing_and_says_so(request, tape):
         produced = endf_reconstruct(endf.mf[2].mt[151], endf.files.get(3))
 
     assert produced == {}, (
-        "Fe-57 now reconstructs something; if P1b landed, this test is the one "
-        "that has to be rewritten into a golden"
+        "Fe-57 now reconstructs something. If an RML formalism was added after "
+        "all, this test is the one to rewrite into a golden -- and the decision "
+        "in the GNDS roadmap's 'what will not be built' has to be revisited "
+        "with it, because the reason it was declined was not difficulty."
     )

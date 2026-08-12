@@ -243,9 +243,17 @@ def reconstruct(
         formalism = region.formalism
         formula = _formula(formalism)
         if formula is None:
+            # Naming the alternative is the point of the message, not politeness.
+            # This module implements three formalisms and is not going to grow a
+            # fourth -- a decision, recorded in the GNDS roadmap's "what will not
+            # be built": for anything it declines, NJOY's RECONR is the answer,
+            # and kika already calls it.
             warnings.warn(
                 f"Unsupported formalism {_formalismName(formalism)!r}, skipping "
-                f"range [{region.domainMin:.6g}, {region.domainMax:.6g}] eV"
+                f"range [{region.domainMin:.6g}, {region.domainMax:.6g}] eV. "
+                f"This reconstructor covers SLBW, MLBW and ENDF's LRF=3 "
+                f"Reich-Moore only; use kika.processing.njoy_reconstruct, which "
+                f"runs RECONR and handles every formalism ENDF defines."
             )
             continue
 
