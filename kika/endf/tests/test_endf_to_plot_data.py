@@ -14,9 +14,10 @@ hand in two places, once per pair, and it is what the GNDS model answers with a
 
 **Freezing it first found two defects**, and the tests say where they are. A
 characterization test that quietly rounds off what it finds buys nothing: the
-move carried both warts across unchanged, and then the colour collision was
-fixed in the commit on top, which is what these tests were for. The MF33 band
-is still unreachable and its test still asserts the failure.
+move carried both warts across unchanged, then the colour collision was fixed
+in the commit on top, and the MF33 band — which had never been produced on any
+tape — was fixed after that in ``kika/cov``. Both of the tests that asserted a
+failure have been turned round; that is what they were written for.
 
 The fixtures are chosen for what they carry, not for the isotope:
 ``micro_fe56_structural`` has MF3 and MF4 and MF34 but no MF33;
@@ -177,29 +178,51 @@ def test_mf3_with_no_mf33_is_the_raw_section_and_a_none(structural):
     assert band is None
 
 
-def test_the_mf3_uncertainty_band_cannot_be_produced_at_all(mf3_with_mf33, capsys):
-    """A defect, frozen as one — the MF33 half of this method is unreachable.
+def test_mf3_comes_back_paired_with_its_mf33_band(mf3_with_mf33, capsys):
+    """D13, from the end that noticed it.
 
-    ``MF33MT.to_xs_covmat`` builds a ``CrossSectionCovariance`` by calling
-    ``add_matrix`` only, and ``add_matrix`` never populates ``cross_sections``.
-    ``CrossSectionCovariance.to_plot_data`` needs ``cross_sections[(zaid, mt)]``
-    for *both* halves of its answer and raises ``ValueError`` when it has
-    neither. So this branch always raises internally, and endf.py:354 catches
-    every exception, prints, and returns ``None``.
-
-    It is structural rather than a property of these fixtures — no tape
-    populates a dictionary nothing writes to — and it is invisible in
-    production because the caller gets a plot with no band, which is also what
+    This test was written asserting ``band is None``: the MF33 half of the
+    method had never once produced a band, on any tape, because
+    ``CrossSectionCovariance.to_plot_data`` gated the whole computation on a
+    ``cross_sections`` dictionary that ``MF33MT.to_xs_covmat`` does not write
+    to — and then computed ``sqrt(diag)`` without reading it. The exception was
+    caught here, printed, and returned as ``None``, which is also exactly what
     a file with no covariance looks like.
 
-    Recorded in ``docs/library-gaps.md``. Pinned here so the move carries it
-    across unchanged and so the fix, when it comes, has to delete this test.
+    The fix is in ``kika/cov`` and is pinned there. What this asserts is the
+    association: the band that comes back is Fe-56's MF33 for MT2, on MF33's
+    own boundaries, and the caller is told about it in both labels.
     """
     plot_data, band = mf3_with_mf33.to_plot_data(mf=3, mt=2)
 
     assert plot_data is not None
-    assert band is None
-    assert "Could not create MF33 uncertainty band" in capsys.readouterr().out
+    assert band is not None
+    assert "Could not create MF33 uncertainty band" not in capsys.readouterr().out
+
+    # MF33/MT2 on this tape covers 850 keV – 4 MeV in three bins; the fourth
+    # y-value is the step repeat, not a fourth bin.
+    np.testing.assert_allclose(band.x, [8.5e5, 1.5e6, 2.5e6, 4.0e6])
+    assert band.y[0] == pytest.approx(14.49137675, rel=1e-8)
+    assert band.y[-1] == band.y[-2]
+    assert band.uncertainty_type == 'relative'
+
+    assert band.label == "Fe56 (n,el) Uncertainty (1σ)"
+    assert plot_data.label.endswith(" (±1σ)")
+
+
+def test_sigma_scales_the_mf33_band_too(mf3_with_mf33):
+    """And only once — ``sigma`` is forwarded, not applied again on the way back.
+
+    The MF34 branch multiplies ``unc.y`` itself because it does not pass
+    ``sigma`` down; this one passes it down and must not multiply. The two
+    branches reaching the same answer by opposite routes is the sort of thing
+    the container's hand-rolled association keeps producing.
+    """
+    _, one = mf3_with_mf33.to_plot_data(mf=3, mt=2)
+    _, two = mf3_with_mf33.to_plot_data(mf=3, mt=2, sigma=2.0)
+
+    np.testing.assert_allclose(two.y, np.asarray(one.y) * 2.0)
+    assert two.label == "Fe56 (n,el) Uncertainty (2.0σ)"
 
 
 # ---------------------------------------------------------------------------

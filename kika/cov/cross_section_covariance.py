@@ -2,6 +2,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union, TYPE_CHECKING
 import copy
+import logging
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,6 +10,8 @@ import pandas as pd
 
 from kika._constants import MT_TO_REACTION
 from kika._utils import create_repr_section
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_min_eigvalsh(M: np.ndarray) -> float:
@@ -1962,59 +1965,83 @@ class CrossSectionCovariance:
                 # Found diagonal block - extract uncertainties
                 cov_matrix = self.matrices[i]
                 diag = np.diag(cov_matrix)
-                
-                # Get cross sections for this reaction (needed for creating MultigroupUncertaintyPlotData)
-                if key in self.cross_sections:
+
+                # Relative or absolute? This is the question that decides
+                # whether a cross section is needed, and it used to be asked
+                # the wrong way round: the branch was gated on
+                # ``cross_sections`` and then computed sqrt(diag) without ever
+                # reading the vector it had just fetched. A *relative*
+                # covariance already carries the answer — sqrt(diag) is the
+                # fractional standard deviation — so on every ENDF-derived
+                # covariance, where nothing populates ``cross_sections``, a
+                # computable band was refused. That is D13, and this is
+                # ``get_relative_uncertainty``'s convention, defaulting to
+                # relative for the matrices added without the flag (GENDF).
+                mat_is_relative = (bool(self.is_relative[i])
+                                   if i < len(self.is_relative) else True)
+
+                sd = np.sqrt(np.maximum(diag, 0.0))
+
+                if mat_is_relative:
+                    rel_unc = sd
+                elif key in self.cross_sections:
+                    # Absolute covariance: sqrt(diag) is in the cross
+                    # section's own units, so divide to get a percentage.
                     xs = np.asarray(self.cross_sections[key], dtype=float)
-                    
-                    # IMPORTANT: The covariance matrix from GENDF is already relative!
-                    # sqrt(diag) gives us the relative standard deviation (fractional)
-                    # We should NOT divide by xs again!
-                    rel_unc = np.sqrt(diag)
-                    
-                    # Ensure finite values
-                    rel_unc = np.where(np.isfinite(rel_unc), rel_unc, 0.0)
-                    
-                    # Convert to percentage and apply sigma multiplier
-                    rel_unc_pct = rel_unc * 100.0 * sigma
-                    
-                    # For step plots with 'post', we need G+1 points (bin edges)
-                    # with the last y-value repeated to show all G bins properly
-                    if self.energy_grid is not None:
-                        energy_edges = np.asarray(self.energy_grid, dtype=float)
-                        # Use energy edges (G+1 points) for x-axis
-                        x_values = energy_edges
-                        # Extend y-values to G+1 by repeating the last value
-                        y_values = np.r_[rel_unc_pct, rel_unc_pct[-1]]
-                    else:
-                        # Fallback: use indices as edges
-                        x_values = np.arange(len(rel_unc_pct) + 1, dtype=float)
-                        y_values = np.r_[rel_unc_pct, rel_unc_pct[-1]]
-                    
-                    # Generate label (for uncertainty data line plot)
-                    if label is None:
-                        try:
-                            isotope_symbol = zaid_to_symbol(zaid)
-                        except Exception:
-                            isotope_symbol = f"ZAID {zaid}"
-                        
-                        reaction_name = MT_TO_REACTION.get(mt, f"MT={mt}")
-                        
-                        sigma_str = f"{sigma}σ" if sigma != 1.0 else "1σ"
-                        label = f"{isotope_symbol} {reaction_name} Uncertainty ({sigma_str})"
-                    
-                    # Create MultigroupUncertaintyPlotData
-                    unc_data = MultigroupUncertaintyPlotData(
-                        x=x_values,
-                        y=y_values,
-                        label=label,
-                        zaid=zaid,
-                        mt=mt,
-                        uncertainty_type='relative',
-                        energy_bins=energy_edges if self.energy_grid is not None else None,
-                        step_where='post',
-                        **styling_kwargs
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        rel_unc = sd / np.abs(xs)
+                else:
+                    # Nothing on this object can relativise it. Say so rather
+                    # than draw barns on an axis labelled per cent.
+                    logger.warning(
+                        f"ZAID={zaid}, MT={mt}: covariance is absolute and no "
+                        f"cross section is stored for it — cannot express the "
+                        f"uncertainty as a percentage, so no band is produced."
                     )
+                    break
+
+                # Ensure finite values
+                rel_unc = np.where(np.isfinite(rel_unc), rel_unc, 0.0)
+
+                # Convert to percentage and apply sigma multiplier
+                rel_unc_pct = rel_unc * 100.0 * sigma
+
+                # For step plots with 'post', we need G+1 points (bin edges)
+                # with the last y-value repeated to show all G bins properly.
+                # The shared grid is the multigroup case; a pointwise
+                # covariance leaves it None and carries one grid per matrix.
+                energy_edges = self._plot_edges(i, len(rel_unc_pct))
+                if energy_edges is not None:
+                    x_values = energy_edges
+                else:
+                    # Fallback: use indices as edges
+                    x_values = np.arange(len(rel_unc_pct) + 1, dtype=float)
+                y_values = np.r_[rel_unc_pct, rel_unc_pct[-1]]
+
+                # Generate label (for uncertainty data line plot)
+                if label is None:
+                    try:
+                        isotope_symbol = zaid_to_symbol(zaid)
+                    except Exception:
+                        isotope_symbol = f"ZAID {zaid}"
+
+                    reaction_name = MT_TO_REACTION.get(mt, f"MT={mt}")
+
+                    sigma_str = f"{sigma}σ" if sigma != 1.0 else "1σ"
+                    label = f"{isotope_symbol} {reaction_name} Uncertainty ({sigma_str})"
+
+                # Create MultigroupUncertaintyPlotData
+                unc_data = MultigroupUncertaintyPlotData(
+                    x=x_values,
+                    y=y_values,
+                    label=label,
+                    zaid=zaid,
+                    mt=mt,
+                    uncertainty_type='relative',
+                    energy_bins=energy_edges,
+                    step_where='post',
+                    **styling_kwargs
+                )
                 break
         
         # Check if at least one of them is available
@@ -3316,6 +3343,28 @@ class CrossSectionCovariance:
             "clamp_iter": iter_num,
         }
         return current, log
+
+    def _plot_edges(self, index: int, n_bins: int) -> Optional[np.ndarray]:
+        """The ``n_bins + 1`` boundaries matrix *index* is defined on, or None.
+
+        Two storage conventions meet here. A multigroup covariance
+        (``read_njoy_covmat``) puts one grid on ``energy_grid`` and shares it;
+        a pointwise one (``MF33MT.to_xs_covmat``) leaves that ``None`` and
+        gives every matrix its own boundaries in ``energy_grids``, because the
+        subsections of an MF33 file do not agree on a grid. Only the first was
+        ever consulted, which put ENDF bands on group indices — that is the
+        second half of D13.
+
+        The shared grid keeps precedence so the multigroup answer cannot
+        change; the length check only rejects a grid that could not have been
+        plotted against these bins anyway.
+        """
+        if self.energy_grid is not None and len(self.energy_grid) == n_bins + 1:
+            return np.asarray(self.energy_grid, dtype=float)
+        if (index < len(self.energy_grids)
+                and len(self.energy_grids[index]) == n_bins + 1):
+            return np.asarray(self.energy_grids[index], dtype=float)
+        return None
 
     def _extract_xs_data(
         self,

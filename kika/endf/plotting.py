@@ -34,17 +34,15 @@ their own copy of it. "Draw this in my colour" and "draw this with its
 uncertainty" were mutually exclusive, and the symptom was indistinguishable
 from a file that carries no covariance.
 
-*Not fixed: the MF33 band cannot be produced at all.* ``MF33MT.to_xs_covmat``
-builds its ``CrossSectionCovariance`` with ``add_matrix`` alone, and
-``add_matrix`` never populates ``cross_sections`` — which
-``CrossSectionCovariance.to_plot_data`` needs for both halves of its answer. So
-the MF3 branch below always raises internally, is caught, and returns ``None``,
-on every tape. Fixing it means teaching ``to_xs_covmat`` to group-average the
-MF3 sections it is already handed onto the covariance grid, and that changes
-what every other consumer of that object sees — a ``kika/cov`` change with its
-own gate, not a line in a move. Recorded in ``docs/library-gaps.md`` and pinned
-in ``kika/endf/tests/test_endf_to_plot_data.py``, where the fix will have to
-delete a test that currently asserts the failure.
+*Fixed afterwards, in ``kika/cov``: the MF33 band could not be produced at
+all.* ``MF33MT.to_xs_covmat`` builds its ``CrossSectionCovariance`` with
+``add_matrix`` alone, and ``add_matrix`` does not take cross sections — which
+``CrossSectionCovariance.to_plot_data`` gated its whole answer on, and then
+did not use, because ``sqrt(diag)`` of a relative covariance already is the
+fractional uncertainty. So the MF3 branch below raised internally, was caught,
+and returned ``None``, on every tape for eight months, and the symptom was
+again indistinguishable from a file that carries no covariance. Recorded as
+D13 in ``docs/library-gaps.md``.
 """
 from __future__ import annotations
 
