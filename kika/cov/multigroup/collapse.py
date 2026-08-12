@@ -151,6 +151,110 @@ def legendre_source_from_endf(mf4_mt_data,
     )
 
 
+def legendre_source_from_model(angular, max_order: int,
+                               awr: Optional[float] = None,
+                               on_tabulated: str = "raise") -> LegendreSource:
+    """Sample a GNDS ``angularTwoBody`` into a :class:`LegendreSource`.
+
+    The model half of the seam, and the reason :class:`LegendreSource` exists at
+    all: the collapse can be fed by a ``reactionSuite`` without an ENDF tape in
+    the room. ``angular`` is a
+    :class:`~kika.nuclear_data.model.distributions.AngularTwoBody`.
+
+    **It reads coefficients, it does not interpolate between energies**, and that
+    distinction is what makes it legal. ``XYs2d.evaluate`` deliberately raises —
+    interpolating between two 1-d functions depends on an
+    ``interpolationQualifier`` and, for Legendre children of different order, on
+    a padding convention, and neither is decided. Nothing here needs it: the
+    energies asked for *are* the outer domain values, so every coefficient is
+    read off its own node. Interpolating between the nodes is
+    :func:`compute_base_cell_means`' job and it does it the same way for both
+    producers.
+
+    ``Regions2d`` is walked recursively through ``function1ds``, in file order
+    and **with duplicate energies kept** — a repeated incident energy is a
+    discontinuity the evaluator wrote down, and the LTT=3 boundary genuinely
+    belongs to two representations.
+
+    Parameters
+    ----------
+    on_tabulated : {"raise", "skip"}
+        What to do with a child that is a tabulated ``P(mu)`` rather than a
+        ``Legendre`` — which is what an LTT=2 section is made of, and what the
+        second region of an LTT=3 section is made of.
+
+        ``"raise"``, the default, because the alternative is a source whose mesh
+        silently stops short of the file's range, and a collapse weighted over
+        a truncated range is a wrong answer that looks like a right one.
+
+        ``"skip"`` builds the source from the Legendre region alone and says so
+        through :attr:`LegendreSource.native_energies`, which then covers only
+        that region. It exists because that is a real and checkable claim —
+        *where the file states Legendre coefficients, these are they* — not
+        because a partial source is generally safe.
+
+    Raises
+    ------
+    NotImplementedError
+        Under ``on_tabulated="raise"``, if any child is tabulated. Projecting
+        ``P(mu)`` onto Legendre orders is a Gauss quadrature with ENDF's angular
+        interpolation laws in it: a second implementation of
+        ``MF4MTTabulated.extract_legendre_coefficients``, validated against the
+        first, which is the trade P1b was withdrawn rather than make. If the
+        model path ever needs it, the quadrature moves down out of
+        ``kika.endf.utils`` and both callers share one copy.
+    """
+    from ...nuclear_data.model.distributions import Isotropic2d
+    from ...nuclear_data.model.enums import Frame
+    from ...nuclear_data.model.functions.simple import Legendre
+
+    if isinstance(angular, Isotropic2d):
+        raise NotImplementedError(
+            "an isotropic distribution states no Legendre mesh of its own, so "
+            "the collapse has no breakpoints to integrate on; the ENDF path "
+            "falls back to the base energy grid for this case"
+        )
+
+    if on_tabulated not in ("raise", "skip"):
+        raise ValueError(
+            f"on_tabulated must be 'raise' or 'skip', got {on_tabulated!r}"
+        )
+
+    frame = "CM" if angular.productFrame == Frame.centerOfMass else "LAB"
+    functions = angular.function1ds
+
+    unsupported = {type(f).__name__ for f in functions if not isinstance(f, Legendre)}
+    if unsupported and on_tabulated == "raise":
+        raise NotImplementedError(
+            f"angularTwoBody carries {'/'.join(sorted(unsupported))} children, "
+            f"not Legendre; projecting a tabulated P(mu) onto Legendre orders "
+            f"is a quadrature with ENDF's angular interpolation in it and is "
+            f"not implemented on the model path. Pass on_tabulated='skip' to "
+            f"build a source from the Legendre region alone, knowing that its "
+            f"energy range then stops where that region does"
+        )
+    functions = [f for f in functions if isinstance(f, Legendre)]
+
+    native_E = np.array([f.outerDomainValue for f in functions], dtype=float)
+
+    # ENDF's convention, and the ENDF producer's too: an order the file does not
+    # carry at this energy is zero, not absent. a_0 the model stores explicitly.
+    coefficients: Dict[int, np.ndarray] = {
+        l: np.zeros(len(functions), dtype=float) for l in range(max_order + 1)
+    }
+    for i, function in enumerate(functions):
+        row = np.asarray(function.coefficients, dtype=float)
+        for l in range(min(max_order + 1, row.size)):
+            coefficients[l][i] = row[l]
+
+    return LegendreSource(
+        native_energies=native_E,
+        coefficients=coefficients,
+        frame=frame,
+        awr=awr,
+    )
+
+
 def resolve_legendre_source(mf4_mt_data,
                             fallback_grid: np.ndarray,
                             max_order: int,
