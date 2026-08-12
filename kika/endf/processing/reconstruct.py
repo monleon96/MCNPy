@@ -64,11 +64,13 @@ def reconstruct(mf2_mt151: MF2MT151,
     resonances, provenance, _ = decodeMF2MT151(mf2_mt151)
     _oneNuclide(provenance)
 
+    reactions = {}
     background = None
     if mf3_data is not None:
         background = {}
         for mt, section in mf3_data.sections.items():
             reaction, _ = decodeMF3MT(section)
+            reactions[mt] = reaction
             background[mt] = reaction.crossSection[EVAL_LABEL]
 
     # Delegate to format-independent processing
@@ -78,7 +80,8 @@ def reconstruct(mf2_mt151: MF2MT151,
     )
 
     # Convert the model back → ENDF types
-    return {mt: _toMF3MT(mt, form, provenance) for mt, form in forms.items()}
+    return {mt: _toMF3MT(mt, form, provenance, reactions.get(mt))
+            for mt, form in forms.items()}
 
 
 def _oneNuclide(provenance) -> None:
@@ -109,23 +112,56 @@ def _oneNuclide(provenance) -> None:
         )
 
 
-def _toMF3MT(mt: int, form, provenance) -> MF3MT:
+#: MTs whose Q values are zero by definition rather than by omission. Elastic
+#: scattering leaves the nucleus as it found it, and the total is a sum and not
+#: a reaction, so ``QM = QI = 0`` for both is a statement and not a default.
+_ZERO_Q = (1, 2)
+
+
+def _reactionQ(mt: int, source):
+    """``(QM, QI, LR)`` for a reconstructed section — inherited, never invented.
+
+    A reconstructed MT102 *replaces* the file's own MT102 over the resonance
+    region: same reaction, same evaluation, so it inherits that section's Q.
+    That is the question ``model/output_channel.py`` left open ("whose Q does a
+    reconstructed MT102 inherit"), and it only looks open while the answer has
+    to come from somewhere other than the file being reconstructed.
+
+    Where there is no such section and the MT is not one of the two whose Q is
+    zero by definition, this raises. Writing zero was the old behaviour and is
+    the defect: QM for (n,gamma) is the neutron separation energy — 7.6 MeV for
+    Fe-56 — and a header claiming 0 is not a smaller error than no header.
+    """
+    if source is not None:
+        return (getattr(source.provenance, "qm", None),
+                source.outputChannel.Q.value,
+                getattr(source.provenance, "lr", None))
+    if mt in _ZERO_Q:
+        return 0.0, 0.0, 0
+    raise ValueError(
+        f"MT{mt} was reconstructed but the input carried no MF3/MT{mt} to take "
+        f"QM, QI and LR from, and they are not zero for this reaction. Pass the "
+        f"file's MF3 as mf3_data; a header written with Q = 0 would be wrong "
+        f"rather than incomplete."
+    )
+
+
+def _toMF3MT(mt: int, form, provenance, source) -> MF3MT:
     """One reconstructed ``XYs1d`` → an ``MF3MT``.
 
-    Not ``encodeMF3MT``: that takes a whole ``Reaction`` and requires QM, QI and
-    LR, which a reconstructed section does not have — reconstruction produces
-    sigma(E) and says nothing about reaction Q values. They are written as zero
-    here, exactly as they were before this moved onto the model, and that is a
-    known defect (``test_metadata_contract.py`` pins it) whose fix is its own
-    increment: the model's ``OutputChannel.Q`` is where the real values live.
+    Not ``encodeMF3MT``: that takes a whole ``Reaction``, and what comes back
+    from the reconstruction is one form. The Q values come from the reaction the
+    section replaces — see :func:`_reactionQ`.
     """
+    qm, qi, lr = _reactionQ(mt, source)
+
     section = MF3MT(number=int(mt))
     section._za = float(provenance.za)
     section._awr = provenance.awr if provenance.awr is not None else 0.0
     section._mat = provenance.mat
-    section._qm = 0.0
-    section._qi = 0.0
-    section._lr = 0
+    section._qm = qm
+    section._qi = qi
+    section._lr = lr
     section._energies = list(form.xs)
     section._cross_sections = list(form.ys)
     section._np = int(form.xs.size)
