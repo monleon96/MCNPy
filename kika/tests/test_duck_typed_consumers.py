@@ -19,6 +19,8 @@ rather than quietly smoothed over — see
 """
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -94,6 +96,45 @@ def test_the_interp_shim_is_dead_for_cross_section(mf33_section, pair):
 
     shimmed = mf33_section._bin_average_xs(_BareSection(), list(GRID_EV))
     assert shimmed.shape == (len(GRID_EV) - 1,)
+
+
+def test_how_wrong_the_shim_would_be_if_it_were_reached(mf33_section, pair):
+    """The size of the hazard above, measured rather than asserted to exist.
+
+    Phase 4's P2 ("one σ-source shape") was planned around the worry that
+    unifying the two shapes could flip sections from ``get_cross_section`` to
+    the shim and move covariance numbers with every test green. Measured
+    2026-08-12, the worry has two halves and they resolve differently.
+
+    **Unreachable, today**: both real producers expose ``get_cross_section`` and
+    return identical values through it, so no unification of ``MF3MT`` and
+    ``CrossSection`` can flip a branch. That is the test above.
+
+    **But it would matter if it ever were reached.** The shim is lin-lin by
+    construction, so it disagrees with any section that declares another
+    scheme. Below, the *same points* read as a histogram (ENDF INT=1) rather
+    than lin-lin: the shim reads the chord where the file says hold-left, and
+    the two answers differ by ~15 % at mid-interval. Recorded so that if the
+    shim is ever revived, the number is already known.
+    """
+    mf3mt, _xs = pair
+    energies = np.asarray(mf3mt.energies, dtype=float)
+    values = np.asarray(mf3mt.cross_sections, dtype=float)
+
+    histogram = dataclasses.replace(
+        mf3mt, _interpolation=[(len(energies), 1)]
+    )
+    midpoints = (energies[5:9] + energies[6:10]) / 2.0
+
+    honoured = np.asarray(histogram.get_cross_section(midpoints), dtype=float)
+    shimmed = np.interp(midpoints, energies, values)
+
+    # Hold-left is exactly the knot below; lin-lin is not.
+    np.testing.assert_array_equal(honoured, values[5:9])
+    assert np.any(honoured != shimmed), (
+        "the fixture no longer distinguishes histogram from lin-lin, so this "
+        "measurement says nothing"
+    )
 
 
 # ---------------------------------------------------------------------------

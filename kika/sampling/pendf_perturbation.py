@@ -98,6 +98,45 @@ VERBOSE_DIAGNOSTICS: int = 1                    # 0=off, 1=summaries, 2=per-MT
 _logger: Optional[DualLogger] = None
 
 
+def derive_mt_thresholds(mf3_sections: Dict[int, Any],
+                         mts: Sequence[int]) -> Dict[int, float]:
+    """First energy at which each MT has a positive cross section.
+
+    ⚑ **This feeds the draw, not a plot.** The map goes to
+    ``draw_relative_factors``' ``mt_thresholds``, which pins the bin containing a
+    reaction's threshold so a perturbation cannot be applied where the cross
+    section is still zero. Move these numbers and the sampled factors move with
+    them.
+
+    It is a named function rather than nine lines inline because of what reads
+    ``mf3_sections``. The map is built from ``.energies`` and
+    ``.cross_sections`` — ENDF's spelling — while the canonical ``CrossSection``
+    spells the second one ``.values``. The GNDS roadmap's phase 4 P2 ("one σ-source
+    shape") changes what ``read_pendf_mf3_sections`` returns, and this is the
+    place where that change reaches sampled numbers instead of a diagnostic.
+    ``kika/sampling/tests/test_mt_thresholds.py`` freezes it first, so that
+    increment can say by how much rather than hope it was nothing.
+
+    Parameters
+    ----------
+    mf3_sections : Dict[int, Any]
+        MT → section, from :func:`kika.processing.read_pendf_mf3_sections`.
+    mts : Sequence[int]
+        The MTs to look up. An MT absent from *mf3_sections*, or one whose cross
+        section is nowhere positive, is simply absent from the result — the
+        caller then applies no threshold pinning for it.
+    """
+    thresholds: Dict[int, float] = {}
+    for mt in mts:
+        if mt in mf3_sections:
+            e = np.asarray(mf3_sections[mt].energies, dtype=float)
+            xs = np.asarray(mf3_sections[mt].cross_sections, dtype=float)
+            positive = e[xs > 0]
+            if positive.size:
+                thresholds[mt] = float(positive[0])
+    return thresholds
+
+
 # ---------------------------------------------------------------------------
 # Public entry
 # ---------------------------------------------------------------------------
@@ -407,14 +446,7 @@ def _process_one_isotope(
     # --- Stage A.4: extract per-MT thresholds from PENDF (for pinning) -
     mt_thresholds: Optional[Dict[int, float]] = None
     if pin_threshold_bins:
-        mt_thresholds = {}
-        for mt in mts_present:
-            if mt in mf3_sections:
-                e = np.asarray(mf3_sections[mt].energies, dtype=float)
-                xs = np.asarray(mf3_sections[mt].cross_sections, dtype=float)
-                positive = e[xs > 0]
-                if positive.size:
-                    mt_thresholds[mt] = float(positive[0])
+        mt_thresholds = derive_mt_thresholds(mf3_sections, mts_present)
 
     # --- Stage A.5: sample perturbation factors -----------------------
     # The repairs are applied ahead of the draw, as a plan, rather than inside
