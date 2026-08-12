@@ -94,9 +94,27 @@ FACADE_IMPORTERS = {
 #: of the PFNS modules (grep, 2026-08-10), so no path in the app reaches this
 #: import. If the app ever calls ``perturb_pfns_files``, ``kika-api.spec``'s
 #: ``hiddenimports`` is where that has to be recorded.
+#:
+#: **Phase 4 P1a (2026-08-12) added the third.**
+#: ``kika/endf/processing/reconstruct.py`` is the ENDF adapter for resonance
+#: reconstruction: MF2/151 in, ``MF3MT`` out. The physics moved onto the model,
+#: so the middle of that sandwich is now ``decodeMF2MT151`` — which makes this
+#: module an ENDF↔model boundary, and that is exactly what the adapter is for.
+#: The alternative was to keep converting through the flat
+#: ``ResonanceParameters``, whose ``c3..c6`` cannot hold an LRF=7 spin group,
+#: and that is the defect the phase exists to fix.
+#:
+#: The imports are inside ``reconstruct()``, so ``import kika.endf.processing``
+#: — which kika-app does, for ``detect_resonance_bounds`` — still does not wake
+#: the model. **The frozen build was checked and needs nothing:**
+#: ``kika.endf.model_adapter`` and ``kika.nuclear_data.model`` have been in
+#: ``kika-api.spec``'s ``hiddenimports`` since phase 3d (spec lines 143-146),
+#: and no path in kika-app reaches this function — the app reconstructs with
+#: NJOY, through ``kika.processing.njoy_reconstruct``.
 PERMANENT_IMPORTERS = {
     "kika/_read.py",
     "kika/sampling/mf35_sampling.py",
+    "kika/endf/processing/reconstruct.py",
 }
 
 ALLOWED_IMPORTERS = FACADE_IMPORTERS | PERMANENT_IMPORTERS

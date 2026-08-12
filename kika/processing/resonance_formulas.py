@@ -7,6 +7,22 @@ in barns.
 
 All formulas follow ENDF-102 manual, Sections D.1.1 (SLBW), D.1.2 (MLBW),
 and D.1.3 (Reich-Moore).
+
+**Split by formalism, not by record position (phase 4).** Each function takes
+the spin group of the model node its formalism owns —
+:class:`kika.nuclear_data.model.resonances.breit_wigner.SpinGroup` for SLBW and
+MLBW, :class:`~kika.nuclear_data.model.resonances.r_matrix.RMatrixSpinGroup` for
+Reich-Moore — and reads its widths **by name**. Before this they took a list of
+records and read ``c3..c6``, which are ENDF *column numbers* whose meaning
+depends on the formalism: ``GT, GN, GG, GF`` under SLBW/MLBW and
+``GN, GG, GFA, GFB`` under Reich-Moore. The same four positions, four different
+quantities, told apart only by which function you happened to call. Under
+Reich-Moore the model names the *channel* each width belongs to, so the lookup
+is by channel label and a formalism with more channels needs no fourth name.
+
+The arithmetic is unchanged, deliberately: the widths are the same floats read
+from a different place, and the goldens under ``tests/data/`` are asserted
+unmoved.
 """
 
 import numpy as np
@@ -22,6 +38,33 @@ from .penetration import (
 def statistical_spin_factor(J: float, spi: float) -> float:
     """Statistical spin factor g_J = (2J+1) / (2(2I+1))."""
     return (2.0 * abs(J) + 1.0) / (2.0 * (2.0 * spi + 1.0))
+
+
+#: Reich-Moore's four ENDF columns, as the channel labels the decoder gives them.
+#: ``fissionA``/``fissionB`` are ENDF's GFA and GFB — the two fission channels
+#: that are the structural reason a single ``fissionWidth`` name cannot serve
+#: both formalisms.
+_RM_CHANNELS = ("neutron", "capture", "fissionA", "fissionB")
+
+
+def _channelColumns(group) -> tuple:
+    """``(iN, iG, iFA, iFB)`` — which width column each channel is, or ``None``.
+
+    A width is identified by the channel it belongs to and not by where it sits
+    in the record, so this is a lookup by label rather than a slice. A channel
+    the group does not have comes back as ``None`` and its width reads as zero,
+    which is how a Reich-Moore group with no fission channels stays expressible
+    without a special case.
+    """
+    byLabel = {}
+    for index, channel in enumerate(group.channels):
+        column = channel.columnIndex if channel.columnIndex is not None else index
+        byLabel[channel.label] = column
+    return tuple(byLabel.get(label) for label in _RM_CHANNELS)
+
+
+def _width(row, column) -> float:
+    return 0.0 if column is None else row[column]
 
 
 def _energy_dependent_neutron_width(Gn_r, E, Er, l, rho_E, rho_Er):
@@ -61,17 +104,17 @@ def _shifted_resonance_energy(Er, l, Gn_r, S_l_E, S_l_Er, P_l_Er):
 # SLBW (Single-Level Breit-Wigner), LRF=1
 # ======================================================================
 
-def slbw_cross_sections(E, resonances, l, spi, ap, awr, ap_table=None):
+def slbw_cross_sections(E, group, spi, ap, awr, ap_table=None):
     """Compute SLBW cross sections for one l-value block.
 
     Parameters
     ----------
     E : array-like
         Energies in eV (must be > 0).
-    resonances : list of Resonance
-        For SLBW: c3=GT, c4=GN, c5=GG, c6=GF.
-    l : int
-        Orbital angular momentum.
+    group : breit_wigner.SpinGroup
+        One l-block of the model's ``BreitWigner`` node. Its resonances carry
+        ``totalWidth``/``neutronWidth``/``captureWidth``/``fissionWidth``; the
+        orbital angular momentum is the group's own ``L``.
     spi : float
         Target spin.
     ap : float
@@ -85,6 +128,8 @@ def slbw_cross_sections(E, resonances, l, spi, ap, awr, ap_table=None):
     -------
     sigma_elastic, sigma_capture, sigma_fission : ndarray
     """
+    l = group.L
+    resonances = group.resonances
     E = np.asarray(E, dtype=float)
     nE = len(E)
     k2 = wave_number_squared(E, awr)
@@ -109,9 +154,9 @@ def slbw_cross_sections(E, resonances, l, spi, ap, awr, ap_table=None):
     for res in resonances:
         Er = res.energy
         J = res.spin
-        GN_r = res.c4
-        GG = res.c5
-        GF = abs(res.c6)
+        GN_r = res.neutronWidth
+        GG = res.captureWidth
+        GF = abs(res.fissionWidth)
 
         g_J = statistical_spin_factor(J, spi)
         abs_Er = abs(Er)
@@ -150,12 +195,15 @@ def slbw_cross_sections(E, resonances, l, spi, ap, awr, ap_table=None):
 # MLBW (Multi-Level Breit-Wigner), LRF=2
 # ======================================================================
 
-def mlbw_cross_sections(E, resonances, l, spi, ap, awr, ap_table=None):
+def mlbw_cross_sections(E, group, spi, ap, awr, ap_table=None):
     """Compute MLBW cross sections for one l-value block.
 
-    For MLBW: c3=GT, c4=GN, c5=GG, c6=GF.
-    Multi-level interference in elastic channel between resonances of same J.
+    Same named widths as SLBW — this is the other Breit-Wigner approximation,
+    not another formalism. Multi-level interference in the elastic channel
+    between resonances of the same J.
     """
+    l = group.L
+    resonances = group.resonances
     E = np.asarray(E, dtype=float)
     nE = len(E)
     k2 = wave_number_squared(E, awr)
@@ -192,9 +240,9 @@ def mlbw_cross_sections(E, resonances, l, spi, ap, awr, ap_table=None):
 
         for res in res_group:
             Er = res.energy
-            GN_r = res.c4
-            GG = res.c5
-            GF = abs(res.c6)
+            GN_r = res.neutronWidth
+            GG = res.captureWidth
+            GF = abs(res.fissionWidth)
 
             abs_Er = abs(Er)
             if abs_Er < 1e-30:
@@ -243,10 +291,19 @@ def mlbw_cross_sections(E, resonances, l, spi, ap, awr, ap_table=None):
 # Reich-Moore (LRF=3) — vectorized over energies
 # ======================================================================
 
-def reich_moore_cross_sections(E, resonances, l, spi, ap, awr, ap_table=None):
+def reich_moore_cross_sections(E, group, spi, ap, awr, ap_table=None):
     """Compute Reich-Moore cross sections for one l-value block.
 
-    For Reich-Moore: c3=GN, c4=GG, c5=GFA, c6=GFB.
+    ``group`` is an ``RMatrixSpinGroup``: widths belong to *channels*, looked up
+    by label — ``neutron``, ``capture``, ``fissionA``, ``fissionB``. ENDF writes
+    them in columns ``c3..c6``, which is where the four names used to come from
+    and why they meant something different one formalism over.
+
+    Note that ENDF's LRF=3 blocks by **l**, not by J, so this "spin group" holds
+    several J values and carries a J per resonance — the grouping below is over
+    ``group.spins`` and not over one group-level spin. That is a property of the
+    ENDF shape the decoder preserved, not of the R-matrix formalism.
+
     The capture channel is eliminated from the R-matrix.
 
     Uses the collision matrix U approach, fully vectorized over energies.
@@ -256,6 +313,8 @@ def reich_moore_cross_sections(E, resonances, l, spi, ap, awr, ap_table=None):
     Energy dependence enters through P_l(E) and phi_l(E) in the collision
     matrix formula, following ENDF-102 Section D.1.3.
     """
+    l = group.channels[0].L if group.channels else None
+    iN, iG, iFA, iFB = _channelColumns(group)
     E = np.asarray(E, dtype=float)
     nE = len(E)
     k2 = wave_number_squared(E, awr)
@@ -276,14 +335,20 @@ def reich_moore_cross_sections(E, resonances, l, spi, ap, awr, ap_table=None):
     P_l_E = penetration_factor(l, rho_E)
     S_l_E = shift_factor(l, rho_E)
 
-    # Group resonances by J
+    # Group resonances by J. Each entry is (Er, GN, GG, GFA, GFB), read off the
+    # width row by channel rather than by column number.
     j_groups = {}
-    for res in resonances:
-        j_groups.setdefault(res.spin, []).append(res)
+    for index, energy in enumerate(group.energies):
+        row = group.widths[index]
+        j_groups.setdefault(group.spins[index], []).append((
+            energy,
+            _width(row, iN), _width(row, iG),
+            _width(row, iFA), _width(row, iFB),
+        ))
 
     for J, res_group in j_groups.items():
         g_J = statistical_spin_factor(J, spi)
-        has_fission = any(abs(r.c5) > 0 or abs(r.c6) > 0 for r in res_group)
+        has_fission = any(abs(r[3]) > 0 or abs(r[4]) > 0 for r in res_group)
         nch = 3 if has_fission else 1
 
         # Build R-matrix: R[c,c'](E) arrays of shape (nE,)
@@ -293,13 +358,7 @@ def reich_moore_cross_sections(E, resonances, l, spi, ap, awr, ap_table=None):
         # gamma_f = sign(GF_r) * sqrt(|GF_r| / 2)   (P_f = 1 for fission)
         R = np.zeros((nch, nch, nE), dtype=complex)
 
-        for res in res_group:
-            Er = res.energy
-            GN_r = res.c3   # RM: c3=GN (neutron width at E_r)
-            GG = res.c4     # RM: c4=GG (gamma width)
-            GFA = res.c5    # RM: c5=GFA
-            GFB = res.c6    # RM: c6=GFB
-
+        for Er, GN_r, GG, GFA, GFB in res_group:
             abs_Er = abs(Er)
             if abs_Er < 1e-30:
                 continue

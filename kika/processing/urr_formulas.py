@@ -15,23 +15,26 @@ from .penetration import (
 from .resonance_formulas import statistical_spin_factor
 
 
-def urr_cross_sections(E, urr_l_groups, spi, ap, awr):
+def urr_cross_sections(E, spinGroups, spi, ap, awr):
     """Compute average cross sections from URR parameters.
 
     Parameters
     ----------
     E : ndarray
         Energy grid in eV.
-    urr_l_groups : list of URR_LGroup
-        Average resonance parameters grouped by l-value.
-        Each LGroup contains j_groups, each with:
-          j, d, gn0, gg, gf, gx (scalars or arrays matching E).
+    spinGroups : list of tabulated_widths.UnresolvedSpinGroup
+        The model's unresolved spin groups — one per ``(L, J)``, with the
+        averages already on *E*. Widths are read from named channels
+        (``neutron``, ``capture``, ``fission``, ``competitive``) rather than
+        from fixed attributes, which is the same move the resolved formulas
+        make; ENDF's degrees-of-freedom counts ride on the channels they
+        belong to.
     spi : float
         Target spin.
     ap : float
         Scattering radius (ENDF units: 10^{-12} cm).
     awr : float
-        Atomic weight ratio.
+        Atomic weight ratio, used for a group that declares none.
 
     Returns
     -------
@@ -45,9 +48,12 @@ def urr_cross_sections(E, urr_l_groups, spi, ap, awr):
     sig_cap = np.zeros(nE)
     sig_fis = np.zeros(nE)
 
-    for lg in urr_l_groups:
-        l = lg.l
-        awr_l = lg.awri if lg.awri > 0 else awr
+    for l, groups in _byOrbitalMomentum(spinGroups):
+        # The potential-scattering term belongs to the l-block, so it is added
+        # once per l and not once per (L, J) — which is why the groups are
+        # blocked back up here rather than iterated flat.
+        awri = groups[0].atomicWeightRatio
+        awr_l = awri if awri and awri > 0 else awr
 
         k2_l = wave_number_squared(E, awr_l)
         rho_E_l = compute_rho(E, awr_l, ap)
@@ -61,15 +67,16 @@ def urr_cross_sections(E, urr_l_groups, spi, ap, awr):
         # Potential scattering for this l
         sig_el += 4.0 * (2.0 * l + 1.0) * pi_over_k2_l * sin_phi ** 2
 
-        for jg in lg.j_groups:
-            g_J = statistical_spin_factor(jg.j, spi)
+        for group in groups:
+            g_J = statistical_spin_factor(group.J, spi)
 
             # Get average parameters at E (scalar or interpolated)
-            D = _as_array(jg.d, nE)
-            GN0 = _as_array(jg.gn0, nE)
-            GG = _as_array(jg.gg, nE)
-            GF = _as_array(jg.gf, nE)
-            GX = _as_array(jg.gx, nE)
+            channels = {channel.label: channel for channel in group.channels}
+            D = _as_array(_levelSpacing(group), nE)
+            GN0 = _as_array(_width(channels.get("neutron")), nE)
+            GG = _as_array(_width(channels.get("capture")), nE)
+            GF = _as_array(_width(channels.get("fission")), nE)
+            GX = _as_array(_width(channels.get("competitive")), nE)
 
             # Energy-dependent average neutron width
             # <Gamma_n>(E) = GN0 * sqrt(E) * P_l(rho_E)
@@ -88,6 +95,39 @@ def urr_cross_sections(E, urr_l_groups, spi, ap, awr):
             sig_fis += pi_over_k2_l * g_J * factor * GF
 
     return np.maximum(sig_el, 0.0), np.maximum(sig_cap, 0.0), np.maximum(sig_fis, 0.0)
+
+
+def _byOrbitalMomentum(spinGroups):
+    """``[(L, [groups])]`` in ascending L — ENDF's l-blocks, rebuilt.
+
+    The model keeps one spin group per ``(L, J)``, which is what the data is;
+    ENDF nests J inside an l-block. Sorting by L rather than keeping first
+    appearance is not arbitrary: it is what ``model.interop`` already does when
+    it projects the same node back to the flat classes, so the two paths visit
+    the blocks in the same order and sum the same series in the same sequence.
+    """
+    byL: dict = {}
+    for group in spinGroups:
+        byL.setdefault(group.L, []).append(group)
+    return [(L, byL[L]) for L in sorted(byL)]
+
+
+def _levelSpacing(group):
+    """A one-element array is ENDF case A's scalar; anything longer is a table."""
+    values = group.levelSpacing
+    if values is None:
+        return 0.0
+    array = np.asarray(values, dtype=float)
+    return float(array[0]) if array.size == 1 else array
+
+
+def _width(channel):
+    """The channel's average width, or zero for a channel the group has not got."""
+    if channel is None:
+        return 0.0
+    if channel.widths is not None:
+        return channel.widths
+    return channel.constantWidth if channel.constantWidth is not None else 0.0
 
 
 def _as_array(val, n):

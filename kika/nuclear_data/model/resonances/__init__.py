@@ -38,6 +38,14 @@ class ScatteringRadius:
     constant: Optional[float] = None
     energies: Optional[object] = None
     values: Optional[object] = None
+    #: The table's ``(NBT, INT)`` pairs. A table without them is a set of points
+    #: that only a convention connects, and the convention is not always
+    #: lin-lin — so a reconstruction reading this node would have to assume one,
+    #: on the one quantity that sets the hard-sphere phase shift. They lived in
+    #: ENDF provenance alone until phase 4, which is enough to write the file
+    #: back and not enough to compute from it. Additive: the encoder still
+    #: writes the table from provenance, so no round trip moves.
+    interpolation: Optional[object] = None
 
     @property
     def isEnergyDependent(self) -> bool:

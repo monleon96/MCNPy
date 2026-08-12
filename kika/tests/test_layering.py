@@ -339,9 +339,20 @@ def test_the_ratchet_catches_a_violation(tmp_path, monkeypatch):
 #: so the dependency is real and only its *timing* is negotiable.
 _MUST_DEFER = "kika/processing"
 
+#: The canonical model. Not a *format* package, so the ratchet above says
+#: nothing about it — and it must not, because ``kika/processing`` computing on
+#: the model is the whole point of phase 4. What is forbidden is only the
+#: *timing*, for the same reason the ENDF imports are: see
+#: ``test_processing_does_not_wake_the_model_at_import_time``.
+_MODEL_ROOT = "kika.nuclear_data.model"
 
-def _moduleScopeImports(path: Path) -> list[tuple[int, str]]:
-    """Forbidden imports that execute when the module is imported.
+
+def _is_model(dotted: str) -> bool:
+    return dotted == _MODEL_ROOT or dotted.startswith(_MODEL_ROOT + ".")
+
+
+def _moduleScopeImports(path: Path, predicate=_is_forbidden) -> list[tuple[int, str]]:
+    """Imports matching *predicate* that execute when the module is imported.
 
     "Module scope" means not lexically inside a ``def``/``async def``. A class
     body counts as module scope, because it runs at import time — that is the
@@ -378,7 +389,7 @@ def _moduleScopeImports(path: Path) -> list[tuple[int, str]]:
         if id(node) in deferred:
             continue
         for dotted in _resolve(node, path):
-            if _is_forbidden(dotted):
+            if predicate(dotted):
                 hits.append((node.lineno, dotted))
     return hits
 
@@ -481,3 +492,75 @@ def test_that_check_catches_a_hoisted_import(tmp_path, monkeypatch):
     monkeypatch.setattr(f"{__name__}.REPO_ROOT", tmp_path)
     with pytest.raises(AssertionError, match="module scope"):
         test_processing_pulls_no_format_package_in_at_import_time()
+
+
+# ---------------------------------------------------------------------------
+# The same property, for the model
+# ---------------------------------------------------------------------------
+
+def test_processing_does_not_wake_the_model_at_import_time():
+    """Phase 4's companion to the check above, and it guards a bigger number.
+
+    Phase 4 moves the calculations onto ``kika.nuclear_data.model``, so
+    ``kika/processing`` importing it is correct and expected — *at call time*.
+    At module scope it is a regression nothing else would notice, because
+    ``kika/__init__.py`` does ``from . import processing`` and would then build
+    ~3 400 lines of model on every ``import kika``: for the cluster pipeline,
+    the desktop app and every notebook, none of which asked to reconstruct
+    anything. ``test_deprecation_surface.py::test_the_model_is_still_dormant_after_the_facade``
+    would catch it, but only after the fact and from the far end of the
+    library; this says which file and which line.
+
+    Not folded into ``FORBIDDEN_ROOTS``: the model is not a format package and
+    a *count* of these imports is the wrong instrument. Deferred imports of it
+    are supposed to grow.
+    """
+    offenders: dict[str, list[tuple[int, str]]] = {}
+    for path in sorted((REPO_ROOT / _MUST_DEFER).rglob("*.py")):
+        if "tests" in path.parts:
+            continue
+        hits = _moduleScopeImports(path, predicate=_is_model)
+        if hits:
+            offenders[str(path.relative_to(REPO_ROOT))] = hits
+
+    assert not offenders, (
+        "these kika/processing modules import the GNDS model at module scope, "
+        "so `import kika` now builds the whole model:\n"
+        + "\n".join(
+            f"  {name}:{line} imports {dotted}"
+            for name, hits in offenders.items()
+            for line, dotted in hits
+        )
+        + "\nMove the import inside the function that needs it."
+    )
+
+
+def test_that_model_check_catches_a_hoisted_import(tmp_path, monkeypatch):
+    """It bites, and it does not fire on the deferred imports P1a actually wrote."""
+    package = tmp_path / "kika" / "processing"
+    package.mkdir(parents=True)
+
+    deferred = package / "deferred.py"
+    deferred.write_text(
+        "def go():\n"
+        "    from kika.nuclear_data.model.functions import XYs1d\n"
+        "    return XYs1d\n"
+    )
+    assert _moduleScopeImports(deferred, predicate=_is_model) == []
+
+    hoisted = package / "hoisted.py"
+    hoisted.write_text("from kika.nuclear_data.model.resonances import RMatrix\n")
+    assert _moduleScopeImports(hoisted, predicate=_is_model) == [
+        (1, "kika.nuclear_data.model.resonances")
+    ]
+
+    # The flat package is a different thing and is not what this checks: a
+    # module-scope `from kika.nuclear_data.cross_section import ...` is a
+    # deprecation question, not an import-cost one.
+    flat = package / "flat.py"
+    flat.write_text("from kika.nuclear_data.cross_section import CrossSection\n")
+    assert _moduleScopeImports(flat, predicate=_is_model) == []
+
+    monkeypatch.setattr(f"{__name__}.REPO_ROOT", tmp_path)
+    with pytest.raises(AssertionError, match="module scope"):
+        test_processing_does_not_wake_the_model_at_import_time()

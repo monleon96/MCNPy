@@ -232,6 +232,7 @@ def _decodeRange(energyRange, resonances: Resonances, report: ConversionReport,
             constant=getattr(parameters, "ap", None),
             energies=np.asarray(energyRange.ap_e.energies, dtype=float),
             values=np.asarray(energyRange.ap_e.ap_values, dtype=float),
+            interpolation=list(energyRange.ap_e.interpolation),
         )
     elif resonances.scatteringRadius is None and getattr(parameters, "ap", None) is not None:
         resonances.scatteringRadius = ScatteringRadius(constant=parameters.ap)

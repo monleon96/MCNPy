@@ -12,13 +12,16 @@ fires once per *name* on first access — never per instance (which would put th
 never at import (which would warn every consumer at once for a message none of
 them asked for).
 
-**What it does not fix.** ``kika.processing.reconstruct`` imports
-``kika.nuclear_data.cross_section`` and ``.resonance_parameters`` *by module
-path* at module scope, so those two still load on ``import kika`` regardless of
-this file. ``angular_distribution`` — 1000 lines, the largest of the four — and
-``nuclide_info`` genuinely stay out. Making the other two lazy means moving
-``reconstruct`` onto the model, which is phase 4. The test below pins the
-current state so the claim is a measurement.
+**What it does not fix.** ``kika.processing`` imports flat modules *by module
+path* at module scope, so those load on ``import kika`` regardless of this file.
+``angular_distribution`` — 1000 lines, the largest of the four — and
+``nuclide_info`` genuinely stay out.
+
+**Phase 4 P1a moved reconstruction onto the model**, and with it
+``resonance_parameters`` stopped loading: nothing on the ``import kika`` path
+reaches the flat resonance classes any more. ``cross_section`` still loads, now
+through ``njoy_reconstruct`` alone. The tests below pin both halves, so the
+claim stays a measurement rather than a memory.
 """
 from __future__ import annotations
 
@@ -141,12 +144,21 @@ def test_import_kika_no_longer_loads_the_two_biggest_flat_modules():
     assert "kika.nuclear_data.nuclide_info" not in loaded
 
 
-def test_the_other_two_still_load_and_here_is_who_pulls_them():
+def test_only_cross_section_still_loads_and_here_is_who_pulls_it():
     """Pinned so the partial win is not mistaken for the whole one.
 
-    ``kika.processing.reconstruct`` imports both by module path at module
-    scope. They will go lazy when phase 4 moves reconstruction onto the model,
-    and this test will then fail and should be tightened rather than deleted.
+    **Phase 4 took one of the two.** ``kika.processing.reconstruct`` used to
+    import ``cross_section`` and ``resonance_parameters`` by module path at
+    module scope; it now computes on the model and imports neither, so
+    ``resonance_parameters`` — the flat resonance classes, and the ones the
+    reconstruction actually read — no longer load on ``import kika`` at all.
+
+    ``cross_section`` still does, and the puller is named rather than left to be
+    grepped for: ``kika/processing/njoy_reconstruct.py:32``, which returns
+    ``Dict[int, CrossSection]``. Changing what it returns is phase 4's P2 — the
+    one-sigma-source increment — not P1, and it reaches the sampling drivers, so
+    it is sequenced behind the parallel migration's gate. This assertion is what
+    will go red when that lands, and it should be tightened again then.
     """
     output = _inSubprocess(
         "import kika\n"
@@ -154,8 +166,11 @@ def test_the_other_two_still_load_and_here_is_who_pulls_them():
     )
     loaded = eval(output)  # noqa: S307
 
+    assert "kika.nuclear_data.resonance_parameters" not in loaded, (
+        "the flat resonance classes are being pulled in again on import kika; "
+        "phase 4 P1a took them out by moving reconstruction onto the model"
+    )
     assert "kika.nuclear_data.cross_section" in loaded
-    assert "kika.nuclear_data.resonance_parameters" in loaded
 
 
 def test_the_model_is_still_dormant_after_the_facade():
