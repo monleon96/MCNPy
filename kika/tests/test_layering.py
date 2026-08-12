@@ -14,8 +14,10 @@ roadmap's phase 4 bullet is "extend the ratchet to ``kika/cov``: no
 ``kika.endf`` imports outside the encoders", and it belongs *before* the phase
 that rewrites ``CrossSectionCovariance`` and ``LegendreCovariance`` to read and
 write through ``CovarianceSuite`` — a net is worth nothing installed after the
-fall. Nothing in ``kika/cov`` was changed to add it; the seven imports it has
-today are written down as they are, which is what a ratchet is for.
+fall. Nothing in ``kika/cov`` was changed to add it; the seven imports it had
+then were written down as they were, which is what a ratchet is for. **Phase 4's
+P4 has since taken it to six** — see the note on ``legacy_mg_plotting.py``
+below.
 
 The phase-4 wording needs one gloss. "Outside the encoders" is not a rule this
 test can express, because ``kika/cov`` is not cleanly one layer: MF34 encoding
@@ -106,9 +108,11 @@ FORBIDDEN_ROOTS = ("kika.endf", "kika.ace")
 #: did not name a format type would not be writing ENDF. Deferred to call time
 #: like the rest, and it goes to zero with the flat classes at 1.0.
 #:
-#: **The three ``kika/cov`` entries are seeded, not earned**, and they are not
-#: all the same kind of thing — which is the point of listing them separately
-#: rather than quoting one total for the package.
+#: **The ``kika/cov`` entries are seeded, not earned**, and they are not all the
+#: same kind of thing — which is the point of listing them separately rather
+#: than quoting one total for the package. There were three; phase 4's P4 cut
+#: one, and the note on it is kept below because *why* it was cheap is the
+#: transferable part.
 #:
 #: ``legendre_covariance.py`` (4) is the one the roadmap protects. Three of the
 #: four are the MF34 *encoder* — ``to_mf34`` builds an ``MF34MT`` from
@@ -128,15 +132,20 @@ FORBIDDEN_ROOTS = ("kika.endf", "kika.ace")
 #: ENDF's property either. If phase 4 moves this grammar down, this entry goes
 #: to zero and no other line here changes.
 #:
-#: ``multigroup/legacy_mg_plotting.py`` (1) is the weakest and the cheapest to
-#: lose: a ``try``/``except`` around a **private** helper,
-#: ``kika.endf.classes.mf4.plotting._plot_uncertainty_bands``. It already fails
-#: soft — the ``except`` sets the name to ``None`` — so nothing breaks if it is
-#: cut. Reaching through a leading underscore into another package is the part
-#: worth recording; the module is named "legacy" and this is why.
+#: ``multigroup/legacy_mg_plotting.py`` (1) — **cut in phase 4's P4**, and it was
+#: the weakest of the three: a ``try``/``except`` around a **private** helper,
+#: ``kika.endf.classes.mf4.plotting._plot_uncertainty_bands``. What made it cheap
+#: was not the ``except`` but the helper itself — it never needed ENDF at all.
+#: Its ``mf34_covmat`` argument *is* a ``LegendreCovariance``, and its body is one
+#: call to ``get_uncertainties_for_legendre_coefficient``, a scan over that
+#: container's own row labels, and an ``ax.fill_between``. Calculation-layer
+#: drawing that happened to live in the format package. It moved to
+#: ``kika/plotting/covariance.py`` as ``plot_legendre_uncertainty_bands``; the
+#: old private name survives there as an alias for the two in-package callers.
+#: Reaching through a leading underscore into another package is the part worth
+#: recording, and it is now nobody's import.
 RUNTIME_ALLOWLIST: dict[str, int] = {
     "kika/cov/legendre_covariance.py": 4,
-    "kika/cov/multigroup/legacy_mg_plotting.py": 1,
     "kika/cov/parse_covmat.py": 1,
     "kika/nuclear_data/angular_distribution.py": 13,
     "kika/nuclear_data/cross_section.py": 3,
