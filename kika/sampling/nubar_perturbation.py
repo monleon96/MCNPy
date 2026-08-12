@@ -27,7 +27,14 @@ import numpy as np
 from kika._constants import NUBAR_TOTAL_MT, NUBAR_COMPONENT_MTS
 from kika.endf.parsers.parse_endf import parse_endf_file
 from kika.endf.writers.endf_writer import ENDFWriter, update_mf1_directory
-from kika.sampling.generators import generate_samples
+from kika.sampling.carrier_blocks import (
+    cross_section_carrier_blocks,
+    cross_section_carrier_index,
+)
+from kika.sampling.multigroup_draw import (
+    apply_legacy_autofix,
+    draw_relative_factors,
+)
 from kika.sampling.mf31_sampling import (
     build_mf31_covariance,
     perturb_nubar_family,
@@ -286,20 +293,38 @@ def _process_one_isotope(
     )
 
     # --- sample perturbation factors --------------------------------------
-    factors, mts_after_fix, fix_info = generate_samples(
-        cov,
-        n_samples=num_samples,
+    # No ``mt_thresholds`` on this path: nu-bar has no reaction threshold to
+    # straddle, so the targeted rescale never applies and only the outlier
+    # rescale and the cap do.
+    cov, mts_after_fix, fix_info = apply_legacy_autofix(
+        cov, autofix,
+        mt_numbers=mts_present,
+        verbose=verbose_diagnostics > 0,
+        logger=log,
+    )
+    (block_key, joint), = cross_section_carrier_blocks(cov)
+    (_key, block_index), = cross_section_carrier_index(cov).items()
+    factors, draw_info = draw_relative_factors(
+        joint,
+        num_samples,
+        key=block_key,
+        pairs=block_index["pairs"],
+        stride=block_index["stride"],
+        bins=union_grid,
         space=space,
         decomposition_method=decomposition_method,
         sampling_method=sampling_method,
         seed=seed,
-        mt_numbers=mts_present,
-        energy_grid=union_grid,
-        autofix=autofix,
         psd_method=psd_method,
         max_relative_std=max_relative_std,
         verbose=verbose_diagnostics > 0,
+        logger=log,
         label=str(zaid),
+    )
+    log.info(
+        f"  [INFO] [NUBAR] zaid={zaid}: conditioning plan = "
+        f"{[s.remedy for s in draw_info['plan'].steps] or ['none']}, "
+        f"{draw_info['n_inert_dropped']} inert bin(s) dropped"
     )
     if mts_after_fix is not None and list(mts_after_fix) != list(mts_present):
         log.info(

@@ -240,6 +240,95 @@ def _resolve_psd_auto(
     return resolved, eigvals, eigvecs
 
 
+def clip_projection(
+    matrix: np.ndarray,
+    *,
+    floor: float = 0.0,
+    symmetrise: bool = True,
+    passthrough_when_clean: bool = False,
+    eigvals: Optional[np.ndarray] = None,
+    eigvecs: Optional[np.ndarray] = None,
+    verbose: bool = True,
+    logger=None,
+    label: str = "clip",
+) -> Tuple[np.ndarray, Dict]:
+    """``V·max(Λ, floor)·Vᵀ`` — the PSD projection, written down once.
+
+    Four copies of these three lines were in the tree: two inside
+    :func:`nearest_psd_higham`, one inside :func:`clip_and_rescale`, one inside
+    :func:`svd_decomposition`, and a fifth in
+    :func:`kika.cov.conditioning._clipped`. Consolidating them turned up
+    something worth stating rather than quietly averaging away: **they were not
+    the same projection.** They differ in three ways, each of which is
+    load-bearing at the last bits, so each is a parameter here and every call
+    site keeps exactly the arithmetic it had.
+
+    * *floor*. Higham and ``clip_rescale`` clip to ``eigval_floor`` (a small
+      positive number), the sampling paths clip to ``0.0``. A strictly positive
+      floor makes the result positive *definite* rather than semi-definite,
+      which is what a Cholesky downstream needs and what an SVD does not.
+    * *symmetrise*. ``(V·Λ·Vᵀ + ·ᵀ)/2`` is not a no-op: the product is
+      mathematically symmetric and numerically is not, and Higham's inner loop
+      deliberately skips the fold-up because Dykstra's correction is taken on
+      the raw projection.
+    * *passthrough_when_clean*. ``svd_decomposition`` leaves a matrix with no
+      negative eigenvalue **untouched** rather than rebuilding it from its own
+      eigendecomposition. That is what makes ``psd_method="clip"`` a true no-op
+      on an already-PSD matrix, and it is what
+      :func:`kika.cov.conditioning.apply_plan` has to reproduce for a
+      conditioned matrix drawn with ``psd_method="none"`` to be bit-identical
+      to the same matrix drawn with ``psd_method="clip"``.
+
+    ``A @ np.diag(w)`` and ``A * w[None, :]`` are bit-identical for finite *A*
+    — the gemm adds exact zeros — so the two spellings the copies used are not
+    a fourth difference, and the faster one is used here.
+
+    Parameters
+    ----------
+    eigvals, eigvecs
+        A decomposition of *matrix* already in hand, reused rather than
+        recomputed. Callers that need the eigendecomposition for their own
+        reasons — ``psd_method="auto"``, which resolves on the spectrum, and
+        Higham's loop, which counts SVD fallbacks — pass it in.
+
+    Returns
+    -------
+    (matrix, info)
+        ``info`` carries ``n_negative``, ``min_eigenvalue`` and ``clipped``
+        (False when *passthrough_when_clean* returned the input unchanged).
+    """
+    if eigvals is None or eigvecs is None:
+        eigvals, eigvecs = _robust_eigh(matrix, label=label, verbose=verbose, logger=logger)
+
+    n_negative = int(np.sum(eigvals < 0))
+    info = {
+        "n_negative": n_negative,
+        "min_eigenvalue": float(eigvals.min()) if eigvals.size else 0.0,
+        "clipped": True,
+    }
+
+    if passthrough_when_clean and n_negative == 0:
+        info["clipped"] = False
+        if verbose:
+            _log_message(
+                f"[COV] [{label.upper()}] No negative eigenvalues - matrix left as it stands",
+                logger, verbose,
+            )
+        return matrix, info
+
+    if verbose and n_negative:
+        _log_message(
+            f"[COV] [{label.upper()}] Clipped {n_negative} negative eigenvalues "
+            f"(min={info['min_eigenvalue']:.3e})",
+            logger, verbose,
+        )
+
+    projected = (eigvecs * np.maximum(eigvals, floor)[None, :]) @ eigvecs.T
+    if symmetrise:
+        projected = (projected + projected.T) / 2.0
+    return projected, info
+
+
 def cap_variance_congruence(
     cov_mat: np.ndarray,
     max_variance: float,
@@ -936,9 +1025,12 @@ def nearest_psd_higham(
     # ------------------------------------------------------------------
     if not preserve_diagonal:
         w, V = _robust_eigh(A_sym, label="Higham clip", verbose=verbose, logger=logger)
-        w_clipped = np.maximum(w, eigval_floor)
-        X = (V * w_clipped[None, :]) @ V.T
-        X = (X + X.T) / 2.0
+        # `verbose=False` on the projection itself: this branch logs its own
+        # summary below, and the eigendecomposition above has already logged
+        # whatever it had to say.
+        X, _clip_info = clip_projection(
+            A_sym, floor=eigval_floor, eigvals=w, eigvecs=V, verbose=False,
+        )
         eigvals_after = _robust_eigvalsh(X, label="Higham clip result", verbose=verbose, logger=logger)
         frob_dist = float(np.linalg.norm(X - A_sym, "fro"))
         frob_orig = float(np.linalg.norm(A_sym, "fro"))
@@ -981,8 +1073,13 @@ def nearest_psd_higham(
         if _robust_eigh.used_svd:
             n_svd_iterations += 1
             svd_fallback_logged = True
-        w_clipped = np.maximum(w, eigval_floor)
-        X_psd = (V * w_clipped[None, :]) @ V.T
+        # No fold-up to symmetry here, deliberately: Dykstra's correction is
+        # taken on the raw projection, and `_robust_eigh` is not called again
+        # because this loop counts its SVD fallbacks itself.
+        X_psd, _clip_info = clip_projection(
+            R, floor=eigval_floor, symmetrise=False,
+            eigvals=w, eigvecs=V, verbose=False,
+        )
 
         # Dykstra correction
         D_S = X_psd - R
@@ -1151,9 +1248,9 @@ def clip_and_rescale(
         M, label="clip_rescale", verbose=verbose, logger=logger,
     )
     n_negative = int(np.sum(eigvals < 0))
-    clipped = np.maximum(eigvals, eigval_floor)
-    projected = (eigvecs * clipped[None, :]) @ eigvecs.T
-    projected = (projected + projected.T) * 0.5
+    projected, _clip_info = clip_projection(
+        M, floor=eigval_floor, eigvals=eigvals, eigvecs=eigvecs, verbose=False,
+    )
 
     before = np.max(np.abs(np.diag(projected) - original)) if original.size else 0.0
 
@@ -1561,16 +1658,17 @@ def svd_decomposition(
     elif psd_method == "clip":
         if eigvals_auto is None:
             eigvals_auto, eigvecs_auto = _robust_eigh(M, label="SVD clip", verbose=verbose, logger=logger)
-        n_negative = int(np.sum(eigvals_auto < 0))
-
-        if n_negative > 0:
-            min_eigval = float(np.min(eigvals_auto))
-            if verbose:
-                _log_message(f"[COV] [SVD] Clipped {n_negative} negative eigenvalues before SVD (min={min_eigval:.3e})", logger, verbose)
-            eigvals_clipped = np.clip(eigvals_auto, 0.0, None)
-            M = eigvecs_auto @ np.diag(eigvals_clipped) @ eigvecs_auto.T
-        elif verbose:
-            _log_message("[COV] [SVD] No negative eigenvalues - applying SVD directly", logger, verbose)
+        # `passthrough_when_clean`: an already-PSD matrix is handed to the SVD
+        # untouched rather than rebuilt from its own eigendecomposition, which
+        # is what makes this path a true no-op there. `kika.cov.conditioning.
+        # apply_plan` reproduces exactly this, so a matrix conditioned ahead of
+        # the draw and then drawn with psd_method="none" is bit-identical to
+        # the same matrix drawn with psd_method="clip".
+        M, _clip_info = clip_projection(
+            M, floor=0.0, symmetrise=False, passthrough_when_clean=True,
+            eigvals=eigvals_auto, eigvecs=eigvecs_auto,
+            verbose=verbose, logger=logger, label="SVD",
+        )
 
     U, S, Vt = np.linalg.svd(M, full_matrices=full_matrices)
 

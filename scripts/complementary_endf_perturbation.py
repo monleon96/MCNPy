@@ -24,13 +24,17 @@ import re
 import sys
 import numpy as np
 
-from kika.sampling.generators import generate_endf_samples
+from kika.sampling.core import draw_samples
+from kika.sampling.model_blocks import (
+    legendre_covariance_blocks,
+    legendre_covariance_index,
+)
 from kika.endf.parsers.parse_endf import parse_endf_file
 from kika.endf.writers.endf_writer import ENDFWriter
 from kika.sampling.endf_perturbation import (
-    load_mf34_covariance,
-    _filter_mf34_covariance,
-    _create_parameter_mapping,
+    load_mf34_suite,
+    _mf34_available,
+    _parameter_mapping_from_index,
     _mask_factors_by_energy_range,
     apply_perturbation_factors_to_endf,
     _write_master_perturbation_file,
@@ -385,24 +389,28 @@ def run_complementary_perturbation(
     #  Step 2: Load and filter reference covariance
     # ------------------------------------------------------------------
     _logger.info(f"\n[COMPLEMENTARY] Loading reference MF34 covariance ...")
-    mf34_cov = load_mf34_covariance(reference_cov_file)
-    if mf34_cov is None:
+    suite = load_mf34_suite(reference_cov_file)
+    if suite is None:
         raise RuntimeError(
             f"Failed to load MF34 covariance from {reference_cov_file}. "
             "Ensure the file contains a valid MF34 section."
         )
 
-    filtered_cov = _filter_mf34_covariance(mf34_cov, mt_list, legendre_coeffs)
-    if filtered_cov.num_matrices == 0:
-        available_mts = sorted(mf34_cov.reactions)
-        available_ls = sorted(mf34_cov.legendre_indices)
+    # `relative=True` matches what `_filter_mf34_covariance` did: absolute MF34
+    # sections do not describe a multiplicative factor and were always dropped.
+    selection = dict(mt=mt_list, orders=legendre_coeffs, relative=True)
+    blocks = legendre_covariance_blocks(suite, **selection)
+    index = legendre_covariance_index(suite, **selection)
+    if not blocks:
+        available_mts, available_ls = _mf34_available(suite)
         raise RuntimeError(
             f"No covariance data for requested MTs {mt_list} and L {legendre_coeffs}.\n"
             f"Available MTs: {available_mts}\n"
             f"Available L  : {available_ls}"
         )
 
-    param_mapping, energy_grids = _create_parameter_mapping(filtered_cov)
+    (block_key, _joint), = blocks
+    param_mapping, energy_grids = _parameter_mapping_from_index(index[block_key])
     _logger.info(f"[COMPLEMENTARY] Parameter mapping: {len(param_mapping)} entries "
                  f"({len(set((p[0],p[1],p[2]) for p in param_mapping))} triplets)")
 
@@ -410,16 +418,22 @@ def run_complementary_perturbation(
     #  Step 3: Generate perturbation factors
     # ------------------------------------------------------------------
     _logger.info(f"\n[COMPLEMENTARY] Generating {n_samples} perturbation samples ...")
-    factors, _, diagnostics = generate_endf_samples(
-        filtered_cov,
+    samples, diagnostics = draw_samples(
+        blocks,
         n_samples,
         space=space,
+        returns="factors",
         decomposition_method=decomposition_method,
         sampling_method=sampling_method,
         seed=seed,
-        mt_numbers=mt_list,
+        # Retained rather than truncated, so this script keeps drawing what it
+        # drew before the migration. Flipped with `perturb_ENDF_files`, against
+        # the same measurement, not separately.
+        null_tol=None,
+        dtype=np.float32,
         verbose=True,
     )
+    factors = samples[block_key]
     _logger.info(f"[COMPLEMENTARY] Factors shape: {factors.shape}")
 
     # ------------------------------------------------------------------

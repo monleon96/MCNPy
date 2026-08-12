@@ -15,7 +15,11 @@ import pandas as pd
 import shutil
 import tempfile
 
-from kika.sampling.generators import generate_endf_samples
+from kika.sampling.core import draw_samples
+from kika.sampling.model_blocks import (
+    legendre_covariance_blocks,
+    legendre_covariance_index,
+)
 from kika.cov.legendre_covariance import LegendreCovariance
 from kika.endf.parsers.parse_endf import parse_endf_file
 from kika.endf.writers.endf_writer import ENDFWriter
@@ -629,6 +633,92 @@ def load_mf34_covariance(path: str) -> Optional[LegendreCovariance]:
         return None
 
 
+def load_mf34_suite(path: str):
+    """Load *path*'s covariance as the format-agnostic ``CovarianceSuite``.
+
+    The replacement for :func:`load_mf34_covariance` on the sampling path, and
+    the reason this module now reaches the GNDS adapter at all. Same contract:
+    ``None`` on failure, with the reason logged, so the caller's per-file
+    bookkeeping is unchanged.
+
+    **The import is function-scope on purpose.** ``kika.endf.model_adapter``
+    pulls in the whole GNDS model, and ``kika.sampling`` is imported on every
+    cluster run; at module scope this would wake the model for callers that
+    never sample MF34. ``test_only_the_facades_and_the_front_door_import_the_adapter``
+    is the ratchet that holds this, and this module is on its allowlist.
+    """
+    from kika.endf.model_adapter import decodeCovarianceSuite
+
+    logger = _get_logger()
+    try:
+        if logger:
+            logger.info(f"  [INFO] [ENDF] Loading MF34 covariance from file: {path}")
+
+        endf = read_endf(path)
+        if endf.get_file(34) is None:
+            if logger:
+                logger.error(f"  [ERROR] [ENDF] No MF34 section found in file: {path}")
+            return None
+
+        suite, report = decodeCovarianceSuite(endf)
+        if logger:
+            for line in getattr(report, "unsupported", ()) or ():
+                logger.info(f"  [INFO] [ENDF] {line}")
+        return suite
+
+    except Exception as e:
+        if logger:
+            logger.error(f"  [ERROR] [ENDF] Failed to load MF34 covariance: {e}")
+        return None
+
+
+def _mf34_available(suite) -> Tuple[List[int], List[int]]:
+    """The MTs and Legendre orders *suite*'s MF34 sections mention.
+
+    What ``resolve_signed_request`` needs, and the suite-side replacement for
+    ``LegendreCovariance.reactions`` / ``.legendre_indices``. Read off the index
+    rather than by walking sections, so it agrees with what would actually be
+    assembled — including a component a file mentions only on the *column* of a
+    cross block.
+    """
+    index = legendre_covariance_index(suite)
+    if not index:
+        return [], []
+    triplets = next(iter(index.values()))["triplets"]
+    return (sorted({mt for _za, mt, _l in triplets}),
+            sorted({l for _za, _mt, l in triplets}))
+
+
+def _parameter_mapping_from_index(entry) -> Tuple[
+    List[Tuple[int, int, int, int]], Dict[Tuple[int, int, int], List[float]]
+]:
+    """A :func:`legendre_covariance_index` entry → what the appliers read.
+
+    The successor of ``_create_parameter_mapping``, and deliberately a pure
+    reshaping of what the index already says: ``triplets`` in row order, each
+    occupying ``stride`` rows, and the per-triplet union grids. Both facts are
+    the index's, so the flat layout can no longer disagree with the matrix the
+    draw came from — which it could when one was derived from a
+    ``LegendreCovariance`` and the other from the suite.
+
+    Note the uniform stride is preserved, padding included: a triplet whose own
+    grid is shorter than ``stride`` still gets ``stride`` entries. Those columns
+    are inert (their rows in the joint are all zero), and the appliers already
+    skip an ``energy_bin`` past the end of its grid.
+    """
+    stride = entry["stride"]
+    param_mapping = [
+        (za, mt, l_coeff, energy_bin)
+        for (za, mt, l_coeff) in entry["triplets"]
+        for energy_bin in range(stride)
+    ]
+    energy_grids = {
+        triplet: np.asarray(entry["grids"][triplet], dtype=float).tolist()
+        for triplet in entry["triplets"]
+    }
+    return param_mapping, energy_grids
+
+
 def perturb_ENDF_files(
     endf_files: Union[str, List[str]],
     mt_list: Union[List[int], List[List[int]]],
@@ -767,6 +857,36 @@ def perturb_ENDF_files(
     # Normalize space parameter: support both 'lin' and 'linear'
     if space.lower() == 'lin':
         space = 'linear'
+
+    # The two settings `generate_endf_samples` accepted and `draw_samples` does
+    # not mean the same thing by. Refused by name rather than quietly drawing
+    # something else, which is what carrying them over would have done.
+    #
+    # `space="log"`: the old path drew from `LegendreCovariance`'s *separately
+    # computed* log covariance. `draw_samples` decomposes the matrix it is
+    # handed and moment-matches against that same matrix, so asking it for a log
+    # draw of a linear covariance gives a distribution neither function
+    # describes. The suite has no log form to hand it, and MF34 stores Legendre
+    # coefficients that are routinely negative -- a log-space multiplicative
+    # factor is not obviously meaningful for them -- so this is not plugged with
+    # a transform until someone argues for what it should mean.
+    if space.lower() != "linear":
+        raise NotImplementedError(
+            f"space={space!r} is not available on the MF34 path. It drew from "
+            f"LegendreCovariance.log_covariance_matrix, which the covariance "
+            f"suite has no equivalent of; draw_samples would moment-match "
+            f"against the linear matrix instead and silently draw a third "
+            f"thing. Use space='linear'."
+        )
+    # `pca` truncates at 99.9 % of the variance and `cholesky` is refused
+    # outright by draw_samples: these covariances are rank deficient by
+    # construction, so a Cholesky factor is either a failure or a fiction.
+    if decomposition_method.lower() not in ("svd", "eigen"):
+        raise NotImplementedError(
+            f"decomposition_method={decomposition_method!r} is not available on "
+            f"the MF34 path; draw_samples offers 'svd' (the shipped setting) "
+            f"and 'eigen'."
+        )
 
     # Resolve higham_projection shorthand into psd_method. The two are
     # mutually exclusive — flagging both is a user error worth surfacing
@@ -954,19 +1074,18 @@ def perturb_ENDF_files(
             cov_file = mf34_cov_files[0] if len(mf34_cov_files) == 1 else mf34_cov_files[i]
             
             # Load covariance matrix
-            mf34_cov = load_mf34_covariance(cov_file)
-            if mf34_cov is None:
+            suite = load_mf34_suite(cov_file)
+            if suite is None:
                 _logger.error(f"  [ERROR] [ENDF] File {step_num}: Failed to load covariance matrix from {cov_file}")
                 failed_files_details[file_key] = "Failed to load MF34 covariance matrix"
                 failed_files += 1
                 step_elapsed = time.time() - step_t0
                 _logger.info(f"#-- END STEP {step_num} (elapsed: {step_elapsed:.1f}s) -------------------------------------")
                 continue
-            
+
             # Resolve positive/negative MT and L semantics against what's
             # actually in the MF34 file (typically only MT2 has data).
-            available_mts_in_cov = sorted(mf34_cov.reactions)
-            available_ls_in_cov = sorted(mf34_cov.legendre_indices)
+            available_mts_in_cov, available_ls_in_cov = _mf34_available(suite)
             mt_resolved, mt_log = resolve_signed_request(
                 list(mt_list or []), available_mts_in_cov, group_map=MT_GROUPS,
             )
@@ -992,41 +1111,71 @@ def perturb_ENDF_files(
                     f"{line.replace('Excluding entries:', 'Excluding L:')}"
                 )
 
-            # Filter covariance data by resolved MTs and Legendre coefficients
-            filtered_cov = _filter_mf34_covariance(mf34_cov, mt_resolved, l_resolved)
+            # Assemble the one covariance the file's MF34 sections partition,
+            # filtered to the resolved MTs and Legendre orders. The order filter
+            # is what keeps L=0 out, and on an `_a0cross` tape a0 is the section
+            # carrying the MF33 cross term on the magnitude grid -- so this is
+            # also what keeps two incompatible energy grids from meeting.
+            # `relative=True` reproduces `load_mf34_covariance`, which has always
+            # dropped absolute MF34 sections: the appliers multiply by what comes
+            # back, and an absolute covariance does not describe a factor.
+            blocks = legendre_covariance_blocks(
+                suite, mt=mt_resolved, orders=l_resolved, relative=True,
+            )
+            index = legendre_covariance_index(
+                suite, mt=mt_resolved, orders=l_resolved, relative=True,
+            )
 
-            if filtered_cov.num_matrices == 0:
+            if not blocks:
                 _logger.warning(f"  [WARN] [ENDF] File {step_num}: No covariance data found for requested MTs {mt_list} and L coefficients {legendre_coeffs}")
                 failed_files_details[file_key] = f"No covariance data for requested MTs {mt_list} and L coefficients {legendre_coeffs}"
                 failed_files += 1
                 step_elapsed = time.time() - step_t0
                 _logger.info(f"#-- END STEP {step_num} (elapsed: {step_elapsed:.1f}s) -------------------------------------")
                 continue
-            
+
+            (block_key, joint), = blocks
+            triplets = index[block_key]["triplets"]
+
             # Store which MTs and L coefficients will be perturbed
-            summary_data[file_key]['perturbed_mts'] = list(filtered_cov.reactions)
-            summary_data[file_key]['perturbed_l_coeffs'] = list(filtered_cov.legendre_indices)
-            
+            summary_data[file_key]['perturbed_mts'] = sorted({mt for _za, mt, _l in triplets})
+            summary_data[file_key]['perturbed_l_coeffs'] = sorted({l for _za, _mt, l in triplets})
+
             # Create parameter mapping and energy grids
-            param_mapping, energy_grids = _create_parameter_mapping(filtered_cov)
-            
+            param_mapping, energy_grids = _parameter_mapping_from_index(index[block_key])
+
             # Generate perturbation factors
             if verbose:
                 _logger.info(f"  [INFO] [ENDF] File {step_num}: Generating {num_samples} perturbation samples...")
-            
+                _logger.info(
+                    f"  [INFO] [ENDF] File {step_num}: joint covariance "
+                    f"{joint.shape[0]}x{joint.shape[0]} over {len(triplets)} "
+                    f"triplet(s), stride {index[block_key]['stride']}"
+                )
+
             try:
-                factors, _, diagnostic_results = generate_endf_samples(
-                    filtered_cov,
+                samples, diagnostic_results = draw_samples(
+                    blocks,
                     num_samples,
                     space=space,
+                    returns="factors",
                     decomposition_method=decomposition_method,
                     sampling_method=sampling_method,
                     seed=seed,
-                    mt_numbers=mt_list,
                     psd_method=psd_method,
+                    # Retain the null directions. Truncating to the retained rank
+                    # is `draw_samples`' default and is the better draw, but it
+                    # changes the QMC dimension and so moves every drawn column
+                    # -- 4218 -> 3603 on the shipped Fe-56 multigroup joint. It
+                    # is turned on in its own commit, against a measurement,
+                    # rather than as a side effect of changing which object the
+                    # covariance arrives in.
+                    null_tol=None,
+                    dtype=np.float32,
                     verbose=verbose,
                 )
-                
+                factors = samples[block_key]
+
                 _logger.info(f"  [INFO] [ENDF] File {step_num}: Successfully generated perturbation factors: shape {factors.shape}")
                 _logger.info(f">> factors_shape = {factors.shape}")
 
@@ -1236,18 +1385,30 @@ def perturb_ENDF_files(
 
                 _logger.info(f"    Number of samples generated: {data['num_samples']}")
 
-                # Sampling quality assessment
-                diagnostics = data.get('sampling_diagnostics')
-                if diagnostics and 'overall_status' in diagnostics:
-                    status = diagnostics['overall_status']
-                    tag_map = {
-                        "EXCELLENT": "[PASS]", "GOOD": "[PASS]",
-                        "ACCEPTABLE": "[WARN]", "POOR": "[WARN]", "CRITICAL": "[FAIL]",
-                    }
-                    tag = tag_map.get(status, "[INFO]")
-                    _logger.info(f"    Sampling Quality: {tag} {status}")
-                    if status in ("CRITICAL", "POOR", "ACCEPTABLE"):
-                        _logger.info(f"      -> See 'SAMPLING QUALITY ASSESSMENT' section above for details")
+                # Sampling quality assessment. `draw_samples` reports per block,
+                # and MF34 is one joint block -- so this reads the block out
+                # rather than looking for the old `overall_status` verdict, which
+                # no longer exists. What replaces it is not a grade but the
+                # numbers a grade was standing in for: how much of the matrix was
+                # actually spanned, and how well the draw reproduced it.
+                diagnostics = data.get('sampling_diagnostics') or {}
+                block = next(iter(diagnostics.values()), None)
+                if isinstance(block, dict) and 'rank' in block:
+                    _logger.info(
+                        f"    Sampling: rank {block['rank']} of {block['n']} "
+                        f"({block['n_null']} null direction(s)), seed {block['seed']}"
+                    )
+                    error = block.get('realised_covariance_error')
+                    if error is not None and np.isfinite(error):
+                        _logger.info(
+                            f"      realised covariance error on the retained "
+                            f"subspace: {error:.3e}"
+                        )
+                    if block['n_null']:
+                        _logger.info(
+                            f"      -> null directions were drawn in, not truncated "
+                            f"(null_tol=None)"
+                        )
                 else:
                     _logger.info("    Sampling Quality: [INFO] Not available (diagnostics disabled)")
 

@@ -14,6 +14,13 @@ regions, the real resonance parameters and the real TAB1 layout, quirks
 included. Trimming it further would mean rewriting TAB1 records, which would
 make the fixture kika's output rather than JEFF's.
 
+``micro_fe56_mf33.endf`` — real JEFF-4.0 Fe-56 again, cut the same verbatim way,
+keeping MF1/451, MF3 and MF33 for MT4 and MT16. It exists because the synthetic
+covariance fixture below is one MT wide, so nothing committed could exercise a
+**cross-reaction** assembly, and because the pair it keeps has no MT4×MT16 block
+— which is what makes the carrier's matrix half NaN and pins
+``docs/library-gaps.md`` D11.
+
 ``micro_fe56_cov.endf`` — synthetic, written by kika's own MF33/MF34 writers on
 a four-point grid. There is no cheap honest slice of the real MF33: Fe-56
 MT2 alone is 33 029 lines (~2.7 MB), and dropping energy bins from it means
@@ -65,6 +72,7 @@ COV = DATA / "micro_fe56_cov.endf"
 PFNS = DATA / "micro_cf252_pfns.endf"
 PFNS_COV = DATA / "micro_pfns_cov.endf"
 NUBAR = DATA / "micro_u235_nubar.endf"
+MF33 = DATA / "micro_fe56_mf33.endf"
 
 
 def mf32_fixture_path(key: str) -> Path:
@@ -75,6 +83,23 @@ REGEN = bool(os.environ.get("REGEN_MICRO_TAPES"))
 
 #: What the structural micro-tape keeps. Everything else is removed.
 KEEP = {1: {451}, 2: {151}, 3: {1, 2, 102}, 4: {2}, 34: {2}}
+
+#: What the MF33 micro-tape keeps, cut the same verbatim way from JEFF-4.0
+#: Fe-56. ``micro_fe56_cov.endf``'s MF33 is synthetic and one MT wide, so
+#: nothing committed could exercise a **cross-reaction** assembly — the case
+#: `cross_section_covariance_blocks` exists for.
+#:
+#: MT4 (inelastic) and MT16 (n,2n) are the two reactions on that tape whose
+#: MF33 is small: 1316 lines each, against 33 029 for MT2 and 33 032 for MT102.
+#: Keeping capture would mean a 3 MB fixture for the same lesson. MF3 comes
+#: along for the same reason it does in the PFNS cut — a covariance of a cross
+#: section wants the cross section — and it is what lets the absolute→relative
+#: conversion be exercised without a PENDF.
+#:
+#: The pair is also, by luck rather than design, the case that matters: the
+#: evaluation states **no** MT4×MT16 cross block, so the carrier's matrix comes
+#: back 50 % NaN and the fixture pins `docs/library-gaps.md` D11.
+KEEP_MF33 = {1: {451}, 3: {4, 16}, 33: {4, 16}}
 
 #: What the PFNS micro-tape keeps, cut the same verbatim way from
 #: ENDF/B-VIII.1 Cf-252. MF3/MT18 comes along because the fission cross section
@@ -164,17 +189,23 @@ def section_inventory(text: str) -> dict[int, dict[int, int]]:
 # Builders
 # ---------------------------------------------------------------------------
 
-def build_structural(source: Path, dest: Path) -> None:
-    """Cut *source* down to ``KEEP`` and write it to *dest*, verbatim."""
+def build_structural(source: Path, dest: Path, keep: dict = None) -> None:
+    """Cut *source* down to *keep* and write it to *dest*, verbatim.
+
+    *keep* defaults to ``KEEP``; ``KEEP_MF33`` cuts the second Fe-56 fixture
+    from the same host tape by the same rule, which is why this takes a
+    parameter rather than there being two near-identical builders.
+    """
+    keep = KEEP if keep is None else keep
     content = source.read_text()
     inventory = section_inventory(content)
 
     to_remove: list[tuple[int, int | None]] = []
     for mf, mts in sorted(inventory.items()):
-        if mf not in KEEP:
+        if mf not in keep:
             to_remove.append((mf, None))
             continue
-        for mt in sorted(set(mts) - KEEP[mf]):
+        for mt in sorted(set(mts) - keep[mf]):
             to_remove.append((mf, mt))
 
     trimmed, n_removed = remove_sections(content, to_remove)
@@ -417,6 +448,7 @@ def test_regenerate_micro_tapes(fe56_host_tape, cf252_b81_tape, u235_b81_tape, r
     """Rebuild every fixture from its source. Opt-in, then commit the diff."""
     DATA.mkdir(parents=True, exist_ok=True)
     build_structural(Path(fe56_host_tape), STRUCTURAL)
+    build_structural(Path(fe56_host_tape), MF33, keep=KEEP_MF33)
     build_cov(COV)
     build_pfns(Path(cf252_b81_tape), PFNS)
     build_pfns_cov(PFNS_COV)
@@ -424,13 +456,47 @@ def test_regenerate_micro_tapes(fe56_host_tape, cf252_b81_tape, u235_b81_tape, r
     for key, tape in MF32_FIXTURES.items():
         source = request.getfixturevalue(f"{tape}_tape")
         build_mf32(Path(source), mf32_fixture_path(key))
-    assert all(p.stat().st_size > 0 for p in (STRUCTURAL, COV, PFNS, PFNS_COV, NUBAR))
+    assert all(p.stat().st_size > 0
+               for p in (STRUCTURAL, MF33, COV, PFNS, PFNS_COV, NUBAR))
     assert all(mf32_fixture_path(k).stat().st_size > 0 for k in MF32_FIXTURES)
 
 
 # ---------------------------------------------------------------------------
 # What the committed fixtures must satisfy
 # ---------------------------------------------------------------------------
+
+def test_mf33_inventory_is_exactly_what_we_kept():
+    """The cross-reaction fixture kept MF3 and MF33 for MT4 and MT16, nothing else."""
+    inventory = section_inventory(MF33.read_text())
+    assert set(inventory) == set(KEEP_MF33), (
+        f"MF set drifted: {sorted(inventory)} != {sorted(KEEP_MF33)}"
+    )
+    for mf, expected_mts in KEEP_MF33.items():
+        assert set(inventory[mf]) == expected_mts, f"MF{mf} MT set drifted"
+
+
+def test_mf33_parses_and_states_no_cross_block():
+    """Two reactions, and no covariance between them — which is the point.
+
+    The fixture earns its place by being the case the carrier cannot express:
+    `CrossSectionCovariance.covariance_matrix` leaves the unstated MT4xMT16
+    block as NaN. If a future JEFF revision started stating it, this fixture
+    would stop exercising `docs/library-gaps.md` D11 and would say so here
+    rather than by a distant test quietly passing for a new reason.
+    """
+    endf = read_endf(str(MF33))
+    assert endf.zaid == 26056
+    assert endf.mat == MAT
+    assert sorted(endf.files) == [1, 3, 33]
+
+    stated = set()
+    for mt, section in endf.files[33].sections.items():
+        covmat = section.to_xs_covmat()
+        for row, col in zip(covmat.reaction_rows, covmat.reaction_cols):
+            stated.add((int(row), int(col)))
+    assert (4, 4) in stated and (16, 16) in stated
+    assert (4, 16) not in stated and (16, 4) not in stated
+
 
 def test_structural_inventory_is_exactly_what_we_kept(micro_tape):
     """No section survived the cut that should not have, and none was lost."""

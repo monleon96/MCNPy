@@ -95,7 +95,24 @@ FACADE_IMPORTERS = {
 #: import. If the app ever calls ``perturb_pfns_files``, ``kika-api.spec``'s
 #: ``hiddenimports`` is where that has to be recorded.
 #:
-#: **Phase 4 P1a (2026-08-12) added the third.**
+#: **P1 of the sampling migration (2026-08-11) added the third.**
+#: ``kika/sampling/endf_perturbation.py`` reads MF34 into a ``CovarianceSuite``
+#: in ``load_mf34_suite``, for the same reason the PFNS entry above does: the
+#: library's format-agnostic covariance object is the GNDS one, and the
+#: alternative was keeping ``LegendreCovariance`` on the sampling path forever.
+#: The import is inside the function, so ``import kika.sampling`` still does not
+#: wake the model.
+#:
+#: **The frozen build was checked, and this one is a live app path** — unlike the
+#: PFNS entry. kika-api's ``routers/sampling.py`` imports ``perturb_ENDF_files``
+#: at module scope and calls it, so the adapter really is reached in the frozen
+#: binary. It needs no spec change *only* because ``kika.endf.model_adapter``
+#: and ``kika.nuclear_data.model`` are already in ``kika-api.spec``'s
+#: ``hiddenimports`` from phase 3d (spec lines 143-146). Verified 2026-08-11 —
+#: if those entries are ever removed, this endpoint breaks in the frozen build
+#: and nowhere else.
+#:
+#: **Phase 4 P1a (2026-08-12) added the fourth.**
 #: ``kika/endf/processing/reconstruct.py`` is the ENDF adapter for resonance
 #: reconstruction: MF2/151 in, ``MF3MT`` out. The physics moved onto the model,
 #: so the middle of that sandwich is now ``decodeMF2MT151`` — which makes this
@@ -114,6 +131,7 @@ FACADE_IMPORTERS = {
 PERMANENT_IMPORTERS = {
     "kika/_read.py",
     "kika/sampling/mf35_sampling.py",
+    "kika/sampling/endf_perturbation.py",
     "kika/endf/processing/reconstruct.py",
 }
 

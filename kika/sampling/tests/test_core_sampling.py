@@ -111,6 +111,33 @@ def test_rank_deficiency_is_recorded_and_not_repaired():
     assert info["null_fraction"] == pytest.approx(0.7)
 
 
+def test_null_tol_none_draws_in_every_direction_and_still_counts_the_null_ones():
+    """The migration escape hatch, and the honesty it is required to keep.
+
+    A migrated call site has to be able to prove it draws what the code it
+    replaces drew, and truncation makes that impossible to prove: it changes the
+    QMC dimension from *n* to the rank, so every drawn column moves and none of
+    the difference can be attributed. ``null_tol=None`` retains everything so
+    the comparison is a real one.
+
+    What it must **not** do is report full rank. The counts stay at
+    ``DEFAULT_NULL_TOL`` and describe the matrix, not the subspace this draw
+    happened to use — otherwise the diagnostics of a gate run would claim a rank
+    deficiency had gone away.
+    """
+    matrix = psd(20, 6, 2)
+
+    kept, info = draw_samples([matrix], 32, seed=1, null_tol=None, verbose=False)
+    truncated, _ = draw_samples([matrix], 32, seed=1, verbose=False)
+
+    assert info[0]["rank"] == 6
+    assert info[0]["n_null"] == 14
+
+    # Drawn in 20 directions rather than 6, so the draw itself is a different
+    # one -- which is the whole reason the two cannot land in the same commit.
+    assert not np.allclose(kept[0], truncated[0])
+
+
 def test_a_component_with_no_stated_variance_gets_no_delta():
     """The reason the decomposition is truncated to the retained rank.
 
