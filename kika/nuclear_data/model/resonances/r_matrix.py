@@ -106,6 +106,21 @@ class RMatrix:
     spinGroups: List[RMatrixSpinGroup] = field(default_factory=list)
     PoPs: Optional[object] = None
     label: Optional[str] = None
+    #: The range's own scattering radius — ENDF's **AP**, the scalar on the range
+    #: record. :class:`~.breit_wigner.BreitWigner` and
+    #: :class:`~.tabulated_widths.TabulatedWidths` have carried this since 3b and
+    #: ``RMatrix`` did not, which left the Reich-Moore range's AP reachable only
+    #: through ``Resonances.scatteringRadius`` — a **file-level** slot filled by
+    #: whichever range happened to be first. For the single-range tapes to hand
+    #: those are the same number; for a file whose ranges declare different radii
+    #: they are not, and a reconstruction reading the file-level one would use
+    #: another range's radius without saying so. Added in phase 4, additively:
+    #: the encoder writes AP from provenance, so no round trip moves.
+    #:
+    #: Per-*channel* radii (ENDF's APL under LRF=3, APT/APE under LRF=7) are a
+    #: different quantity and stay on :class:`Channel`, which is where §19.3.4
+    #: puts them.
+    scatteringRadius: Optional[float] = None
     boundaryCondition: Optional[str] = None
     #: §19.3.1. ENDF's **IFG**. ``False`` — the default and the common case —
     #: means ``widths`` are widths in eV; ``True`` means they are reduced-width

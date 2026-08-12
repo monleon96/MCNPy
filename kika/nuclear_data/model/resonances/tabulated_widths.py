@@ -55,6 +55,15 @@ class TabulatedWidths:
     #: 1 = they are already in MF3 and these are for self-shielding only.
     selfShieldingOnly: bool = False
     label: Optional[str] = None
+    #: §19.4.1's local ``PoPs``, holding the target and — the part that matters
+    #: for a calculation — its **spin**. The URR cross sections carry the same
+    #: ``g_J = (2J+1) / (2(2I+1))`` factor the resolved region does, so a
+    #: reconstructor needs I here as much as there. The resolved formalisms
+    #: (:class:`~.breit_wigner.BreitWigner`, :class:`~.r_matrix.RMatrix`) have
+    #: carried this field since 3b; the unresolved one did not, which made the
+    #: two halves of the same calculation ask for the same number in different
+    #: ways. Added in phase 4.
+    PoPs: Optional[object] = None
 
     def __post_init__(self) -> None:
         if self.energyGrid is not None:

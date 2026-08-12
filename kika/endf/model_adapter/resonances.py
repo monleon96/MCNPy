@@ -39,6 +39,9 @@ from kika.nuclear_data.model import (
     EndfProvenance,
     BreitWignerApproximation,
     ConversionReport,
+    Nuclide,
+    PhysicalQuantity,
+    PoPs,
     Resonances,
     ResolvedRegion,
     ScatteringRadius,
@@ -161,6 +164,59 @@ def _rangeFields(energyRange, isotope, isotopeIndex: int) -> dict:
     }
 
 
+def _targetPoPs(spi, za) -> Optional[PoPs]:
+    """The target nuclide and its spin, as the formalism's own ``PoPs`` (§19.3.1).
+
+    **Why the formalism and not the suite.** ENDF writes SPI on every energy
+    *range*, and reconstruction needs it: the statistical factor is
+    ``g_J = (2J+1) / (2(2I+1))``, so a wrong I is a wrong cross section rather
+    than a wrong label. GNDS's home for it is a local ``PoPs`` on the resonance
+    formalism, and this is not inferred — the shipped ENDF/B-VIII.1 GNDS
+    distribution writes exactly that for Fe-56::
+
+        <RMatrix label="eval" approximation="ReichMoore" ...>
+          <PoPs name="resolved resonances" version="1.0" format="2.0">
+            ... <nucleus id="fe56" index="0">
+                  <spin><fraction label="eval" value="0" unit="hbar"/></spin>
+
+    Keeping it per range also keeps a file whose ranges disagree representable,
+    which a single suite-level spin would not.
+
+    **The duplication with provenance is deliberate and one-directional.**
+    ``headerFields['regions'][i]['spi']`` still holds SPI and is still what
+    ``encodeMF2MT151`` writes, so this addition cannot move a byte of any
+    round trip. The model copy is what a *calculation* reads, because a
+    reconstructor that has to open an ENDF provenance to find a spin is not
+    format-agnostic. If the two ever need to disagree, provenance is the file
+    and the model is the physics — but nothing edits either today.
+    """
+    if spi is None:
+        return None
+
+    identifier = None
+    if za is not None:
+        try:
+            from kika._utils import zaid_to_symbol
+            identifier = zaid_to_symbol(int(round(float(za))))
+        except Exception:
+            identifier = None
+    if identifier is None:
+        identifier = "target"
+
+    pops = PoPs(name="resolved resonances")
+    zNumber, aNumber = None, None
+    if za is not None:
+        zaInt = int(round(float(za)))
+        zNumber, aNumber = divmod(zaInt, 1000)
+    pops.add(Nuclide(
+        id=identifier,
+        Z=zNumber,
+        A=aNumber,
+        spin=PhysicalQuantity(float(spi), "hbar"),
+    ))
+    return pops
+
+
 def _decodeRange(energyRange, resonances: Resonances, report: ConversionReport,
                  regions: Optional[List[dict]] = None, isotope=None,
                  isotopeIndex: int = 0) -> None:
@@ -201,10 +257,16 @@ def _decodeRange(energyRange, resonances: Resonances, report: ConversionReport,
         return
 
     if lru == 2:
+        tabulated = _decodeUnresolved(parameters, report, fields)
+        if tabulated is not None and tabulated.PoPs is None:
+            tabulated.PoPs = _targetPoPs(
+                fields.get("spi"),
+                getattr(isotope, "za", None) if isotope is not None else None,
+            )
         resonances.unresolved = UnresolvedRegion(
             domainMin=energyRange.el,
             domainMax=energyRange.eh,
-            tabulatedWidths=_decodeUnresolved(parameters, report, fields),
+            tabulatedWidths=tabulated,
         )
         keep("unresolved")
         return
@@ -231,6 +293,14 @@ def _decodeRange(energyRange, resonances: Resonances, report: ConversionReport,
     if formalism is None:
         keep("unsupported")
         return
+
+    # Additive: the encoder still writes SPI from provenance, so this cannot
+    # move a byte. It is what makes the range self-sufficient for a calculation.
+    if getattr(formalism, "PoPs", None) is None:
+        formalism.PoPs = _targetPoPs(
+            fields.get("spi"),
+            getattr(isotope, "za", None) if isotope is not None else None,
+        )
 
     resonances.resolved.append(ResolvedRegion(
         domainMin=energyRange.el,
@@ -374,6 +444,7 @@ def _decodeReichMoore(parameters, report: ConversionReport,
         approximation="ReichMoore",
         resonanceReactions=reactions,
         spinGroups=spinGroups,
+        scatteringRadius=parameters.ap,
     )
 
 

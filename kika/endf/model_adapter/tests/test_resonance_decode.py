@@ -285,6 +285,106 @@ def test_an_lrf7_evaluation_keeps_its_resonances(fe57_host_tape):
 
 
 # ---------------------------------------------------------------------------
+# What a *calculation* needs the range itself to carry
+# ---------------------------------------------------------------------------
+
+def test_the_target_spin_reaches_the_formalism_as_pops(decoded, mf2):
+    """ENDF's SPI, on the formalism's own ``PoPs`` (§19.3.1) rather than only in
+    provenance.
+
+    The statistical factor is ``g_J = (2J+1) / (2(2I+1))``, so the target spin
+    is an *input to the arithmetic*, not a label: a wrong I is a wrong cross
+    section. A reconstructor that has to open an ``EndfProvenance`` to find it
+    is not format-agnostic, which is the whole point of computing on the model.
+
+    The location is the shipped ENDF/B-VIII.1 GNDS distribution's, not an
+    inference — ``n-026_Fe_056.endf.gnds.xml`` writes it inside ``<RMatrix>``
+    as ``<PoPs name="resolved resonances">…<spin><fraction value="0"
+    unit="hbar"/>``. Per range rather than per suite, so a file whose ranges
+    disagree stays representable.
+    """
+    resonances, _ = decoded
+    formalism = resonances.resolved[0].formalism
+    spi = mf2.isotopes[0].energy_ranges[0].parameters.spi
+
+    assert formalism.PoPs is not None, "the range carries no target"
+    assert len(formalism.PoPs) == 1
+    target = formalism.PoPs["Fe56"]
+    assert (target.Z, target.A) == (26, 56)
+    assert target.spin.value == spi
+    assert target.spin.unit == "hbar"
+
+
+def test_a_spin_of_zero_is_a_spin_and_not_a_missing_one(decoded):
+    """Fe-56 has I = 0, and ``0.0`` is falsy.
+
+    This is the whole trap in the helper: ``if spi:`` would give even-even
+    targets — the structural-material case this thesis is about — no ``PoPs``
+    at all, and a reconstructor reading ``I = None`` would either guess or
+    raise on exactly the nuclides that matter most here. Only ``None`` means
+    the file said nothing.
+    """
+    resonances, _ = decoded
+    target = resonances.resolved[0].formalism.PoPs["Fe56"]
+    assert target.spin is not None
+    assert target.spin.value == 0.0
+
+
+def test_a_reich_moore_range_carries_the_radius_it_declared(decoded, mf2):
+    """AP on the *range*, not only on the file.
+
+    ``BreitWigner`` and ``TabulatedWidths`` have carried the range's own AP
+    since 3b and ``RMatrix`` did not, which left a Reich-Moore range's radius
+    reachable only through ``Resonances.scatteringRadius`` — a **file-level**
+    slot filled by whichever range was decoded first. On every tape to hand the
+    two are the same number, which is exactly why the gap was invisible; on a
+    file whose ranges declare different radii a reconstruction would have used
+    another range's radius without saying so.
+
+    Per-*channel* radii are a different quantity and stay on ``Channel``: the
+    assertion below is against the range record's AP, and
+    ``test_the_l_dependent_radius_reaches_the_channels`` owns APL.
+    """
+    resonances, _ = decoded
+    formalism = resonances.resolved[0].formalism
+    parameters = mf2.isotopes[0].energy_ranges[0].parameters
+
+    assert formalism.scatteringRadius == parameters.ap
+    assert resonances.scatteringRadius.constant == parameters.ap
+
+
+@pytest.mark.parametrize("tape", REAL_TAPES)
+def test_an_unresolved_region_carries_the_same_spin(request, tape):
+    """Under ``--deep``. The URR half of the same requirement.
+
+    The unresolved cross sections carry the same ``g_J`` factor the resolved
+    ones do, so ``urr_formulas`` needs I exactly as much as
+    ``resonance_formulas`` does. Before this the two halves of one calculation
+    asked for the same number in two different ways — the resolved half from
+    the formalism, the unresolved half from provenance.
+
+    Parametrized over every tape rather than one, with a skip for the files
+    that have no unresolved range — three of the six have one. The skip is a
+    real weakness and is worth stating: if the corpus ever lost its URR tapes
+    this would pass by checking nothing, and no other test in the suite asserts
+    that the corpus still covers LRU=2.
+    """
+    mf2 = read_endf(str(request.getfixturevalue(tape)), mf_numbers=[2]).mf[2].mt[151]
+    unresolvedRanges = [er for iso in mf2.isotopes for er in iso.energy_ranges
+                        if er.lru == 2]
+    if not unresolvedRanges:
+        pytest.skip(f"{tape} has no unresolved range")
+
+    resonances, _, _ = decodeMF2MT151(mf2)
+    widths = resonances.unresolved.tabulatedWidths
+    assert widths.PoPs is not None, f"{tape}: the unresolved region carries no target"
+    assert len(widths.PoPs) == 1
+    target = next(iter(widths.PoPs.particles.values()))
+    assert target.spin.value == unresolvedRanges[0].parameters.spi
+    assert target.spin.unit == "hbar"
+
+
+# ---------------------------------------------------------------------------
 # The formalism split — what ``c3..c6`` could not say
 # ---------------------------------------------------------------------------
 
