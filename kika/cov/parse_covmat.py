@@ -8,7 +8,7 @@ import pandas as pd
 from kika._constants import MT_TO_REACTION, ENDF_MAT_TO_ZAID, ZAID_TO_ENDF_MAT
 from kika.cov.cross_section_covariance import CrossSectionCovariance
 from kika.cov.legendre_covariance import LegendreCovariance
-from kika.endf.utils import (
+from kika._records import (
     parse_number, parse_line, parse_endf_id,
     format_endf_number, format_endf_data_line,
     ENDF_FORMAT_FLOAT, ENDF_FORMAT_INT,

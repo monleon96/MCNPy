@@ -121,16 +121,20 @@ FORBIDDEN_ROOTS = ("kika.endf", "kika.ace")
 #: format work, kept deliberately. The fourth (line 199) is ``read_endf`` in the
 #: reading direction. All four are deferred to call time.
 #:
-#: ``parse_covmat.py`` (1) is the genuine leak, and it is the only one of the
-#: seven that runs at **import** time. It takes ENDF's record grammar —
-#: ``parse_number``, ``parse_line``, ``parse_endf_id``, ``format_endf_number``,
-#: ``format_endf_data_line``, ``ENDF_FORMAT_FLOAT``, ``ENDF_FORMAT_INT`` — to
-#: read and write COVERX/COVFIL/BOXER, which are not ENDF files. They share a
-#: fixed-width record convention, so the dependency is real rather than lazy;
-#: but it is the same species as ``interpolate_1d_endf``, which phase 2 moved
-#: down to ``kika.processing`` precisely because the interpolation laws are not
-#: ENDF's property either. If phase 4 moves this grammar down, this entry goes
-#: to zero and no other line here changes.
+#: ``parse_covmat.py`` (1) — **gone, phase 4 P4, and it was the genuine leak**:
+#: the only import in ``kika/cov`` that ran at *import* time rather than at call
+#: time. It took ENDF's record grammar — ``parse_number``, ``parse_line``,
+#: ``parse_endf_id``, ``format_endf_number``, ``format_endf_data_line``,
+#: ``ENDF_FORMAT_FLOAT``, ``ENDF_FORMAT_INT`` — to read and write
+#: COVERX/COVFIL/BOXER, which are not ENDF files. They share a fixed-width
+#: record convention, so the dependency was real rather than lazy, and deferring
+#: it would have hidden the problem instead of fixing it. The grammar moved down
+#: to :mod:`kika._records` — the same species as ``interpolate_1d_endf``, which
+#: phase 2 moved to ``kika.processing`` precisely because the interpolation laws
+#: are not ENDF's property either. ``kika.endf.utils`` re-exports it, so the
+#: forty-odd importers inside ``kika/endf`` and the public-surface pin on
+#: ``parse_endf_id`` are untouched. The prediction written here — "this entry
+#: goes to zero and no other line here changes" — held exactly.
 #:
 #: ``multigroup/legacy_mg_plotting.py`` (1) — **cut in phase 4's P4**, and it was
 #: the weakest of the three: a ``try``/``except`` around a **private** helper,
@@ -146,7 +150,6 @@ FORBIDDEN_ROOTS = ("kika.endf", "kika.ace")
 #: recording, and it is now nobody's import.
 RUNTIME_ALLOWLIST: dict[str, int] = {
     "kika/cov/legendre_covariance.py": 4,
-    "kika/cov/parse_covmat.py": 1,
     "kika/nuclear_data/angular_distribution.py": 13,
     "kika/nuclear_data/cross_section.py": 3,
     "kika/nuclear_data/nuclide_info.py": 2,
@@ -343,10 +346,17 @@ def test_the_ratchet_catches_a_violation(tmp_path, monkeypatch):
 # The half the count cannot see: *when* those imports run
 # ---------------------------------------------------------------------------
 
-#: ``kika/processing`` modules whose ``kika.endf`` imports must stay inside a
-#: function body. All three genuinely need ``read_endf`` to parse a PENDF tape,
-#: so the dependency is real and only its *timing* is negotiable.
-_MUST_DEFER = "kika/processing"
+#: Packages whose ``kika.endf`` imports must stay inside a function body. The
+#: dependency is real in every case and only its *timing* is negotiable.
+#:
+#: ``kika/processing``'s three genuinely need ``read_endf`` to parse a PENDF
+#: tape. **``kika/cov`` joined in phase 4's P4**, and it could not have before:
+#: ``parse_covmat.py`` imported the record grammar at module scope, so this
+#: check would have failed on the day it was written. Deferring that import
+#: would have passed the check and left the leak; moving the grammar to
+#: ``kika._records`` removed it, and the check is what stops it coming back as a
+#: deferred import nobody counts.
+_MUST_DEFER = ("kika/processing", "kika/cov")
 
 #: The canonical model. Not a *format* package, so the ratchet above says
 #: nothing about it — and it must not, because ``kika/processing`` computing on
@@ -429,15 +439,16 @@ def test_processing_pulls_no_format_package_in_at_import_time():
     does. The property is statically decidable, so it is decided statically.
     """
     offenders: dict[str, list[tuple[int, str]]] = {}
-    for path in sorted((REPO_ROOT / _MUST_DEFER).rglob("*.py")):
-        if "tests" in path.parts:
-            continue
-        hits = _moduleScopeImports(path)
-        if hits:
-            offenders[str(path.relative_to(REPO_ROOT))] = hits
+    for package in _MUST_DEFER:
+        for path in sorted((REPO_ROOT / package).rglob("*.py")):
+            if "tests" in path.parts:
+                continue
+            hits = _moduleScopeImports(path)
+            if hits:
+                offenders[str(path.relative_to(REPO_ROOT))] = hits
 
     assert not offenders, (
-        "these kika/processing modules import a format package at module scope, "
+        "these modules import a format package at module scope, "
         "which re-closes the import cycle phase 2 opened:\n"
         + "\n".join(
             f"  {name}:{line} imports {dotted}"
@@ -523,17 +534,24 @@ def test_processing_does_not_wake_the_model_at_import_time():
     Not folded into ``FORBIDDEN_ROOTS``: the model is not a format package and
     a *count* of these imports is the wrong instrument. Deferred imports of it
     are supposed to grow.
+
+    **``kika/cov`` is covered too, since P4.** The number there is if anything
+    larger: ``import kika`` loads ``kika.cov`` — measured, not assumed — so a
+    module-scope model import in the multigroup collapse would wake the model
+    for the cluster pipeline and kika-app alike, exactly as it would from
+    ``kika/processing``.
     """
     offenders: dict[str, list[tuple[int, str]]] = {}
-    for path in sorted((REPO_ROOT / _MUST_DEFER).rglob("*.py")):
-        if "tests" in path.parts:
-            continue
-        hits = _moduleScopeImports(path, predicate=_is_model)
-        if hits:
-            offenders[str(path.relative_to(REPO_ROOT))] = hits
+    for package in _MUST_DEFER:
+        for path in sorted((REPO_ROOT / package).rglob("*.py")):
+            if "tests" in path.parts:
+                continue
+            hits = _moduleScopeImports(path, predicate=_is_model)
+            if hits:
+                offenders[str(path.relative_to(REPO_ROOT))] = hits
 
     assert not offenders, (
-        "these kika/processing modules import the GNDS model at module scope, "
+        "these modules import the GNDS model at module scope, "
         "so `import kika` now builds the whole model:\n"
         + "\n".join(
             f"  {name}:{line} imports {dotted}"
