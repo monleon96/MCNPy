@@ -53,6 +53,7 @@ from kika.cov.decomposition import (
     flag_threshold_bins,
 )
 from kika.sampling.core import draw_samples
+from kika.sampling.errors import CovarianceFixError, SoftAutofixWarning
 
 __all__ = [
     "CovarianceFixError",
@@ -60,22 +61,16 @@ __all__ = [
     "OUTLIER_FACTOR",
     "apply_legacy_autofix",
     "draw_relative_factors",
+    "mark_soft_autofix_survived",
     "pin_dropped_rows",
     "shipped_repair_plan",
+    "soft_autofix_missed",
 ]
 
 
 #: Variance above this multiple of its per-MT median is an evaluator artefact.
 #: The literal ``generate_samples`` passes to ``flag_outlier_variance_bins``.
 OUTLIER_FACTOR = 1000.0
-
-
-class CovarianceFixError(Exception):
-    """Autofix could not bring the covariance above the eigenvalue threshold."""
-
-
-class SoftAutofixWarning(Exception):
-    """Soft autofix missed the threshold; the decomposition is tried anyway."""
 
 
 # ---------------------------------------------------------------------------
@@ -460,3 +455,42 @@ def apply_legacy_autofix(
             surviving = [mt for mt in surviving if mt not in removed]
 
     return cov_fixed, surviving, fix_log
+
+
+def soft_autofix_missed(level: Optional[str], fix_info) -> bool:
+    """Did a ``soft`` autofix fall short of its own eigenvalue threshold?
+
+    ``generate_samples`` kept this as a local flag and it decided two things,
+    both of which now need a caller that spans the autofix and the draw,
+    because :func:`apply_legacy_autofix` runs before the draw and cannot see
+    it:
+
+    * a decomposition that **fails** after a soft miss is re-raised as
+      :class:`SoftAutofixWarning`, so the ACE pipelines skip the isotope with
+      a diagnosis instead of taking the run down;
+    * a decomposition that **succeeds** after a soft miss gets
+      :func:`mark_soft_autofix_survived` called on its ``fix_info``, which is
+      what puts the "λ_min below threshold but decomposition succeeded" line
+      in the ACE run summary.
+    """
+    if level is None or not isinstance(fix_info, dict):
+        return False
+    return (
+        level.lower() == "soft"
+        and not fix_info.get("converged", False)
+        and not fix_info.get("soft_threshold_met", True)
+    )
+
+
+def mark_soft_autofix_survived(fix_info) -> None:
+    """Stamp the two keys the ACE summaries read, after a draw that worked.
+
+    ``generate_samples`` set these on its very last lines, *after* the
+    decomposition returned — so a soft miss whose decomposition then failed
+    never carried them, and neither does this. The distinction is the whole
+    content of the flag: ACE reports "missed the threshold but drew anyway",
+    which is only true once the draw has happened.
+    """
+    if isinstance(fix_info, dict) and fix_info:
+        fix_info["soft_autofix_failed"] = True
+        fix_info["decomposition_succeeded"] = True

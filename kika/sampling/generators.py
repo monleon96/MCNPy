@@ -327,13 +327,14 @@ def _pca_decomposition_sampling(
 # ----------------------------------------------------------------------
 #  Custom Exceptions
 # ----------------------------------------------------------------------
-class CovarianceFixError(Exception):
-    """Exception raised when covariance matrix cannot be fixed to meet eigenvalue threshold."""
-    pass
-
-class SoftAutofixWarning(Exception):
-    """Warning raised when soft autofix doesn't meet threshold but decomposition should still be attempted."""
-    pass
+# Defined in ``errors`` and re-exported here. This module is being retired and
+# the callers that catch these have already moved to ``multigroup_draw``; one
+# object under both names is what lets a caller that imports either one catch
+# what the other raises while the two draws coexist.
+from kika.sampling.errors import (  # noqa: E402,F401
+    CovarianceFixError,
+    SoftAutofixWarning,
+)
 
 
 # ----------------------------------------------------------------------

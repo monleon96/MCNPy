@@ -16,7 +16,6 @@ import shutil
 import tempfile
 
 from kika.sampling.core import draw_samples
-from kika.sampling.generators import generate_endf_samples
 from kika.sampling.model_blocks import (
     legendre_covariance_blocks,
     legendre_covariance_index,

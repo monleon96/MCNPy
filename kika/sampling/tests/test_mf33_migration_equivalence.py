@@ -303,3 +303,79 @@ def test_a_wholly_inert_block_raises_rather_than_drawing_nothing(carrier):
             np.zeros_like(matrix), N_SAMPLES, key=key, pairs=meta["pairs"],
             stride=meta["stride"], bins=grid, seed=SEED, verbose=False,
         )
+
+
+# ---------------------------------------------------------------------------
+# What the ACE call sites need that the draw does not: the autofix seam
+# ---------------------------------------------------------------------------
+# `generate_samples` carried `soft_autofix_failed` as a local flag spanning the
+# fix and the decomposition, and both ACE pipelines read the consequences. The
+# migration splits those two steps across a call site, so the flag has to
+# survive the split — and it decides two separate things, one on each branch.
+
+
+def test_the_two_exception_classes_are_one_object_under_both_names():
+    """A caller catching `generators`' must catch what `multigroup_draw` raises.
+
+    They coexist for as long as the equivalence gate does. If these ever became
+    two classes, an ACE isotope whose soft autofix missed would stop being a
+    skipped isotope with a diagnosis and become an unhandled exception that
+    takes the whole run down.
+    """
+    from kika.sampling import errors, generators, multigroup_draw
+
+    assert (generators.CovarianceFixError
+            is multigroup_draw.CovarianceFixError
+            is errors.CovarianceFixError)
+    assert (generators.SoftAutofixWarning
+            is multigroup_draw.SoftAutofixWarning
+            is errors.SoftAutofixWarning)
+
+
+@pytest.mark.parametrize("level,fix_info,expected", [
+    (None, {"converged": False, "soft_threshold_met": False}, False),
+    ("soft", None, False),
+    ("soft", {"converged": True, "soft_threshold_met": False}, False),
+    ("soft", {"converged": False, "soft_threshold_met": True}, False),
+    ("soft", {"converged": False, "soft_threshold_met": False}, True),
+    ("SOFT", {"converged": False, "soft_threshold_met": False}, True),
+    ("medium", {"converged": False, "soft_threshold_met": False}, False),
+])
+def test_soft_autofix_missed_is_generate_samples_condition(level, fix_info, expected):
+    from kika.sampling.multigroup_draw import soft_autofix_missed
+
+    assert soft_autofix_missed(level, fix_info) is expected
+
+
+def test_the_survivor_stamp_is_the_two_keys_the_ace_summaries_read():
+    """`generate_samples` set these on its last lines; the ACE summaries read
+    them to write "λ_min below threshold but decomposition succeeded"."""
+    from kika.sampling.multigroup_draw import mark_soft_autofix_survived
+
+    fix_info = {"converged": False, "soft_threshold_met": False,
+                "min_eigenvalue": -1.0}
+    mark_soft_autofix_survived(fix_info)
+    assert fix_info["soft_autofix_failed"] is True
+    assert fix_info["decomposition_succeeded"] is True
+
+    # `if soft_autofix_failed and fix_info` — an autofix that never ran has no
+    # dict to stamp, and stamping one would report a fix that did not happen.
+    for empty in (None, {}):
+        mark_soft_autofix_survived(empty)
+        assert not empty
+
+
+def test_autofix_none_is_the_identity_the_kika_configs_rely_on(carrier):
+    """Every kika-side configuration passes ``autofix=None``.
+
+    On that path `apply_legacy_autofix` must hand back the same object, not a
+    copy and not a repaired matrix — the migrated call sites go on to assemble
+    carrier blocks from whatever it returns.
+    """
+    from kika.sampling.multigroup_draw import apply_legacy_autofix
+
+    cov, _grid, present = carrier
+    same, mts, fix_info = apply_legacy_autofix(cov, None, mt_numbers=present)
+    assert same is cov
+    assert mts == list(present)
+    assert fix_info is None

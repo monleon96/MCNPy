@@ -34,11 +34,18 @@ from kika.processing.njoy_pendf_cache import (
     DEFAULT_PENDF_CACHE_DIR,
     get_or_create_pendf,
 )
-from kika.sampling.generators import generate_samples
+from kika.sampling.carrier_blocks import (
+    cross_section_carrier_blocks,
+    cross_section_carrier_index,
+)
 from kika.sampling.mf33_sampling import (
     apply_factors_to_pendf_mf3,
     extract_mt_param_blocks,
     load_mf33_covariance,
+)
+from kika.sampling.multigroup_draw import (
+    apply_legacy_autofix,
+    draw_relative_factors,
 )
 from kika.sampling.utils import (
     DualLogger,
@@ -410,25 +417,52 @@ def _process_one_isotope(
                     mt_thresholds[mt] = float(positive[0])
 
     # --- Stage A.5: sample perturbation factors -----------------------
-    factors, mts_after_fix, fix_info = generate_samples(
-        cov,
-        n_samples=num_samples,
+    # The repairs are applied ahead of the draw, as a plan, rather than inside
+    # it -- `draw_relative_factors` runs `generate_samples`' sequence in
+    # `generate_samples`' order and is gated bit-for-bit against it.
+    #
+    # ``cov`` is rebound to the fixed covariance, and that is the one deliberate
+    # behaviour change in this migration. ``generate_samples`` fixed a copy it
+    # kept to itself, so ``extract_mt_param_blocks(cov)`` below read the
+    # *unfixed* carrier -- and under ``autofix='hard'``, which drops whole
+    # reactions, that gave slices for a layout the factors no longer had.
+    # Unreachable from kika (``AUTOFIX`` is None everywhere) and only reachable
+    # from kika-app at 'soft', which drops nothing. The comment below has always
+    # said "from the *fixed* cov"; now it is true.
+    cov, mts_after_fix, fix_info = apply_legacy_autofix(
+        cov, autofix,
+        mt_numbers=mts_present,
+        high_val_thresh=high_val_thresh,
+        accept_tol=accept_tol,
+        verbose=verbose_diagnostics > 0,
+        logger=log,
+    )
+    (block_key, joint), = cross_section_carrier_blocks(cov)
+    (_key, block_index), = cross_section_carrier_index(cov).items()
+    factors, draw_info = draw_relative_factors(
+        joint,
+        num_samples,
+        key=block_key,
+        pairs=block_index["pairs"],
+        stride=block_index["stride"],
+        bins=union_grid,
         space=space,
         decomposition_method=decomposition_method,
         sampling_method=sampling_method,
         seed=seed,
-        mt_numbers=mts_present,
-        energy_grid=union_grid,
-        autofix=autofix,
-        high_val_thresh=high_val_thresh,
-        accept_tol=accept_tol,
         psd_method=psd_method,
         max_relative_std=max_relative_std,
         mt_thresholds=mt_thresholds,
         verbose=verbose_diagnostics > 0,
+        logger=log,
         label=str(zaid),
     )
     log.info(f"  [INFO] [PENDF] zaid={zaid}: sampled factors shape={factors.shape}")
+    log.info(
+        f"  [INFO] [PENDF] zaid={zaid}: conditioning plan = "
+        f"{[s.remedy for s in draw_info['plan'].steps] or ['none']}, "
+        f"{draw_info['n_inert_dropped']} inert bin(s) dropped"
+    )
 
     if mts_after_fix is not None and list(mts_after_fix) != list(mts_present):
         # autofix removed some MTs; rebuild mt_to_param_block from the *fixed* cov
