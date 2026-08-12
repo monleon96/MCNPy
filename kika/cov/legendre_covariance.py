@@ -1,3 +1,4 @@
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple, Union, TYPE_CHECKING
 
@@ -6,6 +7,11 @@ import numpy as np
 import pandas as pd
 
 from kika._utils import create_repr_section
+
+
+def _endf_mt_of(data) -> int:
+    """The MT half of a ``DataLink``'s ``ENDF_MFMT``, e.g. ``"34/2"`` -> 2."""
+    return int(str(data.ENDF_MFMT).split("/")[1])
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -150,6 +156,97 @@ class LegendreCovariance:
         self.is_relative.append(is_relative)
         self.frame.append(frame)
         
+    @classmethod
+    def from_covariance_suite(cls, suite, nuclide: int = 0,
+                              energy_unit: str = 'eV') -> "LegendreCovariance":
+        """Every MF34 section of a GNDS ``covarianceSuite``, as one carrier.
+
+        The covariance half of what phase 4 set out to do: the multigroup
+        collapse can be driven from a ``reactionSuite`` on both sides now — a_l
+        through :func:`~kika.cov.multigroup.collapse.legendre_source_from_model`,
+        and the covariance through here.
+
+        The model is treated as one more source format, on the same footing as
+        GENDF, COVFIL, BOXER and COVERX, exactly as
+        :meth:`~kika.cov.cross_section_covariance.CrossSectionCovariance.from_covariance_section`
+        already does. **Duck-typed rather than imported**, and for the same
+        reason: ``kika.cov`` does not depend on the model, and phase 4's P4 had
+        just finished removing the last import-time reason it might.
+
+        A *suite* rather than a section, unlike the cross-section twin, because
+        the two are keyed differently. There, several MF35 bands share one MT and
+        would be indistinguishable inside one object. Here the key is
+        ``(isotope, MT, l)`` and every MF34 section carries a distinct one, so a
+        whole file assembles without collision — which is what the collapse
+        needs, since it walks the blocks looking for ``(l_row, l_col)`` pairs.
+
+        Sections whose ``rowData.ENDF_MFMT`` is not ``34/…`` are skipped, so an
+        MF31 or MF33 section living in the same suite is left alone rather than
+        swept in as an angular block.
+
+        Parameters
+        ----------
+        suite
+            A ``CovarianceSuite``: anything iterable of sections, or exposing
+            ``covarianceSections``. Each section needs ``form.matrix``,
+            ``form.rowGrid``, ``form.isRelative`` and ``rowData.ENDF_MFMT``,
+            with ``rowData.legendreOrder`` giving l.
+        nuclide : int, optional
+            ZAID to file the matrices under, used when
+            ``section.provenance.za`` is absent. The model identifies a
+            covariance by href rather than by a material header.
+        energy_unit : str, optional
+            Unit of ``form.rowGrid``. The model keeps ENDF's native eV.
+
+        Notes
+        -----
+        ⚠ **The model states two grids and this carrier stores one.** Where a
+        section's row and column grids differ, the model is the one telling the
+        truth and this conversion loses the distinction — the same asymmetry
+        ``kika.sampling.model_blocks._mf34_entries`` documents from the sampling
+        side. A warning is raised rather than the difference being absorbed
+        silently. No MF34 seen so far states two.
+        """
+        result = cls()
+        result.energy_unit = energy_unit
+
+        for section in getattr(suite, 'covarianceSections', suite):
+            rowData = getattr(section, 'rowData', None)
+            if rowData is None or not str(getattr(rowData, 'ENDF_MFMT', '') or '').startswith('34/'):
+                continue
+            colData = getattr(section, 'columnData', None) or rowData
+
+            form = getattr(section, 'form', None)
+            if form is None or getattr(form, 'matrix', None) is None:
+                continue
+
+            row_grid = np.asarray(form.rowGrid, dtype=float)
+            col_grid = getattr(form, 'columnGrid', None)
+            if col_grid is not None and not np.array_equal(
+                row_grid, np.asarray(col_grid, dtype=float)
+            ):
+                warnings.warn(
+                    f"MF34 section {getattr(section, 'label', '?')!r} states "
+                    f"different row and column energy grids; LegendreCovariance "
+                    f"stores one per matrix, so the column grid is dropped here",
+                    stacklevel=2,
+                )
+
+            za = int(getattr(getattr(section, 'provenance', None), 'za', 0) or nuclide)
+            result.add_matrix(
+                isotope_row=za,
+                reaction_row=_endf_mt_of(rowData),
+                l_row=int(rowData.legendreOrder),
+                isotope_col=za,
+                reaction_col=_endf_mt_of(colData),
+                l_col=int(colData.legendreOrder),
+                matrix=np.asarray(form.matrix, dtype=float),
+                energy_grid=list(row_grid),
+                is_relative=bool(form.isRelative),
+                frame=getattr(form, 'productFrame', None) or 'same-as-MF4',
+            )
+        return result
+
     @classmethod
     def from_endf(cls, file_path: Union[str, 'Path'], energy_unit: str = 'eV') -> "LegendreCovariance":
         """
