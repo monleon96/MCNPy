@@ -104,6 +104,11 @@ class BreitWigner:
     scatteringRadius: Optional[float] = None
     PoPs: Optional[object] = None
     label: Optional[str] = None
+    #: §19.3.6. ENDF's NAPS=0 — compute the channel radius from the target mass
+    #: instead of using ``scatteringRadius``. 325 of the library's 386
+    #: ``BreitWigner`` nodes set it. See
+    #: :attr:`~kika.nuclear_data.model.resonances.r_matrix.RMatrix.calculateChannelRadius`.
+    calculateChannelRadius: bool = False
 
     @property
     def numberOfResonances(self) -> int:

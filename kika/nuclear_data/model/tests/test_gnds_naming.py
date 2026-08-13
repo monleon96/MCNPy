@@ -28,8 +28,9 @@ from kika.nuclear_data import model
 #: Every entry carries its § reference, so a disagreement can be settled against
 #: the document rather than against somebody's memory of it.
 GNDS_NODES: dict[str, tuple[str, ...]] = {
-    # §2.3.3 physicalQuantity
+    # §2.3.3 physicalQuantity, and the schema's RangeQuantityType beside it
     "PhysicalQuantity": ("value", "unit", "label", "uncertainty"),
+    "RangeQuantity": ("min", "max", "unit"),
     # §5.1.2 axis / §5.1.3 grid / §5.1.1 axes
     "Axis": ("index", "label", "unit"),
     "Grid": ("index", "label", "unit", "style", "interpolation", "values"),
@@ -45,9 +46,18 @@ GNDS_NODES: dict[str, tuple[str, ...]] = {
               "outerDomainValues", "axes", "label", "outerDomainValue", "index"),
     "Regions2d": ("function2ds", "function1ds", "axes", "label",
                   "outerDomainValue", "index"),
+    # §16.1.1 crossSection forms
+    "Background": ("resolvedRegion", "unresolvedRegion", "fastRegion"),
+    "ResonancesWithBackground": ("background", "label"),
+    # §9.2.1 evaluated
+    "Evaluated": ("label", "derivedFrom", "date", "library", "version",
+                  "temperature", "projectileEnergyDomain"),
     # §18 angularTwoBody / isotropic2d
     "AngularTwoBody": ("angular", "productFrame", "label"),
     "Isotropic2d": ("productFrame", "label"),
+    # §21.2 crossSectionSum
+    "CrossSectionSum": ("crossSection", "outputChannel", "summands"),
+    "Summands": ("summands",),
     # §19.3.4 channel
     "Channel": ("label", "resonanceReaction", "L", "channelSpin", "columnIndex",
                 "scatteringRadius"),
@@ -83,6 +93,13 @@ DIVERGENCES: dict[str, str] = {
                                    "methods may be snake_case; the ratchet's concern is "
                                    "two spellings of one attribute on one class, which "
                                    "this is not. Written down so it is not 'corrected'",
+    "AngularTwoBody.recoilHref": "§18 spells it as a child node, `<recoil href=...>`, "
+                                 "with nothing on it but the href; a node whose whole "
+                                 "content is one attribute is a field here, the same "
+                                 "flattening `ResonancesWithBackground."
+                                 "resonanceRegionHref` already makes for `<resonances "
+                                 "href=...>`. The GNDS name survives as the prefix",
+    "ResonancesWithBackground.resonanceRegionHref": "see AngularTwoBody.recoilHref",
     "ScalarUncertainty": "§2.3.3's scalar uncertainty and §7's functional "
                          "`uncertainty` are different nodes with the same name; the "
                          "scalar one is re-exported under a distinguishing alias",

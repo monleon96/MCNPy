@@ -46,6 +46,23 @@ class ScatteringRadius:
     #: back and not enough to compute from it. Additive: the encoder still
     #: writes the table from provenance, so no round trip moves.
     interpolation: Optional[object] = None
+    #: The unit the radius is stated in, or ``None`` for *not stated*.
+    #:
+    #: **The two readers do not agree on the number, and this is what says so.**
+    #: For ENDF/B-VIII.1's Fe-56 the GNDS path gives 5.444 and the ENDF path
+    #: 0.5444, because ENDF writes AP in units of 10^-12 cm — ten femtometres —
+    #: while GNDS writes it in fm with an axis that says so. Both are the same
+    #: radius. Until this field existed both landed in ``constant`` and a
+    #: consumer reading it got a silent factor of ten depending on which
+    #: encoding the evaluation happened to arrive in.
+    #:
+    #: kika does **not** convert on read. The ENDF reconstructor works in ENDF's
+    #: units throughout and rescaling underneath it would move a number the
+    #: thesis pipeline depends on. What changes here is that the unit is stated
+    #: where the format states it, so the mismatch is visible rather than latent;
+    #: making the two paths agree on one canonical unit is a separate change
+    #: with its own gate.
+    unit: Optional[str] = None
 
     @property
     def isEnergyDependent(self) -> bool:

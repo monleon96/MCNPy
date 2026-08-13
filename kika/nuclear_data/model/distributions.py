@@ -40,16 +40,46 @@ class AngularTwoBody:
     a valid ENDF file missing two angular distributions. The 2-d forms carry an
     ordered list precisely so that cannot happen; see
     ``kika/nuclear_data/model/functions/higher.py``.
+
+    **A tabulated function is only one of the four shapes §18 allows here.**
+    ``angularTwoBody`` admits ``XYs2d``, ``regions2d``, ``isotropic2d`` and
+    ``recoil``, and across ENDF/B-VIII.1-GNDS's 45 080 of them the split is
+    21 649 / 111 / 780 / 22 540 — so the *commonest* shape carries no numbers at
+    all. ``isotropic2d`` goes in ``angular`` because it is a statement about
+    P(mu|E) like the other two, just one that needs no table; putting it
+    elsewhere would make "does this product have an angular distribution?" a
+    two-part question.
+
+    ``recoilHref`` is the fourth, and it is a link rather than a function: in
+    two-body kinematics the residual's distribution is the ejectile's mirrored,
+    so the evaluation states it once and points at it. It gets a field of its
+    own rather than a fabricated table — the treatment
+    :class:`~kika.nuclear_data.model.cross_section_forms.Reference` gets for the
+    same reason. ``angular`` and ``recoilHref`` are alternatives; a node carries
+    one of them.
     """
 
-    angular: Optional[Union[XYs2d, Regions2d]] = None
+    angular: Optional[Union[XYs2d, Regions2d, "Isotropic2d"]] = None
     productFrame: Frame = Frame.centerOfMass
     label: Optional[str] = None
+    recoilHref: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self.productFrame = Frame(self.productFrame)
+
+    @property
+    def isRecoil(self) -> bool:
+        """This product's P(mu|E) is another product's, mirrored."""
+        return self.recoilHref is not None
 
     @property
     def energies(self) -> List[float]:
-        """The incident energies, in file order, **duplicates included**."""
-        if self.angular is None:
+        """The incident energies, in file order, **duplicates included**.
+
+        Empty for the two shapes that tabulate nothing — a ``recoil`` link and
+        an ``isotropic2d`` — which is why it is not a proxy for "has data".
+        """
+        if not isinstance(self.angular, (XYs2d, Regions2d)):
             return []
         if isinstance(self.angular, Regions2d):
             return [f.outerDomainValue for f in self.angular.function1ds]
@@ -58,7 +88,7 @@ class AngularTwoBody:
     @property
     def function1ds(self) -> List[Function1d]:
         """Every per-energy angular function, in file order."""
-        if self.angular is None:
+        if not isinstance(self.angular, (XYs2d, Regions2d)):
             return []
         if isinstance(self.angular, Regions2d):
             return self.angular.function1ds
@@ -76,6 +106,9 @@ class Isotropic2d:
     label: Optional[str] = None
     productFrame: Frame = Frame.centerOfMass
 
+    def __post_init__(self) -> None:
+        self.productFrame = Frame(self.productFrame)
+
 
 @dataclass
 class Unspecified:
@@ -83,6 +116,13 @@ class Unspecified:
 
     label: Optional[str] = None
     productFrame: Frame = Frame.lab
+
+    def __post_init__(self) -> None:
+        # Coerced for the reason `ReactionSuite.__post_init__` coerces
+        # `projectileFrame`: `Frame` subclasses `str`, so a raw string compares
+        # equal and everything appears to work until a writer asks for `.value`
+        # and gets an AttributeError three phases later.
+        self.productFrame = Frame(self.productFrame)
 
 
 class _UnimplementedDistribution:

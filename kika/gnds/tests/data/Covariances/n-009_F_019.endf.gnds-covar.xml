@@ -1,0 +1,299 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<covarianceSuite projectile="n" target="F19" evaluation="ENDF/B-8.1" interaction="nuclear" format="2.0">
+  <externalFiles>
+    <externalFile label="reactions" path="../n-009_F_019.endf.gnds.xml"/></externalFiles>
+  <styles>
+    <evaluated label="eval" date="2022-12-01" library="ENDF/B" version="8.1.1">
+      <documentation>
+        <authors>
+          <author name="R.Capote,A.Trkov,M.Kostal+"></author></authors>
+        <dates>
+          <date value="2022-12-01" dateType="created"/></dates>
+        <title><![CDATA[ENDF-6 file from ENDF/B version 8.1.1 translated to GNDS by FUDGE.]]></title>
+        <body><![CDATA[See the endfCompatible section.]]></body></documentation>
+      <temperature value="0" unit="K"/>
+      <projectileEnergyDomain min="1e-5" max="2e7" unit="eV"/></evaluated></styles>
+  <covarianceSections>
+    <covarianceSection label="total">
+      <rowData ENDF_MFMT="33,1" href="$reactions#/reactionSuite/sums/crossSectionSums/crossSectionSum[@label='total']/crossSection/regions1d[@label='eval']"/>
+      <covarianceMatrix label="eval" type="relative">
+        <gridded2d>
+          <axes>
+            <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+              <values>1e-5 1e3 5e3 1e4 1.5e4 2e4 2.5e4 3e4 3.5e4 4e4 4.5e4 5e4 5.5e4 6e4 7e4 8e4 9e4 1e5 1.1e5 1.2e5 1.3e5 1.4e5 1.5e5 1.6e5 1.7e5 1.8e5 1.9e5 2e5 3e5 5e5 1e6 2e6 3e6 4e6 5e6 6e6 8e6 1e7 1.2e7 1.5e7 2e7</values></grid>
+            <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+              <link href="../../grid[@index='2']/values"/></grid>
+            <axis index="0" label="matrix_elements" unit=""/></axes>
+          <array shape="40,40" symmetry="lower">
+            <values>2.103145e-4 2.101563e-4 2.099989e-4 2.094343e-4 2.092811e-4 2.085813e-4 2.082336e-4 2.080865e-4 2.074139e-4 2.06288e-4 2.063304e-4 2.061913e-4 2.055542e-4 2.044843e-4 2.027642e-4 2.018618e-4 2.017353e-4 2.011569e-4 2.001922e-4 1.986742e-4 1.953365e-4 1.602725e-4 1.602455e-4 1.602112e-4 1.606137e-4 1.63133e-4 1.820311e-4 1.002868e-3 1.792067e-4 1.790976e-4 1.78568e-4 1.775261e-4 1.752221e-4 1.653521e-4 -1.473286e-4 2.608411e-4 1.934738e-4 1.933888e-4 1.929903e-4 1.922786e-4 1.909888e-4 1.871963e-4 1.338718e-4 1.752877e-4 1.855898e-4 1.838729e-4 1.838279e-4 1.836142e-4 1.832135e-4 1.823996e-4 1.795915e-4 1.404597e-4 1.658726e-4 1.851531e-4 2.027483e-4 1.368201e-4 1.369448e-4 1.375446e-4 1.385936e-4 1.400754e-4 1.414124e-4 1.17382e-4 1.482349e-4 2.034476e-4 3.678956e-4 1.84466e-3 3.489157e-5 3.456478e-5 3.289179e-5 2.955933e-5 2.369136e-5 1.261074e-5 -7.940488e-6 -5.812738e-5 -2.290287e-4 -9.745208e-4 -8.523254e-3 0.05235365 1.617716e-4 1.617797e-4 1.617807e-4 1.616385e-4 1.610394e-4 1.584543e-4 1.257454e-4 1.415321e-4 1.481249e-4 1.086769e-4 -3.257522e-4 3.251923e-3 3.645326e-4 1.78817e-4 1.78868e-4 1.790576e-4 1.791965e-4 1.78938e-4 1.766752e-4 1.411769e-4 1.608919e-4 1.757923e-4
+              1.659247e-4 5.91257e-5 6.68178e-4 2.140624e-4 2.066441e-4 1.72308e-4 1.725119e-4 1.733643e-4 1.744662e-4 1.753572e-4 1.744908e-4 1.408367e-4 1.62259e-4 1.804267e-4 1.776211e-4 1.297904e-4 1.353123e-4 1.960347e-4 2.321912e-4 3.037425e-4 1.487753e-4 1.493014e-4 1.515562e-4 1.547119e-4 1.58087e-4 1.603424e-4 1.323576e-4 1.564418e-4 1.793646e-4 1.832022e-4 1.453002e-4 7.139914e-5 2.274925e-4 2.953593e-4 4.54136e-4 8.039138e-4 1.135972e-4 1.147356e-4 1.196638e-4 1.267515e-4 1.348931e-4 1.430742e-4 1.24049e-4 1.546562e-4 1.87944e-4 2.043725e-4 1.74278e-4 6.591238e-5 3.117813e-4 4.397856e-4 7.865181e-4 1.588761e-3 3.463943e-3 6.672924e-5 6.741427e-5 7.032846e-5 7.438094e-5 7.883692e-5 8.301263e-5 7.117007e-5 8.730044e-5 1.037484e-4 1.094869e-4 8.980792e-5 3.087852e-5 1.427848e-4 1.851718e-4 2.577524e-4 3.403553e-4 4.777537e-4 5.209435e-3 9.332561e-5 9.351126e-5 9.424358e-5 9.508177e-5 9.56364e-5 9.497236e-5 7.620967e-5 8.666657e-5 9.430267e-5 8.960142e-5 6.462729e-5 2.032557e-5 6.858666e-5 6.056306e-5 -2.958384e-5 -3.534161e-4 -1.298202e-3 2.701886e-3 5.133579e-3 1.444304e-4 1.445489e-4 1.450102e-4 1.454972e-4 1.456301e-4 1.44068e-4 1.153791e-4 1.313485e-4 1.437877e-4 1.385816e-4
+              1.02844e-4 3.293505e-5 1.276481e-4 1.411209e-4 1.210121e-4 1.161709e-5 -3.442883e-4 1.686431e-3 1.971096e-3 3.135688e-3 1.734043e-4 1.734265e-4 1.734788e-4 1.733877e-4 1.728217e-4 1.702051e-4 1.356714e-4 1.537013e-4 1.674582e-4 1.607009e-4 1.188952e-4 3.731301e-5 1.481511e-4 1.663895e-4 1.623148e-4 1.155704e-4 -4.070278e-5 1.26301e-3 1.392656e-3 1.138249e-3 2.780371e-3 1.888392e-4 1.887936e-4 1.885552e-4 1.88048e-4 1.869784e-4 1.836443e-4 1.459347e-4 1.647572e-4 1.788132e-4 1.70864e-4 1.25824e-4 3.871461e-5 1.553359e-4 1.739913e-4 1.71616e-4 1.410093e-4 5.007836e-5 1.069295e-3 1.145333e-3 1.029977e-3 9.83115e-4 2.713382e-3 1.975472e-4 1.974579e-4 1.970322e-4 1.962555e-4 1.948595e-4 1.910703e-4 1.515489e-4 1.707198e-4 1.848145e-4 1.760733e-4 1.292015e-4 3.914749e-5 1.581767e-4 1.763883e-4 1.7276e-4 1.456597e-4 7.811476e-5 9.692866e-4 1.025243e-3 9.764661e-4 9.597493e-4 9.539391e-4 2.701662e-3 2.028158e-4 2.026981e-4 2.021499e-4 2.011967e-4 1.995869e-4 1.95503e-4 1.548775e-4 1.74221e-4 1.882884e-4 1.79021e-4 1.310346e-4 3.924779e-5 1.594228e-4 1.771053e-4 1.718613e-4 1.447049e-4 8.603265e-5 9.122034e-4 9.601094e-4 9.47033e-4 9.468952e-4 9.488852e-4 9.506758e-4 2.70202e-3
+              2.062059e-4 2.060691e-4 2.054381e-4 2.043653e-4 2.026107e-4 1.983285e-4 1.56989e-4 1.764265e-4 1.904536e-4 1.808262e-4 1.321178e-4 3.923054e-5 1.600124e-4 1.772393e-4 1.70573e-4 1.424054e-4 8.707013e-5 8.769624e-4 9.215638e-4 9.294137e-4 9.392006e-4 9.459299e-4 9.502168e-4 9.530017e-4 2.70488e-3 2.085013e-4 2.08351e-4 2.07662e-4 2.065053e-4 2.046491e-4 2.002282e-4 1.584035e-4 1.778961e-4 1.918847e-4 1.820026e-4 1.328019e-4 3.917389e-5 1.603055e-4 1.771674e-4 1.69348e-4 1.400103e-4 8.574888e-5 8.538323e-4 8.971444e-4 9.181443e-4 9.342796e-4 9.440776e-4 9.499942e-4 9.537255e-4 9.561944e-4 2.7079e-3 2.101215e-4 2.099615e-4 2.092304e-4 2.080129e-4 2.06083e-4 2.01562e-4 1.593938e-4 1.789207e-4 1.92876e-4 1.828082e-4 1.332574e-4 3.910759e-5 1.604549e-4 1.770289e-4 1.68293e-4 1.378668e-4 8.37205e-5 8.378974e-4 8.80818e-4 9.105483e-4 9.309632e-4 9.428512e-4 9.498852e-4 9.542683e-4 9.571458e-4 9.591226e-4 2.710533e-3 2.11305e-4 2.111377e-4 2.103753e-4 2.091125e-4 2.071276e-4 2.025322e-4 1.601125e-4 1.796618e-4 1.935892e-4 1.833822e-4 1.335738e-4 3.904296e-5 1.605306e-4 1.768772e-4 1.674128e-4 1.360397e-4 8.160554e-5 8.264828e-4 8.694194e-4 9.052078e-4 9.286321e-4 9.420025e-4
+              9.498336e-4 9.546835e-4 9.578544e-4 9.600263e-4 9.615729e-4 2.71271e-3 2.152414e-4 2.150489e-4 2.141779e-4 2.127575e-4 2.105815e-4 2.057285e-4 1.624678e-4 1.820719e-4 1.9588e-4 1.851822e-4 1.344948e-4 3.869317e-5 1.60531e-4 1.759953e-4 1.636673e-4 1.280077e-4 6.981271e-5 7.902102e-4 8.354993e-4 8.890278e-4 9.215757e-4 9.395402e-4 9.498761e-4 9.562071e-4 9.603153e-4 9.631138e-4 9.650983e-4 9.665531e-4 2.72143e-3 2.162686e-4 2.160692e-4 2.151681e-4 2.137043e-4 2.114756e-4 2.065517e-4 1.630698e-4 1.826813e-4 1.964485e-4 1.856117e-4 1.34681e-4 3.854871e-5 1.604399e-4 1.75631e-4 1.623993e-4 1.252129e-4 6.502294e-5 7.813666e-4 8.281111e-4 8.853898e-4 9.199932e-4 9.390321e-4 9.499671e-4 9.566578e-4 9.60996e-4 9.639496e-4 9.660431e-4 9.675773e-4 9.727164e-4 2.72407e-3 2.165478e-4 2.163464e-4 2.15437e-4 2.139611e-4 2.117176e-4 2.067741e-4 1.632316e-4 1.828442e-4 1.965989e-4 1.857227e-4 1.347221e-4 3.850207e-5 1.604024e-4 1.755138e-4 1.620152e-4 1.243573e-4 6.348335e-5 7.79054e-4 8.263134e-4 8.844859e-4 9.196011e-4 9.389139e-4 9.500037e-4 9.567881e-4 9.611867e-4 9.641811e-4 9.663034e-4 9.678587e-4 9.730677e-4 9.744393e-4 2.724814e-3 2.166014e-4 2.163997e-4 2.154887e-4 2.140104e-4
+              2.117641e-4 2.068167e-4 1.632626e-4 1.828753e-4 1.966275e-4 1.857434e-4 1.347289e-4 3.849247e-5 1.603939e-4 1.754895e-4 1.619375e-4 1.241834e-4 6.316377e-5 7.786189e-4 8.259892e-4 8.843209e-4 9.195296e-4 9.388932e-4 9.50012e-4 9.56814e-4 9.61224e-4 9.642261e-4 9.663539e-4 9.679131e-4 9.731354e-4 9.745104e-4 9.748857e-4 2.724958e-3 2.166103e-4 2.164085e-4 2.154973e-4 2.140185e-4 2.117717e-4 2.068237e-4 1.632677e-4 1.828804e-4 1.966322e-4 1.857468e-4 1.3473e-4 3.849084e-5 1.603924e-4 1.754854e-4 1.619244e-4 1.24154e-4 6.310934e-5 7.785475e-4 8.25937e-4 8.842941e-4 9.19518e-4 9.388899e-4 9.500135e-4 9.568183e-4 9.612302e-4 9.642336e-4 9.663622e-4 9.679221e-4 9.731466e-4 9.745222e-4 9.748976e-4 9.7497e-4 2.724982e-3 2.166133e-4 2.164115e-4 2.155002e-4 2.140213e-4 2.117743e-4 2.068261e-4 1.632694e-4 1.828821e-4 1.966338e-4 1.857479e-4 1.347303e-4 3.849029e-5 1.603919e-4 1.75484e-4 1.619199e-4 1.24144e-4 6.309085e-5 7.785235e-4 8.259196e-4 8.842852e-4 9.195142e-4 9.388888e-4 9.50014e-4 9.568198e-4 9.612323e-4 9.642361e-4 9.66365e-4 9.679252e-4 9.731504e-4 9.745262e-4 9.749017e-4 9.74974e-4 9.74986e-4 2.72499e-3 2.166147e-4 2.164129e-4 2.155015e-4 2.140225e-4 2.117755e-4
+              2.068272e-4 1.632702e-4 1.828829e-4 1.966345e-4 1.857484e-4 1.347305e-4 3.849004e-5 1.603917e-4 1.754833e-4 1.619179e-4 1.241395e-4 6.308242e-5 7.785127e-4 8.259117e-4 8.842812e-4 9.195124e-4 9.388883e-4 9.500142e-4 9.568205e-4 9.612332e-4 9.642372e-4 9.663663e-4 9.679265e-4 9.731521e-4 9.74528e-4 9.749035e-4 9.749758e-4 9.749878e-4 9.749918e-4 2.724994e-3 2.166154e-4 2.164136e-4 2.155022e-4 2.140232e-4 2.117761e-4 2.068277e-4 1.632706e-4 1.828833e-4 1.966349e-4 1.857487e-4 1.347306e-4 3.848991e-5 1.603915e-4 1.75483e-4 1.619168e-4 1.24137e-4 6.307789e-5 7.785069e-4 8.259075e-4 8.84279e-4 9.195115e-4 9.388881e-4 9.500143e-4 9.568208e-4 9.612337e-4 9.642378e-4 9.66367e-4 9.679273e-4 9.73153e-4 9.74529e-4 9.749045e-4 9.749768e-4 9.749888e-4 9.749928e-4 9.749947e-4 2.724996e-3 2.166161e-4 2.164143e-4 2.155028e-4 2.140239e-4 2.117767e-4 2.068283e-4 1.63271e-4 1.828838e-4 1.966352e-4 1.85749e-4 1.347306e-4 3.848978e-5 1.603914e-4 1.754827e-4 1.619158e-4 1.241346e-4 6.307342e-5 7.785012e-4 8.259034e-4 8.842769e-4 9.195106e-4 9.388878e-4 9.500144e-4 9.568212e-4 9.612342e-4 9.642384e-4 9.663677e-4 9.67928e-4 9.731539e-4 9.745299e-4 9.749054e-4 9.749778e-4 9.749898e-4 9.749938e-4
+              9.749956e-4 9.749966e-4 2.724998e-3 2.166164e-4 2.164146e-4 2.155032e-4 2.140242e-4 2.11777e-4 2.068286e-4 1.632712e-4 1.828839e-4 1.966354e-4 1.857491e-4 1.347307e-4 3.848972e-5 1.603914e-4 1.754825e-4 1.619153e-4 1.241335e-4 6.307137e-5 7.784985e-4 8.259015e-4 8.842759e-4 9.195102e-4 9.388877e-4 9.500145e-4 9.568213e-4 9.612345e-4 9.642387e-4 9.66368e-4 9.679283e-4 9.731544e-4 9.745303e-4 9.749059e-4 9.749782e-4 9.749902e-4 9.749942e-4 9.749961e-4 9.74997e-4 9.74998e-4 0.012725 2.166166e-4 2.164148e-4 2.155033e-4 2.140243e-4 2.117772e-4 2.068287e-4 1.632713e-4 1.82884e-4 1.966355e-4 1.857492e-4 1.347307e-4 3.848968e-5 1.603913e-4 1.754824e-4 1.61915e-4 1.241329e-4 6.307026e-5 2.849714e-5 7.590049e-5 1.342754e-4 1.695099e-4 1.888876e-4 2.000145e-4 2.068214e-4 2.112346e-4 2.142389e-4 2.163682e-4 2.179285e-4 2.231546e-4 2.245306e-4 2.249061e-4 2.249784e-4 2.249904e-4 2.249945e-4 2.249963e-4 2.249973e-4 2.249982e-4 5.224999e-3 0.010225 2.166168e-4 2.164149e-4 2.155035e-4 2.140245e-4 2.117773e-4 2.068288e-4 1.632714e-4 1.828841e-4 1.966356e-4 1.857492e-4 1.347307e-4 3.848966e-5 1.603913e-4 1.754823e-4 1.619148e-4 1.241324e-4 6.306935e-5 2.849599e-5 7.589967e-5 1.34275e-4
+              1.695098e-4 1.888876e-4 2.000145e-4 2.068215e-4 2.112347e-4 2.14239e-4 2.163683e-4 2.179287e-4 2.231548e-4 2.245308e-4 2.249063e-4 2.249786e-4 2.249906e-4 2.249947e-4 2.249965e-4 2.249975e-4 2.249984e-4 5.224999e-3 5.224999e-3 0.010225</values></array></gridded2d></covarianceMatrix></covarianceSection>
+    <covarianceSection label="n + F19">
+      <rowData ENDF_MFMT="33,2" href="$reactions#/reactionSuite/reactions/reaction[@label='n + F19']/crossSection/regions1d[@label='eval']"/>
+      <sum label="eval" domainMin="1e-05" domainMax="20000000.0" domainUnit="eV">
+        <!-- The matrix for this reaction equals the weighted sum of the following matrices: -->
+        <summand ENDF_MFMT="33,1" coefficient="1.0" href="/covarianceSuite/covarianceSections/covarianceSection[@label='total']/covarianceMatrix[@label='eval']"/>
+        <summand ENDF_MFMT="33,4" coefficient="-1.0" href="/covarianceSuite/covarianceSections/covarianceSection[@label='(z,n)']/mixed[@label='eval']"/>
+        <summand ENDF_MFMT="33,16" coefficient="-1.0" href="/covarianceSuite/covarianceSections/covarianceSection[@label='n + n + F18 + photon']/mixed[@label='eval']"/>
+        <summand ENDF_MFMT="33,22" coefficient="-1.0" href="/covarianceSuite/covarianceSections/covarianceSection[@label='n + He4 + N15 + photon']/mixed[@label='eval']"/>
+        <summand ENDF_MFMT="33,28" coefficient="-1.0" href="/covarianceSuite/covarianceSections/covarianceSection[@label='n + H1 + O18 + photon']/mixed[@label='eval']"/>
+        <summand ENDF_MFMT="33,102" coefficient="-1.0" href="/covarianceSuite/covarianceSections/covarianceSection[@label='F20 + photon [inclusive]']/covarianceMatrix[@label='eval']"/>
+        <summand ENDF_MFMT="33,103" coefficient="-1.0" href="/covarianceSuite/covarianceSections/covarianceSection[@label='H1 + O19 + photon [inclusive]']/covarianceMatrix[@label='eval']"/>
+        <summand ENDF_MFMT="33,104" coefficient="-1.0" href="/covarianceSuite/covarianceSections/covarianceSection[@label='H2 + O18 [inclusive]']/covarianceMatrix[@label='eval']"/>
+        <summand ENDF_MFMT="33,105" coefficient="-1.0" href="/covarianceSuite/covarianceSections/covarianceSection[@label='H3 + O17 [inclusive]']/covarianceMatrix[@label='eval']"/>
+        <summand ENDF_MFMT="33,107" coefficient="-1.0" href="/covarianceSuite/covarianceSections/covarianceSection[@label='He4 + N16 + photon [inclusive]']/covarianceMatrix[@label='eval']"/></sum></covarianceSection>
+    <covarianceSection label="(z,n)">
+      <rowData ENDF_MFMT="33,4" href="$reactions#/reactionSuite/sums/crossSectionSums/crossSectionSum[@label='(z,n)']/crossSection/XYs1d[@label='eval']"/>
+      <mixed label="eval">
+        <covarianceMatrix label="0" type="relative">
+          <gridded2d>
+            <axes>
+              <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+                <values>1e-5 115840 207460 3e5 4.5e5 6e5 1.1e6 1.5e6 2e7</values></grid>
+              <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+                <link href="../../grid[@index='2']/values"/></grid>
+              <axis index="0" label="matrix_elements" unit=""/></axes>
+            <array shape="8,8" compression="diagonal">
+              <values>0 4e-2 0.0625 4e-2 0.0225 4e-2 0.0225 0</values></array></gridded2d></covarianceMatrix>
+        <covarianceMatrix label="1" type="relative">
+          <gridded2d>
+            <axes>
+              <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+                <values>1e-5 1.5e6 3e6 6e6 1e7 1.4e7 2e7</values></grid>
+              <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+                <link href="../../grid[@index='2']/values"/></grid>
+              <axis index="0" label="matrix_elements" unit=""/></axes>
+            <array shape="6,6" symmetry="lower">
+              <values>0 0 0.012518 0 0.013729 0.015573 0 3.4621e-3 5.6343e-3 8.9701e-3 0 4.1769e-3 5.2882e-3 4.8986e-3 3.6946e-3 0 3.404e-3 3.8635e-3 1.8967e-3 1.7268e-3 1.1448e-3</values></array></gridded2d></covarianceMatrix>
+        <shortRangeSelfScalingVariance label="2" type="absolute" dependenceOnProcessedGroupWidth="inverse">
+          <gridded2d>
+            <axes>
+              <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+                <values>1e-5 115840 207460 3e5 4.5e5 6e5 1.1e6 1.5e6 3e6 6e6 1e7 1.4e7 2e7</values></grid>
+              <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+                <link href="../../grid[@index='2']/values"/></grid>
+              <axis index="0" label="matrix_elements" unit="b**2"/></axes>
+            <array shape="12,12" compression="diagonal">
+              <values>0 2.2235e-6 5.1343e-5 1.4699e-5 2.5148e-6 4.8846e-6 2.1413e-6 1.3654e-6 8.5116e-7 3.4763e-7 2.9932e-8 4.1382e-9</values></array></gridded2d></shortRangeSelfScalingVariance></mixed></covarianceSection>
+    <covarianceSection label="(z,n) vs. n + n + F18 + photon" crossTerm="true">
+      <rowData ENDF_MFMT="33,4" href="$reactions#/reactionSuite/sums/crossSectionSums/crossSectionSum[@label='(z,n)']/crossSection/XYs1d[@label='eval']"/>
+      <columnData ENDF_MFMT="33,16" href="$reactions#/reactionSuite/reactions/reaction[@label='n + n + F18 + photon']/crossSection/XYs1d[@label='eval']"/>
+      <covarianceMatrix label="eval" type="relative">
+        <gridded2d>
+          <axes>
+            <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+              <values>1e-5 1.0985e7 1.2e7 1.4e7 1.6e7 1.8e7 2e7</values></grid>
+            <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+              <link href="../../grid[@index='2']/values"/></grid>
+            <axis index="0" label="matrix_elements" unit=""/></axes>
+          <array shape="6,6">
+            <values>0 0 0 0 0 0 0 -2.7323e-3 -8.4312e-4 1.625e-3 2.6476e-3 4.9395e-3 0 -1.6257e-3 -3.5581e-4 1.4598e-3 2.4374e-3 3.772e-3 0 -2.3147e-4 3.0515e-4 1.2922e-3 2.1523e-3 2.5383e-3 0 3.2296e-4 6.3562e-4 1.3087e-3 1.9863e-3 2.4393e-3 0 4.9817e-4 8.8117e-4 1.5592e-3 2.1351e-3 2.9539e-3</values></array></gridded2d></covarianceMatrix></covarianceSection>
+    <covarianceSection label="(z,n) vs. n + He4 + N15 + photon" crossTerm="true">
+      <rowData ENDF_MFMT="33,4" href="$reactions#/reactionSuite/sums/crossSectionSums/crossSectionSum[@label='(z,n)']/crossSection/XYs1d[@label='eval']"/>
+      <columnData ENDF_MFMT="33,22" href="$reactions#/reactionSuite/reactions/reaction[@label='n + He4 + N15 + photon']/crossSection/XYs1d[@label='eval']"/>
+      <covarianceMatrix label="eval" type="relative">
+        <gridded2d>
+          <axes>
+            <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+              <values>1e-5 4.226e6 8e6 1e7 1.35e7 1.65e7 2e7</values></grid>
+            <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+              <link href="../../grid[@index='2']/values"/></grid>
+            <axis index="0" label="matrix_elements" unit=""/></axes>
+          <array shape="6,6">
+            <values>0 0 0 0 0 0 0 0.012137 0.013924 5.1412e-3 9.78e-3 0.012515 0 9.3187e-3 0.010743 3.4127e-3 7.1245e-3 9.1378e-3 0 7.5198e-3 6.5253e-3 2.5598e-3 5.5638e-3 7.0126e-3 0 2.0669e-3 8.0487e-4 1.8069e-3 3.2097e-3 4.2101e-3 0 5.2989e-3 3.1469e-3 1.9494e-3 3.2724e-3 3.8865e-3</values></array></gridded2d></covarianceMatrix></covarianceSection>
+    <covarianceSection label="(z,n) vs. n + H1 + O18 + photon" crossTerm="true">
+      <rowData ENDF_MFMT="33,4" href="$reactions#/reactionSuite/sums/crossSectionSums/crossSectionSum[@label='(z,n)']/crossSection/XYs1d[@label='eval']"/>
+      <columnData ENDF_MFMT="33,28" href="$reactions#/reactionSuite/reactions/reaction[@label='n + H1 + O18 + photon']/crossSection/XYs1d[@label='eval']"/>
+      <covarianceMatrix label="eval" type="relative">
+        <gridded2d>
+          <axes>
+            <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+              <values>1e-5 8417400 1.2e7 1.4e7 1.6e7 1.8e7 2e7</values></grid>
+            <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+              <link href="../../grid[@index='2']/values"/></grid>
+            <axis index="0" label="matrix_elements" unit=""/></axes>
+          <array shape="6,6">
+            <values>0 0 0 0 0 0 0 -2.4871e-3 1.2639e-3 3.7922e-3 5.0868e-3 5.2588e-3 0 -2.1375e-3 2.2628e-4 2.4209e-3 3.7154e-3 4.0568e-3 0 -1.2787e-3 -5.2096e-4 1.1128e-3 2.2899e-3 2.7582e-3 0 -3.0611e-4 2.1758e-4 1.615e-3 2.4048e-3 2.5772e-3 0 4.4516e-4 1.1975e-3 2.5299e-3 3.085e-3 3.0445e-3</values></array></gridded2d></covarianceMatrix></covarianceSection>
+    <covarianceSection label="n + n + F18 + photon">
+      <rowData ENDF_MFMT="33,16" href="$reactions#/reactionSuite/reactions/reaction[@label='n + n + F18 + photon']/crossSection/XYs1d[@label='eval']"/>
+      <mixed label="eval">
+        <covarianceMatrix label="0" type="relative">
+          <gridded2d>
+            <axes>
+              <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+                <values>1e-5 1.0985e7 1.2e7 1.4e7 1.6e7 1.8e7 2e7</values></grid>
+              <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+                <link href="../../grid[@index='2']/values"/></grid>
+              <axis index="0" label="matrix_elements" unit=""/></axes>
+            <array shape="6,6" symmetry="lower">
+              <values>0 0 0.015187 0 0.012862 0.011874 0 9.1655e-3 9.7056e-3 9.6082e-3 0 8.3526e-3 9.303e-3 9.9978e-3 0.010988 0 7.2017e-3 9.035e-3 0.010758 0.012092 0.014452</values></array></gridded2d></covarianceMatrix>
+        <shortRangeSelfScalingVariance label="1" type="absolute" dependenceOnProcessedGroupWidth="inverse">
+          <gridded2d>
+            <axes>
+              <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+                <values>1e-5 1.0985e7 1.2e7 1.4e7 1.6e7 1.8e7 2e7</values></grid>
+              <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+                <link href="../../grid[@index='2']/values"/></grid>
+              <axis index="0" label="matrix_elements" unit="b**2"/></axes>
+            <array shape="6,6" compression="diagonal">
+              <values>0 3.2745e-12 6.8371e-10 3.1476e-9 6.9961e-9 1.3546e-8</values></array></gridded2d></shortRangeSelfScalingVariance></mixed></covarianceSection>
+    <covarianceSection label="n + n + F18 + photon vs. n + He4 + N15 + photon" crossTerm="true">
+      <rowData ENDF_MFMT="33,16" href="$reactions#/reactionSuite/reactions/reaction[@label='n + n + F18 + photon']/crossSection/XYs1d[@label='eval']"/>
+      <columnData ENDF_MFMT="33,22" href="$reactions#/reactionSuite/reactions/reaction[@label='n + He4 + N15 + photon']/crossSection/XYs1d[@label='eval']"/>
+      <covarianceMatrix label="eval" type="relative">
+        <gridded2d>
+          <axes>
+            <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+              <values>1e-5 1.0985e7 1.2e7 1.4e7 1.6e7 1.8e7 2e7</values></grid>
+            <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+              <link href="../../grid[@index='2']/values"/></grid>
+            <axis index="0" label="matrix_elements" unit=""/></axes>
+          <array shape="6,6">
+            <values>0 0 0 0 0 0 0 5.138e-3 4.9596e-3 3.0902e-3 1.8727e-3 5.3311e-4 0 6.1604e-3 6.2094e-3 5.4477e-3 4.9883e-3 4.2688e-3 0 6.9291e-3 7.6832e-3 8.3746e-3 8.8607e-3 9.0257e-3 0 7.5268e-3 8.9981e-3 0.010351 0.011297 0.011852 0 9.5317e-3 0.010988 0.013107 0.014484 0.015713</values></array></gridded2d></covarianceMatrix></covarianceSection>
+    <covarianceSection label="n + n + F18 + photon vs. n + H1 + O18 + photon" crossTerm="true">
+      <rowData ENDF_MFMT="33,16" href="$reactions#/reactionSuite/reactions/reaction[@label='n + n + F18 + photon']/crossSection/XYs1d[@label='eval']"/>
+      <columnData ENDF_MFMT="33,28" href="$reactions#/reactionSuite/reactions/reaction[@label='n + H1 + O18 + photon']/crossSection/XYs1d[@label='eval']"/>
+      <covarianceMatrix label="eval" type="relative">
+        <gridded2d>
+          <axes>
+            <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+              <values>1e-5 1.0985e7 1.2e7 1.4e7 1.6e7 1.8e7 2e7</values></grid>
+            <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+              <link href="../../grid[@index='2']/values"/></grid>
+            <axis index="0" label="matrix_elements" unit=""/></axes>
+          <array shape="6,6">
+            <values>0 0 0 0 0 0 0 0.018589 0.011445 8.1949e-3 6.491e-3 5.8189e-3 0 0.016228 0.011183 8.8276e-3 7.9875e-3 7.8522e-3 0 0.011599 9.5118e-3 9.1025e-3 9.5619e-3 9.9634e-3 0 9.9386e-3 8.7436e-3 9.6417e-3 0.010876 0.011488 0 9.4611e-3 9.8314e-3 0.01153 0.013249 0.014014</values></array></gridded2d></covarianceMatrix></covarianceSection>
+    <covarianceSection label="n + He4 + N15 + photon">
+      <rowData ENDF_MFMT="33,22" href="$reactions#/reactionSuite/reactions/reaction[@label='n + He4 + N15 + photon']/crossSection/XYs1d[@label='eval']"/>
+      <mixed label="eval">
+        <covarianceMatrix label="0" type="relative">
+          <gridded2d>
+            <axes>
+              <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+                <values>1e-5 4.226e6 8e6 1e7 1.35e7 1.65e7 2e7</values></grid>
+              <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+                <link href="../../grid[@index='2']/values"/></grid>
+              <axis index="0" label="matrix_elements" unit=""/></axes>
+            <array shape="6,6" symmetry="lower">
+              <values>0 0 0.029484 0 0.016915 0.019168 0 0.010163 6.6102e-3 6.8731e-3 0 0.013927 0.011189 8.4581e-3 0.013345 0 0.014625 0.013495 9.3032e-3 0.016238 0.020779</values></array></gridded2d></covarianceMatrix>
+        <shortRangeSelfScalingVariance label="1" type="absolute" dependenceOnProcessedGroupWidth="inverse">
+          <gridded2d>
+            <axes>
+              <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+                <values>1e-5 4.226e6 8e6 1e7 1.35e7 1.65e7 2e7</values></grid>
+              <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+                <link href="../../grid[@index='2']/values"/></grid>
+              <axis index="0" label="matrix_elements" unit="b**2"/></axes>
+            <array shape="6,6" compression="diagonal">
+              <values>0 3.8121e-9 8.8671e-14 1.6015e-8 1.6774e-7 1.5191e-7</values></array></gridded2d></shortRangeSelfScalingVariance></mixed></covarianceSection>
+    <covarianceSection label="n + He4 + N15 + photon vs. n + H1 + O18 + photon" crossTerm="true">
+      <rowData ENDF_MFMT="33,22" href="$reactions#/reactionSuite/reactions/reaction[@label='n + He4 + N15 + photon']/crossSection/XYs1d[@label='eval']"/>
+      <columnData ENDF_MFMT="33,28" href="$reactions#/reactionSuite/reactions/reaction[@label='n + H1 + O18 + photon']/crossSection/XYs1d[@label='eval']"/>
+      <covarianceMatrix label="eval" type="relative">
+        <gridded2d>
+          <axes>
+            <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+              <values>1e-5 8417400 1.2e7 1.4e7 1.6e7 1.8e7 2e7</values></grid>
+            <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+              <link href="../../grid[@index='2']/values"/></grid>
+            <axis index="0" label="matrix_elements" unit=""/></axes>
+          <array shape="6,6">
+            <values>0 0 0 0 0 0 0 7.7032e-3 7.865e-3 8.4174e-3 9.0122e-3 9.1541e-3 0 6.0796e-3 6.8335e-3 9.0413e-3 0.01048 0.010757 0 3.6896e-3 6.1226e-3 9.6779e-3 0.012256 0.013174 0 2.142e-3 5.4093e-3 9.6687e-3 0.013177 0.014806 0 5.9435e-4 5.1032e-3 0.010393 0.014447 0.016244</values></array></gridded2d></covarianceMatrix></covarianceSection>
+    <covarianceSection label="n + H1 + O18 + photon">
+      <rowData ENDF_MFMT="33,28" href="$reactions#/reactionSuite/reactions/reaction[@label='n + H1 + O18 + photon']/crossSection/XYs1d[@label='eval']"/>
+      <mixed label="eval">
+        <covarianceMatrix label="0" type="relative">
+          <gridded2d>
+            <axes>
+              <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+                <values>1e-5 8417400 1.2e7 1.4e7 1.6e7 1.8e7 2e7</values></grid>
+              <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+                <link href="../../grid[@index='2']/values"/></grid>
+              <axis index="0" label="matrix_elements" unit=""/></axes>
+            <array shape="6,6" symmetry="lower">
+              <values>0 0 0.02528 0 0.01672 0.013226 0 0.011088 0.010429 0.01111 0 8.3706e-3 9.082e-3 0.011248 0.012632 0 7.6599e-3 8.6354e-3 0.01082 0.012851 0.013764</values></array></gridded2d></covarianceMatrix>
+        <shortRangeSelfScalingVariance label="1" type="absolute" dependenceOnProcessedGroupWidth="inverse">
+          <gridded2d>
+            <axes>
+              <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+                <values>1e-5 8417400 1.2e7 1.4e7 1.6e7 1.8e7 2e7</values></grid>
+              <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+                <link href="../../grid[@index='2']/values"/></grid>
+              <axis index="0" label="matrix_elements" unit="b**2"/></axes>
+            <array shape="6,6" compression="diagonal">
+              <values>0 5.2775e-11 2.8696e-9 5.3803e-9 9.0994e-9 1.3024e-8</values></array></gridded2d></shortRangeSelfScalingVariance></mixed></covarianceSection>
+    <covarianceSection label="F20 + photon [inclusive]">
+      <rowData ENDF_MFMT="33,102" href="$reactions#/reactionSuite/reactions/reaction[@label='F20 + photon [inclusive]']/crossSection/regions1d[@label='eval']"/>
+      <covarianceMatrix label="eval" type="relative">
+        <gridded2d>
+          <axes>
+            <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+              <values>1e-5 1e3 5e3 1e4 1.5e4 2e4 2.5e4 3e4 3.5e4 4e4 4.5e4 5e4 5.5e4 6e4 7e4 8e4 9e4 1e5 1.1e5 1.2e5 1.3e5 1.4e5 1.5e5 1.6e5 1.7e5 1.8e5 1.9e5 2e5 3e5 5e5 1e6 2e6 3e6 4e6 5e6 6e6 8e6 1e7 1.2e7 1.5e7 2e7</values></grid>
+            <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+              <link href="../../grid[@index='2']/values"/></grid>
+            <axis index="0" label="matrix_elements" unit=""/></axes>
+          <array shape="40,40" symmetry="lower">
+            <values>2.413544e-3 2.023929e-3 1.845569e-3 7.880868e-4 8.486119e-4 7.810763e-4 3.23083e-4 3.714448e-4 7.653748e-4 1.121313e-3 1.731183e-4 2.163451e-4 7.825431e-4 1.281677e-3 1.498573e-3 1.150303e-4 1.566227e-4 8.006386e-4 1.365493e-3 1.60899e-3 1.732263e-3 8.79889e-5 1.288442e-4 8.102177e-4 1.406832e-3 1.663352e-3 1.793042e-3 1.85712e-3 7.335508e-5 1.134716e-4 8.080613e-4 1.415682e-3 1.676585e-3 1.808442e-3 1.873736e-3 1.890991e-3 6.428749e-5 1.033563e-4 7.937374e-4 1.397115e-3 1.655856e-3 1.786573e-3 1.851445e-3 1.868904e-3 1.847569e-3 5.793546e-5 9.558937e-5 7.686591e-4 1.356203e-3 1.607715e-3 1.734688e-3 1.797834e-3 1.815148e-3 1.795011e-3 1.744739e-3 5.302443e-5 8.895682e-5 7.353846e-4 1.29879e-3 1.539404e-3 1.660725e-3 1.721178e-3 1.738079e-3 1.719455e-3 1.67226e-3 1.604001e-3 4.896822e-5 8.298186e-5 6.969002e-4 1.230926e-3 1.458309e-3 1.572754e-3 1.629881e-3 1.64618e-3 1.629251e-3 1.585618e-3 1.522294e-3 1.446382e-3 4.549433e-5 7.750727e-5 6.560226e-4 1.158081e-3 1.371073e-3 1.478023e-3 1.531492e-3 1.547072e-3 1.531903e-3 1.492045e-3 1.433981e-3 1.364265e-3 1.288783e-3 4.247183e-5 7.249952e-5 6.150367e-4 1.084615e-3 1.282981e-3 1.3823e-3 1.432021e-3 1.446825e-3 1.433388e-3
+              1.397303e-3 1.344518e-3 1.281033e-3 1.212233e-3 1.142418e-3 3.752415e-5 6.388271e-5 5.386426e-4 9.470265e-4 1.117816e-3 1.202709e-3 1.2453e-3 1.258552e-3 1.248273e-3 1.219186e-3 1.176235e-3 1.124383e-3 1.068077e-3 1.010866e-3 9.029264e-4 3.377041e-5 5.705076e-5 4.741454e-4 8.304459e-4 9.777354e-4 1.050301e-3 1.086758e-3 1.098613e-3 1.090937e-3 1.06772e-3 1.033058e-3 9.910321e-4 9.452933e-4 8.987536e-4 8.10829e-4 7.357154e-4 3.094663e-5 5.175966e-5 4.222557e-4 7.364496e-4 8.647177e-4 9.272829e-4 9.587365e-4 9.694123e-4 9.63789e-4 9.452669e-4 9.172587e-4 8.83136e-4 8.459056e-4 8.079653e-4 7.361828e-4 6.747791e-4 6.249175e-4 2.882769e-5 4.770003e-5 3.813334e-4 6.622034e-4 7.754008e-4 8.300259e-4 8.574893e-4 8.671981e-4 8.631654e-4 8.483261e-4 8.255542e-4 7.976604e-4 7.671427e-4 7.359914e-4 6.769627e-4 6.26399e-4 5.852993e-4 3.052617e-3 2.723262e-5 4.45848e-5 3.492095e-4 6.038445e-4 7.051648e-4 7.535203e-4 7.778206e-4 7.867443e-4 7.839398e-4 7.719771e-4 7.533071e-4 7.302997e-4 7.050527e-4 6.792354e-4 6.302335e-4 5.881981e-4 5.539955e-4 1.276775e-3 3.005237e-3 2.60239e-5 4.218091e-5 3.239046e-4 5.578201e-4 6.497509e-4 6.931415e-4 7.149274e-4 7.232136e-4 7.213616e-4 7.116542e-4
+              6.962089e-4 6.770483e-4 6.559538e-4 6.343413e-4 5.932487e-4 5.579448e-4 5.291889e-4 1.256284e-3 1.238147e-3 2.973746e-3 2.51003e-5 4.031042e-5 3.0382e-4 5.212503e-4 6.057034e-4 6.451334e-4 6.649066e-4 6.726726e-4 6.715652e-4 6.636398e-4 6.507493e-4 6.346398e-4 6.168417e-4 5.985689e-4 5.63762e-4 5.338112e-4 5.093886e-4 1.239918e-3 1.224489e-3 1.21223e-3 2.952421e-3 2.438832e-5 3.884112e-5 2.877279e-4 4.919183e-4 5.703606e-4 6.066019e-4 6.247494e-4 6.320875e-4 6.31568e-4 6.250642e-4 6.142168e-4 6.005506e-4 5.85394e-4 5.697989e-4 5.400346e-4 5.143806e-4 4.93438e-4 1.226727e-3 1.213474e-3 1.202937e-3 1.194501e-3 2.937684e-3 2.383471e-5 3.767568e-5 2.747038e-4 4.681536e-4 5.417154e-4 5.753638e-4 5.921852e-4 5.991681e-4 5.991176e-4 5.937595e-4 5.845628e-4 5.728729e-4 5.598546e-4 5.464282e-4 5.207502e-4 4.9858e-4 4.804602e-4 1.215988e-3 1.204503e-3 1.195364e-3 1.188042e-3 1.182122e-3 2.927289e-3 2.340079e-5 3.674245e-5 2.64056e-4 4.487042e-4 5.182635e-4 5.497822e-4 5.655109e-4 5.721966e-4 5.725239e-4 5.680986e-4 5.602493e-4 5.501742e-4 5.389044e-4 5.272522e-4 5.049191e-4 4.856022e-4 4.697953e-4 1.207159e-3 1.197122e-3 1.18913e-3 1.182722e-3 1.177538e-3 1.173304e-3 2.91981e-3
+              2.305821e-5 3.598842e-5 2.552658e-4 4.326307e-4 4.988752e-4 5.286277e-4 5.434476e-4 5.498822e-4 5.505171e-4 5.468587e-4 5.401197e-4 5.313772e-4 5.215512e-4 5.113647e-4 4.917963e-4 4.748392e-4 4.609459e-4 1.199829e-3 1.190991e-3 1.183948e-3 1.178298e-3 1.173725e-3 1.169986e-3 1.166899e-3 2.914327e-3 2.278604e-5 3.537406e-5 2.479418e-4 4.192238e-4 4.826977e-4 5.109719e-4 5.250291e-4 5.312497e-4 5.321371e-4 5.291152e-4 5.233e-4 5.156672e-4 5.070443e-4 4.9808e-4 4.808181e-4 4.658306e-4 4.535353e-4 1.193687e-3 1.185851e-3 1.179603e-3 1.174586e-3 1.170523e-3 1.167199e-3 1.164453e-3 1.162163e-3 2.910236e-3 2.256866e-5 3.486963e-5 2.417865e-4 4.079439e-4 4.69082e-4 4.961081e-4 5.095194e-4 5.155563e-4 5.16653e-4 5.141639e-4 5.091237e-4 5.024232e-4 4.948118e-4 4.868754e-4 4.715544e-4 4.582252e-4 4.472758e-4 1.188496e-3 1.181505e-3 1.175926e-3 1.171444e-3 1.167811e-3 1.164837e-3 1.162378e-3 1.160327e-3 1.1586e-3 2.907132e-3 2.239429e-5 3.445254e-5 2.365715e-4 3.983767e-4 4.575294e-4 4.834934e-4 4.963535e-4 5.022315e-4 5.035029e-4 5.014634e-4 4.97079e-4 4.91168e-4 4.844138e-4 4.773488e-4 4.636743e-4 4.517526e-4 4.41946e-4 1.184075e-3 1.177801e-3 1.172791e-3 1.168763e-3 1.165495e-3
+              1.162819e-3 1.160606e-3 1.158757e-3 1.1572e-3 1.155876e-3 2.904743e-3 2.175946e-5 3.262573e-5 2.107284e-4 3.507214e-4 3.998938e-4 4.204879e-4 4.305286e-4 4.355467e-4 4.376283e-4 4.377789e-4 4.366229e-4 4.346184e-4 4.321185e-4 4.293879e-4 4.239205e-4 4.190303e-4 4.149431e-4 1.161624e-3 1.158952e-3 1.1568e-3 1.155057e-3 1.153632e-3 1.152457e-3 1.151478e-3 1.150656e-3 1.149958e-3 1.149362e-3 1.148848e-3 2.896105e-3 2.18206e-5 3.214854e-5 1.986926e-4 3.281545e-4 3.724676e-4 3.904059e-4 3.990069e-4 4.035215e-4 4.059023e-4 4.070203e-4 4.073398e-4 4.071484e-4 4.066408e-4 4.05953e-4 4.043793e-4 4.028472e-4 4.015057e-4 1.150381e-3 1.149453e-3 1.148689e-3 1.148059e-3 1.147535e-3 1.147096e-3 1.146725e-3 1.146408e-3 1.146136e-3 1.1459e-3 1.145694e-3 1.144535e-3 2.893785e-3 2.217451e-5 3.231842e-5 1.942317e-4 3.194508e-4 3.617754e-4 3.785945e-4 3.865526e-4 3.907922e-4 3.932168e-4 3.946483e-4 3.954907e-4 3.959657e-4 3.962059e-4 3.962957e-4 3.962261e-4 3.960099e-4 3.95756e-4 1.145508e-3 1.145283e-3 1.145083e-3 1.144907e-3 1.144754e-3 1.144619e-3 1.1445e-3 1.144395e-3 1.144301e-3 1.144217e-3 1.144142e-3 1.14367e-3 1.143293e-3 2.892986e-3 2.243861e-5 3.255204e-5 1.932812e-4 3.174083e-4
+              3.592091e-4 3.757182e-4 3.834806e-4 3.876125e-4 3.900073e-4 3.91477e-4 3.924124e-4 3.930204e-4 3.934189e-4 3.936795e-4 3.939524e-4 3.940459e-4 3.940544e-4 1.144023e-3 1.143973e-3 1.143916e-3 1.143858e-3 1.1438e-3 1.143746e-3 1.143694e-3 1.143646e-3 1.143601e-3 1.143559e-3 1.14352e-3 1.143244e-3 1.142984e-3 1.142741e-3 0.2528925 2.25334e-5 3.264267e-5 1.930931e-4 3.169675e-4 3.586481e-4 3.750843e-4 3.827969e-4 3.868961e-4 3.892734e-4 3.907392e-4 3.916823e-4 3.923071e-4 3.927287e-4 3.930162e-4 3.933468e-4 3.934958e-4 3.93553e-4 3.935626e-4 3.935473e-4 3.93519e-4 3.934845e-4 3.934473e-4 3.934095e-4 3.933723e-4 3.933364e-4 3.93302e-4 3.932693e-4 3.932383e-4 3.930079e-4 3.927771e-4 3.925515e-4 0.2003923 0.2503922 2.25774e-5 3.26836e-5 1.929829e-4 3.167256e-4 3.583475e-4 3.747494e-4 3.824383e-4 3.865209e-4 3.888876e-4 3.903482e-4 3.912908e-4 3.919188e-4 3.923465e-4 3.92642e-4 3.929913e-4 3.931593e-4 3.932339e-4 3.932586e-4 3.932561e-4 3.932387e-4 3.932134e-4 3.93184e-4 3.931528e-4 3.931214e-4 3.930904e-4 3.930602e-4 3.930313e-4 3.930036e-4 3.927923e-4 3.925744e-4 3.923569e-4 0.2003921 0.200392 0.2503918 2.259921e-5 3.27017e-5 1.928818e-4 3.165247e-4 3.581053e-4
+              3.744847e-4 3.821587e-4 3.862306e-4 3.8859e-4 3.900462e-4 3.90987e-4 3.916152e-4 3.920448e-4 3.923433e-4 3.927005e-4 3.928771e-4 3.929599e-4 3.92992e-4 3.929958e-4 3.929839e-4 3.929632e-4 3.929377e-4 3.929101e-4 3.928815e-4 3.928531e-4 3.928252e-4 3.927983e-4 3.927723e-4 3.925715e-4 3.923607e-4 3.921479e-4 0.2003919 0.2003918 0.2003916 0.2503914 2.260909e-5 3.27071e-5 1.927764e-4 3.163291e-4 3.578747e-4 3.742364e-4 3.818991e-4 3.859631e-4 3.88317e-4 3.897695e-4 3.907083e-4 3.91336e-4 3.91766e-4 3.920658e-4 3.924268e-4 3.92608e-4 3.926954e-4 3.927316e-4 3.927391e-4 3.927303e-4 3.927123e-4 3.926893e-4 3.926636e-4 3.926369e-4 3.926101e-4 3.925836e-4 3.925578e-4 3.92533e-4 3.923386e-4 3.921324e-4 3.919226e-4 0.2003917 0.2003915 0.2003914 0.2003911 0.2503909 2.260923e-5 3.269627e-5 1.925427e-4 3.159181e-4 3.573986e-4 3.7373e-4 3.813749e-4 3.85427e-4 3.877724e-4 3.892192e-4 3.901544e-4 3.907803e-4 3.912098e-4 3.915102e-4 3.918744e-4 3.9206e-4 3.921519e-4 3.921925e-4 3.922039e-4 3.921986e-4 3.921837e-4 3.921633e-4 3.9214e-4 3.921153e-4 3.920902e-4 3.920653e-4 3.920409e-4 3.920173e-4 3.918306e-4 3.916301e-4 3.914241e-4 0.2003912 0.200391 0.2003909
+              0.2003907 0.2003904 0.2503899 2.259447e-5 3.266836e-5 1.922774e-4 3.154668e-4 3.568817e-4 3.731846e-4 3.80814e-4 3.848562e-4 3.87195e-4 3.886372e-4 3.895693e-4 3.901933e-4 3.906219e-4 3.90922e-4 3.912871e-4 3.914744e-4 3.915685e-4 3.916113e-4 3.916247e-4 3.916212e-4 3.916079e-4 3.915889e-4 3.915669e-4 3.915433e-4 3.915192e-4 3.914952e-4 3.914717e-4 3.914488e-4 3.912665e-4 3.910693e-4 3.908657e-4 0.2003907 0.2003905 0.2003903 0.2003901 0.2003899 0.2003894 0.2503888 2.257076e-5 3.262973e-5 1.919832e-4 3.149735e-4 3.563196e-4 3.725937e-4 3.802081e-4 3.842414e-4 3.865742e-4 3.880123e-4 3.889417e-4 3.895639e-4 3.899914e-4 3.90291e-4 3.906561e-4 3.908443e-4 3.909396e-4 3.909835e-4 3.909982e-4 3.909958e-4 3.909834e-4 3.909654e-4 3.909441e-4 3.909213e-4 3.908978e-4 3.908744e-4 3.908513e-4 3.908289e-4 3.906495e-4 3.904546e-4 3.902528e-4 0.2003901 0.2003899 0.2003897 0.2003895 0.2003893 0.2003888 0.2003882 0.2503876 2.252401e-5 3.255782e-5 1.914937e-4 3.1416e-4 3.553953e-4 3.716241e-4 3.79216e-4 3.832362e-4 3.855606e-4 3.869932e-4 3.879188e-4 3.885383e-4 3.889643e-4 3.892628e-4 3.896274e-4 3.89816e-4 3.899121e-4 3.899571e-4 3.899728e-4 3.899714e-4
+              3.8996e-4 3.899428e-4 3.899223e-4 3.899002e-4 3.898773e-4 3.898545e-4 3.898319e-4 3.8981e-4 3.896336e-4 3.894412e-4 3.892412e-4 0.200389 0.2003889 0.2003887 0.2003885 0.2003883 0.2003878 0.2003872 0.2003866 0.2503856</values></array></gridded2d></covarianceMatrix></covarianceSection>
+    <covarianceSection label="H1 + O19 + photon [inclusive]">
+      <rowData ENDF_MFMT="33,103" href="$reactions#/reactionSuite/reactions/reaction[@label='H1 + O19 + photon [inclusive]']/crossSection/XYs1d[@label='eval']"/>
+      <covarianceMatrix label="eval" type="relative">
+        <gridded2d>
+          <axes>
+            <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+              <values>1e-5 4250300 5e6 6e6 8e6 1e7 1.2e7 1.5e7 2e7</values></grid>
+            <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+              <link href="../../grid[@index='2']/values"/></grid>
+            <axis index="0" label="matrix_elements" unit=""/></axes>
+          <array shape="8,8" symmetry="lower">
+            <values>0 0 9e-2 0 0 1e-2 0 0 3e-3 1e-2 0 0 3e-3 3e-3 9e-2 0 0 0 0 0.045 9e-2 0 0 0 0 0.045 0.045 9e-2 0 0 0 0 0.045 0.045 0.045 9e-2</values></array></gridded2d></covarianceMatrix></covarianceSection>
+    <covarianceSection label="H2 + O18 [inclusive]">
+      <rowData ENDF_MFMT="33,104" href="$reactions#/reactionSuite/reactions/reaction[@label='H2 + O18 [inclusive]']/crossSection/XYs1d[@label='eval']"/>
+      <covarianceMatrix label="eval" type="relative">
+        <gridded2d>
+          <axes>
+            <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+              <values>1e-5 6074200 8e6 1e7 1.2e7 1.5e7 2e7</values></grid>
+            <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+              <link href="../../grid[@index='2']/values"/></grid>
+            <axis index="0" label="matrix_elements" unit=""/></axes>
+          <array shape="6,6" symmetry="lower">
+            <values>0 0 9e-2 0 0 9e-2 0 0 0.045 9e-2 0 0 0.045 0.045 9e-2 0 0 0.045 0.045 0.045 9e-2</values></array></gridded2d></covarianceMatrix></covarianceSection>
+    <covarianceSection label="H3 + O17 [inclusive]">
+      <rowData ENDF_MFMT="33,105" href="$reactions#/reactionSuite/reactions/reaction[@label='H3 + O17 [inclusive]']/crossSection/XYs1d[@label='eval']"/>
+      <covarianceMatrix label="eval" type="relative">
+        <gridded2d>
+          <axes>
+            <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+              <values>1e-5 7958200 8e6 1e7 1.2e7 1.5e7 2e7</values></grid>
+            <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+              <link href="../../grid[@index='2']/values"/></grid>
+            <axis index="0" label="matrix_elements" unit=""/></axes>
+          <array shape="6,6" symmetry="lower">
+            <values>0 0 9e-2 0 0 9e-2 0 0 0.045 9e-2 0 0 0.045 0.045 9e-2 0 0 0.045 0.045 0.045 9e-2</values></array></gridded2d></covarianceMatrix></covarianceSection>
+    <covarianceSection label="He4 + N16 + photon [inclusive]">
+      <rowData ENDF_MFMT="33,107" href="$reactions#/reactionSuite/reactions/reaction[@label='He4 + N16 + photon [inclusive]']/crossSection/XYs1d[@label='eval']"/>
+      <covarianceMatrix label="eval" type="relative">
+        <gridded2d>
+          <axes>
+            <grid index="2" label="row_energy_bounds" unit="eV" style="boundaries">
+              <values>1e-5 1603900 2e6 3e6 4e6 5e6 6e6 8e6 1e7 1.2e7 1.5e7 2e7</values></grid>
+            <grid index="1" label="column_energy_bounds" unit="eV" style="boundaries">
+              <link href="../../grid[@index='2']/values"/></grid>
+            <axis index="0" label="matrix_elements" unit=""/></axes>
+          <array shape="11,11" symmetry="lower">
+            <values>0 0 9e-2 0 0 1e-2 0 0 3e-3 1e-2 0 0 3e-3 3e-3 1e-2 0 0 3e-3 3e-3 3e-3 1e-2 0 0 3e-3 3e-3 3e-3 3e-3 1e-2 0 0 3e-3 3e-3 3e-3 3e-3 3e-3 1e-2 0 0 3e-3 3e-3 3e-3 3e-3 3e-3 3e-3 9e-2 0 0 0 0 0 0 0 0 0.045 9e-2 0 0 0 0 0 0 0 0 0.045 0.045 9e-2</values></array></gridded2d></covarianceMatrix></covarianceSection></covarianceSections>
+</covarianceSuite>

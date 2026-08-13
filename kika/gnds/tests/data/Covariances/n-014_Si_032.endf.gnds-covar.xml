@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<covarianceSuite projectile="n" target="Si32" evaluation="ENDF/B-8.1" interaction="nuclear" format="2.0">
+  <externalFiles>
+    <externalFile label="reactions" path="../n-014_Si_032.endf.gnds.xml"/></externalFiles>
+  <styles>
+    <evaluated label="eval" date="2017-07-01" library="ENDF/B" version="8.1.1">
+      <documentation>
+        <authors>
+          <author name="   G. Nobre, D. Brown, M. Herman"></author></authors>
+        <dates>
+          <date value="2017-07-01" dateType="created"/></dates>
+        <title><![CDATA[ENDF-6 file from ENDF/B version 8.1.1 translated to GNDS by FUDGE.]]></title>
+        <body><![CDATA[See the endfCompatible section.]]></body></documentation>
+      <temperature value="0" unit="K"/>
+      <projectileEnergyDomain min="1e-5" max="2e7" unit="eV"/></evaluated></styles>
+  <parameterCovariances>
+    <parameterCovariance label="resolved resonances">
+      <rowData href="$reactions#/reactionSuite/resonances/resolved/BreitWigner[@label='eval']"/>
+      <parameterCovarianceMatrix label="eval" type="absolute">
+        <parameters>
+          <parameterLink label="scatteringRadius" href="$reactions#/reactionSuite/resonances/scatteringRadius"/>
+          <parameterLink label="resonanceParameters" href="$reactions#/reactionSuite/resonances/resolved/BreitWigner[@label='eval']/resonanceParameters/table" nParameters="18" matrixStartIndex="1"/></parameters>
+        <array shape="19,19" compression="diagonal">
+          <values>0.183272178609 6.990487466209e-4 0 0 0 249241.17668836 8.8565942258704e-3 362045756.25 0 0 0 249241.17668836 8.8565942258704e-3 1448183025 0 0 0 498482.31467584 8.8565942258704e-3</values></array></parameterCovarianceMatrix></parameterCovariance></parameterCovariances>
+</covarianceSuite>

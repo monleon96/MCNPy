@@ -52,6 +52,14 @@ class ResonanceReaction:
     Q: Optional[float] = None
     eliminated: bool = False
     scatteringRadius: Optional[float] = None
+    #: §19.3.3's ``<link href=.../>``: the xPath of the ``reaction`` this channel
+    #: *is*. All 902 ``resonanceReaction`` nodes in ENDF/B-VIII.1-GNDS carry one,
+    #: and it is the only formal tie between the resonance block and the
+    #: reactions — a ``label`` that matches a reaction label is a convention the
+    #: files keep, not a statement the format makes. Kept unfollowed, the same
+    #: treatment :class:`~kika.nuclear_data.model.cross_section_forms.Reference`
+    #: gets. ``None`` for an ENDF-decoded evaluation, which has no link to give.
+    href: Optional[str] = None
 
 
 @dataclass
@@ -136,6 +144,12 @@ class RMatrix:
     #: §19.3.1. ENDF's **KRL**: ``True`` selects relativistic kinematics. Never
     #: read at all before B1a — not by the model and not by the flat path.
     relativisticKinematics: bool = False
+    #: §19.3.1. ``True`` means the channel radius is to be **computed from the
+    #: target mass** rather than taken from ``scatteringRadius`` — ENDF's NAPS=0.
+    #: Physics, not bookkeeping: a reconstructor that ignores it puts the
+    #: evaluator's AP into the penetrability where the evaluator asked for
+    #: 0.123 A^(1/3) + 0.08, and the two differ by percent.
+    calculateChannelRadius: bool = False
 
     @property
     def numberOfResonances(self) -> int:

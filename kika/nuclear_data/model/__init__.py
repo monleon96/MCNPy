@@ -61,6 +61,7 @@ from .functions import (
 )
 from .conversion import ConversionReport
 from .covariances import (
+    AverageParameterCovariance,
     CovarianceMatrix,
     CovarianceSection,
     CovarianceSuite,
@@ -69,12 +70,15 @@ from .covariances import (
     ParameterCovariance,
     ParameterCovarianceMatrix,
     ParameterLink,
+    ShortRangeSelfScalingVariance,
     Slice,
     Slices,
     Sum,
+    Summand,
 )
 from .cross_section_forms import (
     EVAL_LABEL,
+    Background,
     CoulombPlusNuclearElastic,
     CrossSection,
     Reference,
@@ -99,11 +103,13 @@ from .output_channel import (DelayedNeutron, DelayedNeutrons,
                              FissionFragmentData, Multiplicity, OutputChannel,
                              Product, Products, Q)
 from .pops import Nuclide, Particle, PoPs
-from .provenance import AceProvenance, EndfProvenance, Provenance
-from .quantities import PhysicalQuantity
+from .provenance import (AceProvenance, EndfProvenance, GndsProvenance,
+                         Provenance)
+from .quantities import PhysicalQuantity, RangeQuantity
 from .quantities import Uncertainty as ScalarUncertainty
 from .reaction_id import ReactionId
 from .reactions import (
+    CrossSectionSum,
     FissionComponents,
     IncompleteReactions,
     OrphanProducts,
@@ -117,6 +123,8 @@ from .resonances import (
     BreitWignerApproximation,
     Channel,
     Resonance,
+    ResonanceParameters,
+    ResonanceReaction,
     ResolvedRegion,
     Resonances,
     RMatrix,
@@ -124,7 +132,9 @@ from .resonances import (
     ScatteringRadius,
     SpinGroup,
     TabulatedWidths,
+    UnresolvedChannel,
     UnresolvedRegion,
+    UnresolvedSpinGroup,
 )
 from .sums import Add, MultiplicitySum, MultiplicitySums, Summands
 from .styles import (
@@ -149,7 +159,7 @@ __all__ = [
     # §3.5 units
     "Unit", "UnitError", "parse_unit", "conversion_factor", "check_mass_unit",
     # §2.3.3
-    "PhysicalQuantity", "ScalarUncertainty",
+    "PhysicalQuantity", "RangeQuantity", "ScalarUncertainty",
     # §3.4
     "Frame", "Interpolation", "InterpolationQualifier", "GridStyle", "ValueType",
     "ENDF_INT_TO_INTERPOLATION", "INTERPOLATION_TO_ENDF_INT",
@@ -171,9 +181,10 @@ __all__ = [
     # §14 the root
     "ReactionSuite", "ExternalFile", "ExternalFiles", "ApplicationData",
     # §15-16 reactions and their cross sections
-    "Reaction", "Reactions", "Sums", "OrphanProducts", "FissionComponents",
+    "Reaction", "CrossSectionSum", "Reactions", "Sums", "OrphanProducts",
+    "FissionComponents",
     "Productions", "IncompleteReactions", "ReactionId",
-    "CrossSection", "EVAL_LABEL", "ResonancesWithBackground", "Reference",
+    "CrossSection", "EVAL_LABEL", "Background", "ResonancesWithBackground", "Reference",
     "CoulombPlusNuclearElastic", "ThermalNeutronScatteringLaw1d",
     "URR_probabilityTables1d",
     # §17-18 output channels and distributions
@@ -187,11 +198,16 @@ __all__ = [
     "Resonances", "ResolvedRegion", "UnresolvedRegion", "ScatteringRadius",
     "BreitWigner", "BreitWignerApproximation", "Resonance", "SpinGroup",
     "RMatrix", "RMatrixSpinGroup", "Channel", "TabulatedWidths",
+    "ResonanceParameters", "ResonanceReaction", "UnresolvedChannel",
+    "UnresolvedSpinGroup",
     # conversion bookkeeping (not GNDS nodes)
     "ConversionReport", "Provenance", "EndfProvenance", "AceProvenance",
+    "GndsProvenance",
     # §25 covariances
     "CovarianceSuite", "CovarianceSection", "DataLink", "CovarianceMatrix",
-    "Mixed", "Sum", "Slice", "Slices",
+    "Mixed", "Sum", "Summand", "ShortRangeSelfScalingVariance",
+    "Slice", "Slices",
     # §25.3 parameter covariances
     "ParameterCovariance", "ParameterCovarianceMatrix", "ParameterLink",
+    "AverageParameterCovariance",
 ]

@@ -154,6 +154,25 @@ _TAPES: Dict[str, Sequence[str]] = {
     "ta181_b81": ("endfb81/n-073_Ta_181.endf", "endfb8.1/n/73181.endf"),
     "mn55_jendl": ("jendl5/n/25055.endf", "JENDL-5/Mn55_jendl5_n.endf"),
     "pu239_jendl": ("jendl5/n/94239.endf", "JENDL-5/Pu239_jendl5_n.endf"),
+    # The ENDF/B-VIII.1 GNDS distribution, as published by the NNDC. Only the
+    # oracle tests need it: they compare what the GNDS reader gets out of Fe-56
+    # against what the ENDF adapter gets out of the same evaluation, and that
+    # needs the whole 18.8 MB file rather than the committed trim. Everything
+    # else under ``kika/gnds`` runs off committed fixtures and needs no share.
+    "fe56_gnds": (
+        "ENDF-B-VIII.1-GNDS/ENDF-B-VIII.1-GNDS/neutrons/n-026_Fe_056.endf.gnds.xml",
+        "ENDF-B-VIII.1-GNDS/neutrons/n-026_Fe_056.endf.gnds.xml",
+    ),
+    # The same evaluation as ``fe56_gnds`` below, in ENDF-6. This pair is the
+    # phase 5 oracle: one evaluation, two encodings, and any disagreement
+    # between them is a reader defect rather than a physics difference. Not the
+    # same tape as ``fe56_host`` — that is JEFF-4.0 with a JEFF-3.3 MF4 graft.
+    "fe56_b81": ("endfb81/n-026_Fe_056.endf", "n-026_Fe_056.endf"),
+    "fe56_gnds_cov": (
+        "ENDF-B-VIII.1-GNDS/ENDF-B-VIII.1-GNDS/neutrons/Covariances/"
+        "n-026_Fe_056.endf.gnds-covar.xml",
+        "ENDF-B-VIII.1-GNDS/neutrons/Covariances/n-026_Fe_056.endf.gnds-covar.xml",
+    ),
     "serpent_input": ("serpent/PWRSphere.sss2", "PWRSphere.sss2"),
     # Smallest real Fe-56 ACE on the share (16 MB) is preferred over the
     # 112 MB JEFF one: the round-trip gate reads and rewrites the whole XSS,
@@ -251,6 +270,23 @@ _TAPE_FIXTURES = frozenset(
 #: Fixtures whose presence means the test spawns NJOY.
 _NJOY_FIXTURES = frozenset({"njoy_exe"})
 
+#: Fixtures whose presence means the test reads GNDS. Both kinds are here on
+#: purpose: the committed fixtures need no shared tree and are *not* also
+#: ``tape``-marked, while ``fe56_gnds_tape``/``fe56_gnds_cov_tape`` are in
+#: ``_TAPES`` and so pick up ``tape`` from the set above as well. That makes
+#: ``-m gnds`` mean "everything that reads a GNDS file", which is the question
+#: worth asking, and ``-m "gnds and not tape"`` the fast lane of it.
+#:
+#: This marker was declared in ``pyproject.toml`` and applied by nothing until
+#: the GNDS reader arrived, so ``-m gnds`` selected zero tests while the module
+#: docstring above claimed it was applied automatically. It is applied now.
+_GNDS_FIXTURES = frozenset({
+    "fe56_gnds_tape", "fe56_gnds_cov_tape",
+    "gnds_data_dir", "micro_fe56_gnds", "micro_ta182_gnds",
+    "h2_gnds", "h2_gnds_cov",
+    "gnds_covariance_fixture",
+})
+
 #: Marks held back from a bare ``pytest``. Measured 2026-08-07: 29 of 1511
 #: tests carry one of these and they dominate the wall clock — the seven
 #: ``njoy`` tests alone run longer than the other 1504 together, because each
@@ -282,6 +318,8 @@ def pytest_collection_modifyitems(
             item.add_marker(pytest.mark.tape)
         if names & _NJOY_FIXTURES:
             item.add_marker(pytest.mark.njoy)
+        if names & _GNDS_FIXTURES:
+            item.add_marker(pytest.mark.gnds)
 
     if (config.getoption("markexpr") or config.getoption("keyword")
             or _deep(config)):
@@ -351,6 +389,9 @@ cf252_b81_tape = _tape_fixture("cf252_b81")
 pu239_b81_tape = _tape_fixture("pu239_b81")
 u5_nubar_covfil_tape = _tape_fixture("u5_nubar_covfil")
 u5_boxer_tape = _tape_fixture("u5_boxer")
+fe56_gnds_tape = _tape_fixture("fe56_gnds")
+fe56_gnds_cov_tape = _tape_fixture("fe56_gnds_cov")
+fe56_b81_tape = _tape_fixture("fe56_b81")
 
 #: The eleven evaluations on this machine that carry an MF32, in the order the
 #: MF32 survey lists them. ``MF32_TAPES`` is exported so a test can parametrise
@@ -504,3 +545,121 @@ def micro_pfns_cov_tape() -> Path:
     if not path.is_file():  # pragma: no cover - fixture is committed
         pytest.fail(f"committed micro-tape is missing: {path}")
     return path
+
+
+# --------------------------------------------------------------------------
+# Fixtures — committed GNDS files
+# --------------------------------------------------------------------------
+
+#: The committed fixtures mirror the distribution's own layout — evaluations at
+#: the top, covariances under ``Covariances/`` — rather than being flattened
+#: into one directory. That is not tidiness: an ``externalFile`` entry names its
+#: sibling by *relative path* (``Covariances/n-001_H_002.endf.gnds-covar.xml``
+#: one way, ``../n-009_F_019.endf.gnds.xml`` the other), so flattening them
+#: would make every committed href resolve to somewhere that does not exist and
+#: the reader would be tested against a layout no real library uses.
+GNDS_DATA_DIR = REPO_ROOT / "kika" / "gnds" / "tests" / "data"
+
+
+def _gnds_file(name: str) -> Path:
+    path = GNDS_DATA_DIR / name
+    if not path.is_file():  # pragma: no cover - fixtures are committed
+        pytest.fail(f"committed GNDS fixture is missing: {path}")
+    return path
+
+
+@pytest.fixture(scope="session")
+def gnds_data_dir() -> Path:
+    """The committed GNDS fixture directory itself.
+
+    For the tests that walk the whole set — "every committed fixture parses",
+    "every one declares a format this reader accepts" — rather than naming one.
+    Walk it with ``rglob``: the covariances are one level down, in
+    ``Covariances/``, exactly as the distribution ships them.
+    """
+    if not GNDS_DATA_DIR.is_dir():  # pragma: no cover - committed
+        pytest.fail(f"committed GNDS fixture directory is missing: {GNDS_DATA_DIR}")
+    return GNDS_DATA_DIR
+
+
+@pytest.fixture(scope="session")
+def h2_gnds() -> Path:
+    """n + H2 from ENDF/B-VIII.1, **unmodified**, with its covariance sibling.
+
+    The paired fixture, and the only one where a cross-file ``href`` and the
+    SHA-1 in ``externalFiles`` are both real. 113 kB for 1013 nodes, which is
+    what makes it the pair worth committing: ``regions1d`` and ``regions2d``,
+    a ``reference`` form, ``crossSectionSum`` with resolvable ``summands``,
+    ``angularTwoBody``/``isotropic2d``/``unspecified`` — the three distributions
+    kika implements — *and* ``uncorrelated``/``NBodyPhaseSpace``, which it does
+    not, so the report's ``unsupported`` list is exercised by a real file rather
+    than by a hand-built one.
+    """
+    return _gnds_file("n-001_H_002.endf.gnds.xml")
+
+
+@pytest.fixture(scope="session")
+def h2_gnds_cov() -> Path:
+    """The covariance sibling of :func:`h2_gnds`, unmodified. 11 kB, 4 sections."""
+    return _gnds_file("Covariances/n-001_H_002.endf.gnds-covar.xml")
+
+
+@pytest.fixture(scope="session")
+def micro_fe56_gnds() -> Path:
+    """Fe-56 cut down to its resonances. One of the two trimmed GNDS fixtures.
+
+    No distributed file under 1.6 MB carries a resolved resonance region, and
+    Fe-56 — the material this project is about — is 18.8 MB, so this one is
+    trimmed: ``resonances`` verbatim (``RMatrix``, five spin groups, their
+    ``resonanceParameters`` tables), the two reactions its
+    ``resonanceReactions`` link to, everything else dropped or truncated.
+
+    **Its cross sections are abridged and are not physics.** Assert on structure
+    here; anything comparing numbers against the ENDF path wants
+    ``fe56_gnds_tape``, which is the whole file. Rebuild with
+    ``python kika/gnds/tests/data/build_micro_fe56_gnds.py``, which validates
+    the result against FUDGE's GNDS 2.0 schema before writing it.
+    """
+    return _gnds_file("micro_fe56.gnds.xml")
+
+
+@pytest.fixture(scope="session")
+def micro_ta182_gnds() -> Path:
+    """The other §19 resolved formalism and the unresolved region, in one file.
+
+    ``micro_fe56_gnds`` covers ``RMatrix``; between them the two cover §19.
+    Ta-182 carries a ``BreitWigner`` (MultiLevel, ``calculateChannelRadius``)
+    **and** a ``tabulatedWidths`` with six (L, J) groups, and its whole
+    ``resonances`` subtree is 11.7 kB — the 373 kB of the distributed file is
+    ``reactions`` and ``sums``, which is what the trim removes.
+
+    Same warning as Fe-56: the resonance block is verbatim, everything outside
+    it is abridged and is not physics. Built by the same script.
+    """
+    return _gnds_file("micro_ta182.gnds.xml")
+
+
+#: Covariance fixture -> the construct it is here for. Each is the *smallest*
+#: file in the 270-file ENDF/B-VIII.1 covariance distribution carrying it, and
+#: each is committed unmodified. Between them they cover every covariance
+#: construct the library uses; the survey that picked them is in the phase 5
+#: section of ``docs/gnds_roadmap.md``.
+GNDS_COVARIANCE_FIXTURES = {
+    "n-014_Si_032": "parameterCovariances alone — a suite with no covarianceSections at all",
+    "n-069_Tm_171": "averageParameterCovariance (URR), and array compression='flattened'",
+    "n-009_F_019": "sum/summand, columnData, crossTerm, mixed, shortRangeSelfScalingVariance",
+    "n-057_La_139": "slices/slice — the MF34 Legendre-order link — plus MF40",
+}
+
+
+@pytest.fixture(scope="session", params=sorted(GNDS_COVARIANCE_FIXTURES))
+def gnds_covariance_fixture(request: pytest.FixtureRequest) -> Path:
+    """Each committed covariance fixture in turn. See :data:`GNDS_COVARIANCE_FIXTURES`.
+
+    These are covariance files **without** their ``reactionSuite`` sibling: the
+    distribution's ``externalFile`` entry points at a file that is not committed
+    beside them. That is deliberate, not an oversight — a ``covarianceSuite``
+    read on its own is a case the reader has to handle, and handling it means
+    reporting the unresolvable ``href`` rather than raising.
+    """
+    return _gnds_file(f"Covariances/{request.param}.endf.gnds-covar.xml")

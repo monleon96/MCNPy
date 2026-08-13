@@ -97,7 +97,30 @@ def _nodes():
         "Regions1d": m.Regions1d.fromEndfRegions(
             np.array([1.0, 5.0, 10.0]), np.array([1.0, 2.0, 3.0]), [(2, 2), (3, 5)]
         ),
-        "Evaluated": m.Evaluated(label="eval", library="JEFF", version="4.0"),
+        "Evaluated": m.Evaluated(
+            label="eval", library="JEFF", version="4.0",
+            temperature=m.PhysicalQuantity(value=0.0, unit="K"),
+            projectileEnergyDomain=m.RangeQuantity(min=1e-5, max=1.5e8, unit="eV"),
+        ),
+        "RangeQuantity": m.RangeQuantity(min=1e-5, max=1.5e8, unit="eV"),
+        "Background": m.Background(
+            resolvedRegion=m.XYs1d(xs=[1e-5, 8.5e5], ys=[0.0, 1.0]),
+            fastRegion=m.XYs1d(xs=[8.5e5, 1.5e8], ys=[1.0, 2.0]),
+        ),
+        "ResonancesWithBackground": m.ResonancesWithBackground(
+            background=m.Background(
+                resolvedRegion=m.XYs1d(xs=[1e-5, 8.5e5], ys=[0.0, 1.0])
+            ),
+            resonanceRegionHref="/reactionSuite/resonances",
+            label="eval",
+        ),
+        "CrossSectionSum": m.CrossSectionSum(
+            id=m.ReactionId(label="total", ENDF_MT=1),
+            summands=m.Summands([m.Add(href="/reactionSuite/reactions")]),
+        ),
+        "AngularTwoBody": m.AngularTwoBody(
+            label="eval", recoilHref="../../product[@label='n']"
+        ),
         "Realization": m.Realization(label="s7", derivedFrom="eval"),
         "ReactionId": m.ReactionId(label="n + Fe56", ENDF_MT=2),
         "Q": m.Q(value=0.0, unit="eV"),

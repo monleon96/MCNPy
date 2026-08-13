@@ -147,7 +147,9 @@ def test_a_cross_section_holds_one_form_per_style_label():
     an ``XYs1d`` labelled ``recon``."""
     xs = m.CrossSection()
     xs[m.EVAL_LABEL] = m.ResonancesWithBackground(
-        background=m.XYs1d(xs=[1.0, 10.0], ys=[2.0, 3.0])
+        background=m.Background(
+            resolvedRegion=m.XYs1d(xs=[1.0, 10.0], ys=[2.0, 3.0])
+        )
     )
     xs["recon"] = m.XYs1d(xs=[1.0, 5.0, 10.0], ys=[2.0, 2.5, 3.0])
 
@@ -164,7 +166,9 @@ def test_evaluating_a_representation_rather_than_a_function_is_an_error():
     """
     xs = m.CrossSection()
     xs[m.EVAL_LABEL] = m.ResonancesWithBackground(
-        background=m.XYs1d(xs=[1.0, 10.0], ys=[2.0, 3.0])
+        background=m.Background(
+            resolvedRegion=m.XYs1d(xs=[1.0, 10.0], ys=[2.0, 3.0])
+        )
     )
     with pytest.raises(TypeError, match="representation rather than a function"):
         xs.evaluate(5.0)
@@ -371,3 +375,97 @@ def test_a_clean_decode_does_not_clutter_the_repr():
     suite.report = m.ConversionReport()
     assert "clean" not in repr(suite)
     assert "clean" in suite.summary()
+
+
+# ---------------------------------------------------------------------------
+# 4. The nodes the real GNDS files forced (phase 5, P4)
+# ---------------------------------------------------------------------------
+
+def test_a_background_is_three_named_regions_and_knows_which_it_has():
+    """§16.1.1. A region the evaluation does not carry stays ``None``, and that
+    is information: 1 541 of the library's 1 613 backgrounds have a resolved
+    region and all 1 613 have a fast one, so absence is never "empty"."""
+    background = m.Background(
+        resolvedRegion=m.XYs1d(xs=[1e-5, 8.5e5], ys=[0.0, 1.0]),
+        fastRegion=m.XYs1d(xs=[8.5e5, 1.5e8], ys=[1.0, 2.0]),
+    )
+    assert len(background) == 2
+    assert background.unresolvedRegion is None
+    assert list(background.regions) == [
+        "resolvedRegion", "unresolvedRegion", "fastRegion"
+    ]
+    assert "resolvedRegion=XYs1d" in repr(background)
+
+
+def test_an_empty_background_is_present_rather_than_absent():
+    """The §14.1.1 rule, applied one level down: `if form.background:` must not
+    read a background whose regions have not been decoded as no background."""
+    assert m.Background()
+    assert len(m.Background()) == 0
+    assert "no region" in repr(m.Background())
+
+
+def test_a_cross_section_sum_is_a_reaction_so_the_suite_lookup_finds_it():
+    """§21.2. MT1 is not an exclusive reaction and asking for it must still work."""
+    suite = m.ReactionSuite(evaluation="e", projectile="n", target="Fe56")
+    total = m.CrossSectionSum(
+        id=m.ReactionId(label="total", ENDF_MT=1),
+        summands=m.Summands([m.Add(href="/reactionSuite/reactions/reaction[0]")]),
+    )
+    suite.sums.append(total)
+
+    assert suite.reactionByENDF_MT(1) is total
+    assert isinstance(total, m.Reaction)
+    assert 1 not in suite.reactions
+    assert len(total.summands) == 1
+    # A sum has no products; §21.2 gives the node no outputChannel at all.
+    assert len(total.outputChannel.products) == 0
+
+
+def test_a_sum_keeps_its_own_values_beside_the_links_it_sums():
+    """Recomputing the total from the summands would replace what the evaluator
+    wrote, and the two need not agree to the last digit."""
+    total = m.CrossSectionSum(id=m.ReactionId(label="total", ENDF_MT=1))
+    total.crossSection[m.EVAL_LABEL] = m.XYs1d(xs=[1.0, 10.0], ys=[3.0, 4.0])
+    assert total.crossSection.hasEvaluated
+    assert len(total.summands) == 0        # values without parts is legal
+    assert "0 summands" in repr(total)
+
+
+def test_a_recoil_angular_distribution_carries_a_link_and_no_table():
+    """§18's commonest ``angularTwoBody``: 22 540 of the library's 45 080."""
+    recoil = m.AngularTwoBody(
+        label="eval", recoilHref="../../product[@label='n']/distribution"
+    )
+    assert recoil.isRecoil
+    assert recoil.angular is None
+    # The accessors answer "nothing tabulated" instead of raising, because a
+    # caller iterating every product's energies should not have to special-case
+    # the majority shape.
+    assert recoil.energies == []
+    assert recoil.function1ds == []
+
+
+def test_an_isotropic_two_body_form_is_a_distribution_not_an_absence():
+    isotropic = m.AngularTwoBody(label="eval", angular=m.Isotropic2d())
+    assert not isotropic.isRecoil
+    assert isotropic.angular is not None
+    assert isotropic.energies == []
+
+
+def test_a_range_quantity_carries_its_unit_and_refuses_an_inverted_interval():
+    domain = m.RangeQuantity(min=1e-5, max=1.5e8, unit="eV")
+    assert 1.0 in domain and 2e8 not in domain
+    assert str(domain).endswith("eV")
+    with pytest.raises(ValueError, match="runs min to max"):
+        m.RangeQuantity(min=1.5e8, max=1e-5, unit="eV")
+
+
+def test_the_evaluated_style_holds_the_two_children_the_schema_requires():
+    style = m.Evaluated(
+        label="eval", library="ENDF/B", version="8.1.1",
+        temperature=m.PhysicalQuantity(value=0.0, unit="K"),
+        projectileEnergyDomain=m.RangeQuantity(min=1e-5, max=1.5e8, unit="eV"),
+    )
+    assert style.temperature.unit == "K"
+    assert style.projectileEnergyDomain.max == 1.5e8

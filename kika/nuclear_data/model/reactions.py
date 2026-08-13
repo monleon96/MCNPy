@@ -8,9 +8,9 @@ from typing import Iterator, List, Optional, Union
 from .cross_section_forms import CrossSection
 from .output_channel import OutputChannel
 from .reaction_id import ReactionId
-from .sums import MultiplicitySum, MultiplicitySums
+from .sums import MultiplicitySum, MultiplicitySums, Summands
 
-__all__ = ["Reaction", "Reactions", "Sums", "OrphanProducts",
+__all__ = ["Reaction", "CrossSectionSum", "Reactions", "Sums", "OrphanProducts",
            "FissionComponents", "Productions", "IncompleteReactions"]
 
 
@@ -42,6 +42,38 @@ class Reaction:
 
     def __repr__(self) -> str:
         return f"Reaction({self.id}, forms={sorted(self.crossSection.forms)})"
+
+
+@dataclass
+class CrossSectionSum(Reaction):
+    """§21.2 ``crossSectionSum``: MT1, MT3, MT4 — a σ **and** what it sums.
+
+    A subclass of :class:`Reaction` rather than a node of its own, because
+    :class:`Sums` has always been a list of reactions and
+    ``ReactionSuite.reactionByENDF_MT`` searches it — asking for MT1 and being
+    told "that is not a reaction" would be pedantically right and useless. It
+    *is* a reaction-shaped thing: it has an ENDF_MT, a cross section in several
+    forms, and a Q. What it does not have is products, so its inherited
+    ``outputChannel`` stays empty, which §21.2 agrees with — the node has no
+    ``outputChannel`` child at all.
+
+    ``summands`` is the addition. Without it a reader keeps MT1's σ and throws
+    away the statement of *which* partials it is the sum of, and that statement
+    is the only thing distinguishing a sum from an ordinary reaction that
+    happens to be labelled "total". §21.2 makes ``summands`` mandatory.
+
+    The evaluated σ is **not** recomputed from the summands, for the reason
+    :class:`~kika.nuclear_data.model.sums.MultiplicitySum` gives: the evaluation
+    states it, and it need not equal the sum of the parts to the last digit.
+    """
+
+    summands: Summands = field(default_factory=Summands)
+
+    def __repr__(self) -> str:
+        return (
+            f"CrossSectionSum({self.id}, {len(self.summands)} summands, "
+            f"forms={sorted(self.crossSection.forms)})"
+        )
 
 
 class _ReactionList:

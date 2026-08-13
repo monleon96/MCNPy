@@ -26,6 +26,7 @@ from .functions import Function1d, Gridded1d, Regions1d, XYs1d, Ys1d
 
 __all__ = [
     "Form",
+    "Background",
     "ResonancesWithBackground",
     "Reference",
     "CoulombPlusNuclearElastic",
@@ -43,6 +44,57 @@ Form = object
 
 
 @dataclass
+class Background:
+    """§16.1.1's ``background``: **three** functions, one per resonance region.
+
+    Not one curve. The evaluator states a separate background over the resolved
+    region, over the unresolved region and above them both, because the three
+    are added to different things — reconstructed resonances, an average
+    cross section, and nothing at all. FUDGE's schema
+    (``CrossSectionResonanceBackgroundType``) makes ``resolvedRegion`` or
+    ``unresolvedRegion`` mandatory and the rest optional, and every
+    ``resonancesWithBackground`` in ENDF/B-VIII.1-GNDS carries at least two of
+    the three.
+
+    **This was a single ``Function1d`` and that was wrong**, in the way that
+    does not announce itself: a reader keeping only one region produces a
+    background that is right over part of the domain and silently absent over
+    the rest, which looks like a cross section with a step in it rather than
+    like a missing field.
+
+    Each region holds an ``XYs1d`` or a ``regions1d`` — the schema allows no
+    other functional there.
+    """
+
+    resolvedRegion: Optional[Function1d] = None
+    unresolvedRegion: Optional[Function1d] = None
+    fastRegion: Optional[Function1d] = None
+
+    def __bool__(self) -> bool:
+        # Present-and-empty is not absent; the reactionSuite's rule.
+        return True
+
+    def __len__(self) -> int:
+        return sum(region is not None for region in self.regions.values())
+
+    @property
+    def regions(self) -> Dict[str, Optional[Function1d]]:
+        """``{node name: function}``, in the order §16.1.1 declares them."""
+        return {
+            "resolvedRegion": self.resolvedRegion,
+            "unresolvedRegion": self.unresolvedRegion,
+            "fastRegion": self.fastRegion,
+        }
+
+    def __repr__(self) -> str:
+        present = ", ".join(
+            f"{name}={type(region).__name__}"
+            for name, region in self.regions.items() if region is not None
+        )
+        return f"Background({present or 'no region'})"
+
+
+@dataclass
 class ResonancesWithBackground:
     """§16.1.1. "Reconstruct the resonances and add them to this background."
 
@@ -52,7 +104,7 @@ class ResonancesWithBackground:
     reconstructor and say so — the thing `endf.pendf` was made explicit for.
     """
 
-    background: Optional[Function1d] = None
+    background: Optional[Background] = None
     resonanceRegionHref: Optional[str] = None
     label: Optional[str] = None
 

@@ -23,7 +23,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-__all__ = ["Provenance", "EndfProvenance", "AceProvenance"]
+__all__ = ["Provenance", "EndfProvenance", "AceProvenance",
+           "GndsProvenance"]
 
 
 @dataclass
@@ -146,3 +147,31 @@ class AceProvenance(Provenance):
     def carriesQValues(self) -> bool:
         """Always ``False``. Stated as a property so a caller can ask."""
         return False
+
+
+@dataclass
+class GndsProvenance(Provenance):
+    """Where a GNDS-read suite came from, and — the load-bearing part — *that* it
+    did.
+
+    Thin on purpose: a GNDS file's own bookkeeping is already GNDS nodes, so
+    unlike ENDF's MF1/451 header there is nothing here that the model cannot
+    hold. What this exists for is the question the writer has to answer and
+    could not: **did this evaluation come from a GNDS file, and if so which
+    version did it declare?**
+
+    ``ReactionSuite.format`` cannot answer it. Its default is ``"2.1"``, so an
+    ENDF-decoded suite and a suite read from a 2.1 file are indistinguishable by
+    that field, and ``kika.write`` would mirror a version nothing ever declared.
+    "Has no provenance" cannot answer it either, and that was the first attempt:
+    the ENDF adapter only fills ``suite.provenance`` when MF1/451 parses, so a
+    tape with a damaged header decoded to a suite that then claimed a GNDS
+    origin. This is the positive statement, made by the only reader entitled to
+    make it.
+    """
+
+    sourceFormat: str = "gnds"
+    #: The ``format`` attribute the file declared — ``"2.0"`` or ``"2.1"``.
+    formatVersion: Optional[str] = None
+    #: The file it was read from, when there was one.
+    path: Optional[str] = None

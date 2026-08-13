@@ -27,6 +27,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional
 
+from .quantities import PhysicalQuantity, RangeQuantity
+
 __all__ = [
     "Style",
     "Evaluated",
@@ -87,10 +89,21 @@ def _style(nodeName: str, *, requiresDerivedFrom: bool = False):
 @_style("evaluated")
 @dataclass
 class Evaluated(Style):
-    """§9.2.1. Data as created by the evaluator. More than one is allowed."""
+    """§9.2.1. Data as created by the evaluator. More than one is allowed.
+
+    ``temperature`` and ``projectileEnergyDomain`` are children the schema makes
+    **mandatory** on this style (``RS_EvaluatedType``), and all 558 neutron
+    evaluations carry both. They are fields rather than reported losses because
+    they are data: dropping the temperature leaves nothing distinguishing a 0 K
+    evaluation from a broadened one, and dropping the domain leaves nothing
+    saying what the evaluation was written *for* — which is not the same
+    statement as the union of its reactions' domains.
+    """
 
     library: Optional[str] = None
     version: Optional[str] = None
+    temperature: Optional[PhysicalQuantity] = None
+    projectileEnergyDomain: Optional[RangeQuantity] = None
 
 
 @_style("realization", requiresDerivedFrom=True)

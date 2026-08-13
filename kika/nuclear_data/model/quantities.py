@@ -16,7 +16,7 @@ from typing import Optional
 
 from .units import Unit, conversion_factor, parse_unit
 
-__all__ = ["PhysicalQuantity", "Uncertainty"]
+__all__ = ["PhysicalQuantity", "RangeQuantity", "Uncertainty"]
 
 
 @dataclass(frozen=True)
@@ -76,3 +76,37 @@ class PhysicalQuantity:
 
     def __str__(self) -> str:
         return f"{self.value}" if not self.unit else f"{self.value} {self.unit}"
+
+
+@dataclass(frozen=True)
+class RangeQuantity:
+    """An interval carrying its unit — the schema's ``RangeQuantityType``.
+
+    ``min``/``max``/``unit`` are GNDS's spellings, shadowing two builtins as
+    *attribute* names, which is the naming rule this model has followed since
+    §5.1's ``Axis.index``.
+
+    One node uses it today: every ``evaluated`` style's
+    ``projectileEnergyDomain``, in all 558 neutron evaluations. It is not the
+    same statement as the union of the reactions' domains — it is the evaluator
+    saying what the evaluation is *for*, and a reaction may legitimately stop
+    short of it.
+    """
+
+    min: float
+    max: float
+    unit: str = ""
+
+    def __post_init__(self) -> None:
+        parse_unit(self.unit)
+        if self.max < self.min:
+            raise ValueError(
+                f"a range runs min to max; got min={self.min}, max={self.max}"
+            )
+
+    def __contains__(self, value: float) -> bool:
+        return self.min <= value <= self.max
+
+    def __str__(self) -> str:
+        span = f"{self.min} to {self.max}"
+        return span if not self.unit else f"{span} {self.unit}"

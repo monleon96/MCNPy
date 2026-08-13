@@ -22,6 +22,7 @@ __author__ = AUTHOR
 _LAZY = {
     'read': '_read',
     'sniff_format': '_read',
+    'write': '_write',
 }
 
 
@@ -57,7 +58,7 @@ def __dir__():
 
 
 __all__ = [
-    'read', 'sniff_format',
+    'read', 'write', 'sniff_format',
     'read_mctal',
     'read_mcnp', 'generate_pert_cards', 'generate_PERTcards', 'perturb_material', 'perturb_materials',
     'compute_sensitivity', 'compute_total_sensitivity', 'plot_sens_comparison',

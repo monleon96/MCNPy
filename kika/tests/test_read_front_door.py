@@ -32,7 +32,15 @@ import kika
 from kika import sniff_format
 from kika._read import UnknownFormatError
 
-ACE_FILE = "kika/ace/files/260560_80.02c"
+#: **Removed 2026-08-12.** This module used to hold
+#: ``ACE_FILE = "kika/ace/files/260560_80.02c"`` — a repo-*relative* path to a
+#: 113 MB file that ``.gitignore:26`` excludes. It resolves only in a clone that
+#: happens to have that file beside it and only when pytest is run from the
+#: repository root, so the two tests below **failed rather than skipped** in
+#: every git worktree, which is exactly the false red that ``conftest.py`` was
+#: written to abolish ("four hardcoded absolute paths ... now go through the
+#: fixtures"). They take the ``fe56_ace`` fixture now, which resolves through
+#: the shared tree and skips honestly when it is not there.
 
 
 # ----------------------------------------------------------------------
@@ -44,21 +52,29 @@ def test_endf_tapes_are_recognised(micro_tape, micro_cov_tape):
     assert sniff_format(micro_cov_tape) == "endf"
 
 
-def test_an_ace_file_is_recognised():
-    assert sniff_format(ACE_FILE) == "ace"
+def test_an_ace_file_is_recognised(fe56_ace):
+    assert sniff_format(str(fe56_ace)) == "ace"
 
 
-def test_gnds_xml_is_recognised_before_it_can_be_read(tmp_path):
-    """Recognised and refused are different answers, and the difference is the point.
-
-    A user handed a GNDS file should be told kika cannot read GNDS *yet*, naming
-    the phase — not told their file is unrecognisable, which would send them
-    looking for a corrupt download.
-    """
+def test_gnds_xml_is_recognised(tmp_path):
+    """Sniffing is content-based, so a ``.xml`` that is not GNDS is not GNDS."""
     path = tmp_path / "Fe56.xml"
     path.write_text('<?xml version="1.0"?>\n<reactionSuite projectile="n"/>\n')
     assert sniff_format(path) == "gnds"
-    with pytest.raises(NotImplementedError, match="phase 5"):
+
+
+def test_a_gnds_version_the_reader_refuses_says_which_and_why(tmp_path):
+    """1.9 is where the real break is — 149 change requests to 2.0 — and the
+    door must say so rather than fail somewhere inside the decode."""
+    from kika.gnds.version import UnsupportedGndsVersion
+
+    path = tmp_path / "old.gnds.xml"
+    path.write_text(
+        '<?xml version="1.0"?>\n'
+        '<reactionSuite projectile="n" target="Fe56" evaluation="x" '
+        'format="1.9" projectileFrame="lab" interaction="nuclear"/>\n'
+    )
+    with pytest.raises(UnsupportedGndsVersion, match="1.9"):
         kika.read(path)
 
 
@@ -104,8 +120,8 @@ def test_reading_an_endf_tape_gives_a_populated_suite(micro_tape):
     assert suite.styles.labels, "no style decoded from MF1/451"
 
 
-def test_reading_an_ace_file_gives_a_populated_suite():
-    suite = kika.read(ACE_FILE)
+def test_reading_an_ace_file_gives_a_populated_suite(fe56_ace):
+    suite = kika.read(str(fe56_ace))
     assert 102 in suite.reactions
     assert suite.report is not None
 
@@ -139,6 +155,83 @@ def test_covariances_are_decoded_by_default(micro_cov_tape):
 def test_covariances_can_be_declined(micro_cov_tape):
     suite = kika.read(micro_cov_tape, covariances=False)
     assert suite.covarianceSuite is None
+
+
+# ----------------------------------------------------------------------
+# GNDS through the same door
+# ----------------------------------------------------------------------
+
+def test_reading_gnds_gives_the_same_kind_of_suite_as_endf(h2_gnds):
+    """One object type comes out, whatever went in. That is the door's premise."""
+    suite = kika.read(h2_gnds)
+    assert suite.reactions.ENDF_MTs == [2, 16, 102]
+    assert suite.styles.labels == ["eval"]
+    assert suite.report is not None
+    E, sigma = suite.cross_section(102)
+    assert E.size == sigma.size > 0
+
+
+def test_the_gnds_door_is_a_route_not_a_second_decoder(h2_gnds):
+    """Array-identical to ``readReactionSuite`` called by hand, same as ENDF's."""
+    from kika.gnds.decode import readReactionSuite
+    from kika.gnds.xpath import Document
+
+    byHand, _ = readReactionSuite(Document.parse(h2_gnds))
+    throughDoor = kika.read(h2_gnds, covariances=False)
+
+    assert throughDoor.reactions.ENDF_MTs == byHand.reactions.ENDF_MTs
+    for mt in byHand.reactions.ENDF_MTs:
+        expectedE, expectedXs = byHand.cross_section(mt)
+        gotE, gotXs = throughDoor.cross_section(mt)
+        np.testing.assert_array_equal(gotE, expectedE, err_msg=f"MT{mt} energies")
+        np.testing.assert_array_equal(gotXs, expectedXs, err_msg=f"MT{mt} sigma")
+
+
+#: The signature of :func:`kika.gnds.covariances._noteUnfollowableLink`'s entry:
+#: a covariance section whose ``rowData`` href reached nothing.
+UNFOLLOWABLE = "The covariance itself is read"
+
+
+def test_the_gnds_door_follows_the_external_file_to_the_covariances(h2_gnds,
+                                                                   h2_gnds_cov):
+    """§25.1.1's covarianceSuite is a **second file**, and the door fetches it.
+
+    It also hands *this* file back to the covariance reader under the label that
+    file uses for it, so every ``$reactions#…`` href on a ``rowData`` resolves.
+    That is checked by contrast rather than by assertion: reading the covariance
+    file on its own leaves one unfollowable link per section, and going through
+    the door leaves none.
+    """
+    from kika.gnds.covariances import readCovarianceSuite
+    from kika.gnds.xpath import Document
+
+    _, alone = readCovarianceSuite(Document.parse(h2_gnds_cov))
+    assert len([loss for loss in alone.losses if UNFOLLOWABLE in loss]) == 4
+
+    suite = kika.read(h2_gnds)
+    assert suite.covarianceSuite is not None
+    assert len(suite.covarianceSuite) == 4
+    assert not [loss for loss in suite.report.losses if UNFOLLOWABLE in loss]
+
+
+def test_gnds_covariances_can_be_declined_and_then_no_second_file_is_read(h2_gnds):
+    suite = kika.read(h2_gnds, covariances=False)
+    assert suite.covarianceSuite is None
+    assert suite.externalFiles.byLabel("covariances") is not None
+
+
+def test_a_missing_covariance_sibling_is_reported_and_not_an_error(tmp_path,
+                                                                  h2_gnds):
+    """A user handed one half of a pair is in a normal situation, and their
+    cross sections are perfectly readable."""
+    copy = tmp_path / h2_gnds.name
+    copy.write_bytes(h2_gnds.read_bytes())
+
+    suite = kika.read(copy)
+    assert suite.covarianceSuite is None
+    assert suite.reactions.ENDF_MTs == [2, 16, 102]
+    assert any("is not beside" in loss for loss in suite.report.losses), \
+        suite.report.losses
 
 
 # ----------------------------------------------------------------------

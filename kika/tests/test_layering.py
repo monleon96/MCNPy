@@ -69,7 +69,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 GUARDED_PACKAGES = ("kika/processing", "kika/nuclear_data", "kika/cov")
 
 #: Packages they must not import.
-FORBIDDEN_ROOTS = ("kika.endf", "kika.ace")
+#:
+#: ``kika.gnds`` joined the list when it was created rather than after the first
+#: violation. The arrow it follows is the same one ``kika.endf`` follows — a
+#: format package may import the model, never the reverse — and the temptation
+#: to break it is stronger here than for ENDF, because the model is *named*
+#: after GNDS and an import from ``kika/nuclear_data`` into ``kika/gnds`` would
+#: read like tidying rather than like an inversion.
+FORBIDDEN_ROOTS = ("kika.endf", "kika.ace", "kika.gnds")
 
 #: Runtime imports of a format package, per module. May only decrease.
 #:

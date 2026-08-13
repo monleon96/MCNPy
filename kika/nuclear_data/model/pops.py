@@ -12,7 +12,7 @@ the model where the rule bites, and it bites here on purpose.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, Optional
+from typing import Dict, Iterator, Optional, Union
 
 from .quantities import PhysicalQuantity
 from .units import check_mass_unit
@@ -29,6 +29,17 @@ class Particle:
     spin: Optional[PhysicalQuantity] = None
     parity: Optional[int] = None
     charge: Optional[int] = None
+    #: §12's ``halflife``, which GNDS writes **two ways**: a ``<double>`` with a
+    #: time unit, or a ``<string value="stable">``. Both are representable here
+    #: — a :class:`~kika.nuclear_data.model.quantities.PhysicalQuantity` for the
+    #: first, the literal string for the second — because collapsing "stable"
+    #: onto infinity would lose the difference between an evaluator saying a
+    #: nuclide does not decay and one saying its halflife is unmeasurably long.
+    #:
+    #: It is modelled because the schema **requires** it on every ``baryon`` and
+    #: ``gaugeBoson``: a PoPs written without it does not validate, and this is
+    #: the one §12 property whose absence a writer cannot report its way out of.
+    halflife: Optional[Union[PhysicalQuantity, str]] = None
 
     def __post_init__(self) -> None:
         if self.mass is not None:

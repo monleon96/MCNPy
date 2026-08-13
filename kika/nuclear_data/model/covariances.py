@@ -14,13 +14,15 @@ in phase 3c/P7, so it is stated here and has a constructor of its own:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterator, List, Optional
+from typing import Iterator, List, Optional, Tuple
 
 import numpy as np
 
-__all__ = ["Slice", "Slices", "DataLink", "CovarianceMatrix", "Mixed", "Sum",
+__all__ = ["Slice", "Slices", "DataLink", "CovarianceMatrix", "Mixed",
+           "Summand", "Sum", "ShortRangeSelfScalingVariance",
            "CovarianceSection", "CovarianceSuite",
-           "ParameterLink", "ParameterCovarianceMatrix", "ParameterCovariance"]
+           "ParameterLink", "ParameterCovarianceMatrix", "ParameterCovariance",
+           "AverageParameterCovariance"]
 
 
 @dataclass
@@ -129,6 +131,46 @@ class DataLink:
                 return int(entry.domainValue)
         return None
 
+    # -- ENDF_MFMT, which is written two ways in this codebase ------------
+
+    @property
+    def ENDF_MF(self) -> Optional[int]:
+        """The MF number, whichever separator the link was built with."""
+        parts = self._mfmtParts()
+        return None if parts is None else parts[0]
+
+    @property
+    def ENDF_MT(self) -> Optional[int]:
+        """The MT number, whichever separator the link was built with.
+
+        **Two spellings are in circulation and this is the accessor that does
+        not care which.** §25.2.3 (p. 363) defines ``ENDF_MFMT`` as *"the ENDF
+        MF and MT numbers, stored as a comma-separated"* pair, and every file in
+        ENDF/B-VIII.1-GNDS writes ``"33,2"``. kika's **ENDF** adapter writes
+        ``"33/2"`` instead, and nine sites across ``kika/cov``,
+        ``kika/sampling`` and ``kika/endf`` parse it with ``split("/")[1]``.
+
+        That divergence is *not* fixed here, deliberately. Two of those modules
+        are the deployed thesis pipeline, mid-migration, and changing the
+        spelling under them is a separate, gated increment — one that belongs
+        with the GNDS **writer**, which is the first thing that would emit the
+        wrong spelling into a published file. Until then this property is the
+        safe way to ask, and a GNDS-decoded suite can be handed to code that was
+        written for the ENDF one.
+        """
+        parts = self._mfmtParts()
+        return None if parts is None else parts[1]
+
+    def _mfmtParts(self) -> Optional[Tuple[int, int]]:
+        if not self.ENDF_MFMT:
+            return None
+        text = str(self.ENDF_MFMT).replace("/", ",")
+        try:
+            mf, mt = (int(part) for part in text.split(",", 1))
+        except ValueError:
+            return None
+        return mf, mt
+
 
 @dataclass
 class CovarianceMatrix:
@@ -170,17 +212,75 @@ class Mixed:
 
 
 @dataclass
+class Summand:
+    """§25. One term of a :class:`Sum`: what to add, and how much of it.
+
+    ``ENDF_MFMT`` travels with the link rather than being looked up through it,
+    because that is where the file puts it and because a summand may point at a
+    section this suite does not contain.
+    """
+
+    href: str
+    coefficient: float = 1.0
+    ENDF_MFMT: Optional[str] = None
+
+
+@dataclass
 class Sum:
-    """§25. A covariance defined as a weighted sum of others, by reference."""
+    """§25. A covariance defined as a weighted sum of others, by reference.
 
-    references: List[str] = field(default_factory=list)
-    coefficients: List[float] = field(default_factory=list)
+    ENDF's NC-type sub-subsections: "the covariance of MT4 is that of MT1 minus
+    those of MT2, MT16, …", stated rather than stored. The domain bounds are
+    part of the statement and not decoration — the same quantity may be a sum
+    over one band and an explicit matrix over another.
 
-    def __post_init__(self) -> None:
-        if self.coefficients and len(self.coefficients) != len(self.references):
-            raise ValueError(
-                f"{len(self.coefficients)} coefficients for {len(self.references)} references"
-            )
+    **Reshaped 2026-08-12** from two parallel lists ``references`` and
+    ``coefficients``, which could fall out of step and had nowhere to keep each
+    term's ``ENDF_MFMT``. Nothing constructed it — it was phase 3b scaffolding
+    — so the change cost no caller. The two lists survive as read-only
+    properties.
+    """
+
+    summands: List[Summand] = field(default_factory=list)
+    label: Optional[str] = None
+    domainMin: Optional[float] = None
+    domainMax: Optional[float] = None
+    domainUnit: str = ""
+
+    def __len__(self) -> int:
+        return len(self.summands)
+
+    def __iter__(self) -> Iterator[Summand]:
+        return iter(self.summands)
+
+    @property
+    def references(self) -> List[str]:
+        return [summand.href for summand in self.summands]
+
+    @property
+    def coefficients(self) -> List[float]:
+        return [summand.coefficient for summand in self.summands]
+
+
+@dataclass
+class ShortRangeSelfScalingVariance:
+    """§25. The variance ENDF's LB=8/LB=9 states, which does not survive grouping.
+
+    A short-range self-scaling term describes variance fully correlated *within*
+    an energy group and uncorrelated between groups, so its magnitude depends on
+    how wide the processing groups turn out to be —
+    ``dependenceOnProcessedGroupWidth`` says how it scales with that width
+    (``'inverse'`` in every file examined).
+
+    It is a class of its own rather than another :class:`CovarianceMatrix`
+    precisely so that nothing can add it to one by accident: it is not a
+    component that can be summed with its siblings on a fixed grid, and a
+    ``mixed`` that contains one does **not** mean "add these matrices together".
+    """
+
+    matrix: Optional[CovarianceMatrix] = None
+    dependenceOnProcessedGroupWidth: Optional[str] = None
+    label: Optional[str] = None
 
 
 @dataclass
@@ -201,10 +301,24 @@ class CovarianceSection:
     #: and M2).
     provenance: Optional[object] = None
 
+    #: §25.2.2's own attribute, kept because the file states it rather than
+    #: leaving it to be inferred. It is normally redundant with "has a
+    #: ``columnData``" and it is **not** always: a section may carry the
+    #: attribute for a reader's benefit before its column link is read, and a
+    #: writer that dropped it would emit a file the publisher's own tools see
+    #: as a different kind of section. :attr:`isCrossTerm` is the question to
+    #: ask; this is the answer the file gave.
+    crossTerm: bool = False
+
     @property
     def isCrossTerm(self) -> bool:
-        """A block between two *different* quantities."""
-        return self.columnData is not None
+        """A block between two *different* quantities.
+
+        True when the file said so **or** when a ``columnData`` is present. The
+        two agree on every section in ENDF/B-VIII.1-GNDS; taking either alone
+        would make the answer depend on which the file happened to write.
+        """
+        return self.crossTerm or self.columnData is not None
 
 
 @dataclass
@@ -335,6 +449,33 @@ class ParameterCovariance:
     @property
     def isCrossTerm(self) -> bool:
         return self.columnData is not None
+
+
+@dataclass
+class AverageParameterCovariance:
+    """§25.3. A covariance about an *unresolved-region average* parameter.
+
+    The third kind, and it is neither of the other two. Its rows are not bins of
+    a cross-section grid (:class:`CovarianceSection`) and they are not individual
+    resonance parameters (:class:`ParameterCovariance`): they are the energy bins
+    of one URR average — a level spacing, an average width — whose ``rowData``
+    points into ``resonances/unresolved/tabulatedWidths``. So its ``form`` is an
+    ordinary gridded :class:`CovarianceMatrix` while the quantity it is about is
+    a model parameter.
+
+    It lives in ``CovarianceSuite.parameterCovariances`` beside
+    :class:`ParameterCovariance` because that is the container GNDS puts it in.
+    """
+
+    label: str
+    rowData: Optional[DataLink] = None
+    columnData: Optional[DataLink] = None
+    form: Optional[object] = None   # CovarianceMatrix
+    crossTerm: bool = False
+
+    @property
+    def isCrossTerm(self) -> bool:
+        return self.crossTerm or self.columnData is not None
 
 
 @dataclass
