@@ -50,12 +50,39 @@ class ENDF:
         -------
         str or None
             Isotope symbol like 'Fe56' if ZAID is available, None otherwise
+
+        Notes
+        -----
+        ``None`` for a thermal scattering evaluation, and correctly so — see
+        :attr:`is_thermal_scattering`.
         """
         if self.zaid is not None:
             from kika._utils import zaid_to_symbol
             return zaid_to_symbol(self.zaid)
         return None
-    
+
+    @property
+    def is_thermal_scattering(self) -> bool:
+        """Whether this tape is a thermal scattering (TSL) evaluation.
+
+        Read from MF1/451's ``NSUB``, which is the format's own answer rather
+        than a guess from the MAT range or the filename. It matters because
+        :attr:`zaid` and :attr:`isotope` are ``None`` here and will stay that
+        way: a TSL material is a bound scatterer in a compound — H in H₂O — not
+        a nuclide. Its MAT (1-8399) is below the lowest key of
+        ``ENDF_MAT_TO_ZAID``, and its ZA is a *pseudo*-ZA (126 for beryllium
+        metal) that means nothing arithmetically. Use
+        :func:`kika.endf.thermal_scatterer` for the identity instead.
+
+        Requires MF1 to have been parsed; ``False`` if it was not.
+        """
+        mf1 = self.files.get(1)
+        mt451 = mf1.sections.get(451) if mf1 is not None else None
+        if mt451 is None:
+            return False
+        from .mf7.scatterer import THERMAL_SCATTERING_NSUB
+        return mt451.sublibrary == THERMAL_SCATTERING_NSUB
+
     @property
     def mf(self) -> Dict[int, MF]:
         """

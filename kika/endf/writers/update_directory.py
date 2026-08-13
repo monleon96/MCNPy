@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from collections import OrderedDict
 
 from ..parsers.parse_mf1 import parse_mt451
-from ..utils import parse_endf_id
+from ..utils import parse_endf_id, record_width
 from ...utils import get_endf_logger
 
 logger = get_endf_logger(__name__)
@@ -138,10 +138,20 @@ def update_mf1_directory(filepath: str, added_sections: Optional[Set[Tuple[int, 
     # rewrote the MF1/451 block of a CRLF tape with bare LF — 911 lines of a
     # JEFF-4.0 Fe-56 tape silently changed by an operation that is supposed to
     # be a no-op when the directory already agrees with the content.
+    # The record *width* is preserved for the same reason, and was missed the
+    # first time round. ENDF-6 makes the columns 76-80 sequence number optional
+    # and ENDF/B-VIII.1's thermal-scattering sublibrary omits it, but
+    # ``str(mt451)`` always writes one — so rebuilding the directory of a
+    # 75-column tape widened exactly its MF1/451 block and left the rest at 75.
+    # Every micro-tape cut from a 75-column source still carries the evidence:
+    # 386 lines of ``micro_cf252_pfns.endf`` are 80 columns wide in an otherwise
+    # 75-column file, and they are precisely its MF1/451.
     replaced = lines[mt451_start:mt451_end] or lines
     terminator = '\r\n' if replaced and replaced[0].endswith('\r\n') else '\n'
+    width = record_width(replaced)
     new_mt451_str = str(mt451)
-    new_mt451_lines = [line + terminator for line in new_mt451_str.split('\n') if line]
+    new_mt451_lines = [line[:width] + terminator
+                       for line in new_mt451_str.split('\n') if line]
 
     new_file_lines = lines[:mt451_start] + new_mt451_lines + lines[mt451_end:]
 

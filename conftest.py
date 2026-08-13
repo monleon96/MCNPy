@@ -154,6 +154,26 @@ _TAPES: Dict[str, Sequence[str]] = {
     "ta181_b81": ("endfb81/n-073_Ta_181.endf", "endfb8.1/n/73181.endf"),
     "mn55_jendl": ("jendl5/n/25055.endf", "JENDL-5/Mn55_jendl5_n.endf"),
     "pu239_jendl": ("jendl5/n/94239.endf", "JENDL-5/Pu239_jendl5_n.endf"),
+    # MF7, the thermal scattering law. A sublibrary of its own (NSUB=12): no
+    # neutron evaluation in ENDF/B-VIII.1 carries an MF7, so every one of these
+    # is a ``tsl-`` tape. They are large — ``tsl-HinH2O`` is 87 MB and its
+    # MF7/MT4 alone is 1.14 million records — which is why the committed
+    # fixtures are small and the full-size witnesses are reached from here.
+    #
+    # ENDF/B-VIII.1, one per format branch that needs a full-size witness:
+    "tsl_h_h2o": ("endfb81/tsl/tsl-HinH2O.endf",),        # 94 temperatures, NS=1
+    "tsl_ortho_h": ("endfb81/tsl/tsl-ortho-H.endf",),     # the only LASYM=1
+    "tsl_be_metal": ("endfb81/tsl/tsl-Be-metal.endf",),   # LTHR=1 + MF7/451
+    "tsl_un": ("endfb81/tsl/tsl-NinUN.endf",),            # LTHR=3
+    "tsl_s_ch4": ("endfb81/tsl/tsl-s-CH4.endf",),         # LTHR=2, LAT=0, NS=1
+    # JEFF-4.0's own ``tsl/``, a different dialect and not merely different
+    # content: 80-column records with sequence numbers, CRLF line endings,
+    # elemental ZA (4000, not the pseudo-ZA 126 ENDF/B writes for the same
+    # material), and LIST bodies padded with explicit zeros. ``tsl_Be_BeO.txt``
+    # is the control — the *same* evaluation as ENDF/B's, adopted, 75-column.
+    "tsl_jeff_be": ("jeff40/tsl/tsl_4-Be.txt",),
+    "tsl_jeff_be_beo": ("jeff40/tsl/tsl_Be_BeO.txt",),
+    "tsl_jeff_si": ("jeff40/tsl/tsl_Si.txt",),
     "serpent_input": ("serpent/PWRSphere.sss2", "PWRSphere.sss2"),
     # Smallest real Fe-56 ACE on the share (16 MB) is preferred over the
     # 112 MB JEFF one: the round-trip gate reads and rewrites the whole XSS,
@@ -352,6 +372,15 @@ pu239_b81_tape = _tape_fixture("pu239_b81")
 u5_nubar_covfil_tape = _tape_fixture("u5_nubar_covfil")
 u5_boxer_tape = _tape_fixture("u5_boxer")
 
+tsl_h_h2o_tape = _tape_fixture("tsl_h_h2o")
+tsl_ortho_h_tape = _tape_fixture("tsl_ortho_h")
+tsl_be_metal_tape = _tape_fixture("tsl_be_metal")
+tsl_un_tape = _tape_fixture("tsl_un")
+tsl_s_ch4_tape = _tape_fixture("tsl_s_ch4")
+tsl_jeff_be_tape = _tape_fixture("tsl_jeff_be")
+tsl_jeff_be_beo_tape = _tape_fixture("tsl_jeff_be_beo")
+tsl_jeff_si_tape = _tape_fixture("tsl_jeff_si")
+
 #: The eleven evaluations on this machine that carry an MF32, in the order the
 #: MF32 survey lists them. ``MF32_TAPES`` is exported so a test can parametrise
 #: over the whole set rather than naming fixtures one at a time.
@@ -448,6 +477,51 @@ def micro_pfns_tape() -> Path:
     if not path.is_file():  # pragma: no cover - fixture is committed
         pytest.fail(f"committed micro-tape is missing: {path}")
     return path
+
+
+#: Committed MF7 micro-tape name -> what it is the fixture for. The cut recipes
+#: live in ``kika/endf/tests/test_micro_tape_regen.py``.
+#:
+#: MF7 could not be cut the way the other fixtures were. Everywhere else the
+#: bulk of a tape is sections the test does not need, so dropping them leaves a
+#: small file carrying the real thing. In a TSL evaluation the bulk **is** the
+#: thing: MF7/MT4 is 98-99 % of every one of them, and it cannot be trimmed
+#: without rewriting records. So the set is built two ways — one whole tape
+#: small enough to commit outright, and three cut down to their *elastic*
+#: sections, which keeps a real MT2 of each LTHR branch for a few hundred kB.
+MICRO_TSL = {
+    "sch4": "whole tsl-s-CH4.endf: MT2 LTHR=2, MT4 with NS=1 and LAT=0",
+    "bemetal_elastic": "MT2 LTHR=1 (2306 Bragg edges, 11 T) + MF7/451",
+    "un_elastic": "MT2 LTHR=3 (coherent then incoherent) + MF7/451",
+    "jeff_be_elastic": "JEFF-4.0 dialect: 80-column, zero-padded LIST bodies",
+}
+
+
+@pytest.fixture(scope="session", params=sorted(MICRO_TSL))
+def micro_tsl_tape(request) -> Path:
+    """Each committed MF7 micro-tape in turn. See :data:`MICRO_TSL`."""
+    path = MICRO_TAPE_DIR / f"micro_tsl_{request.param}.endf"
+    if not path.is_file():  # pragma: no cover - fixture is committed
+        pytest.fail(f"committed micro-tape is missing: {path}")
+    return path
+
+
+def _micro_tsl_fixture(key: str):
+    def _fixture() -> Path:
+        path = MICRO_TAPE_DIR / f"micro_tsl_{key}.endf"
+        if not path.is_file():  # pragma: no cover - fixture is committed
+            pytest.fail(f"committed micro-tape is missing: {path}")
+        return path
+
+    _fixture.__name__ = f"micro_tsl_{key}_tape"
+    _fixture.__doc__ = f"Committed MF7 micro-tape: {MICRO_TSL[key]}."
+    return pytest.fixture(scope="session", name=f"micro_tsl_{key}_tape")(_fixture)
+
+
+micro_tsl_sch4_tape = _micro_tsl_fixture("sch4")
+micro_tsl_bemetal_elastic_tape = _micro_tsl_fixture("bemetal_elastic")
+micro_tsl_un_elastic_tape = _micro_tsl_fixture("un_elastic")
+micro_tsl_jeff_be_elastic_tape = _micro_tsl_fixture("jeff_be_elastic")
 
 
 #: MF32 micro-tape key -> the sub-format it is the fixture for. Kept here so a

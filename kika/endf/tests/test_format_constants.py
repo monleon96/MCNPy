@@ -20,6 +20,7 @@ from kika.endf.utils import (
     ENDF_FORMAT_INT_ZERO,
     format_endf_data_line,
     format_endf_number,
+    parse_number,
 )
 
 MAT, MF, MT = 2631, 3, 2
@@ -62,6 +63,39 @@ def test_the_float_helper_itself_gets_zero_right():
     """format_endf_number has an explicit zero case and always has."""
     assert format_endf_number(0) == " 0.000000+0"
     assert format_endf_number(0.0) == " 0.000000+0"
+
+
+def test_a_three_digit_exponent_is_written_rather_than_flushed_to_zero():
+    """It used to return ``" 0.000000+0"`` for anything below 1e-100.
+
+    Silently, and at the right field width, so nothing downstream could see it.
+    ``tsl-ortho-H.endf`` tabulates S(α, β) down to 1.5963e-100 on 1 403 records
+    and every one of them was written back as zero.
+
+    The mantissa gives up a decimal to pay for the extra exponent digit, which
+    is what keeps the field at 11 characters — the same trade the two-digit case
+    already made.
+    """
+    assert format_endf_number(1.5963e-100) == " 1.5963-100"
+    assert format_endf_number(-1.5963e-100) == "-1.5963-100"
+    assert format_endf_number(1.2345e100) == " 1.2345+100"
+    assert format_endf_number(1e-308) == " 1.0000-308"
+
+
+@pytest.mark.parametrize("value", [
+    1.5963e-100, 5.1183e-100, 1.96567e-17, 8.89108e-18, 1.234567e5,
+    -3.14159e-1, 1.0e10, 9.999999e9, 2.0e7, 1e-308, 4009.0,
+])
+def test_every_written_number_is_eleven_columns_and_reads_back(value):
+    """Width and value survive a write-read cycle across the exponent ladder.
+
+    Eleven columns is not cosmetic: a twelfth character shifts every field to
+    its right, so a formatter that overflows on one value corrupts the whole
+    record rather than just that number.
+    """
+    written = format_endf_number(value)
+    assert len(written) == 11
+    assert parse_number(written) == pytest.approx(value, rel=1e-4)
 
 
 def test_a_line_is_eighty_characters_with_its_identification():
