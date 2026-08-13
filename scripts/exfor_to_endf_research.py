@@ -234,6 +234,28 @@ STOP_AFTER_NOMINAL_FITS = _env_flag("KIKA_STOP_AFTER_NOMINAL_FITS", True)
                                          # no covariance, no ENDF, nothing that can be shipped.
                                          # Set KIKA_STOP_AFTER_NOMINAL_FITS=0 for a full run.
 
+# The line above PROMISES "nothing that can be shipped", but the product
+# switches were left as the deliverable run set them, so `_preflight_products`
+# refused the run outright: GENERATE_CROSS_TERM_ENDF needs the MC, and this mode
+# exits before it. That is a contradiction in the config, not a user error, and
+# it cost P2 a job (8480964, 2026-08-12). Make the flag enforce what it claims.
+#
+# This can only ever turn products OFF, and only in a mode that by construction
+# cannot build them — the run exits before the MC that every one of them
+# consumes. SAVE_NOMINAL_FITS is untouched: nominal_fits.parquet is the product.
+if STOP_AFTER_NOMINAL_FITS:
+    _forced = [n for n, v in (("GENERATE_NOMINAL_ENDF", GENERATE_NOMINAL_ENDF),
+                              ("GENERATE_MULTIGROUP_COVARIANCE", GENERATE_MULTIGROUP_COVARIANCE),
+                              ("GENERATE_MF3_MF33", GENERATE_MF3_MF33),
+                              ("GENERATE_CROSS_TERM_ENDF", GENERATE_CROSS_TERM_ENDF)) if v]
+    GENERATE_NOMINAL_ENDF = False
+    GENERATE_MULTIGROUP_COVARIANCE = False
+    GENERATE_MF3_MF33 = 0
+    GENERATE_CROSS_TERM_ENDF = False
+    if _forced:
+        print("[config] STOP_AFTER_NOMINAL_FITS is on — forcing off, since the "
+              "run exits before the MC they all consume: " + ", ".join(_forced))
+
 # --- CROSS TERM (MF33 <-> MF34) -------------------------------------------- #
 # Cov(c0, a_l) shipped inside MF34's (L=0, L1) blocks, (0,0) self-block null.
 # Built by scripts/build_group_cross.py from this run's own MC replicas, so it
@@ -260,7 +282,34 @@ SAVE_MF33_C0_SAMPLES = True              # mf33_c0_samples.parquet — the c0 re
 # --- OTHER DIAGNOSTIC OUTPUT ----------------------------------------------- #
 SAVE_COVARIANCE_FILES = False            # Fine + multigroup .npy (cov, mean, boundaries)
 SAVE_CORRELATION_MATRICES = False        # Correlation beside covariance (needs the line above)
-SAVE_RAW_KW_PARQUET = False              # legendre_samples_raw_kw.parquet — Pass-1 marginals
+# ⚑ Pass-1's OWN a_l marginals (~570 MB), and the ONLY route to sigma_1 for the
+# angular parameters. The TMC parquet cannot substitute for it: the combine
+# writes `mat_tmc = mean_2 + (mat_kw_1 - mean_1) * (sigma_2 / sigma_1)`, an
+# affine per-column rescale whose std is sigma_2 identically -- that line
+# DESTROYS sigma_1. Run 92 left this False, which is why the MF34 two-pass
+# repair (roadmap §2.7-bis) cannot be built from run 92 at all and needs a fresh
+# MC. Env-selectable so the runner can ask for it without editing the script.
+SAVE_RAW_KW_PARQUET = _env_flag("KIKA_SAVE_RAW_KW_PARQUET", False)
+
+# ⚑⚑ THE SAME LESSON, PAID A SECOND TIME ON A DIFFERENT ARTEFACT.
+# Run 93 recovered sigma_1 for a_l, and it was still not enough: the MF34
+# marginal that has to be preserved is `std_perbin`, which carries per-bin
+# MIXTURE blocks (1700/1738 bins in run 93) and near-zero regularisation
+# (2037/10428 parameters).  Neither is in any saved parquet, and the mixture
+# moments come from `_mc_one_bin` -- i.e. from the MC itself -- so no nominal
+# refit reproduces them.  MF33 ships `mf33_absolute_covariance.npy`; MF34 has
+# shipped NOTHING, and that asymmetry is what forces a re-run every time MF34
+# needs touching (roadmap §2.7-ter).
+#
+# This flag closes it for good: the full MF34 assembly state, in float64, at
+# the point of truth.  ⚠ SAVES ONLY -- every statement it guards is an
+# `np.save`/parquet write, so it cannot move a single computed value, and the
+# run 94 gate (byte-identical tapes vs run 93) proves that rather than assuming
+# it.  ~5 GB on /share_snc.
+SAVE_MF34_COV_SIDECARS = _env_flag("KIKA_SAVE_MF34_COV_SIDECARS", False)
+# Pass-2's own replicas.  The TMC parquet is an affine rescale of PASS 1, not
+# Pass 2, so sigma_2 is only ever inferred today.  This makes it measurable.
+SAVE_PERBIN_PARQUET = _env_flag("KIKA_SAVE_PERBIN_PARQUET", False)
 SAVE_MULTIGROUP_DIAGNOSTICS_CSV = True   # multigroup_boundary_decisions.csv
 SAVE_MF33_MULTIGROUP_DIAGNOSTICS_CSV = True   # mf33_boundary_decisions.csv
 
@@ -293,6 +342,19 @@ SUPPLEMENTARY_JSON_FILES = [                     # Loaded alongside the main sou
 ]
 EXCLUDE_EXPERIMENTS = ["32246002", "400750022"]  # Tostkii 1957; Morozov 1972 pointer 2
                                                  # (SPA-fitted sister of 400750021, double-counts it)
+
+# P2 (post-run-92 roadmap §3): out-of-sample refits. `KIKA_EXCLUDE_EXPERIMENTS`
+# is a comma-separated list that is APPENDED to the two above — the baseline
+# exclusions are provenance decisions and a variant must never silently drop
+# them. With KIKA_STOP_AFTER_NOMINAL_FITS=1 (the default) a variant costs ~2 min
+# and writes nominal_fits.parquet only: no covariance, no ENDF, nothing
+# shippable. ⚠ UNION_GRID_SUBENTRIES is deliberately NOT touched — the mesh is a
+# representation choice carrying no cross-section information, and freezing it
+# is what makes the refit monovariable (§3.1).
+if os.environ.get("KIKA_EXCLUDE_EXPERIMENTS"):
+    _extra = [s.strip() for s in os.environ["KIKA_EXCLUDE_EXPERIMENTS"].split(",")
+              if s.strip()]
+    EXCLUDE_EXPERIMENTS = list(dict.fromkeys(EXCLUDE_EXPERIMENTS + _extra))
 
 # =============================================================================
 # ENERGY RANGE & PHYSICS
@@ -551,8 +613,16 @@ ACE_SKIP_EXISTING = False
 # =============================================================================
 # RUNTIME
 # =============================================================================
-N_PROCS = 24                                     # Keep in step with --cpus-per-task in the sbatch
-                                                 # runner or the pool oversubscribes the allocation
+# ⚑ Was a bare `24` with the comment "keep in step with --cpus-per-task in the
+# sbatch runner or the pool oversubscribes the allocation" -- a coupling held by
+# hand, in two files, which is exactly the kind that drifts silently. It now
+# reads the allocation itself: SLURM_CPUS_PER_TASK is set by Slurm inside the
+# job, so the pool cannot oversubscribe no matter what the header says.
+# KIKA_N_PROCS overrides both, for interactive use off the batch system.
+# Falls back to 24, run 92's value, when neither is set.
+N_PROCS = int(os.environ.get("KIKA_N_PROCS")
+              or os.environ.get("SLURM_CPUS_PER_TASK")
+              or 24)
 N_EFF_WARNING_THRESHOLD = 5.0                    # Warn when the effective sample size falls below this
 VERBOSE_DIAGNOSTICS = True                       # Per-order percentile stats at every stage
 
@@ -3085,6 +3155,41 @@ def run_exfor_to_endf_sampling_v2(
 
     _logger.info(f"  [INFO] [EXFOR] Pre-loading EXFOR data (source={exfor_source})", console=True)
 
+    # ── The union grid must NOT move when a variant excludes an experiment ──
+    #
+    # P2 (roadmap §3.1) claims the refits are monovariable because
+    # UNION_GRID_SUBENTRIES is fixed by configuration. Job 8480970 falsified it:
+    # excluding an experiment removes it from the cache the grid is BUILT from,
+    # so V-noKIN (drops Kinney 10571002, which defines 0.847-2.5 MeV) collapsed
+    # from 1738 bins to 85, and V-KS (drops Pirovano 23365005, which defines
+    # 2.5-4 MeV) lost 83. The log said so plainly — "Union grid: 85 points from
+    # subentries ['23365005']" — and nothing stopped the run.
+    #
+    # The mesh is a representation choice carrying no cross-section information,
+    # so a grid-defining subentry stays in the cache for the GRID and is still
+    # excluded from every FIT. That is safe because the exclusion is enforced
+    # again, independently, inside `filter_exfor_with_energy_bin` (it parses the
+    # same patterns and `continue`s on a match), which is what every bin's fit
+    # goes through. The load-time filter is a second net, not the only one.
+    _load_exclusions = list(exclude_experiments or [])
+    _grid_keep: List[str] = []
+    if energy_grid_source == "union" and union_grid_subentries and _load_exclusions:
+        from scripts.exfor_utils import _parse_exclusion_list, _is_experiment_excluded
+        _pats = _parse_exclusion_list(_load_exclusions)
+        for _sub in [s[0] for s in union_grid_subentries]:
+            _ent, _sb = (_sub[:5], _sub[5:]) if len(_sub) >= 8 else (_sub, "")
+            if _is_experiment_excluded(_ent, _sb, _pats):
+                _grid_keep.append(_sub)
+        if _grid_keep:
+            _keep = set(_grid_keep)
+            _load_exclusions = [e for e in _load_exclusions if e not in _keep]
+            _logger.warning(
+                f"  [WARN] [GRID] {_grid_keep} define the union grid AND are in "
+                f"EXCLUDE_EXPERIMENTS. Kept in the cache so the mesh does not "
+                f"move; still excluded from every fit by "
+                f"filter_exfor_with_energy_bin. This is what makes the refit "
+                f"monovariable (roadmap §3.1).")
+
     try:
         exfor_cache, sorted_exfor_energies = load_exfor_with_new_api(
             exfor_directory=exfor_directory,
@@ -3095,7 +3200,7 @@ def run_exfor_to_endf_sampling_v2(
             mt=mt_number,
             energy_range=(energy_min_mev, energy_max_mev) if energy_min_mev and energy_max_mev else None,
             supplementary_json_files=supplementary_json_files,
-            exclude_experiments=exclude_experiments,
+            exclude_experiments=_load_exclusions,
             logger=_logger,
         )
         t_exfor_elapsed = time.time() - t_step
@@ -3684,6 +3789,25 @@ def run_exfor_to_endf_sampling_v2(
                         console=True,
                     )
 
+            if SAVE_PERBIN_PARQUET:
+                # Pass 2's OWN replicas.  `legendre_samples_tmc.parquet` is an
+                # affine rescale of Pass 1 and carries Pass-2's std only as a
+                # scale factor; this is the pass itself.
+                try:
+                    _perbin_path = save_all_legendre_coefficients(
+                        nominal_results=nominal_results,
+                        all_samples=all_samples_perbin,
+                        output_dir=str(output_path),
+                        max_degree=max_degree,
+                        filename='legendre_samples_perbin.parquet',
+                    )
+                    _logger.info(f"  [INFO] [MC] Pass-2 samples saved to: {_perbin_path}")
+                except Exception as e:
+                    _logger.error(
+                        f"[ERROR] [MC] Failed to save Pass-2 samples: {str(e)}",
+                        console=True,
+                    )
+
             energy_indices_kw = [nr.energy_index for nr in nominal_results if nr.has_data]
             nr_by_idx_kw = {nr.energy_index: nr for nr in nominal_results}
 
@@ -4198,6 +4322,83 @@ def run_exfor_to_endf_sampling_v2(
                     log_psd_diagnostics(cov_combined, "cov_combined (congruence, pure-KW)", _logger)
                     _diag_diff = float(np.max(np.abs(np.diag(cov_combined) - std_perbin**2)))
                     _logger.info(f"  [Congruence check, pure-KW] max |diag(cov) - std_perbin^2| = {_diag_diff:.3e}")
+
+            if SAVE_MF34_COV_SIDECARS:
+                # ⚑ THE POINT OF TRUTH.  Placed after every branch that can
+                # build `cov_combined` (hybrid, pure-KW-inject, pure-KW) and
+                # before anything consumes it, so what lands on disk is what
+                # goes into MF34 -- not a reconstruction of it.
+                #
+                # ⚠ SAVES ONLY.  Nothing here rebinds a name the pipeline reads.
+                try:
+                    _t0_sc = time.time()
+                    _sc = {
+                        # what ships: relative, LB=5, sign restored
+                        "mf34_cov_combined.npy": cov_combined,
+                        # the two passes, each at its own scale, RELATIVE --
+                        # this is what removes the sigma_1/sigma_2 unit-transfer
+                        # step the offline route needed (§2.7-ter D)
+                        "mf34_cov_kw_rel.npy": cov_kw,
+                        "mf34_cov_perbin_rel.npy": cov_perbin,
+                        "mf34_corr_kw.npy": corr_kw,
+                        "mf34_corr_perbin.npy": corr_perbin,
+                        # the marginal that has to be preserved, and the means
+                        # the relative<->absolute conversion needs
+                        "mf34_std_perbin.npy": std_perbin,
+                        "mf34_mean_perbin.npy": mc_mean_perbin,
+                        "mf34_mean_kw.npy": mc_mean_kw,
+                        "mf34_mean_signs.npy": _mean_signs,
+                        "mf34_valid_mask_kw.npy": _valid_mask_kw,
+                        "mf34_energy_indices.npy": np.asarray(energy_indices_kw),
+                    }
+                    for _fn, _obj in _sc.items():
+                        if _obj is None:
+                            _logger.warning(f"  [MF34-SC] {_fn}: object is None, skipped")
+                            continue
+                        np.save(output_path / _fn, np.asarray(_obj))
+                    # Phase 3's per-bin mixture, which exists today only as
+                    # aggregated log lines.  Ragged, so npz of per-bin arrays.
+                    if _mix_blocks:
+                        _mb = {}
+                        for _e, _blk in _mix_blocks.items():
+                            _mb[f"mean_{_e}"] = np.asarray(_blk["mean"])
+                            _mb[f"cov_{_e}"] = np.asarray(_blk["cov"])
+                        np.savez_compressed(
+                            output_path / "mf34_mixture_blocks.npz",
+                            bins=np.asarray(sorted(_mix_blocks.keys())), **_mb)
+                    if _mix_diag:
+                        # `within_var`/`between_var`/`total_var` are per-ORDER
+                        # vectors, not scalars -- the between/within split by
+                        # order IS the Phase-3 diagnostic (a_5 and a_6 came back
+                        # at between-share 1.000 in run 93), so expand them into
+                        # columns rather than dropping them.
+                        try:
+                            _rows_mx = []
+                            for _e, _d in sorted(_mix_diag.items()):
+                                _r = dict(energy_index=_e,
+                                          n_models=int(_d.get("n_models", 0)))
+                                for _key in ("within_var", "between_var", "total_var"):
+                                    _v = np.atleast_1d(np.asarray(_d.get(_key, [])))
+                                    for _l, _x in enumerate(_v, start=1):
+                                        _r[f"{_key}_a{_l}"] = float(_x)
+                                _rows_mx.append(_r)
+                            pd.DataFrame(_rows_mx).to_csv(
+                                output_path / "mf34_mixture_diagnostics.csv", index=False)
+                        except Exception as _e_diag:
+                            _logger.warning(f"  [MF34-SC] mixture diagnostics CSV: {_e_diag}")
+                    _logger.info(
+                        f"  [INFO] [MF34-SC] MF34 assembly state saved "
+                        f"({len(_sc)} arrays, {time.time() - _t0_sc:.1f}s) -> {output_path}"
+                    )
+                except Exception as e:
+                    # Never kill a 4.5 h run over a sidecar: the tape is written
+                    # AFTER this point and the tape is the deliverable.  The
+                    # gate checks the sidecars exist, so a failure here is loud
+                    # at the end rather than fatal in the middle.
+                    _logger.error(
+                        f"[ERROR] [MF34-SC] Failed to save MF34 sidecars: {str(e)}",
+                        console=True,
+                    )
 
             _logger.info(f"  Generating {n_samples} Cholesky samples from combined covariance")
             all_samples = generate_cholesky_samples(

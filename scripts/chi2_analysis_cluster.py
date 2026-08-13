@@ -519,6 +519,31 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
         "title":      "χ² analysis — MF33↔MF34 cross term read from MF34's a_0 blocks",
         "systematic_block_col": None,
     },
+    # ── P1.3: the SPLIT-COMBINE MF33 (post-run-92 roadmap §2.6) ──────────────
+    #
+    # Covariance-only. Same centrals, same MF3, same MF4, same MF34 — the ONLY
+    # thing that moves is MF33's off-diagonal, rebuilt so that the Pass-1
+    # correlation carries only the variance Pass 1 actually measured and the
+    # Pass-2 excess carries the measured local-residual correlation instead.
+    # The tape's MF33 diagonal is byte-identical to run 92's (verified on the
+    # written tape: max |rel diff| = 0.000e+00), so this declares NO extra
+    # uncertainty — it redistributes it. Descriptors on the written tape:
+    # coh 0.779 -> 0.344, PR 2.13 -> 9.47.
+    #
+    # ⚠ Base is 91_rewrite, NOT 91_cross: changing MF33's marginals breaks the
+    # Cauchy-Schwarz compatibility of the a_0 cross block, which is only valid
+    # for the marginals it was built from (§10.1 — this is what killed runs
+    # 89 and 90). Read every subset against predictive_91_rewrite.
+    #
+    # ❌ DISQUALIFYING (§6e): if Kinney improves while n_absorbed FALLS
+    # elsewhere in the corpus, that is redistribution dressed as information.
+    # `corpus_absorbed.py` runs in the same chain and is not optional.
+    "predictive_92split": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_92split.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — MF33 split-combine: Pass-1 correlation at its own scale + measured-correlation Pass-2 excess",
+        "systematic_block_col": None,
+    },
     # ── ITEM 6: Cierjacks' backward points CORRECTED (roadmap §10.8-14) ──────
     #
     # Same evaluation, same Σ_eval, same everything — only the DATA move. The
