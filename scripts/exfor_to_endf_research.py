@@ -310,6 +310,18 @@ SAVE_MF34_COV_SIDECARS = _env_flag("KIKA_SAVE_MF34_COV_SIDECARS", False)
 # Pass-2's own replicas.  The TMC parquet is an affine rescale of PASS 1, not
 # Pass 2, so sigma_2 is only ever inferred today.  This makes it measurable.
 SAVE_PERBIN_PARQUET = _env_flag("KIKA_SAVE_PERBIN_PARQUET", False)
+
+# (c) — the ONE knob that carries the MF34 split (roadmap §2.7-quinquies).
+# A .npy holding a replacement for `corr_kw`, Pass 1's correlation.  It is the
+# correlation and NOT `cov_combined` because `cov_combined` is not an interface:
+# it is rebuilt from `(corr_kw, std_perbin)` at the multigroup step (STEP 7,
+# MULTIGROUP_USE_RAW_MC_CORR) and never read back, so a covariance sidecar would
+# reach the fine MF34 and silently miss the multigroup collapse.  Substituting
+# the correlation at its single point of definition reaches both, plus the
+# saved sidecars, so the run documents what it actually used.
+# ⚠ Empty string = off.  The file is VALIDATED, not trusted: wrong shape, a
+# non-unit diagonal, asymmetry or |rho| > 1 aborts the run before the MC.
+MF34_CORR_OVERRIDE = os.environ.get("KIKA_MF34_CORR_OVERRIDE", "").strip()
 SAVE_MULTIGROUP_DIAGNOSTICS_CSV = True   # multigroup_boundary_decisions.csv
 SAVE_MF33_MULTIGROUP_DIAGNOSTICS_CSV = True   # mf33_boundary_decisions.csv
 
@@ -4056,6 +4068,46 @@ def run_exfor_to_endf_sampling_v2(
                 logger=_logger,
             )
             log_psd_diagnostics(corr_kw, "corr_kw (Pass 1)", _logger)
+
+            # ---- (c): the MF34 split enters HERE, and only here -----------
+            # Every consumer of Pass 1's correlation is downstream of this line:
+            # the branches below, `cov_combined`, STEP 7's multigroup input and
+            # the `mf34_corr_kw.npy` sidecar.  Replacing it once is what makes
+            # the fine MF34 and the multigroup collapse carry the SAME object.
+            if MF34_CORR_OVERRIDE:
+                _ov = np.load(MF34_CORR_OVERRIDE)
+                _n_ov = corr_kw.shape[0]
+                _dd = float(np.max(np.abs(np.diag(_ov) - 1.0))) if _ov.ndim == 2 else np.inf
+                _sy = float(np.abs(_ov - _ov.T).max()) if _ov.ndim == 2 else np.inf
+                _mx = float(np.abs(_ov).max()) if _ov.ndim == 2 else np.inf
+                if _ov.shape != (_n_ov, _n_ov):
+                    raise SystemExit(
+                        f"[MF34-OVERRIDE] {MF34_CORR_OVERRIDE} has shape "
+                        f"{_ov.shape}, this run's corr_kw is ({_n_ov}, {_n_ov})"
+                    )
+                if _dd != 0.0 or _sy != 0.0 or _mx > 1.0 + 1e-12:
+                    raise SystemExit(
+                        f"[MF34-OVERRIDE] not a correlation matrix: "
+                        f"max|diag-1| = {_dd:.3e}, max|A-A.T| = {_sy:.3e}, "
+                        f"max|rho| = {_mx:.6f}. Refusing to ship it."
+                    )
+                _before = float(np.mean(np.abs(corr_kw)))
+                corr_kw = _ov
+                _logger.info(
+                    f"  [MF34-OVERRIDE] corr_kw replaced from {MF34_CORR_OVERRIDE}"
+                )
+                _logger.info(
+                    f"  [MF34-OVERRIDE] <|rho|> over the whole matrix: "
+                    f"{_before:.6f} -> {float(np.mean(np.abs(corr_kw))):.6f}"
+                )
+                _logger.info(
+                    "  [MF34-OVERRIDE] std_perbin, the means and the replicas are "
+                    "UNTOUCHED, so the declared sigma is unchanged and this is a "
+                    "redistribution."
+                )
+                log_psd_diagnostics(corr_kw, "corr_kw (post-override)", _logger)
+                del _ov
+
             _mix_blocks, _mix_diag = ({}, {})
             if USE_MIXTURE_COVARIANCE and mixture_by_bin:
                 _mix_blocks, _mix_diag = build_mixture_blocks(
