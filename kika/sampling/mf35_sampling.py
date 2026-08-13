@@ -175,8 +175,14 @@ def build_pfns_covariance(
         )
 
     suite, report = decodeCovarianceSuite(endf_obj)
+    # `(ENDF_MF, ENDF_MT)` rather than `ENDF_MFMT == f"35/{mt}"`. The suite on
+    # this line is always ENDF-decoded, so the slash spelling would in fact
+    # match — but §25.2.3 spells the attribute with a comma and every
+    # distributed GNDS file agrees, so an equality against one spelling is a
+    # filter that silently selects nothing the day the suite arrives the other
+    # way. The properties read both. See `docs/gnds_endf_conflicts.md` §3.1.
     sections = [s for s in suite if s.rowData is not None
-                and s.rowData.ENDF_MFMT == f"35/{mt}"]
+                and (s.rowData.ENDF_MF, s.rowData.ENDF_MT) == (35, mt)]
     bands = [s.rowData.incidentEnergyBand for s in sections]
 
     if logger is not None:

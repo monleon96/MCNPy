@@ -150,7 +150,8 @@ from .styles import (
     Styles,
     URR_probabilityTables,
 )
-from .suite import ApplicationData, ExternalFile, ExternalFiles, ReactionSuite
+from .suite import (ApplicationData, CROSS_SECTION_UNITS, ExternalFile,
+                    ExternalFiles, ReactionSuite)
 from .uncertainties import Covariance, ListOfCovariances, Uncertainty
 from .units import Unit, UnitError, check_mass_unit, conversion_factor, parse_unit
 from .values import Values
@@ -180,6 +181,7 @@ __all__ = [
     "PoPs", "Particle", "Nuclide",
     # §14 the root
     "ReactionSuite", "ExternalFile", "ExternalFiles", "ApplicationData",
+    "CROSS_SECTION_UNITS",
     # §15-16 reactions and their cross sections
     "Reaction", "CrossSectionSum", "Reactions", "Sums", "OrphanProducts",
     "FissionComponents",

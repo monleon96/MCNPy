@@ -9,9 +9,43 @@ import pandas as pd
 from kika._utils import create_repr_section
 
 
+def _endf_mfmt_of(data) -> Optional[Tuple[int, int]]:
+    """``(MF, MT)`` from a ``DataLink``'s ``ENDF_MFMT``, either separator.
+
+    ``"34/2"`` and ``"34,2"`` both give ``(34, 2)``. GNDS §25.2.3 defines the
+    attribute with a comma and every distributed covariance file writes one;
+    kika's ENDF adapter writes a slash. Parsing only the slash made this
+    module's MF34 filter return an empty result — **without raising** — for any
+    suite decoded from GNDS. See ``docs/gnds_endf_conflicts.md`` §3.1 and §7.1.
+
+    Duck-typed, like everything else this module reads off a suite, so it works
+    on a real ``DataLink`` and on anything that quacks like one.
+    """
+    raw = getattr(data, 'ENDF_MFMT', None) if data is not None else None
+    if not raw:
+        return None
+    try:
+        mf, mt = (int(part) for part in str(raw).replace('/', ',').split(',', 1))
+    except ValueError:
+        return None
+    return mf, mt
+
+
+def _is_endf_mf(data, mf: int) -> bool:
+    """Does this link belong to *mf*? The separator-agnostic ``startswith``."""
+    parts = _endf_mfmt_of(data)
+    return parts is not None and parts[0] == mf
+
+
 def _endf_mt_of(data) -> int:
     """The MT half of a ``DataLink``'s ``ENDF_MFMT``, e.g. ``"34/2"`` -> 2."""
-    return int(str(data.ENDF_MFMT).split("/")[1])
+    parts = _endf_mfmt_of(data)
+    if parts is None:
+        raise ValueError(
+            f"a covariance link whose ENDF_MFMT is "
+            f"{getattr(data, 'ENDF_MFMT', None)!r} names no MT"
+        )
+    return parts[1]
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -212,7 +246,7 @@ class LegendreCovariance:
 
         for section in getattr(suite, 'covarianceSections', suite):
             rowData = getattr(section, 'rowData', None)
-            if rowData is None or not str(getattr(rowData, 'ENDF_MFMT', '') or '').startswith('34/'):
+            if not _is_endf_mf(rowData, 34):
                 continue
             colData = getattr(section, 'columnData', None) or rowData
 

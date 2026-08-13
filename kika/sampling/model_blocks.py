@@ -29,7 +29,8 @@ import numpy as np
 __all__ = ["covariance_suite_blocks", "parameter_covariance_blocks",
            "parameter_covariance_index", "legendre_covariance_blocks",
            "legendre_covariance_index", "cross_section_covariance_blocks",
-           "cross_section_covariance_index", "assemble_joint"]
+           "cross_section_covariance_index", "assemble_joint", "UNION_MODES",
+           "CROSS_SECTION_MF"]
 
 
 def covariance_suite_blocks(suite, isotope: Any = None, mt: int = 18):
@@ -108,15 +109,61 @@ def _lift_matrix(src_grid: np.ndarray, dst_grid: np.ndarray) -> np.ndarray:
     return A
 
 
-def _union_grids(entries, atol: float = 1e-12) -> Dict[Hashable, np.ndarray]:
-    """One merged bin structure per key, over every grid that mentions that key."""
-    unions: Dict[Hashable, list] = {}
+#: How :func:`assemble_joint` decides each component's bin structure. The two
+#: modes are not two layouts of one covariance — **they are two different
+#: covariances**, and which is wanted is a property of the quantity being
+#: assembled rather than a preference.
+#:
+#: ``"per-component"``
+#:     One union per key, over the grids of the blocks that mention it.
+#:     Components keep their own widths and are zero-padded to the widest.
+#:     Correct when the components genuinely live on different grids and the
+#:     evaluation says nothing outside each one's span. This is
+#:     :attr:`~kika.cov.legendre_covariance.LegendreCovariance.covariance_matrix`'s
+#:     layout, and MF34's components — Legendre orders of one distribution —
+#:     share a grid by construction, so it is also the *only* layout there.
+#:
+#: ``"global"``
+#:     One union across every grid in the assembly, handed to every key. No
+#:     padding; every row is stated. This is what
+#:     ``mf33_sampling._build_union_grid`` builds and what
+#:     :class:`~kika.cov.cross_section_covariance.CrossSectionCovariance`
+#:     carries, i.e. **what the MF33 pipeline ships today**.
+UNION_MODES = ("per-component", "global")
+
+
+def _union_grids(entries, atol: float = 1e-12,
+                 union: str = "per-component") -> Dict[Hashable, np.ndarray]:
+    """The merged bin structure each key is stated on. See :data:`UNION_MODES`.
+
+    **Measured on the full Fe-56 tape, 2026-08-13**, MF33 for MT 1/2/4/5/16/102/103
+    with native grids of 630, 630, 124, 124, 124, 631 and 124 bins:
+
+    | mode | dimension | zero-padded rows |
+    |---|---|---|
+    | ``per-component`` | 7 x 631 = **4417** | 2236 |
+    | ``global`` | 7 x 730 = **5110** | 0 (2037 rows are inert, which is different) |
+
+    The 5110 is bit-identical to the shipped carrier's matrix. That is the whole
+    reason this parameter exists rather than a decision having been taken here.
+    """
+    if union not in UNION_MODES:
+        raise ValueError(f"union must be one of {UNION_MODES}, got {union!r}")
+
+    perKey: Dict[Hashable, list] = {}
     for rowKey, colKey, _matrix, rowGrid, colGrid in entries:
-        unions.setdefault(rowKey, []).extend(np.asarray(rowGrid, dtype=float))
-        unions.setdefault(colKey, []).extend(np.asarray(colGrid, dtype=float))
+        perKey.setdefault(rowKey, []).extend(np.asarray(rowGrid, dtype=float))
+        perKey.setdefault(colKey, []).extend(np.asarray(colGrid, dtype=float))
+
+    if union == "global":
+        # Every key gets the same pooled grid. Built by pooling the *per-key*
+        # lists rather than re-walking `entries`, so the two modes cannot
+        # disagree about which grids were in scope -- only about how they merge.
+        pooled = [x for values in perKey.values() for x in values]
+        perKey = {key: pooled for key in perKey}
 
     merged: Dict[Hashable, np.ndarray] = {}
-    for key, values in unions.items():
+    for key, values in perKey.items():
         grid = np.unique(np.asarray(values, dtype=float))
         kept = [grid[0]]
         for x in grid[1:]:
@@ -126,7 +173,8 @@ def _union_grids(entries, atol: float = 1e-12) -> Dict[Hashable, np.ndarray]:
     return merged
 
 
-def assemble_joint(entries, atol: float = 1e-12):
+def assemble_joint(entries, atol: float = 1e-12,
+                   union: str = "per-component"):
     """Sections that share a quantity → the one matrix they are partitions of.
 
     *entries* is a sequence of ``(rowKey, colKey, matrix, rowGrid, colGrid)``.
@@ -151,12 +199,22 @@ def assemble_joint(entries, atol: float = 1e-12):
     component before it. This reproduces
     :attr:`~kika.cov.legendre_covariance.LegendreCovariance.covariance_matrix`,
     which is the layout the MF34 pipeline's existing samples were drawn in.
+
+    *union* selects the bin structure — see :data:`UNION_MODES`. Under
+    ``"global"`` every component is refined onto one pooled grid, so
+    ``widths[key] == stride`` throughout and **there is no padding at all**;
+    the uniform-stride paragraph above still holds, it simply has nothing to do.
+    That is the mode that reproduces
+    :attr:`~kika.cov.cross_section_covariance.CrossSectionCovariance.covariance_matrix`,
+    and it is the MF33 pipeline's shipped layout. The default is
+    ``"per-component"`` because MF34 — the migrated path, whose samples exist —
+    was drawn that way.
     """
     entries = list(entries)
     if not entries:
         return [], np.zeros((0, 0), dtype=float), 0
 
-    unions = _union_grids(entries, atol=atol)
+    unions = _union_grids(entries, atol=atol, union=union)
     keys = sorted(unions)
     index = {key: i for i, key in enumerate(keys)}
     widths = {key: len(grid) - 1 for key, grid in unions.items()}
@@ -193,8 +251,21 @@ def assemble_joint(entries, atol: float = 1e-12):
     return keys, joint, stride
 
 
-def _endf_mt(link) -> int:
-    """The MT an ``ENDF_MFMT`` names — ``"34/2"`` → 2.
+def _endf_mfmt(link) -> Optional[Tuple[int, int]]:
+    """``(MF, MT)`` from an ``ENDF_MFMT``, **whichever separator wrote it**.
+
+    ``"34/2"`` and ``"34,2"`` both give ``(34, 2)``, and that is the whole point
+    of the function. GNDS §25.2.3 (p. 363) defines the attribute as a *comma*
+    separated pair and all 270 covariance files of ENDF/B-VIII.1-GNDS agree;
+    kika's ENDF adapter writes a slash. A suite decoded from GNDS therefore
+    matched none of this module's filters and — the part that made it worth
+    fixing — **did not raise**: ``startswith("34/")`` returned ``False``,
+    ``_mf34_entries`` returned ``[]`` and the caller assembled zero blocks.
+    See ``docs/gnds_endf_conflicts.md`` §3.1 and §7.1.
+
+    ``None`` for a link that has no ``ENDF_MFMT`` or whose value is not a pair
+    of integers; the callers decide whether that is a skip or an error, because
+    they mean different things by it.
 
     Duck-typed rather than imported from
     ``kika.endf.model_adapter.covariances``, which has the same two helpers.
@@ -203,10 +274,30 @@ def _endf_mt(link) -> int:
     model onto the sampler's import path, and this module's own docstring
     promises it duck-types the suite for exactly that reason. Two four-line
     readers of a documented spec field is the cheaper of the two costs.
+    ``DataLink._mfmtParts`` is the model-side twin and does the same thing.
     """
-    if link is None or not getattr(link, "ENDF_MFMT", None):
+    raw = getattr(link, "ENDF_MFMT", None) if link is not None else None
+    if not raw:
+        return None
+    try:
+        mf, mt = (int(part) for part in str(raw).replace("/", ",").split(",", 1))
+    except ValueError:
+        return None
+    return mf, mt
+
+
+def _is_endf_mf(link, mf: int) -> bool:
+    """Does this link belong to *mf*? The separator-agnostic ``startswith``."""
+    parts = _endf_mfmt(link)
+    return parts is not None and parts[0] == mf
+
+
+def _endf_mt(link) -> int:
+    """The MT an ``ENDF_MFMT`` names — ``"34/2"`` and ``"34,2"`` → 2."""
+    parts = _endf_mfmt(link)
+    if parts is None:
         raise ValueError("a covariance link with no ENDF_MFMT cannot be placed")
-    return int(str(link.ENDF_MFMT).split("/")[1])
+    return parts[1]
 
 
 def _legendre_order(link) -> int:
@@ -279,7 +370,7 @@ def _mf34_entries(suite, mt=None, orders=None, relative=None):
     entries = []
     for section in getattr(suite, "covarianceSections", suite):
         rowData, colData = section.rowData, section.columnData
-        if rowData is None or not str(rowData.ENDF_MFMT or "").startswith("34/"):
+        if not _is_endf_mf(rowData, 34):
             continue
         colData = rowData if colData is None else colData
 
@@ -399,8 +490,23 @@ def legendre_covariance_index(
     }
 
 
-def _mf33_entries(suite, mt=None, relative=None):
-    """The MF33 sections of *suite*, as :func:`assemble_joint` entries.
+#: The MFs :func:`_cross_section_entries` serves — the ones whose components are
+#: **reactions on an energy grid**, keyed by ``(ZA, MT)``.
+#:
+#: MF31 is here because §31.1 makes the MT452/455/456 formats *"directly
+#: analogous to those of File 33"*: same records, same grids, same
+#: ``_build_union_grid`` (``mf31_sampling.py`` imports MF33's), and the same
+#: ``CrossSectionCovariance`` carrier. What differs is what the covariance is
+#: *about* — a multiplicity rather than a cross section — and that lives in the
+#: ``href``, which this function does not read.
+#:
+#: MF34 is **not** here and cannot be: its key carries a third coordinate, the
+#: Legendre order. MF35's is a band. Both have their own entry builders.
+CROSS_SECTION_MF = (31, 33)
+
+
+def _cross_section_entries(suite, mf: int = 33, mt=None, relative=None):
+    """The MF31 or MF33 sections of *suite*, as :func:`assemble_joint` entries.
 
     The cross-*reaction* sibling of :func:`_mf34_entries`, and the same shape of
     problem one level out: where MF34 partitions one distribution over Legendre
@@ -413,6 +519,12 @@ def _mf33_entries(suite, mt=None, relative=None):
     So the component key is the ``(ZA, MT)`` pair, and there is no third
     coordinate: the Legendre order that makes MF34's key a triplet has no MF33
     counterpart. That is the whole difference between the two functions.
+
+    *mf* selects which file — see :data:`CROSS_SECTION_MF`. **One function
+    rather than two because the two are the same records**, not because the two
+    were similar enough to merge: `mf31_sampling.py` imports MF33's
+    `_build_union_grid` and packs into the same carrier, so a separate entry
+    builder would have been a copy with one integer changed.
 
     **The key is the pair ``_get_param_pairs`` uses, deliberately.**
     :attr:`~kika.cov.cross_section_covariance.CrossSectionCovariance.covariance_matrix`
@@ -428,12 +540,18 @@ def _mf33_entries(suite, mt=None, relative=None):
     off-diagonal to; and a caller that is about to *sample* wants
     ``relative=True``, because the appliers multiply by what comes back.
     """
+    if mf not in CROSS_SECTION_MF:
+        raise ValueError(
+            f"mf must be one of {CROSS_SECTION_MF}, got {mf}. MF34's components "
+            f"carry a Legendre order and MF35's a band, so their keys are not "
+            f"(ZA, MT) pairs; use _mf34_entries or covariance_suite_blocks."
+        )
     mts = _selection(mt)
 
     entries = []
     for section in getattr(suite, "covarianceSections", suite):
         rowData, colData = section.rowData, section.columnData
-        if rowData is None or not str(rowData.ENDF_MFMT or "").startswith("33/"):
+        if not _is_endf_mf(rowData, mf):
             continue
         colData = rowData if colData is None else colData
 
@@ -462,8 +580,9 @@ def _mf33_entries(suite, mt=None, relative=None):
 
 def cross_section_covariance_blocks(
     suite, isotope: Any = None, mt=None, relative=None, atol: float = 1e-12,
+    union: str = "global", mf: int = 33,
 ) -> List[Tuple[Hashable, np.ndarray]]:
-    """A ``CovarianceSuite``'s MF33 sections → the one joint block they describe.
+    """A ``CovarianceSuite``'s MF33 (or MF31) sections → the one joint block.
 
     The model-side replacement for
     :attr:`~kika.cov.cross_section_covariance.CrossSectionCovariance.covariance_matrix`,
@@ -493,18 +612,43 @@ def cross_section_covariance_blocks(
     smuggle in — it moves numbers on any run that enables autofix, and it needs
     its own before/after.
 
-    *mt* and *relative* select which components enter the joint; see
-    :func:`_mf33_entries`.
+    **The grid, and why the default is ``"global"`` — settled 2026-08-13 by
+    measurement.** MF33's components are *different reactions*, and an evaluator
+    has no reason to grid them alike: on the full Fe-56 tape MT1/2 are on 630
+    bins, MT102 on 631 and MT4/5/16/103 on 124. So the two :data:`UNION_MODES`
+    genuinely disagree — 7 x 730 = 5110 rows against 7 x 631 = 4417, of which
+    2236 are padding. Nothing about MF34 prepared for this: its components are
+    Legendre orders of one distribution and share a grid by construction.
+
+    ``sampling_migration_roadmap.md`` deferred the MF33 source migration on that
+    disagreement, reading it as an evaluation decision that "moves every drawn
+    column either way". **It is a decision about the *improvement*, not about
+    the *migration*.** Measured on that same tape: with ``union="global"`` this
+    function's matrix is **bit-identical** to the carrier's zero-filled
+    ``covariance_matrix``, all 5110 x 5110 of it, on a pooled grid identical to
+    ``_build_union_grid``'s and with the key order ``_get_param_pairs()`` gives.
+
+    So the default is the shipped layout, and moving the source onto the model
+    changes no number — *equivalent first, then improve*. Choosing
+    ``"per-component"`` instead is the improvement, and it keeps its own
+    before/after.
+
+    *mf*, *mt* and *relative* select which components enter the joint; see
+    :func:`_cross_section_entries`. **The MF is in the block key**, so an MF31
+    and an MF33 assembly of the same isotope cannot collide in a caller's dict —
+    they are covariances of different quantities that happen to share a key
+    shape.
     """
-    entries = _mf33_entries(suite, mt=mt, relative=relative)
-    keys, joint, _stride = assemble_joint(entries, atol=atol)
+    entries = _cross_section_entries(suite, mf=mf, mt=mt, relative=relative)
+    keys, joint, _stride = assemble_joint(entries, atol=atol, union=union)
     if not keys:
         return []
-    return [((isotope, "MF33", tuple(keys)), joint)]
+    return [((isotope, f"MF{mf}", tuple(keys)), joint)]
 
 
 def cross_section_covariance_index(
     suite, isotope: Any = None, mt=None, relative=None, atol: float = 1e-12,
+    union: str = "global", mf: int = 33,
 ) -> Dict[Hashable, Dict[str, Any]]:
     """What the rows of :func:`cross_section_covariance_blocks`' block are.
 
@@ -521,16 +665,24 @@ def cross_section_covariance_index(
 
     Derived from the grids alone, so nothing is assembled — the same reason
     :func:`legendre_covariance_index` does not call :func:`assemble_joint`.
+
+    *union* **must match what** :func:`cross_section_covariance_blocks` **was
+    called with**, and shares its default for that reason: the index says which
+    rows of the block mean what, and an index built on one bin structure
+    describing a block built on the other is wrong everywhere without being
+    wrong anywhere visible. Under the ``"global"`` default every ``width``
+    equals ``stride`` and ``grids`` holds the one pooled grid seven times, which
+    is the shape ``extract_mt_param_blocks`` assumes today.
     """
-    entries = _mf33_entries(suite, mt=mt, relative=relative)
+    entries = _cross_section_entries(suite, mf=mf, mt=mt, relative=relative)
     if not entries:
         return {}
-    unions = _union_grids(entries, atol=atol)
+    unions = _union_grids(entries, atol=atol, union=union)
     keys = sorted(unions)
     widths = {key: len(unions[key]) - 1 for key in keys}
     stride = max(widths.values())
     return {
-        (isotope, "MF33", tuple(keys)): {
+        (isotope, f"MF{mf}", tuple(keys)): {
             "pairs": list(keys),
             "stride": stride,
             "grids": {key: unions[key] for key in keys},

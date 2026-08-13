@@ -35,7 +35,8 @@ from .reactions import (FissionComponents, IncompleteReactions, OrphanProducts,
 from .resonances import Resonances
 from .styles import Styles
 
-__all__ = ["ExternalFile", "ExternalFiles", "ApplicationData", "ReactionSuite"]
+__all__ = ["ExternalFile", "ExternalFiles", "ApplicationData", "ReactionSuite",
+           "CROSS_SECTION_UNITS"]
 
 #: §14.1.1 ``interaction``. The spec's three values.
 INTERACTIONS = ("nuclear", "atomic", "thermalNeutronScatteringLaw")
@@ -51,6 +52,60 @@ def _eV(value: float) -> str:
         if abs(value) >= scale:
             return f"{value / scale:g} {unit}"
     return f"{value:g} eV"
+
+
+#: What :meth:`ReactionSuite.cross_section` hands back, as ``(dependent,
+#: independent)`` units. Not a preference — it is what every consumer of those
+#: bare arrays already assumes, from the reconstructor to the chi2 pipeline.
+CROSS_SECTION_UNITS = ("b", "eV")
+
+
+def _checkUnits(form: object, expected: Tuple[str, str], what: str) -> None:
+    """Refuse to hand back bare arrays whose axes say something else.
+
+    **Why this exists, and why it has never fired.** A unit lives on an
+    ``axis`` (§5.1.2) and this method returns two numpy arrays, so the unit is
+    dropped at exactly this line. That is fine while every file agrees on
+    ``b``/``eV`` — and they do: a census of all 558 neutron evaluations of
+    ENDF/B-VIII.1-GNDS found **35 259 ``crossSection`` axes, every one ``b``**,
+    and **475 003 ``energy_in`` axes, every one ``eV``** (2026-08-13). The ENDF
+    and ACE adapters both fill :func:`~kika.nuclear_data.model.axes.
+    crossSectionAxes`, which states the same pair.
+
+    So the guarantee is in *the data*, not in the code, and this puts it in the
+    code. ``ScatteringRadius.constant`` is what the other outcome looks like:
+    the same field meant 5.444 fm down one path and 0.5444 of a different unit
+    down the other, for a year, because nothing asked
+    (``docs/gnds_endf_conflicts.md`` §4.1).
+
+    **It raises rather than converting.** kika does not rescale on read
+    anywhere — the reconstructor works in ENDF's units throughout — and a
+    convenience accessor is the last place to start. The model still holds the
+    data and its axes; a caller meeting this reads ``form.axes`` and decides.
+
+    An *unstated* unit is not an error. ``axes is None`` and ``unit == ""``
+    both mean the source said nothing, which §2.3.3 distinguishes from saying
+    the wrong thing, and inventing a complaint about silence would fire on
+    every hand-built form in the test suite.
+    """
+    axes = getattr(form, "axes", None)
+    if axes is None or getattr(axes, "href", None):
+        return
+    try:
+        found = (axes.dependent.unit, axes.independent[0].unit)
+    except (KeyError, IndexError, AttributeError):
+        return
+    wrong = [(f, e) for f, e in zip(found, expected) if f and f != e]
+    if wrong:
+        raise ValueError(
+            f"{what} states its axes in "
+            f"({found[0] or 'unstated'}, {found[1] or 'unstated'}) and this "
+            f"shortcut returns bare arrays that every consumer reads as "
+            f"({expected[0]}, {expected[1]}). kika does not rescale on read, so "
+            f"the conversion is yours: reach for the form and its `axes` "
+            f"directly. See docs/gnds_endf_conflicts.md §4.1 for what happens "
+            f"when a unit is assumed instead."
+        )
 
 
 def _pointwise(form: object) -> Tuple[np.ndarray, np.ndarray]:
@@ -230,11 +285,19 @@ class ReactionSuite:
         returned pair is faithful at its own nodes and nowhere else, so anything
         that needs a value *between* two nodes must call ``form.evaluate(E)``
         instead, which interpolates each region by its own rule.
+
+        **The arrays are in barns and eV, and that is now checked rather than
+        assumed** — see :func:`_checkUnits`. A form whose axes state anything
+        else raises here instead of being silently rescaled by whatever reads
+        the result.
         """
         reaction = self.reactionByENDF_MT(mt)
         # Raises with the available labels listed -- CrossSection.__getitem__
         # already writes that message, so it is not rewritten here.
-        return _pointwise(reaction.crossSection[form])
+        chosen = reaction.crossSection[form]
+        _checkUnits(chosen, CROSS_SECTION_UNITS,
+                    f"the {form!r} cross section of MT{mt}")
+        return _pointwise(chosen)
 
     def summary(self) -> str:
         """A few lines saying what is actually in here, including what is missing."""

@@ -557,13 +557,19 @@ class CrossSectionCovariance:
             )
 
         if mt is None:
+            # Either separator. GNDS §25.2.3 spells `ENDF_MFMT` with a comma
+            # and every distributed covariance file writes one; kika's ENDF
+            # adapter writes a slash. Requiring the slash made this raise "has
+            # no ENDF_MFMT" at a section that had a perfectly good one, which
+            # is the misleading half of `docs/gnds_endf_conflicts.md` §3.1.
             mfmt = getattr(getattr(section, 'rowData', None), 'ENDF_MFMT', None)
-            if mfmt is None or '/' not in str(mfmt):
+            parts = str(mfmt).replace('/', ',').split(',') if mfmt else []
+            if len(parts) != 2 or not parts[1].strip().isdigit():
                 raise ValueError(
-                    "no mt given and the section's rowData has no ENDF_MFMT to "
-                    "take one from"
+                    f"no mt given and the section's rowData has no ENDF_MFMT to "
+                    f"take one from (it holds {mfmt!r}; §25.2.3 wants 'MF,MT')"
                 )
-            mt = int(str(mfmt).split('/')[1])
+            mt = int(parts[1])
 
         # Both the shared `energy_grid` and the per-matrix `energy_grids` are
         # filled. They are redundant only because this builds a single-matrix

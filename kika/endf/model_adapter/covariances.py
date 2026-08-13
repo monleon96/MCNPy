@@ -401,10 +401,21 @@ def decodeMF35MT(mf35mt, report: Optional[ConversionReport] = None):
 # not the byte identity MF3, MF4 and MF1 are held to.
 
 def _endfMT(link) -> int:
-    """The MT an ``ENDF_MFMT`` names — ``"34/2"`` → 2."""
-    if link is None or not link.ENDF_MFMT:
-        raise ValueError("a covariance link with no ENDF_MFMT cannot be written to ENDF")
-    return int(str(link.ENDF_MFMT).split("/")[1])
+    """The MT an ``ENDF_MFMT`` names — ``"34/2"`` and ``"34,2"`` → 2.
+
+    Goes through :attr:`DataLink.ENDF_MT` rather than splitting the string, so
+    a suite that arrived through the **GNDS** reader — where §25.2.3's comma is
+    the only spelling — encodes to ENDF as readily as one this adapter built
+    itself. ``docs/gnds_endf_conflicts.md`` §3.1.
+    """
+    mt = None if link is None else link.ENDF_MT
+    if mt is None:
+        raise ValueError(
+            f"a covariance link whose ENDF_MFMT is "
+            f"{getattr(link, 'ENDF_MFMT', None)!r} names no MT and cannot be "
+            f"written to ENDF"
+        )
+    return mt
 
 
 def _legendreOrder(link) -> int:
@@ -418,17 +429,22 @@ def _legendreOrder(link) -> int:
     )
 
 
-def _covarianceSections(source, prefix: str, mt: int):
-    """The sections of *source* that belong to one MF and row MT."""
+def _covarianceSections(source, mf: int, mt: int):
+    """The sections of *source* that belong to one MF and row MT.
+
+    Selects on the ``(MF, MT)`` pair rather than on a ``"33/"`` string prefix.
+    The prefix version silently selected **nothing** from a GNDS-decoded suite,
+    whose ``ENDF_MFMT`` is ``"33,2"`` — and returning an empty list is the one
+    failure mode a caller does not notice. ``docs/gnds_endf_conflicts.md`` §7.1.
+    """
     sections = getattr(source, "covarianceSections", source)
     selected = [
         section for section in sections
         if section.rowData is not None
-        and str(section.rowData.ENDF_MFMT or "").startswith(prefix)
-        and _endfMT(section.rowData) == mt
+        and (section.rowData.ENDF_MF, section.rowData.ENDF_MT) == (mf, mt)
     ]
     if not selected:
-        raise ValueError(f"no MF{prefix.rstrip('/')} covariance sections for MT{mt}")
+        raise ValueError(f"no MF{mf} covariance sections for MT{mt}")
     return selected
 
 
@@ -445,7 +461,7 @@ def encodeMF34MT(source, mt: int, mat: Optional[int] = None,
     from kika.cov.legendre_covariance import LegendreCovariance
 
     report = report if report is not None else ConversionReport()
-    sections = _covarianceSections(source, "34/", mt)
+    sections = _covarianceSections(source, 34, mt)
 
     covmat = LegendreCovariance()
     isotope = None
@@ -494,7 +510,7 @@ def encodeMF33MT(source, mt: int, mat: Optional[int] = None,
     from kika.endf.writers.mf33_writer import create_mf33_from_covariance
 
     report = report if report is not None else ConversionReport()
-    sections = _covarianceSections(source, "33/", mt)
+    sections = _covarianceSections(source, 33, mt)
     provenance = sections[0].provenance
 
     za = getattr(provenance, "za", None)
@@ -549,7 +565,7 @@ def encodeMF31MT(source, mt: int, mat: Optional[int] = None,
     from kika.endf.writers.mf33_writer import create_mf33_from_covariance
 
     report = report if report is not None else ConversionReport()
-    sections = _covarianceSections(source, "31/", mt)
+    sections = _covarianceSections(source, 31, mt)
     provenance = sections[0].provenance
 
     za = getattr(provenance, "za", None)
@@ -627,7 +643,7 @@ def encodeMF35MT(source, mt: int, mat: Optional[int] = None,
     from kika.endf.classes.mf35.mf35 import MF35MT, MF35SubSection
 
     report = report if report is not None else ConversionReport()
-    sections = _covarianceSections(source, "35/", mt)
+    sections = _covarianceSections(source, 35, mt)
 
     provenance = sections[0].provenance
     za = getattr(provenance, "za", None)
