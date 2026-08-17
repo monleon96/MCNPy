@@ -29,6 +29,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from kika.gnds.nodes import reads, readersOf
 from kika.nuclear_data.model import (AverageParameterCovariance,
                                      ConversionReport, CovarianceMatrix,
                                      CovarianceSection, CovarianceSuite,
@@ -232,6 +233,7 @@ def _readGridded2d(element: ET.Element, resolve: Optional[Callable]):
     return matrix, gridValues(2), gridValues(1), axes
 
 
+@reads("covarianceForm", "covarianceMatrix")
 def _readCovarianceMatrix(element: ET.Element, resolve, report) -> CovarianceMatrix:
     gridded = element.find("gridded2d")
     if gridded is None:
@@ -249,6 +251,7 @@ def _readCovarianceMatrix(element: ET.Element, resolve, report) -> CovarianceMat
     )
 
 
+@reads("covarianceForm", "shortRangeSelfScalingVariance")
 def _readShortRange(element: ET.Element, resolve, report) -> ShortRangeSelfScalingVariance:
     return ShortRangeSelfScalingVariance(
         matrix=_readCovarianceMatrix(element, resolve, report),
@@ -259,6 +262,7 @@ def _readShortRange(element: ET.Element, resolve, report) -> ShortRangeSelfScali
     )
 
 
+@reads("covarianceForm", "mixed")
 def _readMixed(element: ET.Element, resolve, report) -> Mixed:
     """§25. Components that together make one covariance.
 
@@ -282,6 +286,7 @@ def _readMixed(element: ET.Element, resolve, report) -> Mixed:
     return Mixed(components=components, label=element.attrib.get("label"))
 
 
+@reads("covarianceForm", "sum")
 def _readSum(element: ET.Element, resolve, report) -> Sum:
     return Sum(
         summands=[
@@ -304,12 +309,11 @@ def _optionalFloat(element: ET.Element, name: str) -> Optional[float]:
     return None if value is None else float(value)
 
 
-COVARIANCE_FORMS.update({
-    "covarianceMatrix": _readCovarianceMatrix,
-    "mixed": _readMixed,
-    "sum": _readSum,
-    "shortRangeSelfScalingVariance": _readShortRange,
-})
+# Derived from `kika/gnds/nodes.py` rather than listed a second time here --
+# see the note on `primitives.FUNCTION_1D`. Still an `.update` on the dict
+# declared at the top of the module, because `_readMixed` closes over that
+# object to read its own components.
+COVARIANCE_FORMS.update(readersOf("covarianceForm"))
 
 
 # ---------------------------------------------------------------------------

@@ -43,6 +43,7 @@ from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
+from kika.gnds.nodes import reads, readersOf
 from kika.nuclear_data.model import (Axes, Axis, Constant1d, Grid, GridStyle,
                                      Interpolation, InterpolationQualifier,
                                      Legendre, Polynomial1d, Regions1d,
@@ -320,6 +321,7 @@ def _values(element: ET.Element) -> np.ndarray:
 # §6 one-dimensional functionals
 # ---------------------------------------------------------------------------
 
+@reads("function1d", "XYs1d")
 def _readXYs1d(element: ET.Element, axes: Optional[Axes]) -> XYs1d:
     """§6.1.1. One ``values`` node holding ``x0 y0 x1 y1 …``.
 
@@ -343,6 +345,7 @@ def _readXYs1d(element: ET.Element, axes: Optional[Axes]) -> XYs1d:
     )
 
 
+@reads("function1d", "regions1d")
 def _readRegions1d(element: ET.Element, axes: Optional[Axes]) -> Regions1d:
     """§6.4.1. ``axes`` plus a ``function1ds`` container of 1-d children.
 
@@ -361,6 +364,7 @@ def _readRegions1d(element: ET.Element, axes: Optional[Axes]) -> Regions1d:
     )
 
 
+@reads("function1d", "constant1d")
 def _readConstant1d(element: ET.Element, axes: Optional[Axes]) -> Constant1d:
     """§6.2.1. A value and the domain it is constant over."""
     return Constant1d(
@@ -374,6 +378,7 @@ def _readConstant1d(element: ET.Element, axes: Optional[Axes]) -> Constant1d:
     )
 
 
+@reads("function1d", "Legendre")
 def _readLegendre(element: ET.Element, axes: Optional[Axes]) -> Legendre:
     """§6.3.1. The coefficients ``a_l``, in order from l = 0."""
     return Legendre(
@@ -385,6 +390,7 @@ def _readLegendre(element: ET.Element, axes: Optional[Axes]) -> Legendre:
     )
 
 
+@reads("function1d", "polynomial1d")
 def _readPolynomial1d(element: ET.Element, axes: Optional[Axes]) -> Polynomial1d:
     """§6.2. Coefficients ascending in power, over a stated domain."""
     return Polynomial1d(
@@ -402,6 +408,7 @@ def _readPolynomial1d(element: ET.Element, axes: Optional[Axes]) -> Polynomial1d
 # §6 two-dimensional functionals
 # ---------------------------------------------------------------------------
 
+@reads("function2d", "XYs2d")
 def _readXYs2d(element: ET.Element, axes: Optional[Axes]) -> XYs2d:
     """§6. An ordered list of 1-d functions, one per outer-axis value.
 
@@ -422,6 +429,7 @@ def _readXYs2d(element: ET.Element, axes: Optional[Axes]) -> XYs2d:
     )
 
 
+@reads("function2d", "regions2d")
 def _readRegions2d(element: ET.Element, axes: Optional[Axes]) -> Regions2d:
     own = readAxes(element) or axes
     return Regions2d(
@@ -450,18 +458,18 @@ def _children(element: ET.Element) -> List[ET.Element]:
 # Dispatch
 # ---------------------------------------------------------------------------
 
-FUNCTION_1D: Dict[str, Callable] = {
-    "XYs1d": _readXYs1d,
-    "regions1d": _readRegions1d,
-    "constant1d": _readConstant1d,
-    "Legendre": _readLegendre,
-    "polynomial1d": _readPolynomial1d,
-}
+#: §6's one-dimensional functionals, ``{tag: reader}``.
+#:
+#: **Derived from ``kika/gnds/nodes.py``, not written here.** The literal dict
+#: this replaces was a second list of node names beside the writer's
+#: ``isinstance`` chain, with nothing comparing the two; the registry is the
+#: one place both sides are declared. Adding a reader means decorating it with
+#: ``@reads`` and declaring the node in the table -- and forgetting the second
+#: half fails at import rather than at some later test.
+FUNCTION_1D: Dict[str, Callable] = readersOf("function1d")
 
-FUNCTION_2D: Dict[str, Callable] = {
-    "XYs2d": _readXYs2d,
-    "regions2d": _readRegions2d,
-}
+#: §6's two-dimensional functionals. Derived, as above.
+FUNCTION_2D: Dict[str, Callable] = readersOf("function2d")
 
 
 def isFunction1d(tag: str) -> bool:

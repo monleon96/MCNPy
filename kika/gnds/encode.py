@@ -57,6 +57,7 @@ from kika.nuclear_data.model import (AngularTwoBody, Background,
                                      ShortRangeSelfScalingVariance, Sum,
                                      Unspecified, XYs1d, XYs2d)
 
+from .nodes import writes
 from .primitives import formatFraction
 from .styles import writeStyles
 from .version import ACCEPTED, DEFAULT_WRITE_FORMAT, UnsupportedGndsVersion
@@ -177,6 +178,9 @@ def _interpolation(element: ET.Element, form) -> None:
         element.attrib["interpolation"] = str(interpolation)
 
 
+@writes("function1d", "XYs1d", "regions1d", "constant1d", "Legendre",
+        "polynomial1d")
+@writes("function2d", "XYs2d", "regions2d")
 def _function(parent: ET.Element, form, report: ConversionReport,
               where: str, nested: bool = False,
               parentAxes=None) -> Optional[ET.Element]:
@@ -209,7 +213,14 @@ def _function(parent: ET.Element, form, report: ConversionReport,
     if isinstance(form, Constant1d):
         element = ET.SubElement(parent, "constant1d")
         _writeCommon(element, form)
-        element.attrib["value"] = _number(form.value)
+        # `form.constant`, not `form.value`: the model spells the number
+        # `constant` (functions/simple.py:27), and this line asked for a `value`
+        # no Constant1d has ever had -- so writing a constant1d as a *functional*
+        # raised AttributeError. Unreachable through the committed fixtures,
+        # none of which carries a constant1d cross section, and found by
+        # test_nodes' behavioural writer check: it builds a minimal instance of
+        # every class the registry keys on and asserts the tag that comes out.
+        element.attrib["value"] = _number(form.constant)
         _set(element,
              domainMin=None if form.domainMin is None else _number(form.domainMin),
              domainMax=None if form.domainMax is None else _number(form.domainMax))
@@ -512,6 +523,7 @@ class _SuiteWriter:
         self.outputChannel(element, reaction.outputChannel,
                            f"{reaction.label!r}")
 
+    @writes("crossSectionForm", "resonancesWithBackground", "reference")
     def crossSection(self, parent: ET.Element, crossSection, where: str) -> None:
         element = ET.SubElement(parent, "crossSection")
         for label, form in crossSection.forms.items():
@@ -573,6 +585,7 @@ class _SuiteWriter:
             self.outputChannel(element, product.outputChannel,
                                f"{where} product {product.pid!r}")
 
+    @writes("multiplicityForm", "constant1d")
     def multiplicity(self, parent: ET.Element, multiplicity, where: str) -> None:
         element = ET.SubElement(parent, "multiplicity")
         if multiplicity is None:
@@ -597,6 +610,8 @@ class _SuiteWriter:
         _set(ET.SubElement(axes, "axis"), index="1", label="energy_in", unit="eV")
         _set(ET.SubElement(axes, "axis"), index="0", label="multiplicity", unit="")
 
+    @writes("distributionForm", "angularTwoBody", "unspecified",
+            "isotropic2d")
     def distribution(self, parent: ET.Element, distribution, where: str) -> None:
         """§18. **An empty ``<distribution/>`` is deliberate and is reported.**
 
@@ -625,6 +640,7 @@ class _SuiteWriter:
                     f"{type(form).__name__} distribution"
                 )
 
+    @writes("angularTwoBodyForm", "isotropic2d", "recoil")
     def angularTwoBody(self, parent: ET.Element, form, label: str,
                        where: str) -> None:
         element = ET.SubElement(parent, "angularTwoBody")
@@ -853,6 +869,8 @@ def _dataLink(parent: ET.Element, tag: str, link) -> None:
                  domainUnit=entry.domainUnit or None)
 
 
+@writes("covarianceForm", "covarianceMatrix", "mixed", "sum",
+        "shortRangeSelfScalingVariance")
 def _covarianceForm(parent: ET.Element, form, report, where: str) -> None:
     if form is None:
         report.lost(f"{where} has no covariance form and is written empty")

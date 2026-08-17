@@ -62,8 +62,7 @@ from typing import Dict, List, Optional, Tuple
 
 from kika.nuclear_data.model import (AngularTwoBody, Background,
                                      ConversionReport, CrossSection,
-                                     CrossSectionReconstructed,
-                                     CrossSectionSum, Evaluated,
+                                     CrossSectionSum,
                                      ExternalFile, ExternalFiles,
                                      FissionComponents, Frame, GndsProvenance,
                                      Isotropic2d,
@@ -82,18 +81,11 @@ from .primitives import (UnsupportedNode, readAxes, readForm, readFraction,
                          readFunction2d)
 from .resonances import readResonances
 from .styles import readStyles
+from .nodes import reads
 from .version import checkFormat
 from .xpath import Document, Resolver, readExternalFiles, verifyChecksum
 
 __all__ = ["readReactionSuite"]
-
-#: §9. The style nodes that occur, with the class each becomes. ``heated`` and
-#: the processed styles are modelled but absent from every distributed neutron
-#: evaluation, so meeting one is reported rather than guessed at.
-STYLES = {
-    "evaluated": Evaluated,
-    "crossSectionReconstructed": CrossSectionReconstructed,
-}
 
 #: §14.1.1. The reaction-list children, and the container class for each.
 REACTION_LISTS = (
@@ -401,6 +393,7 @@ class _SuiteReader:
 
     # -- crossSection ------------------------------------------------------
 
+    @reads("crossSectionForm", "resonancesWithBackground", "reference")
     def readCrossSection(self, element: ET.Element, path: str) -> CrossSection:
         """§16.1.1: a mapping from style label to form, which is what it is."""
         here = f"{path}/crossSection"
@@ -580,6 +573,7 @@ class _SuiteReader:
             )
         return product
 
+    @reads("multiplicityForm", "constant1d", "reference", "unspecified", "branching1d")
     def readMultiplicity(self, element: ET.Element, path: str) -> Multiplicity:
         here = f"{path}/multiplicity"
         forms = [c for c in element if c.tag not in IGNORED]
@@ -604,6 +598,7 @@ class _SuiteReader:
 
     # -- distributions -----------------------------------------------------
 
+    @reads("distributionForm", "angularTwoBody", "unspecified")
     def readDistribution(self, element: ET.Element, path: str) -> Distribution:
         here = f"{path}/distribution"
         distribution = Distribution()
@@ -628,6 +623,7 @@ class _SuiteReader:
             distribution[label] = form
         return distribution
 
+    @reads("angularTwoBodyForm", "isotropic2d", "recoil")
     def readAngularTwoBody(self, element: ET.Element,
                            path: str) -> AngularTwoBody:
         """§18's ``angularTwoBody``, in all four of the shapes it takes."""

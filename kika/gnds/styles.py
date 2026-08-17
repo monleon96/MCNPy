@@ -16,18 +16,31 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from typing import Optional
 
+from kika.gnds.nodes import reads, writes
 from kika.nuclear_data.model import (ConversionReport, CrossSectionReconstructed,
                                      Evaluated, PhysicalQuantity, RangeQuantity,
                                      Style, Styles)
 
-__all__ = ["STYLES", "readStyles", "writeStyles", "readPhysicalQuantity",
-           "readRange"]
+__all__ = ["STYLES", "WRITABLE_STYLES", "readStyles", "writeStyles",
+           "readPhysicalQuantity", "readRange"]
 
-#: §9 node name → the class it becomes.
+#: §9 node name → the class it becomes. **The reader's whole vocabulary**: two
+#: of the twelve styles the model declares.
 STYLES = {
     "evaluated": Evaluated,
     "crossSectionReconstructed": CrossSectionReconstructed,
 }
+
+#: What :func:`writeStyles` can emit, derived from the model rather than listed:
+#: it writes ``style.gndsNodeName``, so any style class the model declares comes
+#: out. Twelve, against ``STYLES``'s two — and against the **four**
+#: ``RS_StylesType`` admits (``gnds.xsd:87-93``). The asymmetry is not
+#: 2-against-12: it is 2 read / 12 written / 4 legal, and two of the illegal
+#: eight are built live by ``kika/ace/model_adapter/decode.py:141``.
+#:
+#: Derived so that a style class added to the model is a node
+#: ``kika/gnds/nodes.py`` must declare — the import fails until it does.
+WRITABLE_STYLES = tuple(sorted(cls.gndsNodeName for cls in Style.__subclasses__()))
 
 
 def readPhysicalQuantity(element: Optional[ET.Element]) -> Optional[PhysicalQuantity]:
@@ -45,6 +58,7 @@ def readRange(element: Optional[ET.Element]) -> Optional[RangeQuantity]:
                          unit=element.attrib.get("unit", ""))
 
 
+@reads("style", *STYLES)
 def readStyles(element: ET.Element, path: str, report: ConversionReport,
                tally=None) -> Styles:
     """§9.1 ``styles`` → the model.
@@ -84,6 +98,7 @@ def readStyles(element: ET.Element, path: str, report: ConversionReport,
     return styles
 
 
+@writes("style", *WRITABLE_STYLES)
 def writeStyles(root: ET.Element, styles: Styles, number,
                 documentation: bool = True) -> ET.Element:
     """The model → ``<styles>``. ``number`` formats a float, from the encoder.
