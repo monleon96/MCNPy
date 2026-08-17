@@ -23,7 +23,6 @@ and commit the diff in the same commit as the change that moved it.
 """
 from __future__ import annotations
 
-import hashlib
 import os
 import warnings
 from pathlib import Path
@@ -36,7 +35,18 @@ from kika.endf import read_endf
 
 DATA = Path(__file__).resolve().parent / "data"
 REGEN = bool(os.environ.get("REGEN_NUMERIC_GOLDENS"))
-RTOL = 1e-12
+
+#: Values match to this relative tolerance; shapes must match exactly.
+#:
+#: **1e-12 until 2026-08-17, and it was a tolerance this code cannot honour off
+#: this machine.** Measured on a GitHub runner: the Fe-56 MT102 reconstruction
+#: differs from the workstation's on 4 of 20 459 points, by 3.66e-12 relative.
+#: That is libm, not arithmetic anyone wrote -- capture comes out of a
+#: cancellation, so it is where the last ULP surfaces first. 1e-9 keeps roughly
+#: three orders of headroom over the observed spread while staying far tighter
+#: than any real change: a moved formula, grid or Q value shifts these numbers
+#: by parts in 10^3, not parts in 10^9.
+RTOL = 1e-9
 
 #: Coarse enough to stay small, wide enough to span the MF34 range where the
 #: Fe-56 elastic cross section actually varies.
@@ -133,8 +143,22 @@ def test_the_sigma_weight_golden(collapsed):
 
     Summarised rather than stored whole: the reconstructed grid runs to ~10^5
     points per MT, which is megabytes of fixture for a number that only has to
-    be comparable. Six statistics plus a digest catch any real change, and the
-    digest catches a change the statistics would miss.
+    be comparable. Six statistics catch any real change.
+
+    **There used to be a sha256 over the raw float bytes next to them, and it
+    was removed 2026-08-17 because it did not survive leaving this machine.**
+    The first CI run in ten days -- see the lock commit -- failed here and
+    nowhere near here: on a GitHub runner the Fe-56 MT102 reconstruction differs
+    from this workstation's on 4 of 20 459 points, by 1.3e-15 absolute and
+    3.7e-12 relative. A last-ULP libm difference, which the statistics below
+    absorb and a hash cannot. MT102 is where it shows because capture comes out
+    of a cancellation, and ``sorted()`` put ``mt102_digest`` first of all keys,
+    so the digest aborted the test before any statistic was ever compared.
+
+    So the digest was not catching "a change the statistics would miss" -- it
+    was asserting bit-exactness of floating-point arithmetic across machines,
+    which is not a property this code has or should claim. Regenerating it on a
+    runner would only have moved which machine is wrong.
     """
     endf, _ = collapsed
     assert endf.pendf, "nothing populated pendf, so no sigma was weighted with"
@@ -149,12 +173,6 @@ def test_the_sigma_weight_golden(collapsed):
             energies[0], energies[-1],
             values.min(), values.max(), values.sum(),
         ], dtype=float)
-        arrays[f"mt{mt}_digest"] = np.array(
-            hashlib.sha256(
-                np.ascontiguousarray(energies).tobytes()
-                + np.ascontiguousarray(values).tobytes()
-            ).hexdigest()
-        )
     _check_golden("mf34_to_mg_sigma", arrays)
 
 

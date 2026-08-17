@@ -17,11 +17,20 @@ golden nobody reviewed.
 
 **Tolerance.** Array *shapes* are compared exactly — a linearization that emits
 a different number of points has changed, full stop, and that is the signal
-this file exists to catch. Values are compared at ``rtol=1e-12``, which is
-tight enough to catch any change of algorithm and loose enough to survive a
-different CPU running the CI job. Bit-exactness is the acceptance criterion for
+this file exists to catch. Values are compared at ``rtol`` below, tight enough
+to catch any change of algorithm. Bit-exactness is the acceptance criterion for
 phase 2, where the code moves without being touched; here the code is merely
 frozen where it stands.
+
+*This paragraph used to say ``rtol=1e-12`` was "loose enough to survive a
+different CPU running the CI job", and to describe a sha256 digest stored
+beside each array. Both were wrong, and nothing could tell us so, because CI
+had not run a test since 2026-08-07 — the install step was dying on a stale
+``poetry.lock``. The first run after that was fixed failed here: Fe-56 MT102
+came out different on a GitHub runner, on 4 of 20 459 points, by 3.66e-12
+relative. The digests are gone and the tolerance is 1e-9; see ``RTOL``. The
+lesson worth keeping is not about tolerances — it is that a claim about CI in a
+docstring is worth exactly as much as the last green CI run.*
 
 **Deliberately included: a reconstructor whose output is not trustworthy.**
 Phase 0 froze it through ``ENDF.reconstruct_xs()``, a wrapper documented as
@@ -34,7 +43,6 @@ that moves.
 """
 from __future__ import annotations
 
-import hashlib
 import os
 from pathlib import Path
 
@@ -75,7 +83,19 @@ DATA = Path(__file__).resolve().parent / "data"
 REGEN = bool(os.environ.get("REGEN_NUMERIC_GOLDENS"))
 
 #: Values match to this relative tolerance; shapes must match exactly.
-RTOL = 1e-12
+#:
+#: **1e-12 until 2026-08-17, and it was a tolerance this code cannot honour off
+#: this machine.** Measured on a GitHub runner: the Fe-56 MT102 reconstruction
+#: differs from the workstation's on 4 of 20 459 points, by 1.33e-15 absolute
+#: and 3.66e-12 relative. That is libm, not arithmetic anyone wrote -- capture
+#: comes out of a cancellation, so it is where the last ULP surfaces first.
+#: 1e-9 keeps roughly three orders of headroom over the observed spread while
+#: staying far tighter than any real change: a moved formula, grid or Q value
+#: shifts these numbers by parts in 10^3, not parts in 10^9.
+#:
+#: The digests that used to sit beside these arrays are gone for the same
+#: reason -- see the module docstring.
+RTOL = 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -447,11 +467,11 @@ def test_endf_reconstruct_adapter_golden(micro_tape):
 
     assert produced, "the adapter returned nothing — its shape changed"
 
-    # Fingerprinted rather than stored in full. The output runs to hundreds of
+    # Summarised rather than stored in full. The output runs to hundreds of
     # thousands of points per MT, and committing 3 MB to pin it is not a good
-    # trade. A digest cannot say *how* it moved, but for a wholesale change
-    # "it moved" is the message, and the summary statistics next to it give
-    # the shape of the change.
+    # trade. Six statistics per MT say that it moved and give the shape of the
+    # move; see the module docstring for the digest that used to sit beside
+    # them and why it is gone.
     arrays: dict[str, np.ndarray] = {}
     for mt in sorted(produced):
         section = produced[mt]
@@ -462,7 +482,4 @@ def test_endf_reconstruct_adapter_golden(micro_tape):
             energies[0], energies[-1],
             values.min(), values.max(), values.sum(),
         ])
-        arrays[f"mt{mt}_digest"] = np.array(
-            hashlib.sha256(energies.tobytes() + values.tobytes()).hexdigest()
-        )
     check_golden("endf_reconstruct_adapter", arrays)
