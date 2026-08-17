@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
+from ..utils import record_width
+
 
 def _find_mf_boundaries(
     lines: List[str], mf_number: int
@@ -123,6 +125,7 @@ def write_mf_section_to_file(
     *,
     replace_existing: bool = True,
     update_directory: bool = True,
+    match_source_width: bool = True,
 ) -> str:
     """Insert or replace one (MF, MT) section in an ENDF file.
 
@@ -147,6 +150,11 @@ def write_mf_section_to_file(
         ``FileExistsError`` if False and the section is already present.
     update_directory : bool, default True
         Refresh the MF1/MT451 directory after writing.
+    match_source_width : bool, default True
+        Trim emitted records to the source tape's own record width, so a
+        75-column tape does not gain 80-column lines where the section was
+        spliced in.  Only ever removes the optional sequence-number field
+        (columns 76-80); tapes that carry one are untouched.
     """
     mf_number = int(section._mf)
     mt_number = int(section.number)
@@ -159,7 +167,9 @@ def write_mf_section_to_file(
 
     # ``str(section)`` emits the section body incl. its own SEND, no FEND.
     content = str(section)
-    section_lines = [line + '\n' for line in content.split('\n') if line.strip()]
+    width = record_width(lines) if match_source_width else 80
+    section_lines = [line[:width] + '\n'
+                     for line in content.split('\n') if line.strip()]
 
     if has_block:
         # Splice only the target (MF, MT) section; sibling MT sections and the

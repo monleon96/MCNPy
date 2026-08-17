@@ -4,6 +4,7 @@ Utility functions for ENDF file parsing and writing.
 Contains helper functions for handling the specific formatting requirements of ENDF files.
 """
 import re
+from dataclasses import dataclass
 from typing import Dict,Union, List, Optional, Tuple, Sequence, Any
 from .classes.mt import MT
 from .classes.mf1.mf1mt451 import MF1MT451
@@ -82,6 +83,30 @@ def format_endf_tend_record() -> str:
     return format_endf_data_line(
         [0.0, 0.0, 0, 0, 0, 0], -1, 0, 0, 0, formats=_TERMINATION_FORMATS,
     )
+
+
+def record_width(lines: Sequence[str]) -> int:
+    """75 or 80, whichever *lines* use — the sequence-number field is optional.
+
+    ENDF-6 puts a five-digit sequence number in columns 76-80 and does not
+    require it. Most distributions carry it; ENDF/B-VIII.1's thermal-scattering
+    sublibrary does not, and JEFF-4.0's ``tsl/`` is mixed *within one directory*.
+    kika's emitters always write one, so anything that splices generated records
+    into an existing tape has to trim them back or leave a file whose record
+    width changes partway through — which NJOY reads without complaint and
+    processes wrongly.
+
+    Measured from the widest data line rather than the first, so blank lines and
+    terminators (which are shorter, and legitimately so) do not decide it.
+    """
+    width = 0
+    for line in lines:
+        stripped = line.rstrip('\r\n')
+        if len(stripped) >= 75:
+            width = max(width, len(stripped.rstrip()))
+        if width >= 80:
+            return 80
+    return 75 if width <= 75 else 80
 
 
 
@@ -284,7 +309,47 @@ def parse_data_pairs(lines, start, np_count):
     return x_list, y_list, idx
 
 
-def format_data_values(values, mat, mf, mt, start_line, formats=None):
+#: How a writer fills the unused fields of a record's last, short line. Both
+#: are legal ENDF-6 and both occur: ENDF/B-VIII.1 and most of JEFF-4.0 leave
+#: them blank, while JEFF-4.0's own TSL evaluations write explicit zeros.
+PAD_BLANK = "blank"
+PAD_ZERO = "zero"
+
+
+@dataclass(frozen=True)
+class PadStyle:
+    """Padding convention per record kind, because it is not one convention.
+
+    ``tsl_4-Be.txt`` settles this. Inside a *single* MF7/MT2 section it ends the
+    TAB1's x/y body with blanks::
+
+        1.591491+0 9.636365-1                                              26 7  2  544
+
+    and the LIST body eleven records later with explicit zeros::
+
+        9.497413-1 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0  26 7  2  816
+
+    So a single flag per section is not enough to write the file back, and a
+    single flag per *tape* would be worse. The two bodies are tracked apart:
+    ``pairs`` for TAB1 x/y bodies, ``values`` for LIST bodies. Interpolation
+    records are always blank-padded and are not represented here — the same tape
+    writes ``       1621          1`` followed by blanks.
+    """
+
+    pairs: str = PAD_BLANK
+    values: str = PAD_BLANK
+
+
+def _tail_format(pad: str) -> str:
+    return ENDF_FORMAT_FLOAT if pad == PAD_ZERO else ENDF_FORMAT_BLANK
+
+
+def _tail_value(pad: str):
+    return 0.0 if pad == PAD_ZERO else None
+
+
+def format_data_values(values, mat, mf, mt, start_line, formats=None,
+                       pad=PAD_BLANK):
     """
     Format N scalar values into ENDF LIST-record body lines (6 values per line).
 
@@ -301,6 +366,9 @@ def format_data_values(values, mat, mf, mt, start_line, formats=None):
     formats : list of str, optional
         Per-value format codes (ENDF_FORMAT_*).  If *None*, all values
         are written as floats.
+    pad : str, optional
+        :data:`PAD_BLANK` (default, unchanged behaviour) or :data:`PAD_ZERO`
+        for the unused fields of the final short line.
 
     Returns
     -------
@@ -322,8 +390,8 @@ def format_data_values(values, mat, mf, mt, start_line, formats=None):
             fmts = [ENDF_FORMAT_FLOAT] * len(chunk)
         # Pad chunk to 6 values
         while len(chunk) < 6:
-            chunk.append(None)
-            fmts.append(ENDF_FORMAT_BLANK)
+            chunk.append(_tail_value(pad))
+            fmts.append(_tail_format(pad))
         result_lines.append(format_endf_data_line(chunk, mat, mf, mt, line_num, formats=fmts))
         line_num += 1
         i += 6
@@ -546,9 +614,12 @@ def format_interp_pairs(pairs, mat, mf, mt, start_line):
     return result_lines, line_num
 
 
-def format_data_pairs(x_data, y_data, mat, mf, mt, start_line):
+def format_data_pairs(x_data, y_data, mat, mf, mt, start_line, pad=PAD_BLANK):
     """
     Format NP x/y data pairs into ENDF lines (3 pairs per line).
+
+    *pad* fills the unused fields of the final short line — see
+    :data:`PAD_BLANK`.
 
     Returns
     -------
@@ -559,23 +630,32 @@ def format_data_pairs(x_data, y_data, mat, mf, mt, start_line):
     line_num = start_line
     n = len(x_data)
     i = 0
+    tail, tail_fmt = _tail_value(pad), _tail_format(pad)
     while i < n:
         values = []
+        fmts = []
         for j in range(3):
             if i + j < n:
                 values.extend([x_data[i + j], y_data[i + j]])
+                fmts.extend([ENDF_FORMAT_FLOAT, ENDF_FORMAT_FLOAT])
             else:
-                values.extend([None, None])
-        fmts = [ENDF_FORMAT_FLOAT if v is not None else ENDF_FORMAT_BLANK for v in values]
+                values.extend([tail, tail])
+                fmts.extend([tail_fmt, tail_fmt])
         result_lines.append(format_endf_data_line(values, mat, mf, mt, line_num, formats=fmts))
         line_num += 1
         i += 3
     return result_lines, line_num
 
 
-def format_tab1(c1, c2, l1, l2, interp_pairs, x_data, y_data, mat, mf, mt, start_line):
+def format_tab1(c1, c2, l1, l2, interp_pairs, x_data, y_data, mat, mf, mt,
+                start_line, pad=PAD_BLANK):
     """
     Format a complete TAB1 record to ENDF lines.
+
+    *pad* reaches the x/y body only. The interpolation record keeps blank
+    padding regardless, because that is what the tapes that zero-fill their data
+    lines do — ``tsl_4-Be.txt`` writes ``       1621          1`` followed by
+    blanks on the same tape whose data lines end in explicit zeros.
 
     Parameters
     ----------
@@ -587,6 +667,7 @@ def format_tab1(c1, c2, l1, l2, interp_pairs, x_data, y_data, mat, mf, mt, start
     x_data, y_data : list of float
     mat, mf, mt : int
     start_line : int
+    pad : str, optional
 
     Returns
     -------
@@ -614,7 +695,8 @@ def format_tab1(c1, c2, l1, l2, interp_pairs, x_data, y_data, mat, mf, mt, start
         result_lines.extend(ip_lines)
 
     # Data pairs
-    dp_lines, line_num = format_data_pairs(x_data, y_data, mat, mf, mt, line_num)
+    dp_lines, line_num = format_data_pairs(x_data, y_data, mat, mf, mt,
+                                           line_num, pad=pad)
     result_lines.extend(dp_lines)
 
     return result_lines, line_num

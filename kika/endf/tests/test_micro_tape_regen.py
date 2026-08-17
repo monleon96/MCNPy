@@ -79,6 +79,11 @@ def mf32_fixture_path(key: str) -> Path:
     """Committed MF32 micro-tape for sub-format *key*."""
     return DATA / f"micro_{key}_mf32.endf"
 
+
+def tsl_fixture_path(key: str) -> Path:
+    """Committed MF7 micro-tape for *key*."""
+    return DATA / f"micro_tsl_{key}.endf"
+
 REGEN = bool(os.environ.get("REGEN_MICRO_TAPES"))
 
 #: What the structural micro-tape keeps. Everything else is removed.
@@ -112,6 +117,45 @@ KEEP_PFNS = {1: {451}, 3: {18}, 5: {18, 455}, 35: {18}}
 #: fission *reaction*, so without MF3/MT18 there is no node for them and
 #: `attachNubar` correctly refuses. It costs 270 lines.
 KEEP_NUBAR = {1: {451, 452, 455, 456}, 3: {18}, 31: {452, 455, 456}}
+
+#: What the MF7 elastic micro-tapes keep: MF7/MT2 and, where the evaluation has
+#: one, MF7/MT451.
+#:
+#: **MF7/MT4 is dropped, and that is the whole trick.** Every other fixture here
+#: is small because the sections it does not need are the bulk of the tape. A
+#: TSL evaluation is the other way round — MF7/MT4 is 98-99 % of it (62 411
+#: lines of 67 126 for ``tsl-Be-metal``; 1 144 410 of 1 144 539 for
+#: ``tsl-HinH2O``) and it cannot be trimmed without rewriting records, which is
+#: the one thing these fixtures may not do. So MT4 is cut away entirely and the
+#: elastic section is what stays: a real MT2 of each ``LTHR`` branch for a few
+#: hundred kB. MT4 coverage comes instead from ``micro_tsl_sch4.endf``, which is
+#: a whole tape at 161 kB, and from the ``tape``-marked full-size tests.
+KEEP_TSL_ELASTIC = {1: {451}, 7: {2, 451}}
+
+#: The MF7 fixtures and the tape each is cut from. ``sch4`` is copied whole
+#: rather than cut, because it is already the smallest TSL evaluation published
+#: and dropping anything from it would cost the only committed MT4.
+#:
+#: ``sch4``             LTHR=2 (incoherent elastic), and an MT4 with LAT=0, a
+#:                      single temperature and NS=1 — the secondary-scatterer
+#:                      branch of the B array.
+#: ``bemetal_elastic``  LTHR=1: 2306 Bragg edges over 11 temperatures, so the
+#:                      LT stack and its histogram interpolation are real. Plus
+#:                      an MF7/451 mapping the pseudo-ZA 126 to ZAI 4009.
+#: ``un_elastic``       LTHR=3, the branch a ``lthr == 1`` test silently gets
+#:                      wrong: a coherent block of 911 edges over 8
+#:                      temperatures *followed by* an incoherent one.
+#: ``jeff_be_elastic``  JEFF-4.0's own dialect rather than an adopted ENDF/B
+#:                      evaluation: 80-column records with sequence numbers,
+#:                      elemental ZA 4000, and LIST bodies padded with explicit
+#:                      zeros while the TAB1 body beside them is blank-padded.
+#:                      The only committed witness for ``PadStyle``.
+TSL_FIXTURES = {
+    "sch4": "tsl_s_ch4",
+    "bemetal_elastic": "tsl_be_metal",
+    "un_elastic": "tsl_un",
+    "jeff_be_elastic": "tsl_jeff_be",
+}
 
 #: What each MF32 micro-tape keeps. File 2 comes along rather than being cut:
 #: §32.3 makes File 32 meaningless without it — every resonance a covariance
@@ -210,6 +254,37 @@ def build_structural(source: Path, dest: Path, keep: dict = None) -> None:
 
     trimmed, n_removed = remove_sections(content, to_remove)
     assert n_removed, "nothing was removed — is the source the full Fe-56 tape?"
+    dest.write_text(trimmed)
+
+
+def build_tsl(source: Path, dest: Path, whole: bool = False) -> None:
+    """Cut *source* (a TSL tape) down to ``KEEP_TSL_ELASTIC``, verbatim.
+
+    With *whole*, the tape is copied instead. ``tsl-s-CH4.endf`` is 161 kB
+    entire, and it is the only committed fixture carrying an MF7/MT4 — cutting
+    anything out of it would be paying its size and losing its point.
+
+    The copy goes through ``read_text``/``write_text`` rather than
+    ``shutil.copy`` so a CRLF source lands as LF like every other fixture; the
+    CRLF path itself is covered by the ``tape``-marked tests on the real JEFF
+    tapes.
+    """
+    content = source.read_text()
+    if whole:
+        dest.write_text(content)
+        return
+
+    inventory = section_inventory(content)
+    to_remove: list[tuple[int, int | None]] = []
+    for mf, mts in sorted(inventory.items()):
+        if mf not in KEEP_TSL_ELASTIC:
+            to_remove.append((mf, None))
+            continue
+        for mt in sorted(set(mts) - KEEP_TSL_ELASTIC[mf]):
+            to_remove.append((mf, mt))
+
+    trimmed, n_removed = remove_sections(content, to_remove)
+    assert n_removed, f"nothing was removed from {source.name} — is it a TSL tape?"
     dest.write_text(trimmed)
 
 
@@ -456,9 +531,13 @@ def test_regenerate_micro_tapes(fe56_host_tape, cf252_b81_tape, u235_b81_tape, r
     for key, tape in MF32_FIXTURES.items():
         source = request.getfixturevalue(f"{tape}_tape")
         build_mf32(Path(source), mf32_fixture_path(key))
+    for key, tape in TSL_FIXTURES.items():
+        source = request.getfixturevalue(f"{tape}_tape")
+        build_tsl(Path(source), tsl_fixture_path(key), whole=(key == "sch4"))
     assert all(p.stat().st_size > 0
                for p in (STRUCTURAL, MF33, COV, PFNS, PFNS_COV, NUBAR))
     assert all(mf32_fixture_path(k).stat().st_size > 0 for k in MF32_FIXTURES)
+    assert all(tsl_fixture_path(k).stat().st_size > 0 for k in TSL_FIXTURES)
 
 
 # ---------------------------------------------------------------------------
@@ -675,6 +754,50 @@ def test_micro_tapes_stay_small(micro_tape, micro_cov_tape):
     """
     assert micro_tape.stat().st_size < 2_500_000
     assert micro_cov_tape.stat().st_size < 100_000
+
+
+def test_tsl_micro_tapes_stay_small(micro_tsl_tape):
+    """Same ceiling logic, and it bites harder here than anywhere else.
+
+    A TSL evaluation is 160 kB at its smallest and 93 MB at its largest, so the
+    difference between a fixture and an accident is one wrong source file. The
+    four together are ~880 kB; the bound is per-tape and close.
+    """
+    assert micro_tsl_tape.stat().st_size < 400_000
+
+
+@pytest.mark.parametrize("key,expected", [
+    ("sch4", {1: {451}, 7: {2, 4}}),
+    ("bemetal_elastic", {1: {451}, 7: {2, 451}}),
+    ("un_elastic", {1: {451}, 7: {2, 451}}),
+    ("jeff_be_elastic", {1: {451}, 7: {2}}),
+])
+def test_tsl_inventories_are_exactly_what_we_kept(key, expected):
+    """The cut kept the elastic sections and dropped MF7/MT4, nothing else.
+
+    Worth asserting per fixture rather than as one set: ``jeff_be_elastic`` has
+    no MF7/451 to keep and ``sch4`` was not cut at all, so a single shared
+    expectation would have to be loose enough to miss a bad cut.
+    """
+    inventory = section_inventory(tsl_fixture_path(key).read_text())
+    assert {mf: set(mts) for mf, mts in inventory.items()} == expected
+
+
+def test_the_tsl_fixtures_cover_every_lthr_branch():
+    """One fixture per elastic representation, so none is left untested.
+
+    LTHR=3 is the one this exists to protect. It is 11 files of 114, it is the
+    branch a ``lthr == 1`` test silently mishandles, and without a committed
+    fixture it would only ever be exercised by a ``tape``-marked test that skips
+    on a machine without the share.
+    """
+    seen = {}
+    for key in TSL_FIXTURES:
+        endf = read_endf(str(tsl_fixture_path(key)), mf_numbers=[7])
+        mt2 = endf.files[7].sections.get(2)
+        if mt2 is not None:
+            seen[key] = mt2.lthr
+    assert sorted(set(seen.values())) == [1, 2, 3], seen
 
 
 def test_pfns_micro_tapes_stay_small(micro_pfns_tape, micro_pfns_cov_tape):

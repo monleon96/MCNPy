@@ -30,11 +30,14 @@ def read_endf(filepath: str, mf_numbers: Optional[Union[int, List[int]]] = None)
         ENDF object with parsed data
         
     Notes:
-        Parsers are available for MF1, MF3, MF4, and MF34.
-        Other MF sections will be skipped unless parsers are added.
-        
+        Parsers are available for MF1, MF2, MF3, MF4, MF5, MF7, MF31, MF32,
+        MF33, MF34 and MF35 — the registry is
+        :data:`kika.endf.parsers.parse_endf.MF_PARSERS`, which is the list this
+        note has drifted from before. Other MF sections are skipped with a
+        warning.
+
     Examples:
-        # Parse all MF sections with registered parsers (currently MF1 and MF4)
+        # Parse all MF sections with registered parsers
         endf = read_endf("path/to/file")
         
         # Parse only MF1 and MF4
@@ -144,4 +147,28 @@ def read_mf4_mt(filepath: str, mt_number: int) -> Optional['MF4MT']:
     mf4 = parse_mf_from_file(filepath, 4)
     if mf4 and mt_number in mf4.sections:
         return mf4.sections[mt_number]
+    return None
+
+
+def read_mf7_mt(filepath: str, mt_number: int):
+    """
+    Read a specific MT section from MF7 (thermal scattering law) in an ENDF file.
+
+    Args:
+        filepath: Path to the ENDF file
+        mt_number: 2 (elastic), 4 (incoherent inelastic) or 451 (composition)
+
+    Returns:
+        MF7MT2, MF7MT4 or MF7MT451 if found, None otherwise
+
+    Notes:
+        MF7 lives only in the thermal scattering sublibrary (NSUB=12) — no
+        neutron evaluation in ENDF/B-VIII.1 carries one — so *filepath* is
+        expected to be a TSL tape such as ``tsl-HinH2O.endf``. These are large:
+        the MF7/MT4 of ``tsl-HinH2O.endf`` is 1.14 million records and takes
+        about 35 s to decode.
+    """
+    mf7 = parse_mf_from_file(filepath, 7)
+    if mf7 and mt_number in mf7.sections:
+        return mf7.sections[mt_number]
     return None

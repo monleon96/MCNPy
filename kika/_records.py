@@ -31,6 +31,15 @@ import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 
+def _mantissa_precision(exponent: int) -> int:
+    """Decimal places the mantissa gets, so the field stays 11 characters wide."""
+    if abs(exponent) < 10:
+        return 6
+    if abs(exponent) < 100:
+        return 5
+    return 4
+
+
 def format_endf_number(value: Union[int, float, None], width: int = 11) -> str:
     """
     Format a number according to ENDF specifications.
@@ -41,11 +50,22 @@ def format_endf_number(value: Union[int, float, None], width: int = 11) -> str:
       - When the exponent (after normalization) has only one digit (|exponent| < 10),
         the mantissa is printed with 6 decimal digits and the exponent with one digit.
       - When the exponent has two digits (|exponent| >= 10), the mantissa is printed with 5 decimal digits and the exponent with two digits.
-      
+      - When the exponent has three digits (|exponent| >= 100), the mantissa is
+        printed with 4 decimal digits and the exponent with three digits.
+
     For example:
       - A number like -3.14159e-1 will be formatted as "-3.141590-1".
       - A number like 1.234567e+5 will be formatted as " 1.234567+5".
       - A number like 1.0e10 will be formatted as " 1.00000+10".
+      - A number like 1.5963e-100 will be formatted as " 1.5963-100".
+
+    The three-digit case is not hypothetical and used to be **written as zero**.
+    ``tsl-ortho-H.endf`` tabulates S(α, β) down to 1e-100 and below — 1 403 of
+    its MF7/MT4 records carry such a value — and every one of them came back
+    from this function as ``" 0.000000+0"``. Silently: nothing warned, and the
+    line stayed the right width, so the loss was invisible to a caller that did
+    not diff against the source. Three digits is also the end of the ladder,
+    since a finite double cannot exceed 1e308.
 
     Args:
         value: The number to be formatted. If None, returns a blank field.
@@ -67,27 +87,24 @@ def format_endf_number(value: Union[int, float, None], width: int = 11) -> str:
     sign_char = "-" if value < 0 else " "
     abs_val = abs(value)
     exponent = int(math.floor(math.log10(abs_val)))
-    if abs(exponent) > 99:
-        return " 0.000000+0"
     mantissa = abs_val / (10 ** exponent)
 
-    # Select the number of decimals based on the exponent.
-    # Use 6 decimals if |exponent| < 10, else use 5 decimals.
-    # Adjust the mantissa if rounding would push it to 10 or more.
-    prec = 6 if abs(exponent) < 10 else 5
+    # Select the number of decimals so that sign + mantissa + exponent sign +
+    # exponent digits stays exactly 11 characters: one decimal is given up for
+    # each extra digit the exponent needs.
+    prec = _mantissa_precision(exponent)
     mantissa_str = f"{mantissa:1.{prec}f}"
     # Rounding overflow: e.g. 9.9999999 -> "10.000000" (length > prec + 2)
     if len(mantissa_str) > prec + 2:
         mantissa /= 10.0
         exponent += 1
-        prec = 6 if abs(exponent) < 10 else 5
+        prec = _mantissa_precision(exponent)
         mantissa_str = f"{mantissa:1.{prec}f}"
 
-    # Format the exponent: one digit if |exponent| < 10, two digits otherwise.
-    if abs(exponent) < 10:
-        exp_str = f"{abs(exponent):d}"
-    else:
-        exp_str = f"{abs(exponent):02d}"
+    exp_str = f"{abs(exponent):d}" if abs(exponent) < 10 else (
+        f"{abs(exponent):02d}" if abs(exponent) < 100
+        else f"{abs(exponent):03d}"
+    )
     exp_sign = '+' if exponent >= 0 else '-'
 
     formatted = f"{sign_char}{mantissa_str}{exp_sign}{exp_str}"
