@@ -183,7 +183,7 @@ def _interpolation(element: ET.Element, form) -> None:
 @writes("function2d", "XYs2d", "regions2d")
 def _function(parent: ET.Element, form, report: ConversionReport,
               where: str, nested: bool = False,
-              parentAxes=None) -> Optional[ET.Element]:
+              parentAxes=None, index: Optional[int] = None) -> Optional[ET.Element]:
     """One functional → its node, or ``None`` plus a report entry.
 
     ``nested`` is what makes the difference between the schema's
@@ -193,26 +193,31 @@ def _function(parent: ET.Element, form, report: ConversionReport,
     forbids it from repeating them. The reader shares one ``Axes`` object
     between a container and its children, so writing them again would produce a
     file that is invalid and that says nothing new.
+
+    ``index`` is the second half of the same idea, for attributes rather than
+    for ``axes``: it is the ordinal this form has **inside a regions
+    container**, and ``None`` everywhere else. See :func:`_writeCommon` for why
+    the two positions cannot both write the same attributes.
     """
     if isinstance(form, XYs1d):
         element = ET.SubElement(parent, "XYs1d")
-        _writeCommon(element, form)
+        _writeCommon(element, form, nested, index)
         _interpolation(element, form)
         _axesUnlessNested(element, form, report, where, nested, parentAxes)
         _values(element, form.interleaved())
         return element
     if isinstance(form, Regions1d):
         element = ET.SubElement(parent, "regions1d")
-        _writeCommon(element, form)
+        _writeCommon(element, form, nested, index)
         _axesUnlessNested(element, form, report, where, nested, parentAxes)
         container = ET.SubElement(element, "function1ds")
-        for child in form.function1ds:
+        for position, child in enumerate(form.function1ds):
             _function(container, child, report, where, nested=True,
-                      parentAxes=form.axes)
+                      parentAxes=form.axes, index=position)
         return element
     if isinstance(form, Constant1d):
         element = ET.SubElement(parent, "constant1d")
-        _writeCommon(element, form)
+        _writeCommon(element, form, nested, index)
         # `form.constant`, not `form.value`: the model spells the number
         # `constant` (functions/simple.py:27), and this line asked for a `value`
         # no Constant1d has ever had -- so writing a constant1d as a *functional*
@@ -228,19 +233,19 @@ def _function(parent: ET.Element, form, report: ConversionReport,
         return element
     if isinstance(form, Legendre):
         element = ET.SubElement(parent, "Legendre")
-        _writeCommon(element, form)
+        _writeCommon(element, form, nested, index)
         _axesUnlessNested(element, form, report, where, nested, parentAxes)
         _values(element, form.coefficients)
         return element
     if isinstance(form, Polynomial1d):
         element = ET.SubElement(parent, "polynomial1d")
-        _writeCommon(element, form)
+        _writeCommon(element, form, nested, index)
         _axesUnlessNested(element, form, report, where, nested, parentAxes)
         _values(element, form.coefficients)
         return element
     if isinstance(form, XYs2d):
         element = ET.SubElement(parent, "XYs2d")
-        _writeCommon(element, form)
+        _writeCommon(element, form, nested, index)
         _interpolation(element, form)
         qualifier = getattr(form, "interpolationQualifier", None)
         if qualifier is not None:
@@ -258,12 +263,12 @@ def _function(parent: ET.Element, form, report: ConversionReport,
         return element
     if isinstance(form, Regions2d):
         element = ET.SubElement(parent, "regions2d")
-        _writeCommon(element, form)
+        _writeCommon(element, form, nested, index)
         _axesUnlessNested(element, form, report, where, nested, parentAxes)
         container = ET.SubElement(element, "function2ds")
-        for child in form.function2ds:
+        for position, child in enumerate(form.function2ds):
             _function(container, child, report, where, nested=True,
-                      parentAxes=form.axes)
+                      parentAxes=form.axes, index=position)
         return element
 
     report.unsupportedNode(
@@ -294,15 +299,45 @@ def _axesUnlessNested(element: ET.Element, form, report: ConversionReport,
         )
 
 
-def _writeCommon(element: ET.Element, form) -> None:
-    """``label``, ``index`` and ``outerDomainValue`` — the three every form may
-    carry, and each of which changes what the file means if it is dropped."""
-    outer = getattr(form, "outerDomainValue", None)
-    index = getattr(form, "index", None)
-    _set(element,
-         label=getattr(form, "label", None),
-         index=None if index is None else str(index),
-         outerDomainValue=None if outer is None else _number(outer))
+def _writeCommon(element: ET.Element, form, nested: bool = False,
+                 index: Optional[int] = None) -> None:
+    """``label``, ``index`` and ``outerDomainValue`` — **one** of the three, and
+    which one is decided by where the node sits, not by what the model holds.
+
+    This used to write all three whenever the model carried them, which is a
+    statement the schema does not allow anyone to make. ``gnds.xsd:2109-2245``
+    gives a functional three distinct types by position, and they are mutually
+    exclusive:
+
+    ============================  ====================  ==================
+    position                      type                  attribute
+    ============================  ====================  ==================
+    top of a container            ``xData_*_primary``   ``label``
+    child of a regions container  ``xData_*_inRegions`` ``index`` (required)
+    child of an ``XYs2d``         ``xData_XYs1d``, …    ``outerDomainValue``
+    ============================  ====================  ==================
+
+    Writing an ``index`` on the Legendre children of an ``XYs2d`` is what made
+    3 960 of the 3 999 errors that the missing MF4 ``axes`` was hiding — the
+    schema rejects the attribute outright there, and the whole subtree was
+    unreachable so nothing said so.
+
+    The ordinal is passed in rather than read off ``form.index``: the two
+    ``XYs2d`` a LTT=3 ``Regions2d`` holds have no ``index`` in the model at all,
+    and ``Regions1d.fromEndfRegions`` skips empty regions while its counter
+    keeps going, so a model index can have a hole in it. §6.4's ``index`` *is*
+    the position, and taking it from :func:`enumerate` is the only spelling that
+    cannot disagree with the file.
+    """
+    if index is not None:
+        element.attrib["index"] = str(index)
+        return
+    if nested:
+        outer = getattr(form, "outerDomainValue", None)
+        _set(element,
+             outerDomainValue=None if outer is None else _number(outer))
+        return
+    _set(element, label=getattr(form, "label", None))
 
 
 # ---------------------------------------------------------------------------
