@@ -544,6 +544,163 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
         "title":      "χ² analysis — MF33 split-combine: Pass-1 correlation at its own scale + measured-correlation Pass-2 excess",
         "systematic_block_col": None,
     },
+    # ── P1.4/(b2): the SPLIT-COMBINE MF34 (post-run-92 roadmap §2.7-quater) ──
+    #
+    # Run 95 = run 94 + ONE knob. Verified in run_metadata.json, not assumed:
+    # 154 config keys against run 94's 153, and the single addition is
+    # MF34_CORR_OVERRIDE -> chi2/p16_mf34_split/mf34_corr_split.npy. The runner's
+    # own gate passed in all six parts: MF33's six .npy byte-identical,
+    # nominal_fits.parquet byte-identical, mf34_std_perbin.npy byte-identical
+    # (so this DECLARES NO EXTRA SIGMA — it redistributes), the saved corr_kw
+    # equal to the input at 0.000e+00, the pipeline rebuilding the p16 product to
+    # 2.2e-16, and all three tapes differing as required.
+    #
+    # What moved, on the shipped object: <|rho|> over the whole MF34 matrix
+    # 0.1532 -> 0.0601, and coh 0.209 -> 0.054 / PR 15.26 -> 19.73 over the 6184
+    # usable columns.
+    #
+    # ⚠⚠ MF33 IS NOT SPLIT IN THIS TAPE. Measured, not inferred: run 95's
+    # mf33_absolute_covariance.npy has the same md5 (c68ac0ac...) as run 92's,
+    # while the split MF33 object is a different file (4511d2b7..., in
+    # myworkspace/chi2/p12_new_test_92_integrated/). So `predictive_95` is
+    # MF34's repair ALONE, with the cross term present — it is the mirror of
+    # `predictive_92split`, which was MF33's repair alone with the cross NOT
+    # read. NEITHER IS THE DELIVERABLE. The tape carrying both repairs plus the
+    # cross does not exist yet.
+    #
+    # ⚠⚠ TWO CHANGES TRAVEL IN THIS OBJECT, and the write-up cannot attribute a
+    # move to the redistribution alone until they are separated. Besides the
+    # redistribution, the split ERASES a +-1 correlation block that roundoff had
+    # put across the 2517 columns that are exactly constant in Pass 1
+    # (<|rho|> = 0.9992 between them). Measured bound on the ambiguity: those
+    # 2517 columns carry 2.26 % of MF34's declared variance (the 6184 usable
+    # ones carry 67.56 %). So a large move cannot plausibly be the roundoff
+    # block; a small one needs the tiebreaker, which is NOT built.
+    #
+    # ⚑ THE BASE IS `predictive_91_cross`, AND IT IS ALREADY ON DISK. Measured
+    # 2026-08-14 by cmp over all 346,800,528 bytes: the tape 91_cross scored
+    # (86_a0cross/26-Fe-56g_nominal_a0cross_mg.endf) is BYTE-IDENTICAL to run
+    # 92's, which run 94's gate proved identical to runs 93 and 94. So run 95 is
+    # that same tape with one knob, and no run-94 scoring is needed — its parquet
+    # and 11 GB sidecar exist as chi2_data_predictive_91_cross.*.
+    #
+    # ⚠ NOT 92split as the base: 92split moved MF33's off-diagonal and did not
+    # read the cross, so against it two things move at once.
+    #
+    # ⚠ READING CRITERION, not a failure: the MF34 multigroup grid is chosen
+    # adaptively from the l=1 correlation, which is exactly what this knob
+    # changes. Run 94 grouped 1738 fine bins into 660; run 95 gives 896. That is
+    # downstream of the single knob, not a second knob, and it must be reported.
+    #
+    # ❌ DISQUALIFYING (§6e): if Kinney improves while n_absorbed FALLS elsewhere
+    # in the corpus, that is redistribution dressed as information.
+    # `corpus_absorbed.py` runs in the same chain and is not optional.
+    "predictive_95": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_95.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — MF34 split-combine: Pass-1 correlation redistributed at its own scale, declared σ unchanged",
+        "systematic_block_col": None,
+    },
+    # ⛔ RESULT (job 8488732, 2026-08-14): `predictive_95` IS DISQUALIFIED and is
+    # kept here only so the measurement stays reproducible. The veto passed
+    # exactly (JEFF/JENDL 0.00000 % on all 24 subset x variant comparisons, and
+    # max |delta n_absorbed| = 0.000e+00 on 62 experiments each), so the run was
+    # single-variable and the reading is sound — but §6e trips:
+    #     Kinney            n_absorbed 1447.22 -> 1596.39   +10.31 %
+    #     THE OTHER 61      n_absorbed 1563.55 -> 1535.82    -1.77 %   <-- FALLS
+    # 25 of the other 61 fall and only 9 rise. That is Kinney gaining directions
+    # by taking them from the rest of the corpus, which is the exact pattern §6e
+    # was written to disqualify, and the chi2 agrees rather than fighting it:
+    # no_Cierjacks V4/N 8.4437 -> 8.5445 (+1.19 %), and every subset except
+    # only_KS (-0.69 %) gets worse.
+    #
+    # ⚑ WHY, measured on the shipped object: the 4240 columns that are exactly
+    # constant in Pass 1 carry 32.4 % of MF34's declared variance and come back
+    # with EXACTLY ZERO off-diagonal mass (sampled directly out of
+    # mf34_corr_split.npy), against ~1080 per row on the usable ones. The repair
+    # made a third of MF34's declared variance perfectly independent — not
+    # because independence was measured, but because there is no data there.
+    # That is the 40.7 % the roadmap already declared before the run.
+    #
+    # ⛔ DO NOT score `_splitloc_plain.npy` "to compare". Choosing between two
+    # variants of one repair on the scoreboard is §10.8-6, and it is the thing
+    # this work holds against JENDL. The choice was made on a measured artefact
+    # and a failed score does not reopen it.
+    # ── THE DELIVERABLE CANDIDATE: MF33's repair WITH the cross term ─────────
+    #
+    # The one combination that has never been scored, and the only one that puts
+    # a repair which passed BOTH gates next to the term that ships by physics:
+    #   92split      MF33 repaired, MF34 original, cross NOT read   V4 4.4358 ✅
+    #   91_cross     MF33 original, MF34 original, cross read       V4 8.4437
+    #   95           MF33 original, MF34 repaired, cross read       V4 8.5445 ⛔
+    #   THIS ONE     MF33 repaired, MF34 original, cross read       never measured
+    #
+    # Two free readings, both bases already on disk: against `92split` it prices
+    # the cross term on top of the repair; against `91_cross` it prices the
+    # repair with the cross present.
+    #
+    # ⚠⚠ IT IS GATED, AND THE GATE IS NOT OPTIONAL. §10.1: the a_0 cross block is
+    # Cauchy-Schwarz-compatible only with the marginals it was built from, and
+    # skipping that is what killed runs 89-90. Reading build_group_cross.py
+    # settles what is and is not at risk here:
+    #   * the rescaling `jj = d_tar / d_mc` uses ONLY the diagonals, and the
+    #     split preserves MF33's diagonal byte-for-byte, so `cx_post` comes out
+    #     numerically IDENTICAL either way — the cross block itself is not the
+    #     risk;
+    #   * but the certified joint is [c33_post, cx_post; ...] where `c33_post`
+    #     is the MC matrix, while the tape ships the SPLIT MF33, whose
+    #     off-diagonal is very different (coh 0.900 -> 0.391, PR 1.78 -> 8.06).
+    #     The joint the chi2 actually folds is therefore NOT the PSD-by-
+    #     construction object, and the split moves it in the risky direction:
+    #     it SHRINKS the coherent variance (sigma_coh 0.0554 -> 0.0225) that the
+    #     cross block leans on.
+    # `build_group_cross.py --c33-from-file --check` diagnoses exactly that, on
+    # the MF33 the chi2 folds, and writes nothing. It runs FIRST, as its own
+    # short job, and is READ before the hour is spent.
+    "predictive_92split_cross": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_92split_cross.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — MF33 split-combine WITH the MF33↔MF34 cross term read from the a_0 blocks",
+        "systematic_block_col": None,
+    },
+    # ── THE ANALYTIC (R2) EVALUATION ─────────────────────────────────────────
+    #
+    # `docs/cross_term_two_pass_investigation.md` §10-11. MF33, MF34 and the
+    # cross block all come from ONE object: the closed-form covariance of the
+    # estimator that produced the central values,
+    #
+    #     C = A A^T  +  sum_b B_b(model)      A = d(param)/d(xi)
+    #
+    # read out of the pipeline's own solvers by identity probing (c0 and a_l are
+    # affine in the data). PSD by construction, so the cross term needs no
+    # rescaling and no repair: sigma_max(K) = 0.99949, lam_min = -6.5e-19 in the
+    # units written, against 1.0205 / -1.3e-07 for the shipped file and
+    # 84.72 / -4.38 for the split (which is what killed MF33-split + cross).
+    #
+    # Built by myworkspace/chi2/r2_{dump_nominal,analytic_joint,group_joint,
+    # stage_tape_inputs,write_cross_tape}.py; tape in chi2/r2_analytic_tape/.
+    #
+    # ⚑ The declared MF33 sigma barely moves (median ratio 0.9994 against the
+    # shipped absolute), so this is a REATTRIBUTION of the correlations, not an
+    # inflation: V2 stays a free control and it must come back unchanged.
+    # coh 0.657 against 0.845 shipped and 0.368 split -- the exact number lands
+    # between the two candidates the deliverable was choosing from.
+    #
+    # ⛔ SCORE IT TO REPORT, NOT TO CHOOSE. Sec. 10.8-6 applies unchanged: the
+    # object was built and gated on structural criteria (marginal reproduction,
+    # PSD, Cauchy-Schwarz), never on V4.
+    #
+    # Precompute:
+    #   KIKA_THIS_WORK_DIR=/share_snc/snc/JuanMonleon/chi2/r2_analytic_tape \
+    #   KIKA_THIS_WORK_ENDF=26-Fe-56g_nominal_a0cross_mg.endf \
+    #   KIKA_MF33_MF34_CROSS_FROM_FILE=1 KIKA_RUN_TAG=r2analytic \
+    #   python precompute_chi2_predictive.py
+    "predictive_r2analytic": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_r2analytic.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — analytic joint (R2): MF33, MF34 and the cross term from one PSD object",
+        "systematic_block_col": None,
+    },
     # ── ITEM 6: Cierjacks' backward points CORRECTED (roadmap §10.8-14) ──────
     #
     # Same evaluation, same Σ_eval, same everything — only the DATA move. The

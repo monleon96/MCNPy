@@ -1968,6 +1968,7 @@ def _run_one_kw_sample(args_tuple):
         mc_order_cap_by_bin = sh['mc_order_cap_by_bin']
         band_aware_ess = sh.get('band_aware_ess', False)
         record_c0_channel = sh.get('record_c0_channel', False)
+        sigma_sys_zero_fallback = sh.get('sigma_sys_zero_fallback', False)
     else:
         # Legacy path: full args tuple (sequential mode or old callers)
         (
@@ -1998,6 +1999,7 @@ def _run_one_kw_sample(args_tuple):
         fix_c0_at_nominal = False
         sys_aware_mc_fit = False
         record_c0_channel = False
+        sigma_sys_zero_fallback = False
 
     rng = np.random.default_rng(base_seed + s_idx)
 
@@ -2080,6 +2082,28 @@ def _run_one_kw_sample(args_tuple):
                 sigma_per_pt = df['sigma_sys_relative'].to_numpy(dtype=float)
             else:
                 sigma_per_pt = np.full(len(df), sigma_norm, dtype=float)
+            # ⚑ THE COLUMN CAN BE PRESENT AND ZERO, AND THEN THE TWO PASSES
+            # DISAGREED. Pass 2 draws its normalisation with
+            # `ex_norm_sigma = ex_sigma_sys if ex_sigma_sys > 0 else sigma_norm`
+            # (resample_AD.py:2371-2377), so an entry the manifest leaves at 0
+            # still gets the global default; here it got nothing. Entry 27673
+            # (824 pts, 103 bins) and part of 23365 are exactly that case, and
+            # the gap is measurable: sigma(c0) 4.9 % in Pass 2 against 0.7 % in
+            # Pass 1 on those bins, so the shipped tape carried a Pass-2
+            # diagonal on a Pass-1 correlation that disagreed about which
+            # experiments even have a normalisation.
+            # Pass 1 ALREADY falls back for the Kish rho a few lines below
+            # (`sigma_eff = ex_sigma_sys if ex_sigma_sys > 0 else sigma_norm`),
+            # so this makes the worker self-consistent too.
+            # ⛔ Gated: `exfor_to_endf_sampling_v2` is frozen (it produced the
+            # thesis results) and must stay bit-identical, so the default is
+            # off and only `exfor_to_endf_research` turns it on.
+            # Decided by Juan, 2026-08-14: 5 % by default in both passes.
+            if sigma_sys_zero_fallback:
+                sigma_per_pt = np.where(
+                    np.isfinite(sigma_per_pt) & (sigma_per_pt > 0.0),
+                    sigma_per_pt, sigma_norm,
+                )
             # Apply per-point shared-z factor: same direction, per-point amplitude.
             if norm_dist == "lognormal":
                 norm_per_pt = np.exp(z * sigma_per_pt - 0.5 * sigma_per_pt ** 2)
@@ -2469,6 +2493,7 @@ def run_mc_with_kernel_weights(
     sampled_degrees_per_bin_sample: Optional[Dict[int, np.ndarray]] = None,
     nominal_coeffs_by_bin_by_degree: Optional[Dict[int, Dict[int, np.ndarray]]] = None,
     record_c0_channel: bool = False,
+    sigma_sys_zero_fallback: bool = False,
     logger=None,
 ) -> Dict[int, Dict[int, np.ndarray]]:
     """Orchestrate kernel-weighted multi-bin MC sampling.
@@ -2588,6 +2613,10 @@ def run_mc_with_kernel_weights(
         # fixed-shape c0 of each sample's perturbed data (read-only; the shape
         # coeffs are untouched). Default False → v2/v3 return shape unchanged.
         'record_c0_channel': record_c0_channel,
+        # Entries whose manifest sigma_sys is 0 get the global `sigma_norm`,
+        # matching what Pass 2 has always done. Off by default so the frozen
+        # v2 driver stays bit-identical; see the worker for the measurement.
+        'sigma_sys_zero_fallback': sigma_sys_zero_fallback,
     }
 
     if n_workers > 1:

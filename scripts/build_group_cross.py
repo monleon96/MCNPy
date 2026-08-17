@@ -676,6 +676,37 @@ def main(argv=None):
              "sweep; sigma_max(K) and leak_null34 will not be.",
     )
     ap.add_argument(
+        "--c33-blend-ref", metavar="ENDF",
+        help="With --c33-from-file: a second tape whose MF33 is the s = 0 end of "
+             "a blend C33(s) = (1-s)*ref + s*source. Sweeps row F' over s and "
+             "prints where the joint stops being compatible with the cross term. "
+             "Both MF33s must sit on the same grid and carry the same diagonal.",
+    )
+    ap.add_argument(
+        "--c33-blend-s", default="0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0",
+        help="Comma-separated blend fractions for --c33-blend-ref.",
+    )
+    ap.add_argument(
+        "--cx-j33-exp", metavar="T1,T2,...", default=None,
+        help="With --c33-from-file: sweep the exponent t in "
+             "cx(t) = cx_mc * outer(j33**t, j34) and re-run row F' at each t. "
+             "t = 1 is what ships today (the cross block scaled to the DECLARED "
+             "MF33 diagonal); t = 0 leaves the magnitude side at the Pass-1 "
+             "scale the split-combine's C1' is written in. Give "
+             "--c33-blend-ref as well to get the unsplit anchor column. Writes "
+             "no tape and scores no chi2 -- it is a PSD table (roadmap Sec. 10.3).",
+    )
+    ap.add_argument(
+        "--split-forensics", metavar="C_SPLIT_ABS.npy", default=None,
+        help="With --c33-from-file: the P1.2 split-combine product "
+             "(mf33_absolute_covariance.npy, ABSOLUTE units, on the run's fine "
+             "grid). Answers whether the split/cross incompatibility is PHYSICAL "
+             "or a REPRESENTATION artefact: (1) is C1' = c33_mc, (2) is the joint "
+             "PSD on the MC's OWN grid with no file and no m_of, (3) where the "
+             "Cauchy-Schwarz load lives by eigen-direction. Roadmap Sec. 10.6. "
+             "Writes no tape and scores no chi2.",
+    )
+    ap.add_argument(
         "--write-null-mask", metavar="OUT.npz",
         help="Emit the (n_shape_groups, L_MAX) mask of slots the MC never "
              "populated, with the shape grid and a_nom_group. Works in --check.",
@@ -913,6 +944,38 @@ def main(argv=None):
               f"{int(inside.sum())} of {inside.size}; the rest carry no cross "
               f"covariance and are written zero")
 
+        # ⚑ F' — the a_0 convention against the FILE's MF33, added 2026-08-14.
+        #
+        # WHY IT DID NOT EXIST. Rows A'-C' were written when the cross term still
+        # arrived through the sidecar, so all three divide it by `a_pt` and are
+        # about a route that is retired. Row F below divides by `a_nom` -- the
+        # one convention we actually ship -- but it is taken against `c33_ship`,
+        # which is `run_dir/mf33_relative_covariance.npy`, i.e. the MF33 THE RUN
+        # PRODUCED. When --source-endf carries a DIFFERENT MF33 (the P1.2
+        # split-combine tape: same diagonal, coh 0.900 -> 0.391, PR 1.78 -> 8.06)
+        # nothing in this script tested the pair that would actually be folded.
+        # A' cannot stand in for it: at Cx = 0 the binding eigenvalue comes from
+        # the MF34 block, so A' reproduces A to the digit and is blind to MF33.
+        #
+        # WHAT IT PRICES. §10.1: the cross block is Cauchy-Schwarz-compatible
+        # only with the marginals it was built from. The split preserves the
+        # DIAGONAL byte-for-byte, so `jj = d_tar / d_mc` and hence `cx_post` are
+        # unchanged -- the cross block itself is not the risk. The risk is the
+        # joint: the split SHRINKS the coherent variance (sigma_coh 0.0554 ->
+        # 0.0241 for split-loc, the shipped variant -- 0.0225 is split-diag, the
+        # bound) that the cross block leans on, while Cx stays put. F' is the
+        # only row that sees that.
+        #
+        # ⚑ 2026-08-14, AFTER F' MEASURED 84.72: read the note above with §10.
+        # "the cross block itself is not the risk" is true of its DIAGONAL and
+        # false of its SCALE -- `jj = d_tar/d_mc` inflates it by exactly the
+        # ratio the split removes. --cx-j33-exp prices that.
+        cx_a0_full = np.divide(
+            cx_post, a_flat_nom[None, :], out=np.zeros_like(cx_post),
+            where=(np.abs(a_flat_nom) >= np.finfo(float).tiny)[None, :])
+        cx_a0_file = np.zeros((c33_file.shape[0], cx_post.shape[1]))
+        cx_a0_file[inside] = cx_a0_full[m_of[inside]]
+
         rows3 = [
             diagnose("A' file MF33, Cx = 0   (the real run-86 baseline)",
                      c33_file, rel_ship_K, np.zeros_like(cx_file[:, K])),
@@ -920,6 +983,8 @@ def main(argv=None):
                      c33_file, rel_ship_K, cx_file[:, K]),
             diagnose("C' file MF33 + Cx, rebuilt MF34 (run 90)",
                      c33_file, rel_shipfill_K, cx_file[:, K]),
+            diagnose("F' file MF33 + a_0 blocks  (THE PAIR THAT WOULD SHIP)",
+                     c33_file, rel_post_K, cx_a0_file[:, K]),
         ]
         print("\n=== PSD against the FILE's MF33, in the chi2's own space ===")
         print(pd.DataFrame(rows3).set_index("case").to_string())
@@ -928,6 +993,342 @@ def main(argv=None):
               "interchangeable with the\n  MF33 the chi2 reads, and every PSD "
               "number in this document predating\n  2026-08-06 inherits that. "
               "Sec. 10.6-3 item 5.")
+        print("\n  ⚑ AND READ F' AGAINST F, WHICH IS THE ONLY ROW THAT PRICES\n"
+              "  THE FILE'S MF33 NEXT TO THE CROSS TERM WE ACTUALLY SHIP.\n"
+              "  Criterion, fixed before measuring: F' must land where F does --\n"
+              "  sigma_max(K) on the CONTROL's 0.999993 and lam_min_norm at\n"
+              "  machine zero. Compare sigma_max(K), NOT lam_min_norm: the\n"
+              "  normaliser is max|diag(J)| and the two rows do not share it.\n"
+              "  If sigma_max(K) pulls away from 1, the cross block is NOT\n"
+              "  compatible with these marginals and the tape must not ship --\n"
+              "  the cross block has to be rebuilt against them instead (§8\n"
+              "  step 12(c)). When --source-endf is the run's own tape, F' and F\n"
+              "  are the same pair and agreeing proves nothing; it is only a\n"
+              "  measurement when the source carries a rewritten MF33.")
+
+        # ⚑ THE BLEND SWEEP (option D) — added 2026-08-14.
+        #
+        # WHY. F' measured that the FULL split is incompatible with the cross
+        # term (84.72 against the control's 1.020), and the cross term ships by
+        # physics. So the question is no longer "split or cross" but "HOW MUCH of
+        # the split survives next to the cross". C33(s) = (1-s)*ref + s*source is
+        # the honest way to ask it:
+        #   * both ends carry the SAME diagonal (the split redistributes, it does
+        #     not declare), so C33(s) does too -- no extra sigma at ANY s;
+        #   * a convex combination of two PSD matrices is PSD, so MF33's own
+        #     block never breaks and only the JOINT can fail;
+        #   * s = 0 reproduces the shipped tape and s = 1 reproduces the split,
+        #     so the endpoints are controls, not extrapolations.
+        # Same shape as the cross term's own s_max scan, §10.8-5 step 4.
+        #
+        # ⛔ s IS CHOSEN AGAINST THE PSD LIMIT, NEVER AGAINST V4. Picking the
+        # blend that scores best is rule §10.8-6 -- the thing this work holds
+        # against JENDL -- and it would void the whole argument. Read s_max off
+        # this table BEFORE any tape is written or scored.
+        c33_ref = None
+        if args.c33_blend_ref:
+            print("\n=== BLEND SWEEP: how much of the split survives the cross "
+                  "term? ===")
+            ref = load_library_lib_c0(str(args.c33_blend_ref), "This work")
+            g33r = np.asarray(ref.get("mf33_grid_ev"), float)
+            c33_ref = np.asarray(ref.get("mf33_rel_cov"), float)
+            if c33_ref.shape != c33_file.shape or g33r.size != g33.size:
+                raise SystemExit(
+                    f"--c33-blend-ref MF33 is {c33_ref.shape} on {g33r.size} "
+                    f"edges against the source's {c33_file.shape} on {g33.size}; "
+                    f"the blend needs one grid.")
+            d_grid = float(np.abs(g33r - g33).max())
+            d_diag = float(np.abs(np.diag(c33_ref) - np.diag(c33_file)).max())
+            d_off = float(np.abs(c33_ref - c33_file).max())
+            print(f"  ref    : {args.c33_blend_ref}")
+            print(f"  max |grid_ref - grid_src|       = {d_grid:.6e}")
+            print(f"  max |diag(ref) - diag(src)|     = {d_diag:.6e}   "
+                  f"(must be ~0: the split redistributes, it declares nothing)")
+            print(f"  max |ref - src| overall         = {d_off:.6e}   "
+                  f"(must NOT be 0, or the two tapes carry the same MF33)")
+            if d_off == 0.0:
+                raise SystemExit(
+                    "--c33-blend-ref carries the SAME MF33 as --source-endf; "
+                    "the sweep would be constant. Point it at the unsplit tape.")
+
+            try:
+                svals = [float(x) for x in args.c33_blend_s.split(",") if x.strip()]
+            except ValueError:
+                raise SystemExit(f"--c33-blend-s not parseable: {args.c33_blend_s!r}")
+
+            rows4 = []
+            for sv in svals:
+                c33_s = (1.0 - sv) * c33_ref + sv * c33_file
+                r = diagnose(f"s = {sv:.3f}", c33_s, rel_post_K, cx_a0_file[:, K])
+                r["s"] = sv
+                rows4.append(r)
+            df4 = pd.DataFrame(rows4)
+            cols = ["s", "rank33", "rank34", "sigma_max(K)", "leak_null34",
+                    "lam_min", "scale", "lam_min_norm"]
+            print(pd.DataFrame(df4)[cols].to_string(index=False))
+            print("\n  HOW TO READ IT. s = 0 must reproduce the control's F'\n"
+                  "  (sigma_max(K) ~ 1.02, lam_min at round-off) and s = 1 must\n"
+                  "  reproduce this run's F'. If either endpoint misses, the\n"
+                  "  blend is not between the two objects you think it is.\n"
+                  "  s_max = the largest s whose lam_min stays at round-off and\n"
+                  "  whose sigma_max(K) has not pulled away from the s = 0 value.\n"
+                  "  ⛔ Choose s from THIS table only. Scoring several s and\n"
+                  "  keeping the best V4 is §10.8-6 and voids the result.\n"
+                  "  ⚠ A small s_max is a real answer too: it would say the\n"
+                  "  cross term and the redistribution are incompatible at any\n"
+                  "  useful amplitude, which is worth writing down as it stands.")
+
+        # ⚑ THE PASS-1 SCALE SWEEP — added 2026-08-14, roadmap §10.
+        #
+        # WHY. The cross block ships as `cx_post = cx_mc * outer(j33, j34)` with
+        # `j33 = sqrt(diag(c33_ship)) / sqrt(diag(joint))`, i.e. it is scaled up
+        # to the DECLARED MF33 diagonal. But that diagonal is Pass 2's, and the
+        # inflation of the coherent mode by exactly that ratio IS the defect the
+        # split-combine repairs. `cx_mc` itself is honest: it comes out of the
+        # same `np.cov` call, over the same Pass-1 replicas, as `c33_mc`.
+        #
+        # And the split is written in that same Pass-1 scale:
+        #     C_split = C1' + D_exc R_loc D_exc ,  C1' = Cov(Pass-1) if s1 <= s2
+        # so the consistent joint decomposes as
+        #     [[C33_split, cx_mc],[cx_mc^T, C34_ship]]
+        #       = [[c33_mc, cx_mc],[cx_mc^T, c34_mc]]              <- a SAMPLE cov, PSD
+        #       + [[D_exc R_loc D_exc, 0],[0, C34_ship - c34_mc]]  <- block diagonal
+        # PSD as soon as both added blocks are, and the control F' already prices
+        # the MF34 one at ~2 % (sigma_max 1.0205).
+        #
+        # THE COUNTER-ARGUMENT, which is why this is measured and not asserted:
+        # sigma_max(K) is exactly LINEAR in cx, so a UNIFORM rescale would have
+        # to divide the cross block by >= 1/0.011805 = 84.7 to be admissible next
+        # to the split -- and j33 is typically ~2.5, not ~85. t = 0 can only pass
+        # if the inflation is strongly NON-uniform and sits where cx_mc has mass.
+        # (`W33` and `diag(j33)` do not commute, so that is an expectation, not a
+        # bound.) Hence the j33 percentiles below: they are the predictor.
+        #
+        # ⛔ t IS NOT CHOSEN FROM THIS TABLE. Only t = 1 (declared scale) and
+        # t = 0 (Pass-1 scale) have a justification; the rest show where it
+        # crosses. Picking an intermediate t because it reads better is §10.8-6.
+        # ⛔ And nothing here is decided against V4. This is a PSD gate.
+        if args.cx_j33_exp:
+            print("\n=== PASS-1 SCALE SWEEP on the cross block's MF33 side ===")
+            try:
+                tvals = [float(x) for x in args.cx_j33_exp.split(",") if x.strip()]
+            except ValueError:
+                raise SystemExit(f"--cx-j33-exp not parseable: {args.cx_j33_exp!r}")
+
+            live33 = j33 > 0
+            q = np.percentile(j33[live33], [0, 5, 25, 50, 75, 95, 100])
+            print(f"  j33 = sigma_declared / sigma_Pass1 over {int(live33.sum())} "
+                  f"live bins of {j33.size}")
+            print("    min {:.4g}  p5 {:.4g}  p25 {:.4g}  MEDIAN {:.4g}  "
+                  "p75 {:.4g}  p95 {:.4g}  MAX {:.4g}".format(*q))
+            print(f"    bins with j33 > 84.7 : {int((j33 > 84.7).sum())}   "
+                  f"(a uniform j33 would have to reach ~85 for t = 0 to pass)")
+            print(f"    bins with j33 < 1    : {int((j33[live33] < 1).sum())}   "
+                  f"(there Pass 1 is WIDER than the declared sigma, so C1' is "
+                  f"capped by d1 = min(s1,s2) and C1' != c33_mc)")
+
+            rows5 = []
+            for tv in tvals:
+                jt = np.where(live33, np.power(np.where(live33, j33, 1.0), tv), 0.0)
+                cx_t = cx_mc * np.outer(jt, j34)
+                cx_a0_t = np.divide(
+                    cx_t, a_flat_nom[None, :], out=np.zeros_like(cx_t),
+                    where=(np.abs(a_flat_nom) >= np.finfo(float).tiny)[None, :])
+                cx_t_file = np.zeros((c33_file.shape[0], cx_t.shape[1]))
+                cx_t_file[inside] = cx_a0_t[m_of[inside]]
+
+                r = diagnose(f"t = {tv:.3f}  vs SPLIT MF33 (--source-endf)",
+                             c33_file, rel_post_K, cx_t_file[:, K])
+                r["t"], r["MF33"] = tv, "split"
+                rows5.append(r)
+                if c33_ref is not None:
+                    r2 = diagnose(f"t = {tv:.3f}  vs UNSPLIT MF33 (--c33-blend-ref)",
+                                  c33_ref, rel_post_K, cx_t_file[:, K])
+                    r2["t"], r2["MF33"] = tv, "unsplit"
+                    rows5.append(r2)
+
+            cols5 = ["t", "MF33", "rank33", "rank34", "sigma_max(K)",
+                     "leak_null34", "lam_min", "scale", "lam_min_norm"]
+            print(pd.DataFrame(rows5)[cols5].to_string(index=False))
+            print("\n  ANCHORS -- if either misses, the table is not measuring\n"
+                  "  what it claims and NOTHING below it may be read:\n"
+                  "    t = 1, split    -> sigma_max(K) = 84.715790  (F', job 8488793)\n"
+                  "    t = 1, unsplit  -> sigma_max(K) =  1.020488  (F', job 8488801)\n"
+                  "\n  CRITERION, FIXED BEFORE MEASURING (roadmap §10.3), read at\n"
+                  "  t = 0 against the SPLIT MF33:\n"
+                  "    sigma_max(K) <= 1.05 and lam_min >= -1e-6*scale\n"
+                  "        -> the repair and the cross term are compatible after\n"
+                  "           all; write the tape with cx(0) and score it ONCE.\n"
+                  "    1.05 < sigma_max(K) <= 2\n"
+                  "        -> right mechanism, not sufficient alone. §10.5.\n"
+                  "    sigma_max(K) > 2\n"
+                  "        -> the inflation was not the dominant cause. §10.6,\n"
+                  "           starting with whether C1' really is c33_mc.\n"
+                  "\n  ⚠ The t = 0 joint carries a DECLARED assumption, not a\n"
+                  "  measurement: the split's D_exc R_loc D_exc term is taken to\n"
+                  "  have zero cross covariance with a_l, because Pass 2 emits no\n"
+                  "  a_l replicas. There is nothing to measure there -- but it is\n"
+                  "  an assumption and it goes in the text.")
+
+        # ⚑ SPLIT FORENSICS — added 2026-08-14 after job 8488882, roadmap §10.6.
+        #
+        # WHAT THE SWEEP ACTUALLY SETTLED. --cx-j33-exp failed (sigma_max 7.61 at
+        # t = 0, criterion was <= 1.05), and the UNSPLIT control failed with it:
+        # 1.0205 at t = 1 -> 96.39 at t = 0.75. De-scaling breaks a pair that
+        # WORKED, so t < 1 measures a broken congruence, not the split. The
+        # premise was wrong: sigma_max(K) is INVARIANT under a diagonal
+        # congruence -- the CONTROL and CANDIDATE rows of the first table have
+        # both read 0.999993 all along -- so "the cross block is inflated" is not
+        # a Cauchy-Schwarz defect. c33 is inflated by the same factor.
+        #
+        # ⚠ AND j33's MEDIAN 13.77 IS NOT AN INFLATION FACTOR. `load_pass1_c0`
+        # reads c0 ABSOLUTE and c33_ship is RELATIVE, so j33 carries 1/c0_nom.
+        # The physical ratio is j33 * c0_nom, median 13.77 * 0.192845 = 2.66 --
+        # consistent with sigma_coh 0.0554 -> 0.0241. For the same reason the
+        # printed "bins with j33 < 1" does NOT test sigma_1 <= sigma_2; the
+        # correct per-bin condition is j33 * c0_nom >= 1, measured below.
+        #
+        # WHAT IS STILL OPEN, and it is binary. The algebra of §10.1 lives on the
+        # MC's own grid:
+        #     [[C33_split, cx_mc],[cx_mc^T, c34_mc]]
+        #       = [[c33_mc, cx_mc],[cx_mc^T, c34_mc]]  <- a SAMPLE cov, PSD always
+        #       + [[D_exc R_loc D_exc, 0],[0, 0]]      <- PSD always
+        # PSD by construction IF C1' = c33_mc. The sweep never tested that -- it
+        # tested the FILE's representation (2317 bins, the m_of injection, and
+        # c34_ship substituted for c34_mc). If the MC-grid joint passes, the
+        # incompatibility is REPRESENTATIONAL and there may be a route; if it
+        # fails, it is physical and the line closes.
+        #
+        # ⛔ THIS IS THE LAST PROBE ON THIS LINE. Two hypotheses have already
+        # died here in one day. If it does not come back clean, ship A or B and
+        # report 84.72 as it stands. Do not chain a fourth.
+        if args.split_forensics:
+            print("\n=== SPLIT FORENSICS: physical, or representation? ===")
+            c_split = np.load(args.split_forensics).astype(float)
+            if c_split.shape != c33_mc.shape:
+                raise SystemExit(
+                    f"--split-forensics is {c_split.shape}, the MC magnitude "
+                    f"block is {c33_mc.shape}; they must be the same grid.")
+            # ⚑ THE DENOMINATOR IS c0_HOST, NOT c0_nominal -- fixed 2026-08-14
+            # after job 8488889. `mf33_relative_covariance.npy` is
+            # cov_abs / outer(c0_host, c0_host), the folded-PENDF File-3
+            # denominator that `mf33_build.build_mf33_denominator` computes;
+            # `mf33_c0_nominal.npy` is a DIFFERENT array. Using the wrong one
+            # made this gate report max|ratio-1| = 4.319790, which is EXACTLY
+            # max|c0_host/c0_nom - 1| = 4.319790 -- the gate measured the ratio
+            # between the two denominators and nothing else.
+            # ⚠ It did NOT void (1), (2) or (3): those use only the ABSOLUTE
+            # matrices C_split, c33_mc, c34_mc, cx_mc, and A_mag is exactly the
+            # identity on the fine grid (row_aggregator gives w_i/w_i for
+            # one-bin groups), so they were unit-consistent throughout.
+            _host = run_dir / "mf33_c0_host.npy"
+            if not _host.exists():
+                raise SystemExit(
+                    f"{_host} is missing; it is the denominator MF33's relative "
+                    f"covariance is divided by, and mf33_c0_nominal.npy is NOT "
+                    f"interchangeable with it (they differ by up to 5.3x here).")
+            c0nom = np.load(_host).astype(float)
+
+            # --- UNIT GATE. Both matrices claim ABSOLUTE c0^2. The split
+            # preserves the DECLARED sigma exactly, so
+            #     sqrt(diag(C_split)) = sigma_abs_declared = j33 * c0_host * sqrt(diag(c33_mc))
+            # must hold bin by bin. If it does not, the two objects are not in
+            # the same units and NOTHING below may be read.
+            s_split = np.sqrt(np.maximum(np.diag(c_split), 0.0))
+            s_mc = np.sqrt(np.maximum(np.diag(c33_mc), 0.0))
+            phys = j33 * c0nom                 # the PHYSICAL sigma_2/sigma_1 (c0_host)
+            pred = phys * s_mc
+            ok = pred > 0
+            ratio = np.divide(s_split, pred, out=np.ones_like(pred), where=ok)
+            print(f"  UNIT GATE  max |sqrt(diag(C_split)) / (j33*c0_nom*sigma_mc) "
+                  f"- 1| = {float(np.abs(ratio - 1).max()):.6e}   (must be ~0; "
+                  f"c0_host, NOT c0_nominal -- see the note above)")
+            q = np.percentile(phys, [0, 5, 25, 50, 75, 95, 100])
+            print("  PHYSICAL inflation j33*c0_host = sigma_declared/sigma_Pass1:")
+            print("    min {:.4g}  p5 {:.4g}  p25 {:.4g}  MEDIAN {:.4g}  "
+                  "p75 {:.4g}  p95 {:.4g}  MAX {:.4g}".format(*q))
+            n_bad = int((phys < 1.0).sum())
+            print(f"    bins with j33*c0_host < 1 : {n_bad}   <-- THE CORRECT "
+                  f"TEST of sigma_1 <= sigma_2. Must be 0, or d1 = min(s1,s2) "
+                  f"bites and C1' != c33_mc.")
+
+            # --- (1) IS THE PREMISE TRUE? C_split - c33_mc must be PSD.
+            delta = c_split - c33_mc
+            delta = 0.5 * (delta + delta.T)
+            lam_d = float(np.linalg.eigvalsh(delta)[0])
+            nrm = float(np.abs(c_split).max())
+            print(f"\n  (1) min eig(C_split - c33_mc) = {lam_d:.6e}   "
+                  f"max|C_split| = {nrm:.6e}   ratio = {lam_d / nrm:.3e}")
+            print("      PASS if ratio >= -1e-10: then C_split >= c33_mc and the "
+                  "joint below is\n      PSD by algebra. FAIL closes the line "
+                  "(roadmap §10.6).")
+
+            # --- (2) THE PURE MC JOINT. No file, no m_of, no c34_ship.
+            rows6 = [
+                diagnose("ANCHOR  c33_mc + cx_mc + c34_mc (must be 0.999993)",
+                         c33_mc, c34_mc, cx_mc),
+                diagnose("SPLIT   C_split + cx_mc + c34_mc  (THE ALGEBRA)",
+                         c_split, c34_mc, cx_mc),
+            ]
+            print("\n  (2) THE JOINT ON THE MC's OWN GRID, absolute units")
+            print(pd.DataFrame(rows6).set_index("case").to_string())
+            print("      PASS if SPLIT sigma_max(K) <= 1.001 AND the anchor is on\n"
+                  "      0.999993. Then the incompatibility is REPRESENTATIONAL,\n"
+                  "      not physical. If the anchor misses, the table is void.")
+
+            # --- (3) WHERE DOES THE 84.72 LIVE?
+            # Decompose C33 from the FILE, project the shipped cross block into
+            # its eigenbasis and split the Cauchy-Schwarz load by direction.
+            # sum_i ||(V^T Cx W34)_i||^2 / w_i = ||W33 Cx W34||_F^2, so the loads
+            # are an exact decomposition of the Frobenius norm sigma_max bounds.
+            print("\n  (3) WHERE THE LOAD LIVES, by eigen-direction of the "
+                  "file's MF33")
+            w34m, _, _ = whiten(rel_post_K)
+            cxK = cx_a0_file[:, K]
+            eig = {}
+            for tag, C in (("split", c33_file),
+                           ("unsplit", c33_ref if c33_ref is not None else None)):
+                if C is None:
+                    continue
+                w, V = np.linalg.eigh(0.5 * (C + C.T))
+                keep = w > NULL_TOL * max(w.max(), 0.0)
+                Vk, wk = V[:, keep], w[keep]
+                M = (Vk.T @ cxK) @ w34m
+                load = (M ** 2).sum(1) / wk
+                eig[tag] = (Vk, wk, load)
+                order = np.argsort(load)[::-1]
+                tot = float(load.sum())
+                print(f"\n    {tag}: rank {int(keep.sum())}/{C.shape[0]}   "
+                      f"total load ||W33 Cx W34||_F^2 = {tot:.6e}   "
+                      f"(sqrt = {np.sqrt(tot):.4f})")
+                print("      top 8 directions:  " + "  ".join(
+                    f"[w={wk[i]:.3e} load={load[i]:.3e} "
+                    f"({100 * load[i] / tot:.1f}%)]" for i in order[:8]))
+                cum = np.cumsum(load[order]) / tot
+                for f in (0.5, 0.8, 0.95):
+                    print(f"      directions carrying {100 * f:.0f}% of the load: "
+                          f"{int(np.searchsorted(cum, f) + 1)}")
+
+            # The headline: how much of the split's load lives where the UNSPLIT
+            # MF33 has no variance at all -- i.e. in the directions the
+            # redistribution OPENS, which come from Pass 2 and where the measured
+            # cross covariance with a_l is exactly zero.
+            if "unsplit" in eig and "split" in eig:
+                Vs, ws, load_s = eig["split"]
+                Vu, _, _ = eig["unsplit"]
+                proj = Vs - Vu @ (Vu.T @ Vs)
+                newness = (proj ** 2).sum(0)          # in [0, 1] per direction
+                frac = float((load_s * newness).sum() / load_s.sum())
+                print(f"\n    ⚑ FRACTION OF THE SPLIT'S LOAD IN DIRECTIONS THE "
+                      f"UNSPLIT MF33 DOES NOT SPAN: {100 * frac:.2f} %")
+                print(f"      (split rank {Vs.shape[1]}, unsplit rank "
+                      f"{Vu.shape[1]}, opened {Vs.shape[1] - Vu.shape[1]})")
+                print("      PASS if >= 80 %: the load sits where Pass 2 opened\n"
+                      "      variance and Pass 1 measured NO cross covariance, so\n"
+                      "      zeroing it there declares LESS, not more -- a\n"
+                      "      projection with a physical justification, not a fit.\n"
+                      "      If the load is spread, no projection removes it and\n"
+                      "      the line closes (roadmap §10.6).")
 
         if args.tol_sweep:
             print("\n=== SPECTRA: is whitening these matrices meaningful? ===")
