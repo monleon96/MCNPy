@@ -311,6 +311,68 @@ def test_the_covariance_sibling_validates_too(h2_gnds, tmp_path):
     assert _schemaErrors(sibling, COVARIANCE_SCHEMA) == []
 
 
+def test_a_suite_holding_a_mixed_can_be_written_at_all(gnds_data_dir, tmp_path):
+    """Writing **any** ``mixed`` raised ``AttributeError`` until 2026-08-17.
+
+    ``_covarianceForm`` asked the form for a ``label`` that the model class did
+    not carry, and ``covariances.xsd:135-142`` makes that attribute
+    ``use="required"`` — so the field was missing from the model, dropped by the
+    reader and demanded by the writer, three ways of getting one attribute
+    wrong. Nothing saw it because ``h2_gnds`` is the only covariance file in the
+    round trip and it holds no ``mixed``; F-19 holds four and La-139 thirteen,
+    and both have been committed since phase 5.
+
+    A ``covarianceSuite`` is a root in its own right (§25.1.1), so this goes
+    through ``writeCovarianceSuite`` directly rather than through ``kika.write``
+    — the committed covariance fixtures have no ``reactionSuite`` beside them.
+    """
+    from kika.gnds.covariances import readCovarianceSuite
+    from kika.gnds.encode import writeCovarianceSuite
+
+    source = gnds_data_dir / "Covariances/n-009_F_019.endf.gnds-covar.xml"
+    suite, _ = readCovarianceSuite(Document.parse(source))
+
+    tree, _report = writeCovarianceSuite(suite, "2.0")
+    path = tmp_path / "f19.gnds-covar.xml"
+    path.write_bytes(serialise(tree))
+
+    written = [element.attrib.get("label")
+               for element in ET.parse(path).getroot().iter("mixed")]
+    original = [element.attrib.get("label")
+                for element in ET.parse(source).getroot().iter("mixed")]
+    assert written == original, "the mixed labels did not survive the round trip"
+    assert all(label for label in written), "a required attribute went missing"
+
+    assert _schemaErrors(path, COVARIANCE_SCHEMA) == []
+
+
+def test_every_committed_covariance_fixture_can_be_written(
+        gnds_covariance_fixture, tmp_path):
+    """The gate whose absence let two writer defects live in a shipped module.
+
+    Only ``h2_gnds``'s sibling was ever written, and it is the *simplest*
+    covariance file in the library: one ``covarianceMatrix`` per section, no
+    ``mixed``, no ``shortRangeSelfScalingVariance``, no parameter covariances.
+    The four fixtures here were committed in phase 5 precisely because between
+    them they carry every §25 construct kika reads — and nothing wrote them.
+
+    Both defects this catches were of the same kind: an attribute asked of a
+    class that does not have it. ``mixed`` was asked for a ``label`` the model
+    lacked, and ``shortRangeSelfScalingVariance`` for an ``isRelative`` that
+    lives on the matrix it wraps rather than on itself. Reading was fine and
+    tested; writing raised ``AttributeError`` on any real file.
+    """
+    from kika.gnds.covariances import readCovarianceSuite
+    from kika.gnds.encode import writeCovarianceSuite
+
+    suite, _ = readCovarianceSuite(Document.parse(gnds_covariance_fixture))
+    tree, _report = writeCovarianceSuite(suite, "2.0")
+    path = tmp_path / "out.gnds-covar.xml"
+    path.write_bytes(serialise(tree))
+
+    assert _schemaErrors(path, COVARIANCE_SCHEMA) == []
+
+
 # ---------------------------------------------------------------------------
 # the version policy
 # ---------------------------------------------------------------------------

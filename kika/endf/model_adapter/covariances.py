@@ -784,4 +784,7 @@ def decodeCovarianceSuite(endf, report: Optional[ConversionReport] = None,
             "covariances"
         )
 
+    # Both ways to the same object: the tuple is unchanged, and the
+    # attribute is the one that survives `suite, _ = ...`. §11.4.
+    suite.report = report
     return suite, report

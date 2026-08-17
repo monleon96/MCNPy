@@ -18,6 +18,8 @@ to a format.
 Nothing here imports :mod:`kika.nuclear_data.model`, and that is enforced
 elsewhere by the layering ratchet: these functions duck-type the suite so that
 ``import kika.sampling`` never drags the model onto the critical path.
+:mod:`kika._covariance_forms`, the one thing they do import, duck-types it for
+the same reason and imports nothing itself.
 """
 from __future__ import annotations
 
@@ -25,6 +27,8 @@ import warnings
 from typing import Any, Dict, Hashable, List, Optional, Sequence, Tuple
 
 import numpy as np
+
+from kika._covariance_forms import require_single_matrix
 
 __all__ = ["covariance_suite_blocks", "parameter_covariance_blocks",
            "parameter_covariance_index", "legendre_covariance_blocks",
@@ -58,7 +62,11 @@ def covariance_suite_blocks(suite, isotope: Any = None, mt: int = 18):
     """
     blocks = []
     for index, section in enumerate(suite):
-        blocks.append(((isotope, mt, index), np.asarray(section.form.matrix)))
+        form = require_single_matrix(
+            getattr(section, "form", None),
+            f"covariance section {getattr(section, 'label', index)!r}",
+        )
+        blocks.append(((isotope, mt, index), np.asarray(form.matrix)))
     return blocks
 
 
@@ -374,7 +382,12 @@ def _mf34_entries(suite, mt=None, orders=None, relative=None):
             continue
         colData = rowData if colData is None else colData
 
-        if relative is not None and bool(section.form.isRelative) != bool(relative):
+        form = require_single_matrix(
+            getattr(section, "form", None),
+            f"MF34 covariance section {getattr(section, 'label', '?')!r}",
+        )
+
+        if relative is not None and bool(form.isRelative) != bool(relative):
             continue
 
         if mts is not None and not (
@@ -387,7 +400,6 @@ def _mf34_entries(suite, mt=None, orders=None, relative=None):
             continue
 
         za = int(getattr(section.provenance, "za", None) or 0)
-        form = section.form
         rowGrid = np.asarray(form.rowGrid, dtype=float)
         colGrid = (rowGrid if form.columnGrid is None
                    else np.asarray(form.columnGrid, dtype=float))
@@ -555,7 +567,12 @@ def _cross_section_entries(suite, mf: int = 33, mt=None, relative=None):
             continue
         colData = rowData if colData is None else colData
 
-        if relative is not None and bool(section.form.isRelative) != bool(relative):
+        form = require_single_matrix(
+            getattr(section, "form", None),
+            f"MF{mf} covariance section {getattr(section, 'label', '?')!r}",
+        )
+
+        if relative is not None and bool(form.isRelative) != bool(relative):
             continue
 
         if mts is not None and not (
@@ -564,7 +581,6 @@ def _cross_section_entries(suite, mf: int = 33, mt=None, relative=None):
             continue
 
         za = int(getattr(section.provenance, "za", None) or 0)
-        form = section.form
         rowGrid = np.asarray(form.rowGrid, dtype=float)
         colGrid = (rowGrid if form.columnGrid is None
                    else np.asarray(form.columnGrid, dtype=float))

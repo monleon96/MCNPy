@@ -306,6 +306,20 @@ def test_f19_keeps_short_range_variance_out_of_the_ordinary_components(gnds_data
     assert all(not isinstance(s, CovarianceMatrix) for s in shortRange)
 
 
+def test_a_mixed_keeps_its_label(gnds_data_dir):
+    """``covariances.xsd:135-142`` makes it ``use="required"``, like every other
+    §25.2 form. It was read for the error messages and thrown away, and the
+    writer then asked the model for it — see
+    ``test_encode.test_a_suite_holding_a_mixed_can_be_written_at_all``."""
+    suite, _ = readCovarianceSuite(
+        Document.parse(gnds_data_dir / "Covariances/n-009_F_019.endf.gnds-covar.xml")
+    )
+    mixed = [s.form for s in suite.covarianceSections
+             if isinstance(s.form, Mixed)]
+    assert mixed, "F-19 lost its mixed sections"
+    assert all(form.label for form in mixed)
+
+
 def test_si32_is_a_suite_of_parameter_covariances_only(gnds_data_dir):
     """No ``covarianceSections`` node at all — the shape a reader may assume away."""
     suite, _ = readCovarianceSuite(

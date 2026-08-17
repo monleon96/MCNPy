@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from kika._constants import MT_TO_REACTION
+from kika._covariance_forms import require_single_matrix
 from kika._utils import create_repr_section
 
 logger = logging.getLogger(__name__)
@@ -537,9 +538,10 @@ class CrossSectionCovariance:
         ...     suite.covarianceSections[0], nuclide=92235)
         >>> plot_covariance_heatmap(band, nuclide=92235, mt=18)   # doctest: +SKIP
         """
-        form = getattr(section, 'form', None)
-        if form is None or getattr(form, 'matrix', None) is None:
-            raise ValueError("covariance section carries no matrix")
+        form = require_single_matrix(
+            getattr(section, 'form', None),
+            f"covariance section {getattr(section, 'label', '?')!r}",
+        )
 
         matrix = np.asarray(form.matrix, dtype=float)
         grid = getattr(form, 'rowGrid', None)

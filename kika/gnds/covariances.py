@@ -279,7 +279,7 @@ def _readMixed(element: ET.Element, resolve, report) -> Mixed:
             )
             continue
         components.append(reader(child, resolve, report))
-    return Mixed(components=components)
+    return Mixed(components=components, label=element.attrib.get("label"))
 
 
 def _readSum(element: ET.Element, resolve, report) -> Sum:
@@ -570,4 +570,7 @@ def readCovarianceSuite(
                 f"not read"
             )
 
+    # Both ways to the same object: the tuple is unchanged, and the
+    # attribute is the one that survives `suite, _ = ...`. §11.4.
+    suite.report = report
     return suite, report

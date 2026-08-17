@@ -295,6 +295,9 @@ def decodeReactionSuite(endf, report: Optional[ConversionReport] = None):
             for gap in getattr(mf5.mt[mt], "report_gaps", list)():
                 report.unsupportedNode(gap)
 
+    # Both ways to the same object: the tuple is unchanged, and the
+    # attribute is the one that survives `suite, _ = ...`. §11.4.
+    suite.report = report
     return suite, report
 
 

@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from kika._covariance_forms import require_single_matrix
 from kika._utils import create_repr_section
 
 
@@ -240,6 +241,13 @@ class LegendreCovariance:
         ``kika.sampling.model_blocks._mf34_entries`` documents from the sampling
         side. A warning is raised rather than the difference being absorbed
         silently. No MF34 seen so far states two.
+
+        ⚠ **A section that states no single matrix raises.** It used to be
+        ``continue``, which dropped the section and returned a smaller carrier
+        that looked complete — the one place in the library where meeting a
+        §25.2 ``mixed`` was silent rather than loud. What raises now, and why
+        kika will not merge the components for you, is
+        :func:`kika._covariance_forms.require_single_matrix`.
         """
         result = cls()
         result.energy_unit = energy_unit
@@ -250,9 +258,11 @@ class LegendreCovariance:
                 continue
             colData = getattr(section, 'columnData', None) or rowData
 
-            form = getattr(section, 'form', None)
-            if form is None or getattr(form, 'matrix', None) is None:
-                continue
+            form = require_single_matrix(
+                getattr(section, 'form', None),
+                f"MF34 covariance section "
+                f"{getattr(section, 'label', '?')!r}",
+            )
 
             row_grid = np.asarray(form.rowGrid, dtype=float)
             col_grid = getattr(form, 'columnGrid', None)

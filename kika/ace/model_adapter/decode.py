@@ -208,6 +208,9 @@ def decodeAce(ace, report: Optional[ConversionReport] = None):
         "ACE carries no covariances at all, so there is no covarianceSuite to "
         "build from one"
     )
+    # Both ways to the same object: the tuple is unchanged, and the
+    # attribute is the one that survives `suite, _ = ...`. §11.4.
+    suite.report = report
     return suite, report
 
 

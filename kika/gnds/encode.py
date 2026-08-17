@@ -770,8 +770,6 @@ def writeCovarianceSuite(covarianceSuite, format: str,
         writeStyles(root, covarianceSuite.styles, _number,
                     documentation=False)
     else:
-        from kika.nuclear_data.model import Evaluated, Styles
-
         from kika.nuclear_data.model import (Evaluated, PhysicalQuantity,
                                              RangeQuantity, Styles)
 
@@ -862,10 +860,22 @@ def _covarianceForm(parent: ET.Element, form, report, where: str) -> None:
     if isinstance(form, CovarianceMatrix):
         _covarianceMatrix(parent, "covarianceMatrix", form, report, where)
     elif isinstance(form, ShortRangeSelfScalingVariance):
+        # The one form that is not itself a matrix: the model nests the gridded
+        # data as `.matrix`, deliberately, so that nothing can add a short-range
+        # term to its siblings by taking it for a CovarianceMatrix. So the
+        # writer has to unwrap it again — passing the outer object here asked it
+        # for an `isRelative` it has never had.
+        if form.matrix is None:
+            report.lost(
+                f"{where} holds a shortRangeSelfScalingVariance with no matrix, "
+                f"and it is written as nothing at all"
+            )
+            return
         element = _covarianceMatrix(parent, "shortRangeSelfScalingVariance",
-                                    form, report, where)
+                                    form.matrix, report, where)
         if element is not None:
-            _set(element, dependenceOnProcessedGroupWidth=
+            _set(element, label=form.label,
+                 dependenceOnProcessedGroupWidth=
                  form.dependenceOnProcessedGroupWidth)
     elif isinstance(form, Mixed):
         element = ET.SubElement(parent, "mixed")

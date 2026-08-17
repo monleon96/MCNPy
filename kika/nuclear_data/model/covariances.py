@@ -18,6 +18,8 @@ from typing import Iterator, List, Optional, Tuple
 
 import numpy as np
 
+from .conversion import ConversionReport
+
 __all__ = ["Slice", "Slices", "DataLink", "CovarianceMatrix", "Mixed",
            "Summand", "Sum", "ShortRangeSelfScalingVariance",
            "CovarianceSection", "CovarianceSuite",
@@ -206,9 +208,19 @@ class CovarianceMatrix:
 
 @dataclass
 class Mixed:
-    """§25. Several covariance forms that add up to one covariance."""
+    """§25. Several covariance forms that add up to one covariance.
+
+    **The label is not decoration.** ``covariances.xsd:135-142`` makes it
+    ``use="required"`` on ``mixed``, exactly as on ``covarianceMatrix`` and
+    ``sum``, and every ``<mixed>`` in ENDF/B-VIII.1-GNDS carries one. It was
+    missing here while the reader dropped it and the writer asked for it
+    anyway, so writing any suite holding a ``mixed`` raised ``AttributeError``
+    (``kika/gnds/encode.py``) and no test saw it, because the one round-trip
+    fixture has none.
+    """
 
     components: List[object] = field(default_factory=list)
+    label: Optional[str] = None
 
 
 @dataclass
@@ -491,6 +503,16 @@ class CovarianceSuite:
     styles: Optional[object] = None
     covarianceSections: List[CovarianceSection] = field(default_factory=list)
     parameterCovariances: List[object] = field(default_factory=list)
+
+    #: Not a GNDS node. What the decode did beyond producing this object, on
+    #: the same footing as :attr:`ReactionSuite.report` and for the same
+    #: reason: the decoders keep returning it as the second element of a tuple,
+    #: and a tuple element is what gets dropped by a caller in a hurry. §25.3's
+    #: parameter covariances are not written, ``flattened`` arrays are read and
+    #: not written back, and a covariance file read without its ``reactionSuite``
+    #: sibling cannot resolve a single ``rowData`` href — all three are report
+    #: entries and none of them is visible in the object otherwise.
+    report: Optional[ConversionReport] = None
 
     def __len__(self) -> int:
         return len(self.covarianceSections)

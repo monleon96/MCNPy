@@ -257,6 +257,56 @@ def test_declining_the_covariances_keeps_the_redirect(micro_cov_tape):
     assert redirects, "the notice was dropped even though nothing decoded the covariances"
 
 
+def test_the_low_road_attaches_the_report_too(micro_cov_tape, gnds_data_dir):
+    """§11.4. Two ways to the same object, from *both* doors.
+
+    ``suite.report`` exists because a tuple element is what a caller in a hurry
+    drops: ``suite, _ = decodeReactionSuite(endf)`` is the idiom, and the
+    underscore is exactly the thing that says which MFs went unread. Only
+    ``kika.read()`` filled it, so the answer to "does this object know what its
+    decode lost?" depended on which door was used — and the low road is the
+    door the library's own modules use.
+
+    All four decoders are checked here, in one place, because the property is
+    the same one four times and splitting it across four packages is how three
+    of them would come to disagree. ``CovarianceSuite`` had no ``report`` field
+    at all until this went in, which is why the covariance halves are not just
+    a repeat of the reaction ones.
+    """
+    from kika.endf.model_adapter import decodeCovarianceSuite, decodeReactionSuite
+    from kika.endf.read_endf import read_endf
+    from kika.gnds.covariances import readCovarianceSuite
+    from kika.gnds.decode import readReactionSuite
+    from kika.gnds.xpath import Document
+
+    endf = read_endf(str(micro_cov_tape))
+    suite, report = decodeReactionSuite(endf)
+    assert suite.report is report
+
+    covariances, covarianceReport = decodeCovarianceSuite(endf)
+    assert covariances.report is covarianceReport
+
+    document = Document.parse(gnds_data_dir / "n-001_H_002.endf.gnds.xml")
+    fromGnds, gndsReport = readReactionSuite(document)
+    assert fromGnds.report is gndsReport
+
+    sibling = Document.parse(
+        gnds_data_dir / "Covariances/n-001_H_002.endf.gnds-covar.xml")
+    gndsCovariances, siblingReport = readCovarianceSuite(sibling)
+    assert gndsCovariances.report is siblingReport
+
+
+def test_the_front_door_and_the_low_road_agree_on_the_report(micro_cov_tape):
+    """The same object, not a copy of it. ``kika.read`` adds entries *after* the
+    adapter returns — the unparsed-MF rescan, the redirect cleanup — and they
+    have to land on the report the suite is carrying, not beside it."""
+    suite = kika.read(micro_cov_tape)
+    assert suite.covarianceSuite is not None
+    assert suite.covarianceSuite.report is suite.report, (
+        "the pair came out of one read and carries two different reports"
+    )
+
+
 def test_an_mf_with_no_parser_is_reported_rather_than_passed_over(tmp_path, micro_tape):
     """``endf.mf`` holds only the MFs that *had* a parser, so the parsed object
     cannot answer "did this tape carry an MF6?". The door rescans the tape.
