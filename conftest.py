@@ -17,14 +17,19 @@ Three jobs, and nothing else:
    it, every ``tape``/``njoy`` skip becomes a **failure**, and the session ends
    with a list of exactly which tapes could not be resolved.
 
-A bare ``pytest`` also holds back the ``njoy``/``slow``/``perf`` tests — 29 of
-1511, and nearly all of the wall clock. Say ``-m``, ``-k`` or ``--deep`` and
-you get exactly what you asked for instead.
+A bare ``pytest`` also holds back the ``tape``/``njoy``/``slow``/``perf``
+tests — the ones that read the shared data tree, shell out, or measure wall
+clock, and nearly all of the wall clock between them. Say ``-m``, ``-k`` or
+``--deep`` and you get exactly what you asked for instead. **A bare run is
+therefore not a proof that nothing broke on a real tape** — that is what
+``--deep`` is for, and it is the one to run before pushing anything that
+touches a parser or a writer.
 
 Typical use::
 
-    pytest                                  # fast lane: no NJOY, no slow, no perf
-    pytest -m njoy                          # the 7 that spawn NJOY
+    pytest                                  # fast lane: no tapes, no NJOY, no slow
+    pytest -m tape                          # the 113 that need the shared tree
+    pytest -m njoy                          # the ones that spawn NJOY
     pytest -m "not tape and not njoy"       # what CI runs
     pytest --deep                           # workstation: prove nothing skipped
     KIKA_TAPES=/other/root pytest --deep
@@ -314,7 +319,26 @@ _GNDS_FIXTURES = frozenset({
 #: a one-function change cost half an hour on a box that several sessions
 #: share. Everything else still runs: this is not a fast *subset*, it is the
 #: whole suite minus the parts that shell out or measure wall clock.
-_EXPENSIVE_MARKS = frozenset({"njoy", "slow", "perf"})
+#:
+#: ``tape`` joined them 2026-08-17, for the same reason one measurement later.
+#: The three marks above left 98 non-``slow`` ``tape`` tests reading the share
+#: on every bare run — 27 MB for the Fe-56 host tape alone, most of it network
+#: IO. Measured after the change: a bare ``pytest`` is **8 min 00 s** (2 485
+#: passed, 157 skipped) on a box shared with two other sessions, and one file
+#: alone, ``kika/gnds/tests/test_covariance_oracle.py``, drops from 13.6 s to
+#: 1.6 s. The *before* was never timed, so the "forty minutes" this change was
+#: argued from is the previous session's figure, not one taken here — and what
+#: remains of the eight minutes is mostly ``scripts/``, which no tape marker
+#: touches. The same rule as the other three applies and is what makes this
+#: safe: ``-m tape``, ``-k`` and ``--deep`` all still run them, and CI passes an
+#: explicit ``-m``, so nothing about what *gets* verified changes — only what a
+#: no-argument invocation defaults to.
+#:
+#: The alternative was the ``KIKA_TAPES=`` trick, and it is worse: ``Path("")``
+#: is ``PosixPath('.')``, so an empty value makes the search root the *current
+#: directory* rather than nowhere, and it leaves ``KIKA_LIB_TAPES`` and the
+#: download cache resolving ~23 tapes anyway. A mark is deterministic.
+_EXPENSIVE_MARKS = frozenset({"njoy", "slow", "perf", "tape"})
 
 
 def pytest_collection_modifyitems(
