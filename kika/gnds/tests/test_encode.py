@@ -347,17 +347,20 @@ def test_a_suite_holding_a_mixed_can_be_written_at_all(gnds_data_dir, tmp_path):
 
 
 #: The schema errors an **ENDF-decoded** suite still has, by kind. Measured
-#: 2026-08-17 at twelve and written down in `docs/library-gaps.md` D20; eight
-#: since the MF4 angular `axes` and the single-region containers landed. None of
-#: them is the deliberate empty `<distribution/>` the GNDS fixtures produce --
-#: these are gaps in the
-#: ENDF -> model -> GNDS path itself. Pinned rather than fixed: each survivor is
-#: its own decision (what date format does an ENDF `AUG-2018` become? what
-#: `genre` does an ENDF output channel have?), and a gate that exists is worth
-#: more than a gate that waits for all of them.
+#: 2026-08-17 at twelve and written down in `docs/library-gaps.md` D20; seven
+#: since the MF4 angular `axes`, the single-region containers and the evaluated
+#: style's domain landed. None of them is the deliberate empty
+#: `<distribution/>` the GNDS fixtures produce -- these are gaps in the
+#: ENDF -> model -> GNDS path itself.
+#:
+#: **Every survivor is now a decision rather than a defect**, which is what
+#: makes the count worth pinning instead of chasing to zero: what an ENDF
+#: `AUG-2018` becomes, what `genre` an ENDF output channel has, where a
+#: `scatteringRadius` goes when `RMatrixType` admits no such child (§4.1), and
+#: what an output channel with no products should say. The five that were
+#: writer defects are gone.
 ENDF_SCHEMA_GAPS = (
     "Element 'evaluated', attribute 'date'",
-    "Element 'evaluated': Missing child element",
     "Element 'scatteringRadius': This element is not expected",
     "Element 'outputChannel': The attribute 'genre' is required but missing",
     "Element 'products': Missing child element",
@@ -378,7 +381,7 @@ def test_the_endf_decoded_suites_schema_errors_are_pinned(micro_tape, tmp_path):
     ``Isotropic2d`` -- so nothing ever validated a file written from an ENDF
     decode, which is the direction that had an invalid node in it.
 
-    Eight errors survive today and every one is a known ENDF->GNDS gap
+    Seven errors survive today and every one is a known ENDF->GNDS gap
     (:data:`ENDF_SCHEMA_GAPS`). Pinned by count and kind, the same shape as the
     GNDS half: fixing one lowers the number and this test is what notices.
 
@@ -392,7 +395,7 @@ def test_the_endf_decoded_suites_schema_errors_are_pinned(micro_tape, tmp_path):
     unknown = [e for e in errors
                if not any(kind in e for kind in ENDF_SCHEMA_GAPS)]
     assert unknown == [], unknown
-    assert len(errors) == 8
+    assert len(errors) == 7
 
 
 def test_a_bare_isotropic2d_goes_where_the_schema_admits_it(micro_tape, tmp_path):

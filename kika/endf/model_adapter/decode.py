@@ -37,8 +37,10 @@ from kika.nuclear_data.model import (
     Frame,
     Nuclide,
     OutputChannel,
+    PhysicalQuantity,
     PoPs,
     Q,
+    RangeQuantity,
     Reaction,
     ReactionId,
     ReactionSuite,
@@ -295,10 +297,60 @@ def decodeReactionSuite(endf, report: Optional[ConversionReport] = None):
             for gap in getattr(mf5.mt[mt], "report_gaps", list)():
                 report.unsupportedNode(gap)
 
+    if style is not None:
+        report = _attachEvaluatedDomain(suite, style, headerProvenance, report)
+
     # Both ways to the same object: the tuple is unchanged, and the
     # attribute is the one that survives `suite, _ = ...`. §11.4.
     suite.report = report
     return suite, report
+
+
+def _attachEvaluatedDomain(suite: ReactionSuite, style: Evaluated,
+                           provenance: Optional[EndfProvenance],
+                           report: ConversionReport) -> ConversionReport:
+    """The ``evaluated`` style's ``temperature`` and ``projectileEnergyDomain``.
+
+    ``RS_EvaluatedType`` makes both mandatory and the ENDF path was giving
+    neither, so every GNDS file kika wrote from a tape failed validation on its
+    fourth line. Both numbers are already read -- MF1/451 states the target
+    temperature in TEMP and the upper limit in EMAX -- they were simply never
+    put on the style.
+
+    **This is not only about validity.** ``kika/gnds/encode.py``'s
+    ``_SuiteWriter.domain`` reads the domain off this style to fill the
+    ``domainMin``/``domainMax`` that ``xData_constant1d`` requires on every Q
+    and multiplicity, and with no style to read it fell back to ENDF's
+    assumed 1e-5 eV to 20 MeV. For a 150 MeV evaluation that is a *false*
+    statement in the file, not a missing one.
+
+    Called after the reactions because the lower bound is not in the header:
+    ENDF has no EMIN, so it comes off the MF3 grid the file actually carries.
+    Nothing is invented -- a suite with no cross sections keeps ``None`` and the
+    writer's existing warning stays the truth.
+    """
+    header = provenance.headerFields if provenance is not None else {}
+
+    temperature = header.get("temp")
+    if temperature is not None:
+        style.temperature = PhysicalQuantity(value=float(temperature), unit="K")
+
+    maximum = header.get("emax")
+    minima = [getattr(reaction.crossSection[label], "domainMin", None)
+              for reaction in suite.reactions
+              for label in reaction.crossSection]
+    minima = [value for value in minima if value is not None and value == value]
+    if maximum is None or not minima:
+        report.warn(
+            "MF1/451 gave no EMAX or the evaluation carries no cross section "
+            "grid, so the evaluated style has no projectileEnergyDomain and "
+            "the constant1d nodes fall back to the range ENDF assumes"
+        )
+        return report
+    style.projectileEnergyDomain = RangeQuantity(
+        min=float(min(minima)), max=float(maximum), unit="eV"
+    )
+    return report
 
 
 def _attachAngularDistribution(suite: ReactionSuite, mf4mt, mt: int,
