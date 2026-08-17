@@ -385,6 +385,12 @@ SELECT_DEGREE = "aic"                            # "aic" | "aicc" | "bic" | None
                                                  # AIC (penalty 2k); AICc over-penalises high orders
                                                  # in low-n bins. The parquet column is named `aicc`
                                                  # for legacy reasons whatever this says.
+_IC_LABEL = {"aic": "AIC", "aicc": "AICc", "bic": "BIC"}
+                                                 # Display name for the logs. Every line that names
+                                                 # the criterion MUST look it up here instead of
+                                                 # spelling one out: the logs said "AICc" through
+                                                 # every shipped run while SELECT_DEGREE was "aic",
+                                                 # and a later analysis took the log at its word.
 RIDGE_LAMBDA = 1e-4
 RIDGE_POWER = 4                                  # Ridge penalty scales as l**RIDGE_POWER
 DF_METHOD = "hat"                                # Degrees of freedom: "hat" | "naive"
@@ -414,6 +420,16 @@ BAND_SCALE_METHOD = "mad"                        # "mad" | "rms" | "hybrid" (= m
 SIGMA_SYS_AWARE_FIT = True                       # Fit weights use sigma_total^2 = stat^2 + sys^2, and
                                                  # tau is measured against it, so tau only absorbs
                                                  # scatter beyond what both predict
+SIGMA_SYS_ZERO_FALLBACK = True                   # An entry whose manifest sigma_sys is 0 gets the
+                                                 # global NORM_SYSTEMATIC_SIGMA in BOTH passes.
+                                                 # Pass 2 has always done this (resample_AD.py:2371);
+                                                 # Pass 1 did not, so runs up to 92 shipped a Pass-2
+                                                 # diagonal on a Pass-1 correlation that disagreed
+                                                 # about which experiments have a normalisation at
+                                                 # all (entry 27673: 824 pts / 103 bins, sigma(c0)
+                                                 # 4.9 % vs 0.7 %). Decided by Juan 2026-08-14.
+                                                 # ⛔ v2 stays on the old behaviour by construction:
+                                                 # the flag lives in this driver only.
 RESCALE_UNC_BY_CHI2 = True                       # Birge scaling when band discrepancy is off
 ALLOW_SHRINK_UNC = False                         # Allow uncertainties to shrink at chi2_red < 1
 NORM_COMMON_MODE_SIGMA = 0.0                     # ONE global normalization factor shared by every
@@ -2356,7 +2372,8 @@ def perform_nominal_fits(
             )
             if degree_weights and len(degree_weights) > 1:
                 dw_str = " ".join(f"L{d}:{w:.0%}" for d, w in sorted(degree_weights.items()))
-                logger.info(f"  AICc weights: {dw_str}")
+                _ic = _IC_LABEL.get((select_degree or "").lower(), "max-order")
+                logger.info(f"  {_ic} weights: {dw_str}")
             raw_F = tau_info.get('raw_F', tau_F)
             raw_M = tau_info.get('raw_M', tau_M)
             raw_B = tau_info.get('raw_B', tau_B)
@@ -2912,8 +2929,13 @@ def run_exfor_to_endf_sampling_v2(
         _logger.warning(f"Failed to write run_metadata.json: {type(_e).__name__}: {_e}")
 
     _logger.info("#== MODEL-ORDER POLICY ====================================================")
-    _logger.info("  Nominal MF4 order = AICc winner per bin.")
-    _logger.info("  MC samples may draw alternate AICc-supported orders (mixture).")
+    _ic = _IC_LABEL.get((SELECT_DEGREE or "").lower(), "max-order")
+    if SHIP_MIXTURE_MEAN:
+        _logger.info(f"  Nominal MF4 ORDER = {_ic} winner per bin (frozen_degree),"
+                     f" but the VALUES are the mixture mean over degrees.")
+    else:
+        _logger.info(f"  Nominal MF4 order and values = {_ic} winner per bin.")
+    _logger.info(f"  MC samples may draw alternate {_ic}-supported orders (mixture).")
     _logger.info("  MF34 covariance is published only for orders present in nominal MF4")
     _logger.info("    (n_valid = min(frozen_degree, MAX_SAMPLE_ORDER)).")
     _logger.info("  Higher sampled orders affect retained-order variance but are not published.")
@@ -3713,6 +3735,7 @@ def run_exfor_to_endf_sampling_v2(
             min_relative_uncertainty=MIN_RELATIVE_UNCERTAINTY,
             band_aware_ess=BAND_AWARE_ESS,
             record_c0_channel=record_c0_channel,
+            sigma_sys_zero_fallback=SIGMA_SYS_ZERO_FALLBACK,
             logger=_logger,
         )
         if record_c0_channel:
