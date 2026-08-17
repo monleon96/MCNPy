@@ -303,3 +303,59 @@ def test_an_unmodelled_resolved_formalism_is_reported(micro_fe56_gnds):
     assert resonances.resolved[0].formalism is None
     assert any("/resolved/energyIntervals:" in entry
                for entry in report.unsupported)
+
+
+# ---------------------------------------------------------------------------
+# what the node registry turned up: two flags and a nested PoPs
+# ---------------------------------------------------------------------------
+
+def test_the_two_r_matrix_flags_are_read_and_not_only_written(micro_fe56_gnds):
+    """§19.3.1's ``reducedWidthAmplitudes`` and ``relativisticKinematics``.
+
+    Both were **written** from the model (``encode_resonances.py:161-162``) and
+    read by nobody, so a file declaring either came back out of kika with it
+    ``False``. ``reducedWidthAmplitudes`` is ENDF's **IFG**: it says whether the
+    ``widths`` column holds widths in eV or reduced-width amplitudes in eV^½,
+    and the two are not interchangeable — losing it does not drop a flag, it
+    silently reinterprets every width in the table.
+
+    Planted rather than fixture-borne: no committed evaluation declares either,
+    which is exactly why nothing noticed.
+    """
+    tree = ET.parse(micro_fe56_gnds)
+    rMatrix = tree.getroot().find("resonances/resolved/RMatrix")
+    assert "reducedWidthAmplitudes" not in rMatrix.attrib, "fixture changed"
+    rMatrix.attrib["reducedWidthAmplitudes"] = "true"
+    rMatrix.attrib["relativisticKinematics"] = "true"
+
+    resonances, _ = _readBlock(None, tree.getroot())
+    formalism = resonances.resolved[0].formalism
+    assert formalism.reducedWidthAmplitudes is True
+    assert formalism.relativisticKinematics is True
+
+
+def test_a_file_that_declares_neither_flag_still_reads_them_false(fe56):
+    """The other half. GNDS omits a false flag rather than writing it, so
+    ``absent`` must not become ``True`` by some helper's default."""
+    suite, _ = fe56
+    formalism = suite.resonances.resolved[0].formalism
+    assert formalism.reducedWidthAmplitudes is False
+    assert formalism.relativisticKinematics is False
+
+
+def test_the_nested_pops_is_announced_instead_of_disappearing(micro_fe56_gnds,
+                                                              tmp_path):
+    """§19 admits a ``PoPs`` inside the formalism and every RMatrix in
+    ENDF/B-VIII.1-GNDS carries one. kika reads it and does not write it —
+    writing it is §12 work, blocked on ``gnds_endf_conflicts.md`` §3.3 — and it
+    was the **only** node kika read and dropped without a report entry.
+
+    The writer is unchanged. What is asserted is that the silence is gone.
+    """
+    import kika
+
+    suite = kika.read(micro_fe56_gnds, covariances=False)
+    assert suite.resonances.resolved[0].formalism.PoPs is not None
+
+    report = kika.write(suite, tmp_path / "out.gnds.xml")
+    assert any("nested <PoPs>" in loss for loss in report.losses), report.losses

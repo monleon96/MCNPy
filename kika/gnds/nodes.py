@@ -280,23 +280,6 @@ class Defect:
 #: shorter.
 KNOWN_DEFECTS: Tuple[Defect, ...] = (
     Defect(
-        what="the <PoPs> nested inside RMatrix, BreitWigner and tabulatedWidths "
-             "is read onto the formalism and never written, with no report "
-             "entry — a silent loss, where every other unwritten node announces "
-             "itself",
-        where="kika/gnds/resonances.py readRMatrix vs kika/gnds/encode_resonances.py",
-        caughtBy="walking both sides to fill this table; the tag key sets do "
-                 "not express it, because <PoPs> is written at the suite root",
-    ),
-    Defect(
-        what="relativisticKinematics and reducedWidthAmplitudes are written "
-             "from the model (encode_resonances.py:161-162) and never read "
-             "back, so both come out False on any round trip through kika",
-        where="kika/gnds/resonances.py, readRMatrix",
-        caughtBy="attribute level; this table does not express it and writing "
-                 "the table is what found it",
-    ),
-    Defect(
         what="supportsAngularReconstruction is read and reported and never "
              "written, so a file kika round trips loses FUDGE's hint",
         where="kika/gnds/resonances.py:222 vs encode_resonances.py",
@@ -306,10 +289,9 @@ KNOWN_DEFECTS: Tuple[Defect, ...] = (
 
 #: The asymmetries that are of *attribute*, not of node — kept beside the table
 #: precisely so the commit message cannot suggest the key-set test found them.
-#: It did not and cannot; walking both sides to write the table did.
+#: It did not and cannot; walking both sides to write the table did. There were
+#: three; ``relativisticKinematics`` and ``reducedWidthAmplitudes`` are read now.
 ONE_SIDED_ATTRIBUTES = (
-    ("RMatrix", "relativisticKinematics", "written, never read"),
-    ("RMatrix", "reducedWidthAmplitudes", "written, never read"),
     ("RMatrix", "supportsAngularReconstruction", "read, never written"),
 )
 

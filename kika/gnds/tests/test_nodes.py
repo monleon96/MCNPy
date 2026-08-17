@@ -172,17 +172,19 @@ def test_the_writer_emits_the_tag_the_key_claims(family):
 # ---------------------------------------------------------------------------
 
 def test_the_known_defects_are_pinned_by_count():
-    """Four on the day the table landed, three since D19 was fixed. Each repair
-    lowers the number and
-    this test is what notices — the same shape as
+    """Four on the day the table landed, one now: D19 went with the isotropic2d
+    fix, and the two R-matrix flags and the nested PoPs went with the commit
+    after that. What is left is ``supportsAngularReconstruction``, read and
+    reported and never written. Each repair lowers the number and this test is
+    what notices — the same shape as
     ``test_the_only_schema_errors_are_the_distributions_phase_7b_will_fill``.
 
-    Two of them are of *attribute*, which the tag table cannot express.
-    They are here because writing the table found them, and saying otherwise
-    would credit the key-set comparison with a catch it did not make.
+    The survivor is of *attribute*, which the tag table cannot express. It is
+    here because writing the table found it, and saying otherwise would credit
+    the key-set comparison with a catch it did not make.
     """
-    assert len(nodes.KNOWN_DEFECTS) == 3
-    assert len(nodes.ONE_SIDED_ATTRIBUTES) == 3
+    assert len(nodes.KNOWN_DEFECTS) == 1
+    assert len(nodes.ONE_SIDED_ATTRIBUTES) == 1
     for defect in nodes.KNOWN_DEFECTS:
         assert defect.where and defect.caughtBy
 

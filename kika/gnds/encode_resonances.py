@@ -151,6 +151,30 @@ def _resolved(parent: ET.Element, region, report: ConversionReport,
         )
 
 
+def _nestedPoPs(formalism, report: ConversionReport, where: str) -> None:
+    """Say so when a formalism carries a `<PoPs>` this writer does not emit.
+
+    §19.3.1 and §19.3.6 both admit a `PoPs` inside the formalism -- a local
+    particle database for the channels, which every ENDF/B-VIII.1-GNDS RMatrix
+    carries. The reader reads it onto `formalism.PoPs`; writing it is §12 work
+    and is blocked on the `gnds_endf_conflicts.md` §3.3 decision, so it is not
+    started here.
+
+    What is fixed here is the **silence**. Every other node kika reads and does
+    not write announces itself in the report, and this one did not -- so a file
+    round-tripped through kika lost its nested particle database with nothing
+    said. That was the whole defect; the writer is unchanged.
+    """
+    if getattr(formalism, "PoPs", None) is None:
+        return
+    report.lost(
+        f"{where}: the nested <PoPs> was read and is not written. §19 admits a "
+        f"local particle database inside the formalism and writing it is §12 "
+        f"work, blocked on the docs/gnds_endf_conflicts.md §3.3 decision; the "
+        f"channels below refer to particles this file no longer defines"
+    )
+
+
 def _rMatrix(parent: ET.Element, formalism: RMatrix,
              report: ConversionReport, domain) -> None:
     element = ET.SubElement(parent, "RMatrix")
@@ -160,6 +184,7 @@ def _rMatrix(parent: ET.Element, formalism: RMatrix,
          calculateChannelRadius=_true(formalism.calculateChannelRadius),
          relativisticKinematics=_true(formalism.relativisticKinematics),
          reducedWidthAmplitudes=_true(formalism.reducedWidthAmplitudes))
+    _nestedPoPs(formalism, report, "RMatrix")
     if formalism.scatteringRadius is not None:
         _scatteringRadius(element, ScatteringRadius(
             constant=formalism.scatteringRadius), report, "RMatrix", domain)
@@ -270,6 +295,7 @@ def _breitWigner(parent: ET.Element, formalism: BreitWigner,
     _set(element, label=formalism.label or "eval",
          approximation=str(formalism.approximation),
          calculateChannelRadius=_true(formalism.calculateChannelRadius))
+    _nestedPoPs(formalism, report, "BreitWigner")
     if formalism.scatteringRadius is not None:
         _scatteringRadius(element, ScatteringRadius(
             constant=formalism.scatteringRadius), report, "BreitWigner", domain)
@@ -312,6 +338,7 @@ def _unresolved(parent: ET.Element, region, report: ConversionReport,
     _set(node, label=widths.label or "eval",
          approximation="SingleLevelBreitWigner",
          useForSelfShieldingOnly=_true(widths.selfShieldingOnly))
+    _nestedPoPs(widths, report, "tabulatedWidths")
     if widths.scatteringRadius is not None:
         _scatteringRadius(node, ScatteringRadius(
             constant=widths.scatteringRadius), report, "tabulatedWidths", domain)

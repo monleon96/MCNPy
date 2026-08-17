@@ -233,6 +233,15 @@ class _ResonanceReader:
             approximation=element.attrib.get("approximation"),
             boundaryCondition=element.attrib.get("boundaryCondition"),
             calculateChannelRadius=_isTrue(element, "calculateChannelRadius"),
+            # §19.3.1's two flags. Both were **written** from the model
+            # (encode_resonances.py:161-162) and never read back, so a file that
+            # declared either came out of a kika round trip with it False.
+            # `reducedWidthAmplitudes` is ENDF's IFG: it says whether `widths`
+            # are widths in eV or reduced-width amplitudes in eV^1/2, and the two
+            # are not interchangeable, so losing it silently reinterprets every
+            # width in the table.
+            reducedWidthAmplitudes=_isTrue(element, "reducedWidthAmplitudes"),
+            relativisticKinematics=_isTrue(element, "relativisticKinematics"),
             scatteringRadius=_constant(element.find("scatteringRadius")),
             PoPs=None if pops is None else self.readPoPs(pops),
             resonanceReactions=self.readResonanceReactions(element, here),
