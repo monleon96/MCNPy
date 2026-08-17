@@ -32,7 +32,7 @@ import pytest
 
 import kika
 from kika.gnds.decode import readReactionSuite
-from kika.gnds.encode import (chooseFormat, serialise, sha1,
+from kika.gnds.encode import (_function, chooseFormat, serialise, sha1,
                               writeReactionSuite)
 from kika.gnds.version import UnsupportedGndsVersion
 from kika.gnds.xpath import Document
@@ -346,13 +346,14 @@ def test_a_suite_holding_a_mixed_can_be_written_at_all(gnds_data_dir, tmp_path):
     assert _schemaErrors(path, COVARIANCE_SCHEMA) == []
 
 
-#: The schema errors an **ENDF-decoded** suite still has, by kind. Twelve, and
-#: none of them is the deliberate empty `<distribution/>` that the GNDS
-#: fixtures produce -- these are gaps in the ENDF -> model -> GNDS path itself,
-#: measured 2026-08-17 and written down in `docs/library-gaps.md` D20. Pinned
-#: rather than fixed here: each one is its own decision (what date format does
-#: an ENDF `AUG-2018` become? what `genre` does an ENDF output channel have?),
-#: and a gate that exists is worth more than a gate that waits for all twelve.
+#: The schema errors an **ENDF-decoded** suite still has, by kind. Measured
+#: 2026-08-17 at twelve and written down in `docs/library-gaps.md` D20; eleven
+#: since the MF4 angular `axes` landed. None of them is the deliberate empty
+#: `<distribution/>` the GNDS fixtures produce -- these are gaps in the
+#: ENDF -> model -> GNDS path itself. Pinned rather than fixed: each survivor is
+#: its own decision (what date format does an ENDF `AUG-2018` become? what
+#: `genre` does an ENDF output channel have?), and a gate that exists is worth
+#: more than a gate that waits for all of them.
 ENDF_SCHEMA_GAPS = (
     "Element 'evaluated', attribute 'date'",
     "Element 'evaluated': Missing child element",
@@ -361,7 +362,6 @@ ENDF_SCHEMA_GAPS = (
     "Element 'outputChannel': The attribute 'genre' is required but missing",
     "Element 'products': Missing child element",
     "Element 'multiplicity': Missing child element",
-    "Element 'function2ds': This element is not expected",
 )
 
 
@@ -378,16 +378,21 @@ def test_the_endf_decoded_suites_schema_errors_are_pinned(micro_tape, tmp_path):
     ``Isotropic2d`` -- so nothing ever validated a file written from an ENDF
     decode, which is the direction that had an invalid node in it.
 
-    Twelve errors survive today and every one is a known ENDF->GNDS gap
+    Eleven errors survive today and every one is a known ENDF->GNDS gap
     (:data:`ENDF_SCHEMA_GAPS`). Pinned by count and kind, the same shape as the
     GNDS half: fixing one lowers the number and this test is what notices.
+
+    **The count is not monotone downwards, and that is the interesting part.**
+    An absent required child makes everything below it unreachable, so a fix can
+    raise the number by exposing what it was hiding. The MF4 angular ``axes``
+    did exactly that: one error was standing in front of 3 999.
     """
     _path, errors = _endfSchemaErrors(kika.read(micro_tape, covariances=False),
                                       tmp_path)
     unknown = [e for e in errors
                if not any(kind in e for kind in ENDF_SCHEMA_GAPS)]
     assert unknown == [], unknown
-    assert len(errors) == 12
+    assert len(errors) == 11
 
 
 def test_a_bare_isotropic2d_goes_where_the_schema_admits_it(micro_tape, tmp_path):
@@ -435,15 +440,78 @@ def test_a_bare_isotropic2d_goes_where_the_schema_admits_it(micro_tape, tmp_path
     assert set(errors) - set(baseline) == set(), (
         "writing the isotropic distribution added a schema error"
     )
-    # It removes one, and that is the point rather than an aside: the LTT=3
-    # section it replaced is written as an `<XYs2d>` whose `function2ds` comes
-    # before its `axes`, which the schema rejects (ENDF_SCHEMA_GAPS again).
-    assert len(errors) == len(baseline) - 1
+    # It used to remove one as well, because the LTT=3 section it replaces was
+    # written with no `axes` at all -- and an absent required first child is
+    # what xmllint reports as "this element is not expected. Expected is
+    # ( axes )", which is where the D20 note's "written after the function1ds"
+    # came from. The writer always emitted axes before the container; the model
+    # simply had none to give. Now that it does, replacing that section removes
+    # nothing, and the delta is zero.
+    assert len(errors) == len(baseline)
 
     # And the half that says it is not merely valid: kika reads it back.
     after = kika.read(path, covariances=False)
     form = after.reactions[2].outputChannel.products[0].distribution["eval"]
     assert isinstance(form.angular, Isotropic2d), form
+
+
+def test_where_a_functional_sits_decides_which_attribute_it_declares(tmp_path):
+    """§5-6: ``index``, ``outerDomainValue`` and ``label`` are exclusive.
+
+    ``gnds.xsd:2109-2245`` gives a functional three types by position and each
+    admits exactly one of the three attributes: a child of a *regions*
+    container must declare ``index`` and may not declare ``outerDomainValue``,
+    a child of an ``XYs2d`` the other way round, and the head of a container
+    carries ``label`` and the ``axes``.
+
+    The writer used to emit whichever of the three the model happened to hold,
+    which put an ``index`` on all 3 960 ``Legendre`` children of the Fe-56 LTT=3
+    section. Nothing said so because the container above them had no ``axes``,
+    and an absent required child makes everything under it unreachable.
+
+    Built by hand rather than from a tape: the rule is about *position*, so a
+    synthetic two-by-two — a ``Regions2d`` of two ``XYs2d`` of two ``Legendre``
+    — states it in one place and survives any fixture changing underneath it.
+    The model deliberately carries **both** attributes on every node, so the
+    test fails if the writer copies rather than decides.
+    """
+    from kika.nuclear_data.model import (ConversionReport, Legendre, Regions2d,
+                                         XYs2d, angularAxes)
+
+    axes = angularAxes()
+
+    def series(outer, index):
+        return Legendre(coefficients=np.array([1.0, 0.1]),
+                        outerDomainValue=outer, index=index, axes=axes)
+
+    regions = Regions2d(axes=axes, function2ds=[
+        XYs2d(axes=axes, outerDomainValue=float(n), index=n,
+              function1ds=[series(1.0 + n, 0), series(2.0 + n, 1)])
+        for n in (0, 1)
+    ])
+    root = ET.Element("root")
+    report = ConversionReport()
+    _function(root, regions, report, "test")
+
+    written = root.find("regions2d")
+    assert written.find("axes") is not None, "the container head carries the axes"
+
+    for position, child in enumerate(written.find("function2ds")):
+        assert child.attrib.get("index") == str(position), child.attrib
+        assert "outerDomainValue" not in child.attrib, (
+            "a child of a regions container is an xData_XYs2d_inRegions")
+        assert child.find("axes") is None, "§5.1.1 has a child inherit its axes"
+
+        for grandchild in child.find("function1ds"):
+            assert "outerDomainValue" in grandchild.attrib, grandchild.attrib
+            assert "index" not in grandchild.attrib, (
+                "a child of an XYs2d is an xData_Legendre_1d, which has no index")
+
+    # The axes are one shared object all the way down, so nothing is reported
+    # lost -- `_axesUnlessNested` decides inheritance by identity, and a second
+    # equal-but-distinct Axes would be flagged on every region instead.
+    assert not [entry for entry in report.losses if "axes of its own" in entry], (
+        report.losses)
 
 
 def test_every_committed_covariance_fixture_can_be_written(

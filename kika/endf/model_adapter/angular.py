@@ -43,6 +43,7 @@ from kika.nuclear_data.model import (
     Regions1d,
     Regions2d,
     XYs2d,
+    angularAxes,
     fromEndfTab2,
     toEndfTab2,
 )
@@ -158,6 +159,13 @@ def decodeMF4MT(mf4mt, report: Optional[ConversionReport] = None):
             )
         return Isotropic2d(productFrame=frame), provenance, report
 
+    # One object, shared by the container and everything under it. Calling
+    # `angularAxes()` per branch would give distinct objects, and
+    # `kika/gnds/encode.py:_axesUnlessNested` tests inheritance by *identity* --
+    # so a second object would be read as "this child carries axes of its own",
+    # which §5.1.1 has no slot for, and reported as a loss on every region.
+    axes = angularAxes()
+
     if ltt == 1:
         functions = [
             _legendreAt(energy, row, i)
@@ -165,7 +173,7 @@ def decodeMF4MT(mf4mt, report: Optional[ConversionReport] = None):
                 zip(mf4mt.legendre_energies, mf4mt.legendre_coefficients)
             )
         ]
-        angular = fromEndfTab2(functions, mf4mt.energy_interpolation)
+        angular = fromEndfTab2(functions, mf4mt.energy_interpolation, axes=axes)
 
     elif ltt == 2:
         functions = [
@@ -173,7 +181,7 @@ def decodeMF4MT(mf4mt, report: Optional[ConversionReport] = None):
                          _angularRegions(mf4mt, i), i)
             for i, energy in enumerate(mf4mt.energies)
         ]
-        angular = fromEndfTab2(functions, mf4mt.energy_interpolation)
+        angular = fromEndfTab2(functions, mf4mt.energy_interpolation, axes=axes)
 
     elif ltt == 3:
         legendre = [
@@ -189,9 +197,9 @@ def decodeMF4MT(mf4mt, report: Optional[ConversionReport] = None):
             for i, energy in enumerate(mf4mt.tabulated_energies)
         ]
         angular = Regions2d(function2ds=[
-            fromEndfTab2(legendre, getattr(mf4mt, "_interpolation", [])),
-            fromEndfTab2(tabulated, getattr(mf4mt, "_tab_interpolation", [])),
-        ])
+            fromEndfTab2(legendre, getattr(mf4mt, "_interpolation", []), axes=axes),
+            fromEndfTab2(tabulated, getattr(mf4mt, "_tab_interpolation", []), axes=axes),
+        ], axes=axes)
 
     else:
         report.unsupportedNode(
