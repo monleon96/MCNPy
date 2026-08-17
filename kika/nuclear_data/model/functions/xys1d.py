@@ -72,12 +72,21 @@ class XYs1d(Function1d):
         out[1::2] = self.ys
         return out
 
+    def toEndfRegions(self):
+        """One grid and its single ``(NBT, INT)`` pair — the ENDF-6 TAB1 layout.
+
+        The same shape :meth:`Regions1d.toEndfRegions` returns, so a caller that
+        has to re-emit a TAB1 record does not need to know which of the two
+        classes it is holding. A single region is exactly what an NR=1 record
+        is, and :meth:`evaluate` below already built this very pair list to feed
+        the interpolator — this names it instead of rebuilding it inline.
+        """
+        return self.xs, self.ys, [(len(self), self.endfInterpolationCode)]
+
     def evaluate(
         self, x: Union[float, ArrayLike], outOfRange: OutOfRange = "zero"
     ) -> Union[float, np.ndarray]:
-        return _interpolate_1d()(
-            self.xs, self.ys, [(len(self), self.endfInterpolationCode)], x, outOfRange
-        )
+        return _interpolate_1d()(self.xs, self.ys, self.toEndfRegions()[2], x, outOfRange)
 
     def __repr__(self) -> str:
         return (

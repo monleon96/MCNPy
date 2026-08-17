@@ -97,19 +97,32 @@ def _legendreAt(energy: float, row: Sequence[float], index: int) -> Legendre:
     return Legendre(coefficients=coefficients, outerDomainValue=float(energy), index=index)
 
 
-def _tabulatedAt(energy: float, cosines, probabilities, regions, index: int) -> Regions1d:
-    """One ENDF tabulated record → a :class:`Regions1d` over mu.
+def _tabulatedAt(energy: float, cosines, probabilities, regions, index: int):
+    """One ENDF tabulated record → a function over mu.
 
-    ``regions1d`` rather than ``XYs1d`` even when there is a single region, for
-    the same reason ``decodeMF3MT`` does it: one shape for the ENDF
-    ``(NBT, INT)`` layout means one inverse, and the inverse is what the gate
-    exercises.
+    A :class:`Regions1d` when the record really has more than one interpolation
+    region, and the single :class:`XYs1d` inside it when it does not. **One
+    region is not a region set**: ``function1ds_inRegions``
+    (``gnds.xsd:2143-2147``) puts ``minOccurs="2"`` on its children, so a
+    ``regions1d`` wrapping one region is a node the schema rejects — and it is
+    what every one of this evaluation's tabulated energies produced.
+
+    This is the 1-d twin of a rule the 2-d side already had: ``fromEndfTab2``
+    (``functions/higher.py:240-241``) returns an ``XYs2d`` when NR<=1 and a
+    ``Regions2d`` only when there is more than one region. It is also what the
+    committed fixtures carry — ``micro_fe56.gnds.xml`` writes the tabulated half
+    of its LTT=3 section as plain ``<XYs1d outerDomainValue=...>`` children.
+
+    Both classes answer ``toEndfRegions()``, so ``_tabulatedRecord`` below
+    re-emits either without asking which one it got.
     """
     pairs = [(int(nbt), int(code)) for nbt, code in regions]
     mu = np.asarray(cosines, dtype=float)
     if not pairs and mu.size:
         pairs = [(int(mu.size), 2)]
     function = Regions1d.fromEndfRegions(mu, np.asarray(probabilities, dtype=float), pairs)
+    if len(function.function1ds) == 1:
+        function = function.function1ds[0]
     function.outerDomainValue = float(energy)
     function.index = index
     return function
