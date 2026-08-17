@@ -347,9 +347,10 @@ def test_a_suite_holding_a_mixed_can_be_written_at_all(gnds_data_dir, tmp_path):
 
 
 #: The schema errors an **ENDF-decoded** suite still has, by kind. Measured
-#: 2026-08-17 at twelve and written down in `docs/library-gaps.md` D20; eleven
-#: since the MF4 angular `axes` landed. None of them is the deliberate empty
-#: `<distribution/>` the GNDS fixtures produce -- these are gaps in the
+#: 2026-08-17 at twelve and written down in `docs/library-gaps.md` D20; eight
+#: since the MF4 angular `axes` and the single-region containers landed. None of
+#: them is the deliberate empty `<distribution/>` the GNDS fixtures produce --
+#: these are gaps in the
 #: ENDF -> model -> GNDS path itself. Pinned rather than fixed: each survivor is
 #: its own decision (what date format does an ENDF `AUG-2018` become? what
 #: `genre` does an ENDF output channel have?), and a gate that exists is worth
@@ -358,7 +359,6 @@ ENDF_SCHEMA_GAPS = (
     "Element 'evaluated', attribute 'date'",
     "Element 'evaluated': Missing child element",
     "Element 'scatteringRadius': This element is not expected",
-    "Element 'function1ds': Missing child element",
     "Element 'outputChannel': The attribute 'genre' is required but missing",
     "Element 'products': Missing child element",
     "Element 'multiplicity': Missing child element",
@@ -378,7 +378,7 @@ def test_the_endf_decoded_suites_schema_errors_are_pinned(micro_tape, tmp_path):
     ``Isotropic2d`` -- so nothing ever validated a file written from an ENDF
     decode, which is the direction that had an invalid node in it.
 
-    Eleven errors survive today and every one is a known ENDF->GNDS gap
+    Eight errors survive today and every one is a known ENDF->GNDS gap
     (:data:`ENDF_SCHEMA_GAPS`). Pinned by count and kind, the same shape as the
     GNDS half: fixing one lowers the number and this test is what notices.
 
@@ -392,7 +392,7 @@ def test_the_endf_decoded_suites_schema_errors_are_pinned(micro_tape, tmp_path):
     unknown = [e for e in errors
                if not any(kind in e for kind in ENDF_SCHEMA_GAPS)]
     assert unknown == [], unknown
-    assert len(errors) == 11
+    assert len(errors) == 8
 
 
 def test_a_bare_isotropic2d_goes_where_the_schema_admits_it(micro_tape, tmp_path):

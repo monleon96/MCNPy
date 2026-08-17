@@ -207,6 +207,29 @@ def _function(parent: ET.Element, form, report: ConversionReport,
         _values(element, form.interleaved())
         return element
     if isinstance(form, Regions1d):
+        # A region set of one is not a region set: `function1ds_inRegions`
+        # (`gnds.xsd:2143-2147`) puts `minOccurs="2"` on its children, so the
+        # node the schema wants here is the single `XYs1d` itself. kika's ENDF
+        # cross sections are `Regions1d` whatever the tape's NR says --
+        # `decodeMF3MT` keeps one shape so there is one inverse -- and MT1, MT2
+        # and MT102 of the Fe-56 micro-tape are all NR=1.
+        #
+        # Done here and not in the model on purpose: changing what
+        # `CrossSection[...]` *is* would reach the flat-path parity tests and
+        # the processing code, for a question that is only about how GNDS
+        # spells it. The model keeps one shape; the writer spells it the way
+        # the schema reads it. Inert on the three committed GNDS fixtures --
+        # none holds a single-region container, because none could and validate.
+        if len(form.function1ds) == 1:
+            only = form.function1ds[0]
+            collapsed = _function(parent, only, report, where, nested, parentAxes, index)
+            if collapsed is not None and not nested:
+                # The primary's `label` and `axes` describe the curve, not the
+                # wrapper, so they survive the collapse.
+                _set(collapsed, label=getattr(form, "label", None))
+                if collapsed.find("axes") is None:
+                    _axes(collapsed, form.axes)
+            return collapsed
         element = ET.SubElement(parent, "regions1d")
         _writeCommon(element, form, nested, index)
         _axesUnlessNested(element, form, report, where, nested, parentAxes)
