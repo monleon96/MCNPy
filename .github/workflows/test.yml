@@ -41,9 +41,27 @@ jobs:
         # KIKA_TAPES points nowhere on purpose: the marker filter should
         # already exclude every test that needs it, and if one slips through
         # unmarked it must skip loudly rather than pick up a stray file.
+        #
+        # `slow` and `perf` are named here because passing any -m at all turns
+        # off conftest.py's automatic hold-back (see pytest_collection_modifyitems
+        # -- it defers to a caller who expressed an opinion). Without them this
+        # step ran a strictly *larger* set than a bare `pytest` does on the
+        # workstation, while being called "the fast lane". That is how
+        # scripts/tests/test_pipeline_golden.py came to run here: it is the
+        # thesis pipeline's golden, it compares a Legendre covariance at
+        # rtol=1e-10, and on a runner 8 of its 256 elements differ by 6.2e-10 --
+        # the same last-ULP libm spread that moved the reconstruction goldens.
+        #
+        # Loosening *that* tolerance was the wrong lever. It is the one test
+        # that would notice a change to the fitting, the uncertainty resolution
+        # or the Monte-Carlo sampling, and its tightness is the whole point on
+        # the machine where the numbers are reproducible. So it keeps 1e-10 and
+        # stops being asserted somewhere its premise does not hold.
         env:
           KIKA_TAPES: /nonexistent
-        run: poetry run pytest -m "not tape and not njoy and not gnds" -q
+        run: >-
+          poetry run pytest -q
+          -m "not tape and not njoy and not gnds and not slow and not perf"
 
   wheel:
     # Guards the `exclude` list in pyproject.toml. Test fixtures — including
