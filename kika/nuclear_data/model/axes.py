@@ -125,3 +125,25 @@ def crossSectionAxes() -> Axes:
 #: would be a second spelling of the same thing.
 def multiplicityAxes() -> Axes:
     return Axes.forFunction1d("multiplicity", "", "energy_in", "eV")
+
+
+#: The axes of a two-body angular distribution — the MF4 case, and the one
+#: container in the library that is **three** axes rather than two, so it is
+#: built literally instead of through :meth:`Axes.forFunction1d`.
+#:
+#: The triple is not a guess: all three committed GNDS fixtures carry exactly
+#: this on their ``angularTwoBody`` container, and they are trims of
+#: FUDGE-distributed files. It is the same triple for LTT=1, 2 and 3 alike —
+#: ``mu`` stays index 1 even where the inner function is a Legendre series,
+#: because the *container* describes P(mu|E) however its regions spell it.
+#:
+#: **The caller must share one object across a container and its children.**
+#: ``kika/gnds/encode.py:_axesUnlessNested`` decides "this child inherits" by
+#: object *identity*, so calling this function once per region would make a
+#: nested form look like it carried axes of its own and be reported as a loss.
+def angularAxes() -> Axes:
+    return Axes([
+        Axis(index=2, label="energy_in", unit="eV"),
+        Axis(index=1, label="mu", unit=""),
+        Axis(index=0, label="P(mu|energy_in)", unit=""),
+    ])
