@@ -5,8 +5,9 @@ writer dispatches on ``isinstance`` of model classes and emits a tag literal.
 The two halves are not indexed by the same thing, so nothing compares them —
 and "the reader knows a node the writer does not" is not a failure any test can
 observe. Four such asymmetries were found by writing this table, one of them a
-node kika **emits into files** that its own reader silently drops and that the
-schema does not admit at all (:data:`KNOWN_DEFECTS` D1).
+node kika **emitted into files** that its own reader silently dropped and that
+the schema does not admit at all — fixed in the commit after this table landed,
+and the count in :data:`KNOWN_DEFECTS` is what recorded it.
 
 **What it is.** One entry per node at a *choice point*, keyed by ``(family,
 tag)``. Each entry says which side handles it and — when only one does — why
@@ -194,12 +195,6 @@ NODES: Dict[Tuple[str, str], NodeSpec] = dict([
           Status.PAIRED),
     _spec("unspecified", "distributionForm", "§18.1.1", Unspecified,
           Status.PAIRED),
-    _spec("isotropic2d", "distributionForm", "§18.1.1", Isotropic2d,
-          Status.WRITE_ONLY,
-          "**a defect, not a decision** — see KNOWN_DEFECTS D1. "
-          "DistributionType (gnds.xsd:1647-1662) does not admit this node "
-          "here at all, so the entry describes what the writer does rather "
-          "than something GNDS allows"),
     _spec("uncorrelated", "distributionForm", "§18.3", Uncorrelated,
           Status.NEITHER, _PHASE_7B),
     _spec("energyAngular", "distributionForm", "§18.4", EnergyAngular,
@@ -284,19 +279,6 @@ class Defect:
 #: are not here — the point of the distinction is that this list may only get
 #: shorter.
 KNOWN_DEFECTS: Tuple[Defect, ...] = (
-    Defect(
-        what="a bare Isotropic2d distribution was written as <isotropic2d> "
-             "directly under <distribution>, where DistributionType "
-             "(gnds.xsd:1647-1662) does not admit it and kika's own reader "
-             "drops it into the report. The path is live: "
-             "kika/endf/model_adapter/angular.py:146 returns exactly that for "
-             "every MF4 with LTT=0, so an isotropic ENDF angular distribution "
-             "lost its distribution between kika's two halves",
-        where="kika/gnds/encode.py, _Writer.distribution",
-        caughtBy="the (distributionForm, isotropic2d) entry this table has no "
-                 "reader for; and no test validated an ENDF-decoded suite "
-                 "against the schema, which is the gate that should have seen it",
-    ),
     Defect(
         what="the <PoPs> nested inside RMatrix, BreitWigner and tabulatedWidths "
              "is read onto the formalism and never written, with no report "

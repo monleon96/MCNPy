@@ -610,8 +610,7 @@ class _SuiteWriter:
         _set(ET.SubElement(axes, "axis"), index="1", label="energy_in", unit="eV")
         _set(ET.SubElement(axes, "axis"), index="0", label="multiplicity", unit="")
 
-    @writes("distributionForm", "angularTwoBody", "unspecified",
-            "isotropic2d")
+    @writes("distributionForm", "angularTwoBody", "unspecified")
     def distribution(self, parent: ET.Element, distribution, where: str) -> None:
         """§18. **An empty ``<distribution/>`` is deliberate and is reported.**
 
@@ -629,8 +628,25 @@ class _SuiteWriter:
             if isinstance(form, AngularTwoBody):
                 self.angularTwoBody(element, form, label, where)
             elif isinstance(form, Isotropic2d):
-                _set(ET.SubElement(element, "isotropic2d"), label=label,
-                     productFrame=str(form.productFrame))
+                # A bare Isotropic2d is what `kika/endf/model_adapter/
+                # angular.py:146` returns for every MF4 with LTT=0, so this is
+                # the majority shape of an ENDF-sourced angular distribution and
+                # not an edge case. It used to be written as <isotropic2d>
+                # directly under <distribution>, which is wrong three ways:
+                # `DistributionType` (gnds.xsd:1647-1662) has no such child,
+                # `DistributionIsotropic2dType` (:1693) has no attributes at all
+                # so `label` and `productFrame` were invalid on it, and kika's
+                # own reader (decode.py's readDistribution) drops the node into
+                # the report. An isotropic MF4 lost its distribution between
+                # kika's two halves.
+                #
+                # The fix is here and not in the reader: adding a reader would
+                # encode a node the schema does not have. What an LTT=0 MF4 *is*
+                # in GNDS is a two-body angular distribution that happens to be
+                # isotropic, and `readAngularTwoBody` already reads that back.
+                twoBody = ET.SubElement(element, "angularTwoBody")
+                _set(twoBody, label=label, productFrame=str(form.productFrame))
+                ET.SubElement(twoBody, "isotropic2d")
             elif isinstance(form, Unspecified):
                 _set(ET.SubElement(element, "unspecified"), label=label,
                      productFrame=str(form.productFrame))

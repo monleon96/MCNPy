@@ -172,15 +172,16 @@ def test_the_writer_emits_the_tag_the_key_claims(family):
 # ---------------------------------------------------------------------------
 
 def test_the_known_defects_are_pinned_by_count():
-    """Four, on the day the table landed. Each repair lowers the number and
+    """Four on the day the table landed, three since D19 was fixed. Each repair
+    lowers the number and
     this test is what notices — the same shape as
     ``test_the_only_schema_errors_are_the_distributions_phase_7b_will_fill``.
 
-    Two of the four are of *attribute*, which the tag table cannot express.
+    Two of them are of *attribute*, which the tag table cannot express.
     They are here because writing the table found them, and saying otherwise
     would credit the key-set comparison with a catch it did not make.
     """
-    assert len(nodes.KNOWN_DEFECTS) == 4
+    assert len(nodes.KNOWN_DEFECTS) == 3
     assert len(nodes.ONE_SIDED_ATTRIBUTES) == 3
     for defect in nodes.KNOWN_DEFECTS:
         assert defect.where and defect.caughtBy

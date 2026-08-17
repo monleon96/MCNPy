@@ -346,6 +346,106 @@ def test_a_suite_holding_a_mixed_can_be_written_at_all(gnds_data_dir, tmp_path):
     assert _schemaErrors(path, COVARIANCE_SCHEMA) == []
 
 
+#: The schema errors an **ENDF-decoded** suite still has, by kind. Twelve, and
+#: none of them is the deliberate empty `<distribution/>` that the GNDS
+#: fixtures produce -- these are gaps in the ENDF -> model -> GNDS path itself,
+#: measured 2026-08-17 and written down in `docs/library-gaps.md` D20. Pinned
+#: rather than fixed here: each one is its own decision (what date format does
+#: an ENDF `AUG-2018` become? what `genre` does an ENDF output channel have?),
+#: and a gate that exists is worth more than a gate that waits for all twelve.
+ENDF_SCHEMA_GAPS = (
+    "Element 'evaluated', attribute 'date'",
+    "Element 'evaluated': Missing child element",
+    "Element 'scatteringRadius': This element is not expected",
+    "Element 'function1ds': Missing child element",
+    "Element 'outputChannel': The attribute 'genre' is required but missing",
+    "Element 'products': Missing child element",
+    "Element 'multiplicity': Missing child element",
+    "Element 'function2ds': This element is not expected",
+)
+
+
+def _endfSchemaErrors(suite, tmp_path, name="out.xml"):
+    path, _ = _write(suite, tmp_path, name)
+    return path, _schemaErrors(path)
+
+
+def test_the_endf_decoded_suites_schema_errors_are_pinned(micro_tape, tmp_path):
+    """The gate that was missing, and it is why D19 lived for a phase.
+
+    ``test_the_only_schema_errors_are_the_distributions_phase_7b_will_fill``
+    walks the three **GNDS** fixtures, and the GNDS reader never produces a bare
+    ``Isotropic2d`` -- so nothing ever validated a file written from an ENDF
+    decode, which is the direction that had an invalid node in it.
+
+    Twelve errors survive today and every one is a known ENDF->GNDS gap
+    (:data:`ENDF_SCHEMA_GAPS`). Pinned by count and kind, the same shape as the
+    GNDS half: fixing one lowers the number and this test is what notices.
+    """
+    _path, errors = _endfSchemaErrors(kika.read(micro_tape, covariances=False),
+                                      tmp_path)
+    unknown = [e for e in errors
+               if not any(kind in e for kind in ENDF_SCHEMA_GAPS)]
+    assert unknown == [], unknown
+    assert len(errors) == 12
+
+
+def test_a_bare_isotropic2d_goes_where_the_schema_admits_it(micro_tape, tmp_path):
+    """D19. ``<isotropic2d>`` is not a child of ``<distribution>``.
+
+    ``kika/endf/model_adapter/angular.py:146`` returns a **bare**
+    ``Isotropic2d`` for every MF4 with LTT=0, and the writer used to emit it
+    straight under ``<distribution>`` with a ``label`` and a ``productFrame``.
+    ``DistributionType`` (``gnds.xsd:1647-1662``) has no such child and
+    ``DistributionIsotropic2dType`` (``:1693``) has no attributes at all, so the
+    node was invalid twice over -- and kika's own reader dropped it into the
+    report, so an isotropic ENDF distribution vanished between the two halves.
+
+    Built by hand rather than from a fixture: no committed micro-tape carries an
+    LTT=0 section, and minting one to reach a single branch is worse than
+    stating the shape here.
+
+    **Compared against the same suite unmodified**, not against zero: the ENDF
+    path still has the twelve gaps above, and the claim being made is the narrow
+    one -- putting the isotropic distribution in adds no schema error and comes
+    back on a re-read.
+    """
+    from kika.nuclear_data.model import Frame, Isotropic2d
+
+    before = kika.read(micro_tape, covariances=False)
+    _path, baseline = _endfSchemaErrors(before, tmp_path, "baseline.xml")
+
+    suite = kika.read(micro_tape, covariances=False)
+    product = suite.reactions[2].outputChannel.products[0]
+    product.distribution.forms.clear()
+    product.distribution["eval"] = Isotropic2d(label="eval",
+                                               productFrame=Frame.centerOfMass)
+    path, errors = _endfSchemaErrors(suite, tmp_path, "isotropic.xml")
+
+    root = ET.parse(path).getroot()
+    stray = [d for d in root.iter("distribution")
+             if d.find("isotropic2d") is not None]
+    assert not stray, "an <isotropic2d> is still a direct child of <distribution>"
+    wrapped = [b for b in root.iter("angularTwoBody")
+               if b.find("isotropic2d") is not None]
+    assert wrapped, "the isotropic distribution was not written at all"
+    assert wrapped[0].find("isotropic2d").attrib == {}, (
+        "DistributionIsotropic2dType has no attributes"
+    )
+    assert set(errors) - set(baseline) == set(), (
+        "writing the isotropic distribution added a schema error"
+    )
+    # It removes one, and that is the point rather than an aside: the LTT=3
+    # section it replaced is written as an `<XYs2d>` whose `function2ds` comes
+    # before its `axes`, which the schema rejects (ENDF_SCHEMA_GAPS again).
+    assert len(errors) == len(baseline) - 1
+
+    # And the half that says it is not merely valid: kika reads it back.
+    after = kika.read(path, covariances=False)
+    form = after.reactions[2].outputChannel.products[0].distribution["eval"]
+    assert isinstance(form.angular, Isotropic2d), form
+
+
 def test_every_committed_covariance_fixture_can_be_written(
         gnds_covariance_fixture, tmp_path):
     """The gate whose absence let two writer defects live in a shipped module.
