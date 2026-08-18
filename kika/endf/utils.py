@@ -331,13 +331,82 @@ class PadStyle:
 
     So a single flag per section is not enough to write the file back, and a
     single flag per *tape* would be worse. The two bodies are tracked apart:
-    ``pairs`` for TAB1 x/y bodies, ``values`` for LIST bodies. Interpolation
-    records are always blank-padded and are not represented here — the same tape
-    writes ``       1621          1`` followed by blanks.
+    ``pairs`` for TAB1 x/y bodies, ``values`` for LIST bodies, ``interp`` for
+    the (NBT, INT) records of a TAB1 or TAB2.
+
+    **``interp`` was added when MF6 landed, and the claim it replaces was
+    wrong.** This docstring used to say interpolation records are always
+    blank-padded, measured on the TSL tapes — ``tsl_4-Be.txt`` writes
+    ``       1621          1`` followed by blanks on the same tape whose data
+    lines end in explicit zeros. ENDF/B-VIII.1's *neutron* tapes do the
+    opposite — O-16's MF6 ends its one-pair interpolation records with four
+    explicit zeros::
+
+        16          2          0          0          0          0
+
+    Fifty-two records of a single section, and every one of them re-written
+    wrongly by an emitter that had no way to say so.
     """
 
     pairs: str = PAD_BLANK
     values: str = PAD_BLANK
+    interp: str = PAD_BLANK
+
+
+#: Fields in a record line, and their width.
+FIELDS_PER_LINE = 6
+FIELD_WIDTH = 11
+
+
+class PaddingProbe:
+    """Works out how this section's writer fills a short line's unused fields.
+
+    Both conventions are legal and both are in use, so re-emitting a section
+    faithfully means knowing which one it arrived in. The three record kinds are
+    probed apart because they disagree inside a single real section — see
+    :class:`PadStyle`.
+
+    The first short record of each kind decides it, and then that kind stops
+    being looked at: checking every record would cost a field lookup per line on a
+    file with a million of them, for a property that does not change within a
+    section. A body that fills all six fields tells us nothing and is skipped,
+    which is why a section can finish with a kind still unknown — that resolves
+    to blanks, the convention kika emitted before any of this existed.
+    """
+
+    def __init__(self) -> None:
+        self.pairs = None
+        self.values = None
+        self.interp = None
+
+    def _read(self, lines: List[str], end_idx: int, n_fields: int):
+        used = n_fields % FIELDS_PER_LINE
+        if used == 0 or end_idx <= 0 or end_idx > len(lines):
+            return None
+        field = lines[end_idx - 1][used * FIELD_WIDTH:(used + 1) * FIELD_WIDTH]
+        if not field.strip():
+            return PAD_BLANK
+        return PAD_ZERO if parse_number(field) == 0 else None
+
+    def observe_pairs(self, lines: List[str], end_idx: int, n_pairs: int) -> None:
+        """A TAB1 x/y body, which uses two fields per point."""
+        if self.pairs is None:
+            self.pairs = self._read(lines, end_idx, 2 * n_pairs)
+
+    def observe_values(self, lines: List[str], end_idx: int, n: int) -> None:
+        """A LIST body, one field per value."""
+        if self.values is None:
+            self.values = self._read(lines, end_idx, n)
+
+    def observe_interp(self, lines: List[str], end_idx: int, n_pairs: int) -> None:
+        """An interpolation record, which uses two fields per (NBT, INT) pair."""
+        if self.interp is None and n_pairs:
+            self.interp = self._read(lines, end_idx, 2 * n_pairs)
+
+    def resolve(self) -> PadStyle:
+        return PadStyle(pairs=self.pairs or PAD_BLANK,
+                        values=self.values or PAD_BLANK,
+                        interp=self.interp or PAD_BLANK)
 
 
 def _tail_format(pad: str) -> str:
@@ -586,9 +655,12 @@ def parse_tab1(lines, start):
     return header, interp_pairs, x_data, y_data, idx
 
 
-def format_interp_pairs(pairs, mat, mf, mt, start_line):
+def format_interp_pairs(pairs, mat, mf, mt, start_line, pad=PAD_BLANK):
     """
     Format NR interpolation (NBT, INT) pairs into ENDF lines.
+
+    *pad* fills the unused fields of the last line: blanks, or explicit integer
+    zeros. Both are in use — see :class:`PadStyle`.
 
     Returns
     -------
@@ -607,8 +679,8 @@ def format_interp_pairs(pairs, mat, mf, mt, start_line):
             values.extend([nbt, interp])
             fmts.extend([ENDF_FORMAT_INT, ENDF_FORMAT_INT])
         while len(values) < 6:
-            values.append(None)
-            fmts.append(ENDF_FORMAT_BLANK)
+            values.append(0 if pad == PAD_ZERO else None)
+            fmts.append(ENDF_FORMAT_INT if pad == PAD_ZERO else ENDF_FORMAT_BLANK)
         result_lines.append(format_endf_data_line(values, mat, mf, mt, line_num, formats=fmts))
         line_num += 1
     return result_lines, line_num
@@ -648,14 +720,14 @@ def format_data_pairs(x_data, y_data, mat, mf, mt, start_line, pad=PAD_BLANK):
 
 
 def format_tab1(c1, c2, l1, l2, interp_pairs, x_data, y_data, mat, mf, mt,
-                start_line, pad=PAD_BLANK):
+                start_line, pad=PAD_BLANK, interp_pad=PAD_BLANK):
     """
     Format a complete TAB1 record to ENDF lines.
 
-    *pad* reaches the x/y body only. The interpolation record keeps blank
-    padding regardless, because that is what the tapes that zero-fill their data
-    lines do — ``tsl_4-Be.txt`` writes ``       1621          1`` followed by
-    blanks on the same tape whose data lines end in explicit zeros.
+    *pad* reaches the x/y body and *interp_pad* the interpolation record. They
+    are separate because the two disagree inside one section: ``tsl_4-Be.txt``
+    writes ``       1621          1`` followed by blanks on the same tape whose
+    data lines end in explicit zeros, and ENDF/B-VIII.1's O-16 does the reverse.
 
     Parameters
     ----------
@@ -691,7 +763,8 @@ def format_tab1(c1, c2, l1, l2, interp_pairs, x_data, y_data, mat, mf, mt,
 
     # Interpolation pairs
     if nr > 0:
-        ip_lines, line_num = format_interp_pairs(interp_pairs, mat, mf, mt, line_num)
+        ip_lines, line_num = format_interp_pairs(
+            interp_pairs, mat, mf, mt, line_num, pad=interp_pad)
         result_lines.extend(ip_lines)
 
     # Data pairs
@@ -733,7 +806,8 @@ def parse_tab2(lines, start):
     return header, interp_pairs, idx
 
 
-def format_tab2(c1, c2, l1, l2, interp_pairs, nz, mat, mf, mt, start_line):
+def format_tab2(c1, c2, l1, l2, interp_pairs, nz, mat, mf, mt, start_line,
+                interp_pad=PAD_BLANK):
     """
     Format a TAB2 record to ENDF lines.
 
@@ -749,6 +823,8 @@ def format_tab2(c1, c2, l1, l2, interp_pairs, nz, mat, mf, mt, start_line):
         Number of sub-records (written to C6).
     mat, mf, mt : int
     start_line : int
+    interp_pad : str, optional
+        How the interpolation record's unused fields are filled.
 
     Returns
     -------
@@ -770,7 +846,8 @@ def format_tab2(c1, c2, l1, l2, interp_pairs, nz, mat, mf, mt, start_line):
     line_num += 1
 
     if nr > 0:
-        ip_lines, line_num = format_interp_pairs(interp_pairs, mat, mf, mt, line_num)
+        ip_lines, line_num = format_interp_pairs(
+            interp_pairs, mat, mf, mt, line_num, pad=interp_pad)
         result_lines.extend(ip_lines)
 
     return result_lines, line_num

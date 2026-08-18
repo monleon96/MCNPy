@@ -51,8 +51,9 @@ Start with ``summary()``, which says what the file actually contained:
 Check what was dropped
 ----------------------
 
-That last line matters. kika does not yet model every ENDF section — MF5, MF6
-and MF12-15 are not read — so a decode is often **partial**, and
+That last line matters. kika does not yet model every ENDF section — MF5 and
+MF6 are parsed but not yet carried into the model, and MF12-15 are not read at
+all — so a decode is often **partial**, and
 ``ev.report`` is the only thing that says so:
 
 .. code-block:: python
