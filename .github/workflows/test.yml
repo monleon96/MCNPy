@@ -61,7 +61,7 @@ jobs:
           KIKA_TAPES: /nonexistent
         run: >-
           poetry run pytest -q
-          -m "not tape and not njoy and not gnds and not slow and not perf"
+          -m "not tape and not njoy and not slow and not perf"
 
   wheel:
     # Guards the `exclude` list in pyproject.toml. Test fixtures — including
