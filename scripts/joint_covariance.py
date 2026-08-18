@@ -671,14 +671,96 @@ class JointCov:
             obj = obj.restrict(*energy_range_ev)
         return obj
 
+    def collapse_orders(
+        self,
+        order_weights: Dict[int, np.ndarray],
+        order_grids_ev: Dict[int, np.ndarray],
+    ) -> Tuple[Dict[Tuple[int, int], np.ndarray], Dict[int, np.ndarray]]:
+        """Coarsen each order onto a mesh of its own, shape blocks and cross alike.
+
+        ``order_weights[l]`` is the (G_l, M1) matrix that averages this object's
+        M1 fine a_l bins onto order ``l``'s G_l groups -- the same weights the
+        central values are collapsed with, so the ratio the ENDF entry means
+        stays the ratio it was built from. ``order_grids_ev[l]`` gives the G_l+1
+        boundaries.
+
+        One map does both halves::
+
+            block(l, l1) = W_l C34(l, l1) W_l1^T
+            cross(l)     = Cross(l) W_l^T
+
+        which is why they are collapsed here and not by the caller: supplied
+        separately they can disagree, and a cross block whose columns sit on a
+        different mesh than the shape block it correlates with is silently
+        wrong -- nothing downstream can detect it.
+
+        Being a congruence, ``W C W^T`` keeps PSD; no eigenvalue can appear that
+        the fine object did not have.
+        """
+        orders = list(range(1, self.l_max + 1))
+        missing = [l for l in orders if l not in order_weights
+                   or l not in order_grids_ev]
+        if missing:
+            raise ValueError(
+                f"order_weights/order_grids_ev are missing order(s) {missing}; "
+                f"every order in 1..{self.l_max} needs both"
+            )
+        W, sizes = {}, {}
+        for l in orders:
+            w = np.asarray(order_weights[l], dtype=float)
+            g = np.asarray(order_grids_ev[l], dtype=float)
+            if w.ndim != 2 or w.shape[1] != self.n_a_bins:
+                raise ValueError(
+                    f"order_weights[{l}] is {w.shape}, expected "
+                    f"(G_{l}, {self.n_a_bins})"
+                )
+            if g.size != w.shape[0] + 1:
+                raise ValueError(
+                    f"order_grids_ev[{l}] has {g.size} edges, expected "
+                    f"{w.shape[0] + 1} for {w.shape[0]} groups"
+                )
+            if np.any(np.diff(g) <= 0):
+                raise ValueError(
+                    f"order_grids_ev[{l}] must be strictly increasing")
+            W[l], sizes[l] = w, w.shape[0]
+
+        c34 = self.c34
+        rows = {l: np.arange(self.n_a_bins) * self.l_max + (l - 1)
+                for l in orders}
+        blocks = {}
+        for l in orders:
+            for l1 in range(l, self.l_max + 1):
+                fine = c34[np.ix_(rows[l], rows[l1])]
+                blocks[(l, l1)] = W[l] @ fine @ W[l1].T
+
+        cross_blocks = {}
+        if self.has_cross:
+            cx = self.cross.reshape(self.n_sigma, self.n_a_bins, self.l_max)
+            for l in orders:
+                cross_blocks[l] = cx[:, :, l - 1] @ W[l].T
+        return blocks, cross_blocks
+
     def to_endf_sections(self, za: float, awr: float, mat: int, mt: int = 2,
-                         ltt: int = 1):
+                         ltt: int = 1,
+                         order_weights: Optional[Dict[int, np.ndarray]] = None,
+                         order_grids_ev: Optional[Dict[int, np.ndarray]] = None):
         """Build the (MF33MT, MF34MT) sections this object represents.
 
         The a_l half is handed to ``create_mf34_from_covariance`` unreshaped:
         its documented layout ``idx = i_energy * n_orders + (l - l_min)`` is
         this object's layout, on purpose. The cross block, when present, goes
         out as the (L=0, L1) LB=6 sub-subsections that writer already supports.
+
+        Pass ``order_weights`` and ``order_grids_ev`` together to give each
+        order a mesh of its own -- see :meth:`collapse_orders`. ENDF-6 states
+        the grids inside each (L, L1) sub-subsection, so this is ordinary
+        format: an order whose coefficient is well determined need not be
+        written at the resolution the noisiest one needs. Without them the
+        emission is unchanged, and passing meshes that all coincide with
+        ``grid_a_ev`` reproduces it byte for byte.
+
+        The magnitude half never moves: MF33 and the L=0 dimension of the cross
+        stay on ``grid_sigma_ev`` either way.
 
         Writing is left to the caller so the host range-merge stays in one
         place (``merge_mf33_covariance_into_host`` / ``merge_mf34``): outside
@@ -690,15 +772,31 @@ class JointCov:
         )
         if not (self.sigma_is_relative and self.a_is_relative):
             raise ValueError("ENDF LB=5/6 entries are relative; this joint is not")
+        if (order_weights is None) != (order_grids_ev is None):
+            raise ValueError(
+                "order_weights and order_grids_ev go together; got "
+                f"order_weights={'set' if order_weights is not None else 'None'}, "
+                f"order_grids_ev={'set' if order_grids_ev is not None else 'None'}"
+            )
         sec33 = create_mf33_from_covariance(
             self.c33, self.grid_sigma_ev, za=za, awr=awr, mat=mat, mt=mt,
         )
-        cross_cov = None
-        if self.has_cross:
-            cx = self.cross.reshape(self.n_sigma, self.n_a_bins, self.l_max)
-            cross_cov = {l + 1: cx[:, :, l] for l in range(self.l_max)}
+
+        if order_weights is None:
+            a_cov, a_grid = self.c34, self.grid_a_ev
+            cross_cov = None
+            if self.has_cross:
+                cx = self.cross.reshape(self.n_sigma, self.n_a_bins, self.l_max)
+                cross_cov = {l + 1: cx[:, :, l] for l in range(self.l_max)}
+        else:
+            a_cov, cross_blocks = self.collapse_orders(
+                order_weights, order_grids_ev)
+            a_grid = {l: np.asarray(order_grids_ev[l], dtype=float)
+                      for l in range(1, self.l_max + 1)}
+            cross_cov = cross_blocks or None
+
         sec34 = create_mf34_from_covariance(
-            self.c34, self.grid_a_ev, max_order=self.l_max,
+            a_cov, a_grid, max_order=self.l_max,
             za=za, awr=awr, mat=mat, mt=mt, ltt=ltt,
             cross_cov=cross_cov,
             cross_energy_grid_ev=self.grid_sigma_ev if cross_cov else None,
