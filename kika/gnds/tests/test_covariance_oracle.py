@@ -172,3 +172,57 @@ def test_the_encodings_group_a_mixed_covariance_differently(
                 f"grid kika's ENDF adapter merged onto"
             ),
         )
+
+
+def test_the_sum_of_a_mixed_reproduces_the_matrix_endf_merged(
+    gndsCovariances, fe56_b81_tape
+):
+    """The test the docstring above says belongs "wherever the two paths are
+    made to produce one answer". This is that place.
+
+    **The arithmetic is not invented here.** ``MF33MT._process_ni_records_to_matrix``
+    already performs it on the ENDF side and has since long before GNDS: every
+    NI sub-subsection projected piecewise-constant onto the union of the grids
+    and added, LB=8/9 decoded as LB=0 — i.e. the short-range self-scaling term
+    is summed in like any other. That is the carrier the thesis runs on, so the
+    question is not "what should combining a ``mixed`` do" but "does the ENDF
+    answer come back out of the GNDS components", and the answer decides
+    §2.2 rather than opening it.
+
+    The previous test pins the grids; this one pins the values, which is the
+    half that was never measured.
+    """
+    from kika.endf.classes.mf33.mf33 import MF33MT
+
+    gnds, _ = gndsCovariances
+    fromGnds = _byMT(gnds)
+    fromEndf = _byMT(_endfSections(fe56_b81_tape))
+
+    compared = 0
+    for mt in sorted(fromGnds):
+        components = fromGnds[mt]
+        if len(components) == 1:
+            continue
+        merged = fromEndf[mt][0]
+        union = np.unique(np.concatenate([c.rowGrid for c in components]))
+
+        assert {c.isRelative for c in components} == {merged.isRelative}, (
+            f"MT{mt}: the components and the merged matrix disagree about "
+            f"relative-ness, so adding them is not the same operation"
+        )
+
+        total = np.zeros((len(union) - 1, len(union) - 1), dtype=float)
+        for component in components:
+            total += MF33MT._project_matrix_piecewise_constant(
+                component.matrix, list(component.rowGrid), list(union),
+                list(component.columnGrid) if component.columnGrid is not None
+                else None,
+            )
+
+        np.testing.assert_allclose(
+            total, merged.matrix, rtol=1e-9, atol=0,
+            err_msg=f"MT{mt}: the summed GNDS components are not ENDF's matrix",
+        )
+        compared += 1
+
+    assert compared == 3, f"expected MT1, MT2 and MT102 to be mixed; {compared}"
