@@ -211,6 +211,41 @@ def test_a_paired_entry_with_no_writer_fails_the_check():
     assert nodes.check() == (), "the table was not restored"
 
 
+def test_every_unimplemented_distribution_is_placed_at_a_choice_point():
+    """The model's list of unimplemented distributions is not a list of §18 laws.
+
+    Two of its six names are not members of §18.1.1's choice at all —
+    ``recoil`` belongs to ``angularTwoBody`` (``gnds.xsd:1670``), where it is
+    already read and written, and ``NBodyPhaseSpace`` is an §18.3 *energy* form
+    (``gnds.xsd:1703``). Both read like laws phase 7b owes, and treating them as
+    such would mean adding a ``distributionForm`` entry the schema does not
+    admit — the same class of mistake as the ``isotropic2d`` the writer used to
+    emit under ``distribution``.
+
+    So each name is either an entry here or explicitly placed elsewhere, and
+    this is what stops a third state — named in the model, absent from both.
+    """
+    from kika.nuclear_data.model.distributions import \
+        NOT_IMPLEMENTED_DISTRIBUTIONS
+
+    for name in NOT_IMPLEMENTED_DISTRIBUTIONS:
+        elsewhere = nodes.NOT_A_DISTRIBUTION_FORM.get(name)
+        if elsewhere is not None:
+            assert ("distributionForm", name) not in NODES, (
+                f"{name} is declared not to be a distribution form and has an "
+                f"entry as one"
+            )
+            assert "gnds.xsd:" in elsewhere, (
+                f"{name}'s placement cites no schema line, so it is an opinion"
+            )
+            continue
+        assert ("distributionForm", name) in NODES, (
+            f"{name} is declared unimplemented in the model and appears at no "
+            f"choice point — add the entry, or say where it really belongs in "
+            f"nodes.NOT_A_DISTRIBUTION_FORM"
+        )
+
+
 def test_registering_an_undeclared_node_fails_at_import_time():
     """The other direction, and the one that makes phase 7b safe: a reader for
     a §18 law that nobody declared cannot be added quietly."""

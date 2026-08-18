@@ -153,13 +153,30 @@ class KalbachMann(_UnimplementedDistribution):
 
 
 class NBodyPhaseSpace(_UnimplementedDistribution):
+    """**Not a `<distribution>` form.** §18.3's *energy* choice
+    (``gnds.xsd:1703``), inside ``uncorrelated/energy`` — so it arrives with
+    :class:`Uncorrelated` and not on its own."""
+
     gndsNodeName = "NBodyPhaseSpace"
 
 
 class Recoil(_UnimplementedDistribution):
+    """**Not a `<distribution>` form either, and not unimplemented.**
+    ``gnds.xsd:1647-1662`` does not admit ``recoil`` there; it occurs only
+    inside ``angularTwoBody`` (``gnds.xsd:1670``) as a bare
+    ``<recoil href=…/>``, where it is the library's commonest shape and kika
+    both reads and writes it — onto :attr:`AngularTwoBody.recoilHref`, which is
+    where a link belongs. The class is kept because it is exported, and named
+    here so that nobody restores it to the §18.1.1 table on the strength of
+    this list."""
+
     gndsNodeName = "recoil"
 
 
+#: What a reader meeting one of these can be told is missing. **Two of the six
+#: are not members of §18.1.1's choice at all** — see the two docstrings above —
+#: which is why :data:`kika.gnds.nodes.NOT_A_DISTRIBUTION_FORM` names their real
+#: choice point and a test holds the two lists against each other.
 NOT_IMPLEMENTED_DISTRIBUTIONS = {
     cls.gndsNodeName: cls
     for cls in (Uncorrelated, EnergyAngular, AngularEnergy, KalbachMann,

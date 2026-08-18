@@ -77,8 +77,8 @@ from kika.nuclear_data.model.styles import (AverageProductData,
                                             MonteCarlo_cdf, SnElasticUpScatter)
 
 __all__ = ["Status", "NodeSpec", "NODES", "KNOWN_DEFECTS",
-           "ONE_SIDED_ATTRIBUTES", "reads", "writes", "readersOf", "check",
-           "UndeclaredNode"]
+           "NOT_A_DISTRIBUTION_FORM", "ONE_SIDED_ATTRIBUTES", "reads", "writes",
+           "readersOf", "check", "UndeclaredNode"]
 
 
 class Status(str, Enum):
@@ -127,13 +127,36 @@ def _spec(*args, **kwargs) -> Tuple[Tuple[str, str], NodeSpec]:
     return spec.key, spec
 
 
-#: Phase 7b's landing strip: the five §18 laws and the three multiplicity forms
-#: are already here as ``READ_ONLY``/``NEITHER`` entries with a reason. When
-#: their writers land they become ``PAIRED``, and :func:`check` is what notices
-#: that the declaration and the code agree again.
+#: Phase 7b's landing strip: the §18 laws and the multiplicity forms kika
+#: declares are already here as ``READ_ONLY``/``NEITHER`` entries with a reason.
+#: When their writers land they become ``PAIRED``, and :func:`check` is what
+#: notices that the declaration and the code agree again.
+#:
+#: **Four §18 entries carry this, not five.** ``gnds.xsd:1647-1662`` gives
+#: §18.1.1's choice twelve members; kika names six of them below and the count
+#: of *unimplemented* ones is four — ``uncorrelated``, ``energyAngular``,
+#: ``angularEnergy``, ``KalbachMann``. ``branching3d`` is deliberately absent,
+#: as the guinea pig of the import-time ratchet (see :func:`reads` and its
+#: test). The remaining five — ``reference``, ``CoulombPlusNuclearElastic``,
+#: ``coherentPhotonScattering``, ``incoherentPhotonScattering``,
+#: ``thermalNeutronScatteringLaw`` — occur **zero times** across the 558 neutron
+#: evaluations the census walked, which is why they are not entries.
 _PHASE_7B = ("declared in the model and not implemented — "
-             "kika/nuclear_data/model/distributions.py:162 lists them — "
+             "kika/nuclear_data/model/distributions.py:163 lists them — "
              "and scheduled for phase 7b")
+
+#: Two of the six names in
+#: :data:`~kika.nuclear_data.model.distributions.NOT_IMPLEMENTED_DISTRIBUTIONS`
+#: are **not** members of §18.1.1's choice, so they cannot have a
+#: ``distributionForm`` entry. Their real choice point is named here rather than
+#: left to be rediscovered, because the model's list reads like a list of §18
+#: laws and is not one.
+NOT_A_DISTRIBUTION_FORM = {
+    "recoil": "angularTwoBodyForm — gnds.xsd:1670, where it is already PAIRED "
+              "as a bare <recoil href=…/> onto AngularTwoBody.recoilHref",
+    "NBodyPhaseSpace": "§18.3's energy choice — gnds.xsd:1703, inside "
+                       "uncorrelated/energy, so it lands with uncorrelated",
+}
 
 NODES: Dict[Tuple[str, str], NodeSpec] = dict([
     # -- §5-6 functionals. `primitives.FUNCTION_1D` / `_2D` derive from these.
@@ -181,13 +204,13 @@ NODES: Dict[Tuple[str, str], NodeSpec] = dict([
     # -- §17.3 multiplicity forms. gnds.xsd:1626, an xs:choice.
     _spec("constant1d", "multiplicityForm", "§17.3", Constant1d, Status.PAIRED),
     _spec("reference", "multiplicityForm", "§17.3", None, Status.READ_ONLY,
-          "kika/gnds/decode.py:594 names it and reports it; kika's Multiplicity "
+          "kika/gnds/decode.py:576-597 names it and reports it; kika's Multiplicity "
           "is a constant or a function of E, and a link needs a node the model "
           "does not have. " + _PHASE_7B),
     _spec("unspecified", "multiplicityForm", "§17.3", None, Status.READ_ONLY,
-          "kika/gnds/decode.py:594 names it and reports it. " + _PHASE_7B),
+          "kika/gnds/decode.py:576-597 names it and reports it. " + _PHASE_7B),
     _spec("branching1d", "multiplicityForm", "§17.3", None, Status.READ_ONLY,
-          "kika/gnds/decode.py:594 names it and reports it; an isomeric "
+          "kika/gnds/decode.py:576-597 names it and reports it; an isomeric "
           "branching is not a multiplicity kika can evaluate. " + _PHASE_7B),
 
     # -- §18.1.1 distribution forms. gnds.xsd:1647, an xs:choice.
