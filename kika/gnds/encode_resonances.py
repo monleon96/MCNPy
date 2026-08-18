@@ -92,30 +92,43 @@ def _constant(parent: ET.Element, tag: Optional[str], value: float, domain,
     return node
 
 
-def _scatteringRadius(parent: ET.Element, radius: Optional[ScatteringRadius],
-                      report: ConversionReport, where: str, domain,
-                      tag: str = "scatteringRadius") -> None:
-    """§19's radius. **The unit is written as the model holds it, or not at all.**
+def _radiusUnit(unit: Optional[str], report: ConversionReport,
+                where: str) -> str:
+    """The unit to label a radius axis with, and the warning when there is none.
 
-    An ENDF-sourced suite carries the radius in ENDF's units — a tenth of a
-    femtometre count — and ``unit`` is ``None`` for it, because the ENDF adapter
-    states none. Writing ``fm`` there would be a factor-of-ten error dressed as
-    a label, so the axis goes out with an empty unit and the report says why.
+    **Every radius kika writes goes through here**, and that is the point. The
+    rule below used to live in :func:`_scatteringRadius` alone, while the two
+    call sites that write a radius through :func:`_constant` — a
+    ``resonanceReaction``'s and a ``channel``'s — labelled theirs ``fm``
+    outright. On an ENDF-sourced suite that is the factor-of-ten error this
+    docstring forbids, written into the file as a fact: measured on the
+    Fe-56 micro-tape, kika emitted ``0.5002`` labelled ``fm`` where FUDGE emits
+    ``5.002 fm``.
     """
-    if radius is None:
-        return
-    element = ET.SubElement(parent, tag)
-    if radius.unit is None:
+    if unit is None:
         report.warn(
             f"{where}: the scattering radius carries no unit — it came from a "
             f"reader that states none, and ENDF's AP is in units of 10^-12 cm "
             f"while GNDS's is in fm. The axis is written with an empty unit "
             f"rather than labelled fm, because the number may not be in fm"
         )
+        return ""
+    return unit
+
+
+def _scatteringRadius(parent: ET.Element, radius: Optional[ScatteringRadius],
+                      report: ConversionReport, where: str, domain,
+                      tag: str = "scatteringRadius") -> None:
+    """§19's radius. **The unit is written as the model holds it, or not at all**
+    — see :func:`_radiusUnit`, which is where that rule lives."""
+    if radius is None:
+        return
+    element = ET.SubElement(parent, tag)
+    unit = _radiusUnit(radius.unit, report, where)
     if radius.isEnergyDependent:
         node = ET.SubElement(element, "XYs1d")
         node.attrib["label"] = "eval"
-        _radiusAxes(node, radius.unit)
+        _radiusAxes(node, unit)
         values = ET.SubElement(node, "values")
         values.text = " ".join(
             _number(v) for pair in zip(radius.energies, radius.values) for v in pair
@@ -124,7 +137,7 @@ def _scatteringRadius(parent: ET.Element, radius: Optional[ScatteringRadius],
     node = ET.SubElement(element, "constant1d")
     _set(node, label="eval", value=_number(radius.constant),
          domainMin=domain[0], domainMax=domain[1])
-    _radiusAxes(node, radius.unit)
+    _radiusAxes(node, unit)
 
 
 def _radiusAxes(parent: ET.Element, unit: Optional[str]) -> None:
@@ -187,7 +200,8 @@ def _rMatrix(parent: ET.Element, formalism: RMatrix,
     _nestedPoPs(formalism, report, "RMatrix")
     if formalism.scatteringRadius is not None:
         _scatteringRadius(element, ScatteringRadius(
-            constant=formalism.scatteringRadius), report, "RMatrix", domain)
+            constant=formalism.scatteringRadius,
+            unit=formalism.radiusUnit), report, "RMatrix", domain)
 
     reactions = ET.SubElement(element, "resonanceReactions")
     for reaction in formalism.resonanceReactions:
@@ -219,7 +233,8 @@ def _resonanceReaction(parent: ET.Element, reaction, report: ConversionReport,
         _constant(element, "Q", reaction.Q, domain, unit="eV", label="Q")
     if reaction.scatteringRadius is not None:
         _constant(element, "scatteringRadius", reaction.scatteringRadius,
-                  domain, unit="fm")
+                  domain, unit=_radiusUnit(reaction.radiusUnit, report,
+                                           "resonanceReaction"))
 
 
 def _spinGroup(parent: ET.Element, group, report: ConversionReport,
@@ -242,7 +257,9 @@ def _spinGroup(parent: ET.Element, group, report: ConversionReport,
         for tag, value in (("scatteringRadius", channel.scatteringRadius),
                            ("hardSphereRadius", channel.hardSphereRadius)):
             if value is not None:
-                _constant(node, tag, value, domain, unit="fm")
+                _constant(node, tag, value, domain,
+                          unit=_radiusUnit(channel.radiusUnit, report,
+                                           f"channel[@label='{channel.label}']/{tag}"))
 
     _rMatrixTable(element, group, report)
 
@@ -298,7 +315,8 @@ def _breitWigner(parent: ET.Element, formalism: BreitWigner,
     _nestedPoPs(formalism, report, "BreitWigner")
     if formalism.scatteringRadius is not None:
         _scatteringRadius(element, ScatteringRadius(
-            constant=formalism.scatteringRadius), report, "BreitWigner", domain)
+            constant=formalism.scatteringRadius,
+            unit=formalism.radiusUnit), report, "BreitWigner", domain)
 
     resonances = [(group.L, resonance)
                   for group in formalism.resonanceParameters.spinGroups
@@ -341,7 +359,8 @@ def _unresolved(parent: ET.Element, region, report: ConversionReport,
     _nestedPoPs(widths, report, "tabulatedWidths")
     if widths.scatteringRadius is not None:
         _scatteringRadius(node, ScatteringRadius(
-            constant=widths.scatteringRadius), report, "tabulatedWidths", domain)
+            constant=widths.scatteringRadius,
+            unit=widths.radiusUnit), report, "tabulatedWidths", domain)
 
     reactions = ET.SubElement(node, "resonanceReactions")
     for reaction in widths.resonanceReactions:

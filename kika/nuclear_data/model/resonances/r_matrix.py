@@ -41,6 +41,18 @@ class Channel:
     #: by the parser, held by no model node until now, so an LRF=7 round trip
     #: wrote back a boundary condition of zero whatever the file said.
     boundaryConditionValue: Optional[float] = None
+    #: The unit the two radii above were read with — ``fm`` from GNDS, ``None``
+    #: from ENDF, which declares none. Both share one field because they come
+    #: off the same node and no file states them differently.
+    #:
+    #: It exists because the alternative was writing a *false* unit: the GNDS
+    #: writer used to label these ``fm`` unconditionally, and an ENDF-sourced
+    #: radius is a tenth of a femtometre count (AP in units of 10^-12 cm). See
+    #: :attr:`~kika.nuclear_data.model.resonances.ScatteringRadius.unit`, which
+    #: makes the same statement for the file-level radius, and note the type is
+    #: deliberately *not* ``ScatteringRadius``: ``reconstruct.py`` reads
+    #: ``channels[0].scatteringRadius`` as a number into the penetrability.
+    radiusUnit: Optional[str] = None
 
 
 @dataclass
@@ -60,6 +72,9 @@ class ResonanceReaction:
     #: treatment :class:`~kika.nuclear_data.model.cross_section_forms.Reference`
     #: gets. ``None`` for an ENDF-decoded evaluation, which has no link to give.
     href: Optional[str] = None
+    #: The unit ``scatteringRadius`` was read with. Same field, same reason as
+    #: :attr:`Channel.radiusUnit`.
+    radiusUnit: Optional[str] = None
 
 
 @dataclass
@@ -129,6 +144,9 @@ class RMatrix:
     #: different quantity and stay on :class:`Channel`, which is where §19.3.4
     #: puts them.
     scatteringRadius: Optional[float] = None
+    #: The unit the radius above was read with. Same field, same reason as
+    #: :attr:`Channel.radiusUnit`.
+    radiusUnit: Optional[str] = None
     boundaryCondition: Optional[str] = None
     #: §19.3.1. ENDF's **IFG**. ``False`` — the default and the common case —
     #: means ``widths`` are widths in eV; ``True`` means they are reduced-width

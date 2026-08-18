@@ -178,6 +178,22 @@ class _ResonanceReader:
             unit=self.radiusUnit(table),
         )
 
+    def constantUnit(self, wrapper: Optional[ET.Element]) -> Optional[str]:
+        """The radius unit out of the same wrapper :func:`_constant` reads.
+
+        The bare-float radii — a channel's, a resonance reaction's, an
+        l-block's — are numbers in the model rather than
+        :class:`~kika.nuclear_data.model.resonances.ScatteringRadius` objects,
+        because a reconstruction reads them as numbers. Their unit still has to
+        survive the read, or the writer has nothing to write and either drops
+        it or, as it did until now, asserts ``fm`` over a number that may be in
+        ENDF's tenths of a femtometre.
+        """
+        if wrapper is None:
+            return None
+        constant = wrapper.find("constant1d")
+        return None if constant is None else self.radiusUnit(constant)
+
     def radiusUnit(self, element: ET.Element) -> Optional[str]:
         """The radius axis's unit — ``fm`` in every file of the library.
 
@@ -243,6 +259,7 @@ class _ResonanceReader:
             reducedWidthAmplitudes=_isTrue(element, "reducedWidthAmplitudes"),
             relativisticKinematics=_isTrue(element, "relativisticKinematics"),
             scatteringRadius=_constant(element.find("scatteringRadius")),
+            radiusUnit=self.constantUnit(element.find("scatteringRadius")),
             PoPs=None if pops is None else self.readPoPs(pops),
             resonanceReactions=self.readResonanceReactions(element, here),
             spinGroups=[
@@ -271,6 +288,7 @@ class _ResonanceReader:
                 eliminated=_isTrue(child, "eliminated"),
                 Q=_constant(child.find("Q")),
                 scatteringRadius=_constant(child.find("scatteringRadius")),
+                radiusUnit=self.constantUnit(child.find("scatteringRadius")),
                 href=None if link is None else link.attrib.get("href"),
             ))
         return out
@@ -313,6 +331,8 @@ class _ResonanceReader:
                          if "columnIndex" in element.attrib else None),
             scatteringRadius=_constant(element.find("scatteringRadius")),
             hardSphereRadius=_constant(element.find("hardSphereRadius")),
+            radiusUnit=(self.constantUnit(element.find("scatteringRadius"))
+                        or self.constantUnit(element.find("hardSphereRadius"))),
         )
 
     def readParameterTable(self, element: ET.Element, channels: List[Channel],
@@ -412,6 +432,7 @@ class _ResonanceReader:
             ),
             calculateChannelRadius=_isTrue(element, "calculateChannelRadius"),
             scatteringRadius=_constant(element.find("scatteringRadius")),
+            radiusUnit=self.constantUnit(element.find("scatteringRadius")),
             PoPs=None if pops is None else self.readPoPs(pops),
             resonanceParameters=self.readBreitWignerTable(element, here),
         )
@@ -492,6 +513,7 @@ class _ResonanceReader:
             label=element.attrib.get("label", ""),
             selfShieldingOnly=_isTrue(element, "useForSelfShieldingOnly"),
             scatteringRadius=_constant(element.find("scatteringRadius")),
+            radiusUnit=self.constantUnit(element.find("scatteringRadius")),
             PoPs=None if pops is None else self.readPoPs(pops),
             resonanceReactions=self.readResonanceReactions(element, here),
         )

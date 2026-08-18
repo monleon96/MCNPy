@@ -78,6 +78,9 @@ class TabulatedWidths:
     spinGroups: List[UnresolvedSpinGroup] = field(default_factory=list)
     energyGrid: Optional[np.ndarray] = None
     scatteringRadius: Optional[float] = None
+    #: The unit the radius above was read with. Same field, same reason as
+    #: :attr:`~kika.nuclear_data.model.resonances.r_matrix.Channel.radiusUnit`.
+    radiusUnit: Optional[str] = None
     #: §19.4.1's ``resonanceReactions`` — the channels the averages are for,
     #: each with the link to the reaction it is. All 351 unresolved blocks in
     #: ENDF/B-VIII.1-GNDS carry them, and the schema makes the ``<link>`` inside

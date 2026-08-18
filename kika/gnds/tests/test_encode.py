@@ -216,6 +216,56 @@ def test_the_covariance_matrices_survive_the_round_trip(h2_gnds, tmp_path):
             np.testing.assert_array_equal(right.rowGrid, left.rowGrid)
 
 
+def _radii(path):
+    """Every radius in a written file, as ``(tag, value, unit of axis 0)``."""
+    found = []
+    for element in ET.parse(path).getroot().iter():
+        if element.tag not in ("scatteringRadius", "hardSphereRadius"):
+            continue
+        for form in element:
+            units = [axis.attrib.get("unit") for axis in form.iter("axis")
+                     if axis.attrib.get("index") == "0"]
+            found.append((element.tag, form.attrib.get("value"),
+                          units[0] if units else None))
+    return found
+
+
+def test_an_endf_radius_is_never_labelled_fm(micro_tape, tmp_path):
+    """ENDF's AP is in units of 10^-12 cm and GNDS's radius is in fm.
+
+    The writer's rule has always been "the unit as the model holds it, or not
+    at all" — but two call sites wrote ``unit="fm"`` outright, and an
+    ENDF-sourced radius reaching them came out a factor of ten wrong *as a
+    statement of the file*, which no schema and no round trip can see. Measured
+    on this tape before the fix: ``0.5002`` labelled ``fm``, where FUDGE's own
+    conversion of the same evaluation writes ``5.002 fm``.
+
+    The numbers are asserted too, so that a later decision to canonicalise to
+    fm has to come here and say so rather than arrive as a silent rescale.
+    """
+    path, _ = _write(kika.read(micro_tape, covariances=False), tmp_path)
+    radii = _radii(path)
+
+    assert radii, "the tape's resonance block carries radii; none were written"
+    assert {unit for _, _, unit in radii} == {""}, radii
+    assert {value for _, value, _ in radii} == {"0.5444", "0.5002"}, radii
+
+
+def test_a_gnds_radius_keeps_the_unit_it_came_with(micro_fe56_gnds, tmp_path):
+    """The other half: the model carries the unit, so a file that declares one
+    still declares it after a round trip.
+
+    Without this the fix above would be a regression dressed as honesty — every
+    radius written with an empty unit, including the ones whose unit was
+    *stated* in the file kika had just read.
+    """
+    before = _radii(micro_fe56_gnds)
+    path, _ = _write(kika.read(micro_fe56_gnds, covariances=False), tmp_path)
+
+    assert {unit for _, _, unit in before} == {"fm"}, before
+    assert _radii(path) == before
+
+
 def _matrices(form):
     from kika.nuclear_data.model import CovarianceMatrix, Mixed
 

@@ -102,6 +102,9 @@ class BreitWigner:
     approximation: BreitWignerApproximation = BreitWignerApproximation.multiLevel
     resonanceParameters: ResonanceParameters = field(default_factory=ResonanceParameters)
     scatteringRadius: Optional[float] = None
+    #: The unit the radius above was read with. Same field, same reason as
+    #: :attr:`~kika.nuclear_data.model.resonances.r_matrix.Channel.radiusUnit`.
+    radiusUnit: Optional[str] = None
     PoPs: Optional[object] = None
     label: Optional[str] = None
     #: §19.3.6. ENDF's NAPS=0 — compute the channel radius from the target mass
