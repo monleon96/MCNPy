@@ -871,9 +871,17 @@ def main() -> None:
               f"on {_m.shape[0]} shape groups")
         print(f"[NULLMASK]   by order: " + "  ".join(
             f"a_{l+1} {int(_m[:, l].sum())}" for l in range(_m.shape[1])))
-        print(f"[NULLMASK]   These are parameters `row_aggregator` never "
-              f"populated; the file declares up to 7.6 relative variance there "
-              f"and the fold was applying it at full weight (§10.1.8-L14.2).")
+        print(f"[NULLMASK]   The mask says WHICH (group, order) parameters to "
+              f"drop; it does NOT say why. Two masks are in use and they are "
+              f"not the same thing:")
+        print(f"[NULLMASK]     null slots      — `row_aggregator` never "
+              f"populated them, the file declares up to 7.6 relative variance "
+              f"anyway, and the fold applied it at full weight (§10.1.8-L14.2).")
+        print(f"[NULLMASK]     degenerate slots— LIVE, but the group mean of "
+              f"a_l cancels, so the file declares up to 4016 relative variance "
+              f"and the fold rescales it by MF4's POINTWISE a_l "
+              f"(deliverable_tape_audit.md §6.0-bis).")
+        print(f"[NULLMASK]   Read the mask's own file name to know which.")
         print(f"[NULLMASK]   JEFF and JENDL are untouched — they ship no such "
               f"term, so this asymmetry REMOVES a bias in our favour.")
     else:
