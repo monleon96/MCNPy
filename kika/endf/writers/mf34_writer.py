@@ -129,17 +129,141 @@ def _split_matrix_excluding_range(
 # ---- MF34 builder ----------------------------------------------------------
 
 
+def _normalize_shape_mesh(
+    cov_matrix: Union[np.ndarray, Dict[Tuple[int, int], np.ndarray]],
+    energy_grid_ev: Union[np.ndarray, Dict[int, np.ndarray]],
+    l_min: int,
+    max_order: int,
+) -> Tuple[Dict[int, List[float]], Dict[Tuple[int, int], np.ndarray]]:
+    """Resolve either mesh form into per-order grids and upper-triangle blocks.
+
+    Two input forms are accepted, and both leave this function by the same door
+    so the emitting loop has one code path:
+
+    *One mesh for every order* -- ``energy_grid_ev`` an array of N+1 boundaries
+    and ``cov_matrix`` the square matrix laid out ``idx = i_energy * n_orders +
+    (l - l_min)``.  The blocks are the same slices the loop used to take inline,
+    so this form is byte-identical to the pre-existing behaviour.
+
+    *A mesh per order* -- ``energy_grid_ev`` a dict ``{l: boundaries}`` and
+    ``cov_matrix`` a dict ``{(l, l1): block}`` covering the upper triangle,
+    where block ``(l, l1)`` has shape ``(n_l, n_l1)``.  ENDF-6 asks for nothing
+    more than this: each (L, L1) sub-subsection carries its own grids, LB=5 on
+    one for the diagonal and LB=6 on a row/column pair off it, so orders that
+    need different resolution do not have to share the finest one.
+
+    Returns
+    -------
+    grids : dict
+        ``{l: list of boundaries}`` for l in ``l_min..max_order``.
+    blocks : dict
+        ``{(l, l1): array}`` for the upper triangle, shaped ``(n_l, n_l1)``.
+    """
+    orders = list(range(l_min, max_order + 1))
+    per_order = isinstance(energy_grid_ev, dict)
+    if per_order != isinstance(cov_matrix, dict):
+        raise ValueError(
+            "per-order meshes need both a dict of grids and a dict of blocks; "
+            f"got energy_grid_ev={type(energy_grid_ev).__name__}, "
+            f"cov_matrix={type(cov_matrix).__name__}"
+        )
+
+    if not per_order:
+        grid = np.asarray(energy_grid_ev, dtype=float)
+        if not np.all(np.isfinite(grid)):
+            raise ValueError(
+                f"Energy grid contains non-finite values: "
+                f"{grid[~np.isfinite(grid)]}"
+            )
+        n_energies = len(grid) - 1
+        n_orders = len(orders)
+        expected = n_energies * n_orders
+        cov = np.asarray(cov_matrix, dtype=float)
+        if cov.shape != (expected, expected):
+            raise ValueError(
+                f"Covariance matrix shape {cov.shape} doesn't match "
+                f"expected ({expected}, {expected}) for "
+                f"{n_energies} energy intervals and {n_orders} Legendre orders "
+                f"(l_min={l_min}, max_order={max_order})"
+            )
+        if not np.all(np.isfinite(cov)):
+            n_inf = int(np.sum(np.isinf(cov)))
+            n_nan = int(np.sum(np.isnan(cov)))
+            bad = np.argwhere(~np.isfinite(cov))
+            raise ValueError(
+                f"Covariance matrix contains {n_inf} inf and {n_nan} NaN "
+                f"values. First 5 non-finite positions (row, col): "
+                f"{bad[:5].tolist()}"
+            )
+        grids = {l: list(energy_grid_ev) for l in orders}
+        blocks = {}
+        for l in orders:
+            rows = [i * n_orders + (l - l_min) for i in range(n_energies)]
+            for l1 in range(l, max_order + 1):
+                cols = [i * n_orders + (l1 - l_min) for i in range(n_energies)]
+                blocks[(l, l1)] = cov[np.ix_(rows, cols)]
+        return grids, blocks
+
+    missing = [l for l in orders if l not in energy_grid_ev]
+    if missing:
+        raise ValueError(
+            f"energy_grid_ev is missing a mesh for order(s) {missing}; "
+            f"every order in {l_min}..{max_order} needs one"
+        )
+    grids, sizes = {}, {}
+    for l in orders:
+        g = np.asarray(energy_grid_ev[l], dtype=float)
+        if not np.all(np.isfinite(g)):
+            raise ValueError(
+                f"Energy grid for order {l} contains non-finite values: "
+                f"{g[~np.isfinite(g)]}"
+            )
+        if len(g) < 2:
+            raise ValueError(
+                f"Energy grid for order {l} needs at least 2 boundaries, "
+                f"got {len(g)}"
+            )
+        grids[l], sizes[l] = list(g), len(g) - 1
+
+    blocks = {}
+    for l in orders:
+        for l1 in range(l, max_order + 1):
+            if (l, l1) not in cov_matrix:
+                raise ValueError(
+                    f"cov_matrix is missing the ({l}, {l1}) block; the whole "
+                    f"upper triangle over {l_min}..{max_order} is required"
+                )
+            blk = np.asarray(cov_matrix[(l, l1)], dtype=float)
+            if blk.shape != (sizes[l], sizes[l1]):
+                raise ValueError(
+                    f"cov_matrix[({l}, {l1})] shape {blk.shape} doesn't match "
+                    f"expected ({sizes[l]}, {sizes[l1]}) from the meshes of "
+                    f"orders {l} and {l1}"
+                )
+            if not np.all(np.isfinite(blk)):
+                raise ValueError(
+                    f"cov_matrix[({l}, {l1})] contains "
+                    f"{int(np.sum(~np.isfinite(blk)))} non-finite values"
+                )
+            blocks[(l, l1)] = blk
+    return grids, blocks
+
+
+
+
 def _normalize_cross_cov(
     cross_cov: Union[Dict[int, np.ndarray], np.ndarray],
     max_order: int,
     n0: int,
-    n_shape: int,
+    n_shape: Union[int, Dict[int, int]],
     zero_warn_threshold: float,
 ) -> Dict[int, np.ndarray]:
     """Validate and normalize the (L=0, L1) cross-covariance blocks.
 
     Accepts a dict ``{l1: (n0, n_shape) array}`` for ``l1`` in ``1..max_order``
-    or a stacked array of shape ``(max_order, n0, n_shape)``.  Returns a dict
+    or a stacked array of shape ``(max_order, n0, n_shape)``.  ``n_shape`` may
+    be a dict ``{l1: n}`` when the shape orders carry a mesh each, in which case
+    the stacked-array form is refused -- it cannot hold ragged blocks.  Returns a dict
     keyed by ``l1``.  Rejects non-finite entries.  Because these are *relative*
     cross-covariances ``Cov(sigma, a_l)/(sigma*a_l)``, entries blow up where an
     ``a_l`` crosses zero; a warn-only diagnostic (consistent with the PSD-check
@@ -155,6 +279,12 @@ def _normalize_cross_cov(
         blocks = {l1: np.asarray(cross_cov[l1], dtype=float)
                   for l1 in range(1, max_order + 1)}
     else:
+        if isinstance(n_shape, dict):
+            raise ValueError(
+                "with a mesh per order the cross blocks are ragged, so the "
+                "stacked-array form cannot express them; pass a dict "
+                "{l1: (n0, n_l1) array}"
+            )
         arr = np.asarray(cross_cov, dtype=float)
         if arr.shape != (max_order, n0, n_shape):
             raise ValueError(
@@ -163,12 +293,15 @@ def _normalize_cross_cov(
             )
         blocks = {l1: arr[l1 - 1] for l1 in range(1, max_order + 1)}
 
+    def _cols(l1: int) -> int:
+        return n_shape[l1] if isinstance(n_shape, dict) else n_shape
+
     big_per_order: Dict[int, int] = {}
     for l1, blk in blocks.items():
-        if blk.shape != (n0, n_shape):
+        if blk.shape != (n0, _cols(l1)):
             raise ValueError(
                 f"cross_cov[{l1}] shape {blk.shape} doesn't match expected "
-                f"({n0}, {n_shape})"
+                f"({n0}, {_cols(l1)})"
             )
         if not np.all(np.isfinite(blk)):
             raise ValueError(
@@ -192,8 +325,8 @@ def _normalize_cross_cov(
 
 
 def create_mf34_from_covariance(
-    cov_matrix: np.ndarray,
-    energy_grid_ev: np.ndarray,
+    cov_matrix: Union[np.ndarray, Dict[Tuple[int, int], np.ndarray]],
+    energy_grid_ev: Union[np.ndarray, Dict[int, np.ndarray]],
     max_order: int,
     za: float,
     awr: float,
@@ -216,15 +349,30 @@ def create_mf34_from_covariance(
     where ``l_min`` is 0 for ``ltt=2`` (a_0 included) and 1 otherwise, and
     ``n_orders = max_order - l_min + 1``.
 
+    **The orders may instead carry a mesh each.**  ENDF-6 asks for nothing more
+    than that: every (L, L1) sub-subsection states its own grids -- LB=5 on one
+    grid for a diagonal block, LB=6 on a row/column pair off it -- so an order
+    whose coefficient is well resolved does not have to be written on the mesh
+    the noisiest one needs.  Pass ``energy_grid_ev`` as ``{l: boundaries}`` and
+    ``cov_matrix`` as ``{(l, l1): block}`` over the upper triangle to use it;
+    the two dict forms go together.  With one mesh for every order the output is
+    byte-identical to the pre-existing behaviour, which
+    ``_normalize_shape_mesh`` keeps true by construction: both forms leave it by
+    the same door, and the shared form slices exactly as this function used to
+    inline.
+
     Parameters
     ----------
-    cov_matrix : np.ndarray
+    cov_matrix : np.ndarray or dict
         Square covariance matrix of shape
-        (N_energies * n_orders, N_energies * n_orders).  Must be **relative**
+        (N_energies * n_orders, N_energies * n_orders), or -- with a mesh per
+        order -- a dict ``{(l, l1): array}`` covering the upper triangle, block
+        ``(l, l1)`` shaped ``(n_l, n_l1)``.  Must be **relative**
         covariance: ``Cov_rel(i, j) = Cov_abs(i, j) / (mean_i * mean_j)``.
         ENDF-6 LB=5/LB=6 entries are interpreted as relative.
-    energy_grid_ev : np.ndarray
-        Energy boundaries in eV (``N_energies + 1`` values).
+    energy_grid_ev : np.ndarray or dict
+        Energy boundaries in eV (``N_energies + 1`` values), or a dict
+        ``{l: boundaries}`` giving order ``l`` its own mesh.
     max_order : int
         Highest Legendre order included.  With ``ltt=1`` orders span
         1..max_order; with ``ltt=2`` they span 0..max_order.
@@ -260,7 +408,11 @@ def create_mf34_from_covariance(
         byte-identical to the pre-existing behavior.
     cross_energy_grid_ev : np.ndarray, optional
         Coarse (magnitude) energy boundaries in eV for the L=0 dimension of the
-        cross blocks (``N0 + 1`` values).  Defaults to ``energy_grid_ev``.
+        cross blocks (``N0 + 1`` values).  Defaults to ``energy_grid_ev``, and
+        is **required** when the shape orders carry a mesh each -- there is then
+        no single shape grid to default to.  With per-order meshes ``cross_cov``
+        must be the dict form: block ``l1`` is ``(N0, n_l1)``, and the stacked
+        array cannot hold ragged blocks.
     cross_zero_warn_threshold : float, default 1e3
         Magnitude above which a relative cross-covariance entry triggers a
         warn-only diagnostic (a_l near a zero crossing).  Never modifies data.
@@ -286,30 +438,9 @@ def create_mf34_from_covariance(
             f"max_order={max_order} must be >= l_min={l_min} (LTT={ltt})"
         )
     n_orders = max_order - l_min + 1
-    n_energies = len(energy_grid_ev) - 1
-    expected_size = n_energies * n_orders
-
-    if cov_matrix.shape != (expected_size, expected_size):
-        raise ValueError(
-            f"Covariance matrix shape {cov_matrix.shape} doesn't match "
-            f"expected ({expected_size}, {expected_size}) for "
-            f"{n_energies} energy intervals and {n_orders} Legendre orders "
-            f"(LTT={ltt}, l_min={l_min}, max_order={max_order})"
-        )
-
-    if not np.all(np.isfinite(cov_matrix)):
-        n_inf = int(np.sum(np.isinf(cov_matrix)))
-        n_nan = int(np.sum(np.isnan(cov_matrix)))
-        bad = np.argwhere(~np.isfinite(cov_matrix))
-        raise ValueError(
-            f"Covariance matrix contains {n_inf} inf and {n_nan} NaN values. "
-            f"First 5 non-finite positions (row, col): {bad[:5].tolist()}"
-        )
-    if not np.all(np.isfinite(energy_grid_ev)):
-        raise ValueError(
-            f"Energy grid contains non-finite values: "
-            f"{energy_grid_ev[~np.isfinite(energy_grid_ev)]}"
-        )
+    grids, blocks = _normalize_shape_mesh(
+        cov_matrix, energy_grid_ev, l_min, max_order
+    )
 
     mf34 = MF34MT(number=mt)
     mf34._za = za
@@ -330,17 +461,14 @@ def create_mf34_from_covariance(
     lct_map = {"same-as-MF4": 0, "LAB": 1, "CM": 2}
     lct = lct_map.get(frame, 0)
 
-    grid = list(energy_grid_ev)
     for l in range(l_min, max_order + 1):
         for l1 in range(l, max_order + 1):
-            row_indices = [i * n_orders + (l - l_min) for i in range(n_energies)]
-            col_indices = [i * n_orders + (l1 - l_min) for i in range(n_energies)]
-            sub_matrix = cov_matrix[np.ix_(row_indices, col_indices)]
+            sub_matrix = blocks[(l, l1)]
 
             if l == l1:
-                records = [_make_lb5_record(sub_matrix, grid)]
+                records = [_make_lb5_record(sub_matrix, grids[l])]
             else:
-                records = [_make_lb6_record(sub_matrix, grid, grid)]
+                records = [_make_lb6_record(sub_matrix, grids[l], grids[l1])]
 
             sub_subsec = SubSubsection(l=l, l1=l1, lct=lct, ni=1, records=records)
             subsection.sub_subsections.append(sub_subsec)
@@ -351,8 +479,8 @@ def create_mf34_from_covariance(
 
 
 def _create_mf34_with_cross(
-    cov_matrix: np.ndarray,
-    energy_grid_ev: np.ndarray,
+    cov_matrix: Union[np.ndarray, Dict[Tuple[int, int], np.ndarray]],
+    energy_grid_ev: Union[np.ndarray, Dict[int, np.ndarray]],
     max_order: int,
     za: float,
     awr: float,
@@ -388,33 +516,28 @@ def _create_mf34_with_cross(
     if max_order < 1:
         raise ValueError(f"max_order={max_order} must be >= 1 for cross blocks")
 
-    n_shape = len(energy_grid_ev) - 1
-    n_orders = max_order  # l_min = 1 for the shape layout
-    expected_size = n_shape * n_orders
-    if cov_matrix.shape != (expected_size, expected_size):
-        raise ValueError(
-            f"Covariance matrix shape {cov_matrix.shape} doesn't match "
-            f"expected ({expected_size}, {expected_size}) for {n_shape} energy "
-            f"intervals and {n_orders} Legendre orders (LTT=1 shape layout, "
-            f"max_order={max_order})"
-        )
-    if not np.all(np.isfinite(cov_matrix)):
-        n_inf = int(np.sum(np.isinf(cov_matrix)))
-        n_nan = int(np.sum(np.isnan(cov_matrix)))
-        bad = np.argwhere(~np.isfinite(cov_matrix))
-        raise ValueError(
-            f"Covariance matrix contains {n_inf} inf and {n_nan} NaN values. "
-            f"First 5 non-finite positions (row, col): {bad[:5].tolist()}"
-        )
-    if not np.all(np.isfinite(energy_grid_ev)):
-        raise ValueError(
-            f"Energy grid contains non-finite values: "
-            f"{energy_grid_ev[~np.isfinite(energy_grid_ev)]}"
-        )
-
-    cross_grid_arr = (
-        energy_grid_ev if cross_energy_grid_ev is None else cross_energy_grid_ev
+    shape_grids, shape_blocks = _normalize_shape_mesh(
+        cov_matrix, energy_grid_ev, 1, max_order
     )
+    n_shape_per_order = {l: len(shape_grids[l]) - 1
+                         for l in range(1, max_order + 1)}
+    # Only ragged meshes force the dict form on ``cross_cov``. When every order
+    # ends up on the same number of intervals the stacked (max_order, N0, N)
+    # array is still expressible, and the API has always accepted it.
+    _sizes = set(n_shape_per_order.values())
+    n_shape_arg = n_shape_per_order if len(_sizes) > 1 else _sizes.pop()
+
+    if cross_energy_grid_ev is None:
+        if isinstance(energy_grid_ev, dict):
+            # "defaults to energy_grid_ev" has no meaning once the shape orders
+            # stop sharing one: there is no single grid to fall back to.
+            raise ValueError(
+                "cross_energy_grid_ev is required when the shape orders carry "
+                "a mesh each -- there is no single shape grid to default to"
+            )
+        cross_grid_arr = energy_grid_ev
+    else:
+        cross_grid_arr = cross_energy_grid_ev
     if not np.all(np.isfinite(cross_grid_arr)):
         raise ValueError(
             f"Cross energy grid contains non-finite values: "
@@ -423,7 +546,7 @@ def _create_mf34_with_cross(
     n0 = len(cross_grid_arr) - 1
 
     blocks = _normalize_cross_cov(
-        cross_cov, max_order, n0, n_shape, cross_zero_warn_threshold
+        cross_cov, max_order, n0, n_shape_arg, cross_zero_warn_threshold
     )
 
     mf34 = MF34MT(number=mt)
@@ -448,18 +571,15 @@ def _create_mf34_with_cross(
     lct_map = {"same-as-MF4": 0, "LAB": 1, "CM": 2}
     lct = lct_map.get(frame, 0)
 
-    shape_grid = list(energy_grid_ev)
     cross_grid = list(cross_grid_arr)
 
     for l in range(0, max_order + 1):
         for l1 in range(l, max_order + 1):
-            row_grid = cross_grid if l == 0 else shape_grid
-            col_grid = cross_grid if l1 == 0 else shape_grid
+            row_grid = cross_grid if l == 0 else shape_grids[l]
+            col_grid = cross_grid if l1 == 0 else shape_grids[l1]
 
             if l >= 1:
-                row_indices = [i * n_orders + (l - 1) for i in range(n_shape)]
-                col_indices = [i * n_orders + (l1 - 1) for i in range(n_shape)]
-                sub_matrix = cov_matrix[np.ix_(row_indices, col_indices)]
+                sub_matrix = shape_blocks[(l, l1)]
             elif l1 == 0:
                 # Null magnitude self-block (belongs in MF33).
                 sub_matrix = np.zeros((n0, n0), dtype=float)
