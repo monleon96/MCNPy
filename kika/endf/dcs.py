@@ -49,6 +49,7 @@ __all__ = [
     "transform_angular_curve",
     "interpolate_log_log",
     "bin_edges_for_energy",
+    "bin_edges_for_width",
     "sigma_nominal",
     "sigma_bin_averaged",
     "sigma_folded",
@@ -342,6 +343,56 @@ def bin_edges_for_energy(energies: Sequence[float], index: int) -> Tuple[float, 
         lo = 0.5 * (e[index - 1] + ei)
         hi = 0.5 * (ei + e[index + 1])
     return max(float(lo), 0.0), float(hi)
+
+
+BinWindow = Literal["mf4grid", "relative", "tof"]
+
+
+def bin_edges_for_width(
+    energy_ev: float,
+    *,
+    mode: BinWindow = "relative",
+    relative_width: float = 0.02,
+    tof: Optional["TofResolution"] = None,
+    n_sigma: float = 1.0,
+) -> Tuple[float, float]:
+    r"""Bin ``[lo, hi]`` around ``energy_ev`` from an explicit width.
+
+    The companion to :func:`bin_edges_for_energy`, which takes its width from
+    the spacing of the MF4 incident-energy grid.  That is the right default —
+    it is the resolution at which the angular distribution is actually
+    tabulated — but it also means the window is as coarse as that grid, and for
+    a nuclide whose angular data is far sparser than its cross section it can
+    span a wide range with nothing on screen to say so.
+
+    ``mode``:
+
+    ``'relative'``
+        A fixed :math:`\Delta E / E`, centred on ``energy_ev``.
+    ``'tof'``
+        ``n_sigma`` times the time-of-flight resolution width at this energy,
+        so a bin average and a fold can be compared on equal terms.
+    ``'mf4grid'``
+        Not handled here — it needs the grid, so call
+        :func:`bin_edges_for_energy` instead.  Passing it raises, rather than
+        silently substituting a different window.
+    """
+    if mode == "mf4grid":
+        raise ValueError(
+            "mode='mf4grid' takes its width from the energy grid; "
+            "call bin_edges_for_energy(energies, index) instead"
+        )
+    e = float(energy_ev)
+    if not (e > 0.0):
+        return 0.0, 0.0
+    if mode == "relative":
+        half = 0.5 * e * float(relative_width)
+    elif mode == "tof":
+        resolution = tof or TofResolution()
+        half = float(n_sigma) * resolution.sigma_e_mev(e / 1e6) * 1e6
+    else:  # pragma: no cover - guarded by the Literal
+        raise ValueError(f"unknown bin window mode {mode!r}")
+    return max(e - half, 0.0), e + half
 
 
 def sigma_nominal(xs_energies_ev, xs_values, energy_ev):

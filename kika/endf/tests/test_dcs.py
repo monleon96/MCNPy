@@ -530,3 +530,40 @@ class TestMaxLegendreOrder:
         order = dcs.max_legendre_order(self._Section(rows=rows))
         wire = {str(l): [0.1, 0.2] for l in range(1, 8)}
         assert dcs.coefficients_at_energies([1.0, 2.0], wire, [1.0], max_order=order).shape[0] == 7
+
+
+# --- explicit-width bins ----------------------------------------------------
+
+
+def test_bin_edges_for_width_relative_is_centred():
+    lo, hi = dcs.bin_edges_for_width(1e6, mode="relative", relative_width=0.02)
+    assert lo == pytest.approx(0.99e6)
+    assert hi == pytest.approx(1.01e6)
+    assert 0.5 * (lo + hi) == pytest.approx(1e6)
+
+
+def test_bin_edges_for_width_tof_matches_the_resolution():
+    """The TOF window is the folding width, so the two modes are comparable."""
+    tof = dcs.TofResolution()
+    sigma_ev = tof.sigma_e_mev(1.0) * 1e6
+    lo, hi = dcs.bin_edges_for_width(1e6, mode="tof", tof=tof, n_sigma=1.0)
+    assert hi - 1e6 == pytest.approx(sigma_ev)
+    assert 1e6 - lo == pytest.approx(sigma_ev)
+
+
+def test_bin_edges_for_width_scales_with_n_sigma():
+    one = dcs.bin_edges_for_width(1e6, mode="tof", n_sigma=1.0)
+    three = dcs.bin_edges_for_width(1e6, mode="tof", n_sigma=3.0)
+    assert (three[1] - three[0]) == pytest.approx(3.0 * (one[1] - one[0]))
+
+
+def test_bin_edges_for_width_refuses_the_grid_mode():
+    """Silently substituting a different window would be worse than failing."""
+    with pytest.raises(ValueError, match="bin_edges_for_energy"):
+        dcs.bin_edges_for_width(1e6, mode="mf4grid")
+
+
+def test_bin_edges_for_width_clamps_below_zero():
+    lo, hi = dcs.bin_edges_for_width(1.0, mode="relative", relative_width=10.0)
+    assert lo == 0.0
+    assert hi > 1.0
