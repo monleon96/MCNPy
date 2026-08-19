@@ -614,6 +614,18 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
     # OOM porque su MF34 era mas FINO que nada puntuado hasta entonces (896
     # grupos, 485 MB); el de la 97 es mas GRUESO en cinco de los seis ordenes.
     # Si aun asi la mata la OOM, descomentar `--mem` en la cabecera de run_chi.sh.
+    # La run 98 es un cambio de REPRESENTACION sobre la misma covarianza: la malla
+    # por orden colapsa MF34 y el cruzado con la MISMA U, y el colapso es una
+    # contraccion demostrada (amp = 1 en los seis ordenes, max|c34_rel| 0.9945 ->
+    # 0.9945 exacto). ⇒ EL CHI2 TIENE QUE SALIR IGUAL QUE EL DE LA RUN 96/94.
+    # Eso es lo que este job comprueba; una diferencia no seria una mejora, seria
+    # un fallo del colapso. La base de lectura es `predictive_91_cross`.
+    "predictive_98raw": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_98raw.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "\u03c7\u00b2 analysis \u2014 malla por orden emitida en 691/699/690/690/699/703 grupos, colapso demostrado contractivo",
+        "systematic_block_col": None,
+    },
     "predictive_97mesh": {
         "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_97mesh.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",

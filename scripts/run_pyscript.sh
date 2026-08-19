@@ -50,13 +50,36 @@ export KIKA_UNCERTAINTY_MANIFEST_PATH=/share_snc/snc/JuanMonleon/EXFOR/uncertain
 # Cuesta poco: los cruces son 26/0/40/128/198/245 de 660 grupos, asi que la
 # regla todavia permite bajar a 644 parametros de 3960.
 #
-# Esperado: entre -8 % y -12 % en entradas MF34, y amp = 1 en los seis ordenes.
+# ⛔ LO QUE ESTA RUN NO VA A ARREGLAR, Y HAY QUE SABERLO ANTES DE MIRARLA.
+# La malla que se EMITE no la limita el DP: la limita que el entregable declara
+# MF34 solo donde las replicas TMC se mueven, y en los ordenes altos casi no se
+# mueven. Medido en la 98:
+#
+#   sigma del pipeline > 0 :  1738 1738 1738 1728 1726 1722  (de 1738 bins)
+#   lo que ve el cruzado   :  1738 1735 1537  727  341  106
+#
+# En a_5 y a_6 TODA la varianza es entre-modelos ([MIX] share 1.000) y los
+# bloques de la mezcla se SUSTITUYEN analiticamente en la covarianza -- nunca se
+# muestrean en las replicas. El cruzado, que reconstruye desde replicas, escribe
+# cero ahi: 1542 de 4218 casillas. Cada grupo muerto fuerza sus dos bordes, y la
+# rejilla llega fragmentada antes de que el DP diga nada. En la 98 el DP propuso
+# 23 fusiones en a_6 y sobrevivieron CERO.
+#
+# Eso es un supuesto de la era winner-take-all que la mezcla invalido, se arregla
+# en build_group_cross y se reemite en 90 s. NO lo toca esta run a proposito:
+# cambiar el contenido del entregable en una run de 5 h sin medirlo antes es
+# exactamente el patron que ha fallado cuatro veces hoy.
+#
+# ⇒ Esperado en la 99: malla LEGAL por construccion (amp = 1) y compresion
+#   emitida parecida a la de la 98 (~-2 %). Si sale mas, bien; no es el objetivo.
+#
+# LO QUE SI COMPRA, Y NO LO DA NADA MAS: mf34_mg_mesh_inputs.npz -- la covarianza
+# multigrupo ANTES del capado, la de emision, las medias y los bordes. 250 MB de
+# los 7.7 GB. Es lo unico que vive treinta lineas y muere, y por eso cada
+# pregunta sobre el agrupamiento costaba 5 h. Despues de esta run, cualquier
+# criterio nuevo se prueba en segundos y sin pipeline.
+#
 # ⚠ ~5 h, ~7.7 GB. Nada escribe en 92/93/94/96/97/98.
-# ⚠ La run 98 se puede terminar en 90 s con run_chi.sh, que repara su malla en la
-#   emision (-7.9 %). Esta run existe para que lo que se envie sea la malla que
-#   el criterio ELIGIO, no una reparada a posteriori.
-# Por que cada cosa: docs/handoff_per_order_mesh.md en kika-workspace.
-
 R99=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_99_signcut
 R98=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_98_meshraw
 R97=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_97_perordermesh
@@ -66,9 +89,11 @@ mkdir -p $R99
 # --- PRE-FLIGHT: que los scripts desplegados HOY estan ahi -------------------
 # Ejercita el codigo, no lee una etiqueta: el fallo que esto atrapa es enviar el
 # job antes de copiar, y entonces la run seria la 97 otra vez con otro nombre.
-grep -q "MF34_MESH_FROM_RAW" exfor_to_endf_research.py || {
-    echo "[preflight] exfor_to_endf_research.py no tiene MF34_MESH_FROM_RAW. No envies."
-    exit 1; }
+for tok in MF34_MESH_FROM_RAW mf34_mg_mesh_inputs; do
+    grep -q "$tok" exfor_to_endf_research.py || {
+        echo "[preflight] exfor_to_endf_research.py no tiene $tok. No envies."
+        exit 1; }
+done
 python - <<'PREFLIGHT99' || exit 1
 import sys, numpy as np
 try:
@@ -173,7 +198,21 @@ else:
     else:
         print(f"   OK   el criterio ve {d} casillas que sobre la capada no existen")
 
-print("\n-- 3. LA MALLA (se REPORTA, no se puntua)")
+print("\n-- 3. LAS ENTRADAS DE LA MALLA, que es lo que esta run compra")
+zz = new / "mf34_mg_mesh_inputs.npz"
+if not zz.exists():
+    print("   ⛔ no hay mf34_mg_mesh_inputs.npz: seguimos atados a runs de 5 h")
+    bad += 1
+else:
+    q = np.load(zz)
+    print(f"   OK   {zz.name}: {zz.stat().st_size/1e6:.0f} MB, "
+          f"decision {'SIN capar' if bool(q['decision_is_raw']) else 'CAPADA ⛔'}, "
+          f"cov {q['cov_decision'].shape}")
+    if not bool(q["decision_is_raw"]):
+        print("   ⛔ la matriz de decision salio capada: KIKA_MF34_MESH_FROM_RAW no llego")
+        bad += 1
+
+print("\n-- 4. LA MALLA (se REPORTA, no se puntua)")
 z = new / "mf34_per_order_mesh.npz"
 if not z.exists():
     print("   ⛔ no hay mf34_per_order_mesh.npz: el flag no llego"); bad += 1

@@ -296,115 +296,56 @@ export KIKA_UNCERTAINTY_MANIFEST_PATH=/share_snc/snc/JuanMonleon/EXFOR/uncertain
 # therefore not contaminated. But the collision is real, so do not merge these.
 
 # ===========================================================================
-# CURRENT JOB: TERMINAR LA RUN 98 -- solo el cruzado, sobre lo que ya escribio
+# CURRENT JOB: PUNTUAR LA RUN 98 -- la malla NO puede mover el chi2
 # ===========================================================================
-# La run 98 escribio TODO menos el entregable: los tres parquets, los cinco
-# .npy de MF34, el _mg.endf, la cinta fina, los sidecars de MF33 y el npz de la
-# malla. Murio en el ultimo paso, en una guarda de build_group_cross, y ese paso
-# lee del directorio -- no hace falta repetir las 5 h de MC.
+# El cruzado de la 98 ya esta hecho y su gate paso (job 8518589):
+#   cortes que fuerzan los centrales: a_1 +14 a_2 +10 a_3 +41 a_4 +107 a_5 +82 a_6 +37
+#   cancelacion (sum|u|/|sum u|)^2 : 1  1  1  1  1  1
+#   max |c34_rel|: 0.9945 -> 0.9945 (1.00x)   <- contraccion, exacta
+#   26-Fe-56g_nominal_a0cross_mg.endf  342,752,391 bytes (-1.2 % vs run 96)
 #
-# Por que murio: el DP elige la malla sobre la rejilla multigrupo de 660 grupos,
-# pero la rejilla base que vuelve de la cinta ha pasado por `merge_mf34` con el
-# host, que la parte en los 14 bordes que el host declara dentro de la ventana.
-# Una astilla entre un borde del host y uno nuestro puede no contener ningun bin
-# fino, y entonces su a_l es exactamente cero. El DP no pudo hacerlas puntos de
-# corte porque en SU rejilla no existen: 10 de ellas quedaron absorbidas en
-# grupos vivos de a_1.
+# LO QUE ESTE JOB PREGUNTA. La malla es un cambio de REPRESENTACION sobre la
+# misma covarianza: se colapsa MF34 y el cruzado con la MISMA U, y el colapso
+# esta demostrado contractivo. ⇒ el chi2 tiene que salir IGUAL que el de la
+# run 96 = run 94. Una diferencia no seria una mejora: seria un fallo del
+# colapso, y habria que encontrarlo antes de escribir nada.
 #
-# `_isolate_dead_groups` conserva LOS DOS bordes de cada grupo muerto, asi que
-# cada uno queda como un grupo grueso escrito a cero -- que es lo que la emision
-# de malla compartida declaraba para el. Cuesta un corte por grupo muerto sobre
-# mallas de 550-660.
-#
-# La malla de la 98 (esta ya calculada y guardada, esto no la recalcula):
-#   648/660/620/554/588/637 de 660; parametros -6.4 %, entradas MF34 -12.4 %
-#   casillas con SNR < 1: decision 154, emision 0  <- el cambio de la 98 funciono
-#
-# Minutos, no horas. Recursos: le sobra todo lo de la cabecera.
-
-R98=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_98_meshraw
-
-ls -la $R98/26-Fe-56g_nominal_mg.endf $R98/mf34_per_order_mesh.npz || exit 1
-
-# Los mismos argumentos que la pipeline le pasa por dentro (CROSS_MAG_GRID
-# "fine", CROSS_NULL_FILL "zero"). --mag-grid fine es el unico que hace que el
-# plegado sea una congruencia; con "group" el conjunto certificado no es la
-# matriz que pliega el chi2.
-python build_group_cross.py \
-    --run-dir $R98 \
-    --source-endf $R98/26-Fe-56g_nominal_mg.endf \
-    --write-endf  $R98/26-Fe-56g_nominal_a0cross_mg.endf \
-    --mag-grid fine --null-fill zero \
-    --cache $R98/.group_cross_cache || exit 1
-
-# --- EL GATE de la run 98, la parte que el fallo dejo sin correr -------------
-python - "$R98" /share_snc/snc/JuanMonleon/ENDF_samples/new_test_97_perordermesh \
-              /share_snc/snc/JuanMonleon/ENDF_samples/new_test_96_wheel029 <<'GATE98B' || exit 1
-import sys, filecmp
-from pathlib import Path
-import numpy as np
-new, r97, r96 = (Path(p) for p in sys.argv[1:4])
-bad = 0
-
-print("\n-- 1. LO QUE NO PUEDE MOVERSE: nada anterior a la malla")
-for f in ["26-Fe-56g_nominal.endf", "nominal_fits.parquet",
-          "mf33_absolute_covariance.npy", "mf33_relative_covariance.npy",
-          "mf33_c0_nominal.npy", "mf33_c0_host.npy", "mf33_energy_grid_ev.npy",
-          "mf33_multigroup_relative_covariance.npy"]:
-    a, b = new / f, r97 / f
-    if not a.exists() or not b.exists():
-        print(f"   FALTA  {f}"); bad += 1; continue
-    if filecmp.cmp(a, b, shallow=False):
-        print(f"   OK   {f}")
-    else:
-        print(f"   ⛔ {f} CAMBIO -- el cambio de la 98 toco algo que no es MF34")
-        bad += 1
-
-print("\n-- 2. LA MALLA (se REPORTA, no se puntua)")
-n = [len(np.load(new / "mf34_per_order_mesh.npz")[f"e_{l}"]) - 1 for l in range(1, 7)]
-r97n = [660, 660, 660, 651, 648, 648]
-print(f"   grupos por orden: {'/'.join(map(str, n))}")
-print(f"   la run 97 dio   : {'/'.join(map(str, r97n))}")
-print(f"   entradas MF34   : {sum(n)**2:,} vs {sum(r97n)**2:,} "
-      f"({100*(sum(n)**2/sum(r97n)**2 - 1):+.1f} %)")
-if n == r97n:
-    print("   ⛔ malla IDENTICA a la de la 97: el cambio no tuvo efecto"); bad += 1
-
-print("\n-- 3. EL ENTREGABLE")
-for f in ["26-Fe-56g_nominal_mg.endf", "26-Fe-56g_nominal_a0cross_mg.endf"]:
-    a, b = new / f, r96 / f
-    if not a.exists():
-        print(f"   ⛔ FALTA {f}"); bad += 1; continue
-    print(f"   OK   {f}: {a.stat().st_size:,} bytes "
-          f"({100*(a.stat().st_size/b.stat().st_size - 1):+.1f} % vs run 96)")
-
-if bad:
-    print(f"\n❌ RUN 98 FALLA en {bad} comprobacion(es). NO se puntua.")
-    sys.exit(1)
-print("\n✅ RUN 98 PASA. Leer los grupos del punto 2 antes de decidir si se puntua.")
-GATE98B
-
-# --- SIGUIENTE: puntuar la 98. Descomentar CUANDO PASE el gate de arriba ----
-# R98=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_98_meshraw
 # ⚠ KIKA_THIS_WORK_ENDF explicito: por defecto es `_nominal_mg.endf` y puntuaria
 #   la cinta SIN cruzado en vez del entregable.
 # ⚠ ..._CROSS_FROM_FILE=1, NUNCA ..._CROSS_DIR: la ruta del sidecar declara
 #   is_relative=False contra una familia MF34 relativa y es la que mato las runs
-#   87-90. La base `predictive_91_cross` se puntuo por los bloques a_0.
+#   87-90. La base de lectura es `predictive_91_cross`.
 # ⚠ Sin KIKA_MF34_NULL_MASK, a proposito: la mascara vive en la malla de 703 de
-#   la run 86 y el MF34 de la 98 esta en seis mallas distintas.
-# ⚠ Hay que anadir `predictive_98raw` al registro de chi2_analysis_cluster.py
-#   ANTES de lanzarlo, o el job muere DESPUES del precompute de 1.5 h.
-# KIKA_THIS_WORK_DIR=$R98 \
-# KIKA_THIS_WORK_ENDF=26-Fe-56g_nominal_a0cross_mg.endf \
-# KIKA_MF33_MF34_CROSS_FROM_FILE=1 \
-# KIKA_RUN_TAG=98raw \
-#     python precompute_chi2_predictive.py || exit 1
-# KIKA_CHI2_METHODOLOGIES=predictive_98raw \
-# KIKA_CHI2_RUN_ID=98raw \
-#     python chi2_analysis_cluster.py || exit 1
-# ⚠ El baseline es la run 96 = la run 94. Su chi2 ya esta; no se re-puntua.
+#   la run 86 y el MF34 de la 98 esta en seis mallas distintas. eval_covariance
+#   la coloca POR ENERGIA, asi que una mascara caduca se aplica en silencio.
 # ⚠ ~1.5 h y un sidecar de ~11 GB, que se borra en cuanto se lea el parquet.
+
+R98=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_98_meshraw
+
+grep -q "RUN 98 PASA" slurm-*.out 2>/dev/null \
+  || { echo "⛔ no encuentro '✅ RUN 98 PASA'. El entregable existe pero su gate"; \
+       echo "   no consta; comprueba antes de puntuar."; exit 1; }
+ls -la $R98/26-Fe-56g_nominal_a0cross_mg.endf || exit 1
+
+KIKA_THIS_WORK_DIR=$R98 \
+KIKA_THIS_WORK_ENDF=26-Fe-56g_nominal_a0cross_mg.endf \
+KIKA_MF33_MF34_CROSS_FROM_FILE=1 \
+KIKA_RUN_TAG=98raw \
+    python precompute_chi2_predictive.py || exit 1
+
+KIKA_CHI2_METHODOLOGIES=predictive_98raw \
+KIKA_CHI2_RUN_ID=98raw \
+    python chi2_analysis_cluster.py || exit 1
+
+# --- YA HECHO: reconstruir el cruzado de la 98 (90 s). Descomentar si hace ---
+# --- falta rehacerlo tras tocar build_group_cross.py ------------------------
+# python build_group_cross.py \
+#     --run-dir $R98 \
+#     --source-endf $R98/26-Fe-56g_nominal_mg.endf \
+#     --write-endf  $R98/26-Fe-56g_nominal_a0cross_mg.endf \
+#     --mag-grid fine --null-fill zero \
+#     --cache $R98/.group_cross_cache || exit 1
+
 
 # ===========================================================================
 # CURRENT JOB (2026-08-17): THE READ-BACK GATE ON THE ANALYTIC DELIVERABLE.

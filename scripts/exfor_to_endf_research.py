@@ -5713,6 +5713,37 @@ def run_exfor_to_endf_sampling_v2(
                              "mf34_per_order_mesh.npz (the cross term MUST "
                              "collapse with the same weights)")
 
+                # ⚑ LAS ENTRADAS DE LA MALLA, QUE HASTA AHORA SE TIRABAN.
+                # Todo lo que el DP necesita vive treinta lineas y muere aqui, y
+                # por eso cada pregunta sobre el agrupamiento costaba una run de
+                # 5 h. Son 250 MB de los 7.7 GB de la run. Con esto, cualquier
+                # criterio nuevo se prueba en segundos y sin pipeline:
+                #   cov_decision  la covarianza ANTES del capado near-zero, que
+                #                 es donde el criterio SNR aun tiene disparador
+                #   cov_emission  la que de verdad se colapsa y escribe
+                #   means         el denominador de las dos, y lo que decide
+                #                 donde a_l existe y donde cambia de signo
+                # Misma leccion que [[save-covariance-objects-not-just-samples]].
+                np.savez(
+                    output_path / "mf34_mg_mesh_inputs.npz",
+                    cov_decision=(_mg_cov_for_mesh
+                                  if _mg_cov_for_mesh is not None
+                                  else cov_grouped_nominal),
+                    cov_emission=cov_grouped_nominal,
+                    means=nom_mean_grouped,
+                    edges_ev=np.asarray(multigroup_result.group_boundaries_ev, float),
+                    valid_mask=np.asarray(
+                        getattr(multigroup_result, "valid_mask_grouped",
+                                np.ones_like(nom_mean_grouped, dtype=bool))),
+                    decision_is_raw=np.array(_mg_cov_for_mesh is not None),
+                    max_order=np.array(max_degree),
+                )
+                _logger.info(
+                    "  entradas de la malla -> mf34_mg_mesh_inputs.npz "
+                    f"(decision {'SIN capar' if _mg_cov_for_mesh is not None else 'capada'}, "
+                    f"emision, medias, bordes): cualquier criterio nuevo se "
+                    f"prueba desde aqui sin repetir el pipeline")
+
             if mf34_covariance_type in ("multigroup", "both") and cov_grouped_nominal is not None:
                 if average_file:
                     _logger.info(f"  Pre-MF34 check (MG avg): cov shape={multigroup_result.cov_grouped.shape}, "
