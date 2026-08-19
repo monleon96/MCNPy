@@ -187,3 +187,35 @@ def test_the_driver_rejects_a_covariance_that_does_not_match_the_mesh():
     edges, cov, means = _case(n_g=6)
     with pytest.raises(ValueError, match="expected"):
         per_order_meshes(edges[:-1], cov, means, L)
+
+
+def test_capping_every_sigma_at_snr_one_leaves_the_dp_nothing_to_do():
+    """Run 97's defect, isolated: the criterion cannot fire on a capped object.
+
+    `regularize_near_zero_relative_covariance` scales down every sigma whose SNR
+    is below 1 until it is exactly 1. The DP merges only to repair SNR < 1, so
+    running it after that step is running it on a matrix built to pass the test:
+    it merges nothing, whatever the data said. The mesh must therefore be chosen
+    on the covariance BEFORE the cap.
+    """
+    n_g, l_max = 12, 1
+    edges = np.linspace(1.0e6, 4.0e6, n_g + 1)
+    # Neighbours that agree, on a mean far below their own spread: every
+    # singleton fails SNR, and averaging them is what rescues it.
+    means = np.full(n_g, 0.2)
+    rho = 0.995
+    sd = np.full(n_g, 1.0)
+    raw = np.outer(sd, sd) * (rho + (1.0 - rho) * np.eye(n_g))
+
+    n_merged = len(per_order_meshes(edges, raw, means, l_max)[1]) - 1
+    assert n_merged < n_g, "el objeto crudo tiene que fusionar algo"
+
+    # The cap, applied as the pipeline applies it: rescale each row/column so no
+    # diagonal sigma_rel exceeds 1.
+    sd_cap = np.minimum(np.sqrt(np.diag(raw)), np.abs(means))
+    s = sd_cap / np.sqrt(np.diag(raw))
+    capped = raw * np.outer(s, s)
+    assert np.all(np.sqrt(np.diag(capped)) <= np.abs(means) + 1e-12)
+
+    n_capped = len(per_order_meshes(edges, capped, means, l_max)[1]) - 1
+    assert n_capped == n_g, "sobre el objeto capado el DP no puede fusionar nada"

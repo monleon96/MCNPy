@@ -604,6 +604,30 @@ MERGE_ORIGINAL_MF34 = True                       # Merge our MF34 with the host'
 # 299/105 groups, MF34 entries -52.9 % in the ragged emission.
 MF34_PER_ORDER_MESH = _env_flag("KIKA_MF34_PER_ORDER_MESH", False)
 
+# ⛔ RUN 97: THE MESH WAS BEING CHOSEN AFTER ITS TRIGGER HAD BEEN ERASED.
+#
+# The DP merges only to repair segments with SNR < 1 -- a singleton whose own
+# SNR is already >= 1 scores (0 bad, 0 destroyed) and the tie-break keeps
+# resolution. But `regularize_near_zero_relative_covariance` runs first and caps
+# every flagged sigma at exactly SNR = 1, so by the time the mesh is asked, no
+# parameter fails the test any more. Measured on run 97:
+#
+#   post-convert   max sigma_rel  l=1..6:  2116 %  90 %  4128 %  5749 %  5208 %  744 %
+#   post-nz-nom    max sigma_rel  l=1..6:    94 %  90 %    99 %    99 %   100 %   98 %
+#
+# The mesh merged 33 groups of 3960 (-1.7 % of MF34) where the criterion,
+# measured on an unregularised object, had given 679/703/637/472/299/105.
+#
+# ⚑ THE DECISION AND THE EMISSION USE DIFFERENT MATRICES ON PURPOSE. The mesh is
+# chosen on the covariance BEFORE the cap -- the honest evidence about what the
+# data resolves -- while what gets collapsed and written is still the fully
+# post-processed object, unchanged from run 97. Capping a sigma is a
+# declaration; widening the group is a measurement, and only the second belongs
+# in the choice of grid.
+#
+# Set to 0 to reproduce run 97's mesh exactly.
+MF34_MESH_FROM_RAW = _env_flag("KIKA_MF34_MESH_FROM_RAW", True)
+
 # =============================================================================
 # MF33 ELASTIC MAGNITUDE CHANNEL
 # =============================================================================
@@ -1595,13 +1619,21 @@ def _log_mc_bin_failures(bin_results, nominal_results, warning_counts, logger):
         )
 
 
-def _per_order_mf34_args(cov_rel, means, edges_ev, max_order, window_ev, logger):
+def _per_order_mf34_args(cov_rel, means, edges_ev, max_order, window_ev, logger,
+                         cov_for_mesh=None):
     """`(cov_matrix, energy_grid_ev)` for `create_mf34_from_covariance`, per order.
 
     Returns the dict forms the writer takes when each order carries a mesh of its
     own, plus the aggregators, which the CROSS term must be collapsed with too:
     a cross block whose columns sit on a different mesh than the shape block it
     correlates with is silently wrong and nothing downstream can detect it.
+
+    ⚑ `cov_for_mesh` CHOOSES THE MESH; `cov_rel` IS WHAT GETS WRITTEN. They are
+    the same matrix at two different points of the post-processing chain, and the
+    split exists because the near-zero regularisation caps every sigma at exactly
+    SNR = 1 and so erases the DP's only trigger (run 97: -1.7 % where the
+    criterion had promised -52.9 %). Passing None keeps the old behaviour, which
+    is choosing the mesh on a matrix that has been made to pass the test.
 
     ⚑ THE MESH DEPENDS ON WHICH ORDERS ARE DECLARED, so it must be computed from
     the same central values the tape ships. Under the AICc mixture a_l is present
@@ -1613,7 +1645,17 @@ def _per_order_mf34_args(cov_rel, means, edges_ev, max_order, window_ev, logger)
         collapse_relative_per_order, mesh_report, per_order_meshes,
     )
 
-    meshes = per_order_meshes(edges_ev, cov_rel, means, max_order,
+    decide_on = cov_rel if cov_for_mesh is None else cov_for_mesh
+
+    # What the criterion sees, in both matrices: a singleton fails exactly when
+    # its own sigma_rel exceeds 1. If these two numbers are equal the mesh is
+    # again being chosen on a capped object and the run will merge nothing.
+    for tag, m in (("decision", decide_on), ("emission", cov_rel)):
+        sd = np.sqrt(np.maximum(np.diag(m), 0.0))
+        logger.info(f"    [mesh] {tag} matrix: {int((sd > 1.0).sum())}/{len(sd)} "
+                    f"slots with SNR < 1 (max sigma_rel {sd.max():.3g})")
+
+    meshes = per_order_meshes(edges_ev, decide_on, means, max_order,
                               window_ev=window_ev, logger=logger)
     blocks, grids, weights = collapse_relative_per_order(
         edges_ev, cov_rel, means, max_order, meshes)
@@ -1659,9 +1701,17 @@ def _write_cross_term_endf(mg_endf, output_path, logger):
                 null_fill=CROSS_NULL_FILL,
                 cache=Path(output_path) / ".group_cross_cache",
             )
-    except Exception as e:
+    except BaseException as e:
+        # ⚑ `SystemExit` IS NOT AN `Exception`. Every refusal build_group_cross
+        # raises is a SystemExit, so `except Exception` let the most likely
+        # failure mode past while `buf` -- the entire diagnostic output of the
+        # cross build -- was discarded unread. Run 97 died on one of those
+        # guards and the log kept nothing but the one-line message.
         for line in buf.getvalue().splitlines():
             logger.info(f"  | {line}")
+        if isinstance(e, SystemExit):
+            logger.error(f"[ERROR] [CROSS] cross-term ENDF refused: {e}", console=True)
+            raise                       # a refusal still ends the run non-zero
         logger.error(f"[ERROR] [CROSS] cross-term ENDF failed: {e}", console=True)
         logger.error(f"  Traceback:\n{traceback.format_exc()}", console=False)
         return None
@@ -3169,6 +3219,7 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info(f"  SAMPLING_RESOLUTION = {sampling_resolution}")
         _logger.info(f"  MERGE_ORIGINAL_MF34 = {merge_original_mf34}")
         _logger.info(f"  MF34_PER_ORDER_MESH = {MF34_PER_ORDER_MESH}")
+        _logger.info(f"  MF34_MESH_FROM_RAW = {MF34_MESH_FROM_RAW}")
         _logger.info(f"  SAMPLING_SPACE = {sampling_space}")
         _logger.info(f"  SAMPLING_DECOMPOSITION = {sampling_decomposition}")
         _logger.info(f"  SAMPLING_METHOD = {sampling_method}")
@@ -5268,6 +5319,7 @@ def run_exfor_to_endf_sampling_v2(
                             )
 
             cov_grouped_nominal = None
+            _mg_cov_for_mesh = None
             if multigroup_result is not None:
                 A = multigroup_result.aggregation_matrix
                 valid_indices = [
@@ -5307,6 +5359,14 @@ def run_exfor_to_endf_sampling_v2(
                 _logger.info(f"  MG abs→nominal conversion: max rel_std = {np.max(_mg_nom_rel_std)*100:.1f}%")
                 if verbose_diagnostics:
                     log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-convert", _logger, verbose=True)
+
+                # The per-order mesh is chosen on THIS matrix, not on what comes
+                # out of the steps below -- see MF34_MESH_FROM_RAW. 3960^2 float64
+                # = 125 MB, which is nothing next to the 870 MB fine arrays this
+                # run already holds.
+                _mg_cov_for_mesh = (cov_grouped_nominal.copy()
+                                    if (MF34_PER_ORDER_MESH and MF34_MESH_FROM_RAW)
+                                    else None)
 
                 if regularize_near_zero:
                     cov_grouped_nominal, _ = regularize_near_zero_relative_covariance(
@@ -5642,6 +5702,7 @@ def run_exfor_to_endf_sampling_v2(
                     max_order=max_degree,
                     window_ev=_po_window,
                     logger=_logger,
+                    cov_for_mesh=_mg_cov_for_mesh,
                 )
                 np.savez_compressed(
                     output_path / "mf34_per_order_mesh.npz",

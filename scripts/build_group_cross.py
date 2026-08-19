@@ -355,6 +355,51 @@ def assemble_c34_rel(c34_post, a_flat, c34_rel_ship, null_fill="zero"):
     return np.divide(c34_post, np.outer(a_flat, a_flat), out=base, where=both)
 
 
+def _snap_to_base(g_run, base_ev, label, tol_rel=5e-5):
+    """The mesh's boundaries, replaced by the base grid's own values for them.
+
+    ⚑ THE NPZ IS FLOAT64; THE TAPE IS SIX SIGNIFICANT DIGITS. The mesh is
+    chosen on the multigroup boundaries and saved as it stands
+    (``847499.9999999999``); by the time the same boundary comes back off the
+    tape it has been through ``format_endf_number`` and reads ``8.475000+5``.
+    That moves 287 of a_1's 661 boundaries, so exact set membership called our
+    own mesh foreign and run 97 died on the guard below with every other
+    artefact already on disk.
+
+    The tolerance is what separates a text round trip from a real difference.
+    Six significant digits move a value by at most 5e-6 relative -- half a unit
+    in the last place, worst case at mantissa 1.0; measured maximum over the
+    six meshes 2.0e-6 -- while the narrowest group in any of them is 4.0e-4
+    relative wide. 5e-5 sits an order above the round trip and an order below
+    the narrowest group's half width, so it can only ever snap a boundary onto
+    itself.
+
+    Anything outside that band is NOT a round trip and is refused: it means the
+    npz and the tape did not come from the same run, and silently accepting it
+    would emit the cross term on a mesh the shape blocks are not written on.
+    """
+    base_ev = np.asarray(base_ev, float)
+    out = np.asarray(g_run, float)
+    if base_ev.size < 2:
+        raise SystemExit(f"{label}: the base shape grid has no groups to snap onto.")
+    j = np.clip(np.searchsorted(base_ev, out), 1, base_ev.size - 1)
+    lo, hi = base_ev[j - 1], base_ev[j]
+    near = np.where(np.abs(out - lo) <= np.abs(hi - out), lo, hi)
+    off = np.abs(near - out) / np.maximum(np.abs(out), 1.0)
+    if np.any(off > tol_rel):
+        k = int(np.argmax(off))
+        raise SystemExit(
+            f"{label}: mesh boundary {out[k]!r} eV is not in the base shape "
+            f"grid and is not a rounding of anything in it (nearest "
+            f"{near[k]!r}, {off[k]:.2e} relative, tolerance {tol_rel:.0e}). "
+            f"The npz and the tape do not come from the same run.")
+    if np.any(np.diff(near) <= 0):
+        raise SystemExit(
+            f"{label}: snapping put two mesh boundaries on the same base "
+            f"boundary, which would emit a zero-width group.")
+    return near
+
+
 def per_order_shape_grids(blocks: dict, base_ev: np.ndarray, run_dir=None,
                           l_max: int = L_MAX) -> dict:
     """``{l: e_l}`` — the mesh each Legendre order's parameters actually live on.
@@ -391,7 +436,12 @@ def per_order_shape_grids(blocks: dict, base_ev: np.ndarray, run_dir=None,
                 f"stated anywhere; the cross term cannot be put on it.")
         g = np.asarray(blocks[key], float)
         if from_npz is not None:
-            g_run = from_npz[l]
+            # Snap FIRST: everything below compares mesh boundaries against
+            # tape boundaries, and on raw float64 every one of those
+            # comparisons is wrong in the same way -- `extra` would report our
+            # own rounded boundaries as the host's, and the closing guard would
+            # refuse the run.
+            g_run = _snap_to_base(from_npz[l], base_ev, f"a_{l}")
             # ⚑ THE MESH SPANS OUR WINDOW; THE BASE GRID SPANS THE HOST'S RANGE.
             # `merge_mf34` gave the tape the host's coverage outside our fits,
             # where a_l is exactly zero and the emission writes zeros. Splice

@@ -681,6 +681,70 @@ def test_a_mesh_that_is_not_a_subset_of_the_base_is_refused(tmp_path):
     base = np.array([0.85e6, 1.5e6, 2.5e6, 4.0e6])
     np.savez(tmp_path / "mf34_per_order_mesh.npz",
              **{f"e_{l}": np.array([0.85e6, 1.9e6, 4.0e6]) for l in range(1, L_MAX + 1)})
-    with pytest.raises(SystemExit, match="not a subset"):
+    # Caught by the snap, which is the earlier and more specific of the two
+    # guards: 1.9e6 is 0.21 relative away from the nearest base boundary, four
+    # orders outside anything a six-digit round trip could explain.
+    with pytest.raises(SystemExit, match="not a rounding"):
         per_order_shape_grids(_mesh_blocks({l: base for l in range(1, L_MAX + 1)}),
                               base, run_dir=tmp_path)
+
+
+def _endf6(x):
+    """What `format_endf_number` keeps: six significant digits."""
+    import numpy as np
+    return np.array([float(f"{v:.5e}") for v in np.asarray(x, float)])
+
+
+def test_the_tapes_six_digit_boundaries_are_recognised_as_the_meshs_own(tmp_path):
+    """Run 97's failure: the npz is float64, the tape is six significant digits.
+
+    The mesh is saved as it was computed (``847499.9999999999``) and comes back
+    off the tape as ``8.475000+5``. Exact set membership called 287 of a_1's
+    661 boundaries foreign and refused the run with every other artefact
+    already written.
+    """
+    import numpy as np
+    from scripts.build_group_cross import per_order_shape_grids
+
+    raw = np.array([846822.0, 847499.9999999999, 848500.0,
+                    849499.9999999999, 850500.0])
+    base = _endf6(raw)                           # what the tape carries
+    assert not np.isin(raw, base).all()          # the failure, reproduced
+    np.savez(tmp_path / "mf34_per_order_mesh.npz",
+             **{f"e_{l}": raw for l in range(1, L_MAX + 1)})
+
+    got = per_order_shape_grids(_mesh_blocks({l: base for l in range(1, L_MAX + 1)}),
+                                base, run_dir=tmp_path)
+    for l in range(1, L_MAX + 1):
+        np.testing.assert_array_equal(got[l], base)
+
+
+def test_a_snapped_mesh_is_reported_as_merging_nothing(tmp_path):
+    """The round trip must not be mistaken for the host's own boundaries.
+
+    Before the snap, `extra` compared tape values against raw mesh values, so
+    every rounded boundary looked like a boundary the host merge had added.
+    """
+    import numpy as np
+    from scripts.build_group_cross import per_order_shape_grids
+
+    raw = np.array([846822.0, 847499.9999999999, 848500.0, 850500.0])
+    base = _endf6(raw)
+    np.savez(tmp_path / "mf34_per_order_mesh.npz",
+             **{f"e_{l}": raw for l in range(1, L_MAX + 1)})
+    got = per_order_shape_grids(_mesh_blocks({l: base for l in range(1, L_MAX + 1)}),
+                                base, run_dir=tmp_path)
+    for l in range(1, L_MAX + 1):
+        assert len(got[l]) == len(base)
+
+
+def test_two_mesh_boundaries_may_not_snap_onto_the_same_base_boundary(tmp_path):
+    """A zero-width group is not a rounding; refuse rather than emit it."""
+    import numpy as np
+    import pytest
+    from scripts.build_group_cross import _snap_to_base
+
+    base = np.array([1.0e6, 2.0e6, 3.0e6])
+    mesh = np.array([1.0e6, 2.0e6, 2.0e6 + 1.0, 3.0e6])   # 5e-7 relative apart
+    with pytest.raises(SystemExit, match="zero-width"):
+        _snap_to_base(mesh, base, "a_1")
