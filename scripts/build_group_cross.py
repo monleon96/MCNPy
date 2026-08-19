@@ -202,16 +202,47 @@ def mf33_file_grid_ev(mg: Path, cache: Path) -> np.ndarray:
 
 
 def base_shape_grid(blocks: dict) -> np.ndarray:
-    """The finest MF34 grid; every other block's grid must be a subset of it."""
+    """A grid every MF34 block's grid is a subset of, so duplication is well defined.
+
+    With one mesh shared by all orders — every tape written before roadmap
+    §10.8 — the blocks are nested and this is the finest of them, which is what
+    it used to return outright.
+
+    ⚑ WITH A MESH PER ORDER THEY NEED NOT BE NESTED, and refusing was wrong.
+    ENDF-6 states the grids inside each (L, L1) sub-subsection precisely so that
+    a_1 and a_5 can be written at different resolutions; two coarsenings of the
+    same parent mesh are then both legal and neither contains the other. What
+    the expansion actually needs is a common refinement, and the union of the
+    block grids IS one — every block's grid is a subset of it by construction,
+    so `shipped_c34_rel_on_base`'s duplication stays exactly as well defined as
+    it was.
+
+    The old guard survives only as a postcondition, and it can no longer fire:
+    every block grid is a subset of the union BY CONSTRUCTION. The case it used
+    to catch — a boundary falling strictly inside another grid's interval — is
+    not an error any more, because the union splits that interval and both
+    blocks expand onto it unambiguously. It is kept as a cheap invariant on how
+    `base` is built, not as a check on the data.
+    """
     keys = [k[2:] for k in blocks if k.startswith("m_")]
-    cand = max((blocks[f"e_{k}"] for k in keys), key=len)
-    for k in keys:
-        if not np.isin(blocks[f"e_{k}"], cand).all():
+    grids = [np.asarray(blocks[f"e_{k}"], dtype=float) for k in keys]
+    # `np.unique` also DEDUPLICATES, so a block grid carrying a repeated
+    # boundary — a zero-width group — would come back one group shorter than the
+    # old `max(..., key=len)` returned, silently changing n_gs. Refuse instead.
+    for k, g in zip(keys, grids):
+        if np.any(np.diff(g) <= 0):
+            raise SystemExit(
+                f"MF34 block {k}'s grid is not strictly increasing; it has "
+                f"{int((np.diff(g) <= 0).sum())} zero-width or reversed groups.")
+    base = np.unique(np.concatenate(grids)) if grids else np.array([])
+    for k, g in zip(keys, grids):
+        if not np.isin(g, base).all():
             raise SystemExit(
                 f"MF34 block {k} sits on a grid that is not a subset of the "
-                f"finest one; expanding by duplication would be wrong."
+                f"union of all block grids; expanding by duplication would be "
+                f"wrong."
             )
-    return cand
+    return base
 
 
 def fine_to_group(fine_edges_ev: np.ndarray, target_edges_ev: np.ndarray) -> np.ndarray:
@@ -322,6 +353,112 @@ def assemble_c34_rel(c34_post, a_flat, c34_rel_ship, null_fill="zero"):
     base = (np.array(c34_rel_ship, float) if null_fill == "ship"
             else np.zeros_like(c34_post))
     return np.divide(c34_post, np.outer(a_flat, a_flat), out=base, where=both)
+
+
+def per_order_shape_grids(blocks: dict, base_ev: np.ndarray, run_dir=None,
+                          l_max: int = L_MAX) -> dict:
+    """``{l: e_l}`` — the mesh each Legendre order's parameters actually live on.
+
+    ENDF-6 states the grids inside each (L, L1) sub-subsection, so order l's
+    parameters are the ones its DIAGONAL block declares: the off-diagonal
+    (l, l1) records are LB=6 on the pair (e_l, e_l1), and reading them back
+    squares them onto the union of the two, which is why they must not be used
+    to infer either mesh.
+
+    ⚑ THE RUN'S OWN `mf34_per_order_mesh.npz` WINS when it is there. The tape's
+    grids have been through `merge_mf34` with the host by the time this reads
+    them, and a host boundary landing inside our window would re-split a group
+    the mesh deliberately merged. Deriving the mesh from the tape is the
+    fallback for a foreign file, not the primary source.
+    """
+    base_ev = np.asarray(base_ev, float)
+    from_npz = None
+    if run_dir is not None:
+        p = Path(run_dir) / "mf34_per_order_mesh.npz"
+        if p.exists():
+            z = np.load(p)
+            from_npz = {l: np.asarray(z[f"e_{l}"], float)
+                        for l in range(1, l_max + 1) if f"e_{l}" in z}
+            if len(from_npz) != l_max:
+                from_npz = None
+
+    grids = {}
+    for l in range(1, l_max + 1):
+        key = f"e_{l}_{l}"
+        if key not in blocks:
+            raise SystemExit(
+                f"MF34 has no (L={l}, L1={l}) block, so order {l}'s mesh is not "
+                f"stated anywhere; the cross term cannot be put on it.")
+        g = np.asarray(blocks[key], float)
+        if from_npz is not None:
+            g_run = from_npz[l]
+            # ⚑ THE MESH SPANS OUR WINDOW; THE BASE GRID SPANS THE HOST'S RANGE.
+            # `merge_mf34` gave the tape the host's coverage outside our fits,
+            # where a_l is exactly zero and the emission writes zeros. Splice
+            # those boundaries back so the per-order grids cover exactly what
+            # the shared-mesh emission covered: then the ONLY thing the mesh
+            # changes is the resolution INSIDE the window, and the outside
+            # groups carry the same nothing they carry today.
+            outside = np.concatenate([base_ev[base_ev < g_run[0] - 1e-3],
+                                      base_ev[base_ev > g_run[-1] + 1e-3]])
+            g_run = np.unique(np.concatenate([g_run, outside]))
+            extra = g[(g > g_run[0]) & (g < g_run[-1]) & ~np.isin(g, g_run)]
+            if extra.size:
+                # The host's own MF34 boundaries inside our window (JEFF-4.0
+                # declares 14, on a 0.2 MeV grid) come back through the union
+                # the merge takes. Re-splitting a group the DP merged is not
+                # fatal -- it costs resolution the mesh said was not supported,
+                # nothing more -- but the emission must then use the mesh, not
+                # the tape, or shape and cross would sit on different grids.
+                print(f"    a_{l}: the tape has {extra.size} in-window "
+                      f"boundaries the mesh merged away (host merge); emitting "
+                      f"on the mesh")
+            g = g_run
+        if not np.isin(g, base_ev).all():
+            raise SystemExit(
+                f"a_{l}'s mesh is not a subset of the base shape grid; the "
+                f"collapse onto it would not be a congruence.")
+        grids[l] = g
+    return grids
+
+
+def order_emission_weights(base_ev, order_ev, base_valid_width, a_base):
+    """``U[coarse, base]``: the map that collapses RELATIVE MF34 entries exactly.
+
+    The absolute collapse is width-weighted over the bins the aggregator counts
+    as valid, and the group central value is the same width-weighted mean, so
+
+        rel_S = abs_S / m_S^2
+              = sum_ij (w_i a_i)(w_j a_j) rel_ij / (sum_i w_i a_i)^2
+
+    i.e. the relative entries average with weights ``u = w * a``.  Absolute
+    never appears, which matters because what reaches this point has been
+    through the near-zero regularisation, the between-experiment floor and the
+    order smoothing — steps that put content exactly where ``a`` is zero and an
+    absolute round trip would delete it.
+
+    ⚑ EXACTLY TRANSITIVE, which is why the collapse can happen here instead of
+    on the replicas: a base group's ``w_g * a_g`` IS the sum of ``w_i * a_i``
+    over the fine bins it covers, so composing fine -> base -> coarse gives the
+    same weights as fine -> coarse.  Everything upstream — the marginal-identity
+    gate, the PSD diagnosis, the Cauchy-Schwarz margin — therefore stays on the
+    base grid where it is comparable with every previous run, and the emission
+    is a congruence of the object that was diagnosed, so PSD survives it.
+
+    ⚠ ``a`` CAN CHANGE SIGN, and then ``sum_i w_i a_i`` can approach zero and the
+    relative form explodes.  That is a true property of the relative form, not
+    an artefact — and it is exactly what the mesh's SNR >= 1 criterion and its
+    no-cancellation constraint exist to prevent.  A mesh that did not come from
+    that DP can violate it, so the caller checks the result.
+    """
+    base_ev = np.asarray(base_ev, float)
+    order_ev = np.asarray(order_ev, float)
+    g = fine_to_group(base_ev, order_ev)
+    U = np.zeros((len(order_ev) - 1, len(base_ev) - 1))
+    U[g, np.arange(len(g))] = np.asarray(base_valid_width, float) * np.asarray(a_base, float)
+    tot = U.sum(axis=1, keepdims=True)
+    np.divide(U, tot, out=U, where=tot != 0)
+    return U
 
 
 def shipped_c34_rel_on_base(blocks, base_ev):
@@ -485,7 +622,8 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
                           a_nom_group, shape_ev, mag_ev, c34_rel_ship,
                           null_fill="zero",
                           cross_emin_ev=None, cross_emax_ev=None,
-                          mf33_file_grid=None):
+                          mf33_file_grid=None,
+                          order_grids_ev=None, base_valid_width=None):
     """Write the _mg tape whose MF34 is the joint that was just diagnosed.
 
     `cx_post` is Cauchy-Schwarz-compatible with `c34_post`, not with the MF34
@@ -592,10 +730,97 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
         cross_grid = g_file
 
     cross_cov = {l1: cx_win[:, :, l1 - 1] for l1 in range(1, L_MAX + 1)}
+    shape_arg = np.asarray(shape_ev, float)
+
+    # ── a mesh per Legendre order, as one congruence at the point of emission ──
+    #
+    # Shape and cross are collapsed HERE, together, with the SAME U. Handing
+    # them meshes separately is the failure this whole step exists to avoid: a
+    # cross block whose columns sit on a different mesh than the shape block it
+    # correlates with stays PSD, passes every marginal gate, and is wrong, with
+    # nothing downstream able to detect it.
+    if order_grids_ev is not None:
+        if null_fill != "zero":
+            raise SystemExit(
+                f"--null-fill {null_fill!r} cannot be combined with a mesh per "
+                f"order: it writes the file's own relative values where a_l is "
+                f"exactly zero, and those slots are not what U was built to "
+                f"average. Use --null-fill zero.")
+        n_ord = {l: len(np.asarray(order_grids_ev[l], float)) - 1
+                 for l in range(1, L_MAX + 1)}
+        U = {}
+        for l in range(1, L_MAX + 1):
+            U[l] = order_emission_weights(shape_ev, order_grids_ev[l],
+                                          base_valid_width[:, l - 1],
+                                          a_nom_group[:, l - 1])
+            # A coarse group must be entirely live or entirely dead. The DP makes
+            # absent groups fixed cut points precisely so this holds; a mesh that
+            # merged a dead group into a live one would hand it a fabricated
+            # central value, and the relative entry it then carries is not the
+            # one the file declares.
+            dead = np.abs(a_nom_group[:, l - 1]) < np.finfo(float).tiny
+            g_of = fine_to_group(np.asarray(shape_ev, float),
+                                 np.asarray(order_grids_ev[l], float))
+            n_dead = np.bincount(g_of, weights=dead.astype(float),
+                                 minlength=n_ord[l])
+            n_tot = np.bincount(g_of, minlength=n_ord[l])
+            mixed = int(((n_dead > 0) & (n_dead < n_tot)).sum())
+            if mixed:
+                raise SystemExit(
+                    f"a_{l}: {mixed} coarse groups merge an absent group with a "
+                    f"live one; the mesh was not built with absent groups as cut "
+                    f"points, so the merged entry would carry a fabricated "
+                    f"central value.")
+        a_ord = {l: U[l] @ a_nom_group[:, l - 1] for l in range(1, L_MAX + 1)}
+
+        rows_of = {l: np.arange(n_gs) * L_MAX + (l - 1) for l in range(1, L_MAX + 1)}
+        blocks_rel = {}
+        for l in range(1, L_MAX + 1):
+            for l1 in range(l, L_MAX + 1):
+                blocks_rel[(l, l1)] = (
+                    U[l] @ c34_rel[np.ix_(rows_of[l], rows_of[l1])] @ U[l1].T)
+        cross_cov = {l1: cross_cov[l1] @ U[l1].T for l1 in range(1, L_MAX + 1)}
+
+        before = float(np.abs(c34_rel).max())
+        worst = max(float(np.abs(b).max()) for b in blocks_rel.values())
+        print(f"\n  per-order mesh: groups "
+              + "/".join(str(n_ord[l]) for l in range(1, L_MAX + 1))
+              + f" of {n_gs}")
+        print(f"    MF34 entries {L_MAX * L_MAX * n_gs * n_gs:,d} -> "
+              f"{sum(n_ord[a] * n_ord[b] for a in n_ord for b in n_ord):,d} "
+              f"({100 * (sum(n_ord[a] * n_ord[b] for a in n_ord for b in n_ord) / (L_MAX * L_MAX * n_gs * n_gs) - 1):+.1f} %)")
+        # ⚑ THE MESH IMPROVES THE RELATIVE FORM, IT DOES NOT STRAIN IT, and the
+        # right guard is a comparison rather than an absolute bar. The SNR >= 1
+        # criterion is exactly "the group mean is not small against its sigma",
+        # so merging removes the near-cancelling groups where rel explodes:
+        # measured on the mixture object, max |rel| falls from 1.35e7 to 5.5 at
+        # a_3 and from 3.86e7 to 6.4 at a_6. A fixed threshold would have
+        # aborted a run whose object is thousands of times better behaved than
+        # the shared-mesh one that ships today.
+        print(f"    max |c34_rel|: {before:.4g} -> {worst:.4g} "
+              f"({worst / max(before, 1e-300):.2e}x)")
+        if not np.isfinite(worst):
+            raise SystemExit(
+                "the per-order collapse produced non-finite relative entries: a "
+                "merged group's central value cancelled to exactly zero.")
+        if worst > 10.0 * max(before, np.finfo(float).tiny):
+            raise SystemExit(
+                f"the per-order collapse made the relative form {worst / before:.1f}x "
+                f"WORSE (max |rel| {before:.4g} -> {worst:.4g}). Merging is "
+                f"supposed to raise SNR, so this means the mesh was not built "
+                f"from this covariance.")
+        for l in range(1, L_MAX + 1):
+            live_b = np.abs(a_nom_group[:, l - 1]) >= np.finfo(float).tiny
+            live_c = np.abs(a_ord[l]) >= np.finfo(float).tiny
+            print(f"    a_{l}: {int(live_b.sum())} live of {n_gs} -> "
+                  f"{int(live_c.sum())} live of {n_ord[l]}")
+        c34_rel = blocks_rel
+        shape_arg = {l: np.asarray(order_grids_ev[l], float)
+                     for l in range(1, L_MAX + 1)}
 
     za, awr, mat = _za_awr_mat_from_endf(source_endf)
     mf34 = create_mf34_from_covariance(
-        c34_rel, np.asarray(shape_ev, float), L_MAX, za, awr, mat, 2,
+        c34_rel, shape_arg, L_MAX, za, awr, mat, 2,
         ltt=1, cross_cov=cross_cov, cross_energy_grid_ev=cross_grid,
     )
     sub = mf34._subsections[0]
@@ -744,6 +969,13 @@ def main(argv=None):
     ap.add_argument("--cross-emin-ev", type=float, default=None,
                     help="Clip the cross block's magnitude axis (default: the whole grid)")
     ap.add_argument("--cross-emax-ev", type=float, default=None)
+    ap.add_argument(
+        "--per-order-mesh", choices=["auto", "on", "off"], default="auto",
+        help="Emit each Legendre order on its own mesh. 'auto': on exactly when "
+             "the run wrote mf34_per_order_mesh.npz, so a run that did not "
+             "choose a mesh is untouched byte for byte. 'on' also accepts the "
+             "tape's own diagonal grids, for a foreign file.",
+    )
     args = ap.parse_args(argv)
 
     run_dir = Path(args.run_dir)
@@ -1426,6 +1658,40 @@ def main(argv=None):
               f"{int(_outside.sum())} of {_outside.size} — these carried the "
               f"host's merged MF34 and now carry nothing")
 
+        # ── the mesh per order, if this run has one ───────────────────────────
+        #
+        # `auto` is what makes this switch safe to leave in: with one shared
+        # mesh every e_l IS the base grid, the branch is not entered at all, and
+        # the emission is the pre-existing code path untouched.
+        # ⚑ `auto` KEYS ON THE RUN'S OWN mf34_per_order_mesh.npz, NOT on whether
+        # the tape's grids differ. They already differ on every tape shipped so
+        # far -- run 94's blocks carry 703/703/703/684/673/673 groups -- because
+        # `merge_mf34` unions each pair with the host's, which adds ~30
+        # boundaries in 0.05-0.55 and 14.5-19 MeV. Those sit entirely OUTSIDE
+        # the fits, where a_l is zero and the emission writes zeros either way;
+        # collapsing onto them would still move those zeros to a coarser grid
+        # and change the file. Firing only on the npz means a run that did not
+        # choose a mesh is untouched, byte for byte.
+        _order_grids = _valid_width = None
+        _has_mesh = (run_dir / "mf34_per_order_mesh.npz").exists()
+        if args.per_order_mesh == "on" or (args.per_order_mesh == "auto" and _has_mesh):
+            _g = per_order_shape_grids(blocks, shape_ev, run_dir=run_dir)
+            if all(np.array_equal(_g[l], shape_ev) for l in _g):
+                if args.per_order_mesh == "on":
+                    raise SystemExit(
+                        "--per-order-mesh on, but every order is already on the "
+                        "base grid: there is no mesh to emit.")
+            else:
+                _order_grids = _g
+                _valid_width = np.stack(
+                    [np.bincount(g_shape,
+                                 weights=np.where(valid[:, l], widths, 0.0),
+                                 minlength=n_gs)
+                     for l in range(L_MAX)], axis=-1)
+                print(f"\n  per-order mesh: "
+                      + ("mf34_per_order_mesh.npz" if _has_mesh
+                         else "the tape's own diagonal blocks"))
+
         write_consistent_mf34(
             out_path=Path(args.write_endf),
             source_endf=source_endf,
@@ -1435,6 +1701,7 @@ def main(argv=None):
             cross_emin_ev=args.cross_emin_ev, cross_emax_ev=args.cross_emax_ev,
             mf33_file_grid=(mf33_file_grid_ev(source_endf, cache)
                             if _fine_mag else None),
+            order_grids_ev=_order_grids, base_valid_width=_valid_width,
         )
     return 0
 

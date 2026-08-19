@@ -486,3 +486,201 @@ def test_the_c33_matrix_gate_passes_on_the_fine_construction_and_fails_off_diago
         c33_matrix_gate(bad, c33_ship, fatal=True)
     # ... and on the group axis the same disagreement is reported, not fatal.
     assert c33_matrix_gate(bad, c33_ship, fatal=False) > 1e-3
+
+
+# --------------------------------------------------------------------------- #
+# base_shape_grid with a mesh per Legendre order (roadmap §10.8)
+# --------------------------------------------------------------------------- #
+def _blocks(grids):
+    """`mf34_group_edges_ev`-shaped dict from {key: edges}."""
+    import numpy as np
+    out = {}
+    for k, e in grids.items():
+        e = np.asarray(e, dtype=float)
+        out[f"e_{k}"] = e
+        out[f"m_{k}"] = np.zeros((len(e) - 1, len(e) - 1))
+    return out
+
+
+def test_base_shape_grid_is_inert_on_nested_grids():
+    """Every tape written before the per-order mesh: the finest grid, unchanged."""
+    import numpy as np
+    from scripts.build_group_cross import base_shape_grid
+
+    fine = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    grids = {"1_1": fine, "1_2": fine[::2], "2_2": fine[[0, 2, 4]], "3_3": fine}
+    np.testing.assert_array_equal(base_shape_grid(_blocks(grids)), fine)
+
+
+def test_base_shape_grid_takes_the_union_when_no_block_grid_contains_the_others():
+    """Two coarsenings of one parent mesh: both legal, neither contains the other."""
+    import numpy as np
+    from scripts.build_group_cross import base_shape_grid
+
+    parent = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    a = np.array([1.0, 2.0, 4.0, 5.0])       # merged 2-4
+    b = np.array([1.0, 3.0, 4.0, 5.0])       # merged 1-3
+    base = base_shape_grid(_blocks({"1_1": a, "2_2": b}))
+    np.testing.assert_array_equal(base, parent)
+    assert np.isin(a, base).all() and np.isin(b, base).all()
+
+
+def test_base_shape_grid_splits_an_interval_a_foreign_boundary_falls_inside():
+    """The case the old guard refused is not an error under the union.
+
+    2.5 falls strictly inside the other grid's [2, 3). Taking the finest grid
+    there was ambiguous, so refusing was right; the union splits the interval and
+    both blocks expand onto it unambiguously, so the postcondition cannot fire.
+    """
+    import numpy as np
+    from scripts.build_group_cross import base_shape_grid
+
+    a = np.array([1.0, 2.0, 3.0])
+    b = np.array([1.0, 2.5, 3.0])
+    base = base_shape_grid(_blocks({"1_1": a, "2_2": b}))
+    np.testing.assert_array_equal(base, np.array([1.0, 2.0, 2.5, 3.0]))
+
+
+# --------------------------------------------------------------------------- #
+# a mesh per Legendre order at the point of emission (roadmap §10.8)
+# --------------------------------------------------------------------------- #
+def _valid_width():
+    """Base-group valid widths, one column per order: all bins live here."""
+    import numpy as np
+    return np.repeat(np.diff(SHAPE_EV)[:, None], L_MAX, axis=1)
+
+
+def _write(tmp_path, name, **kw):
+    import numpy as np
+    from scripts.build_group_cross import write_consistent_mf34
+    a_nom_group, _a_flat, c34_post, cx_post = _inputs()
+    out = tmp_path / name
+    write_consistent_mf34(
+        out_path=out, source_endf=_source_endf(tmp_path),
+        c34_post=c34_post, cx_post=cx_post, a_nom_group=a_nom_group,
+        shape_ev=SHAPE_EV, mag_ev=MAG_EV, c34_rel_ship=_rel_ship(),
+        **kw,
+    )
+    return out
+
+
+def test_the_same_mesh_for_every_order_is_byte_identical(tmp_path):
+    """THE gate. Asking for per-order meshes and handing each order the mesh it
+    already has must reproduce the shared emission exactly -- otherwise the
+    switch is a fork, not a switch."""
+    shared = _write(tmp_path, "shared.endf")
+    per_order = _write(tmp_path, "per_order.endf",
+                       order_grids_ev={l: SHAPE_EV for l in range(1, L_MAX + 1)},
+                       base_valid_width=_valid_width())
+    assert shared.read_bytes() == per_order.read_bytes()
+
+
+def test_a_coarser_mesh_moves_the_block_and_the_cross_together(tmp_path):
+    """The point of the exercise: order 6 on half the groups, cross included."""
+    import numpy as np
+    coarse = SHAPE_EV[::2]                      # 4 groups -> 2
+    grids = {l: SHAPE_EV for l in range(1, L_MAX)}
+    grids[L_MAX] = coarse
+    out = _write(tmp_path, "coarse.endf", order_grids_ev=grids,
+                 base_valid_width=_valid_width())
+    blocks = _read_blocks(out)
+
+    # the diagonal block sits on the coarse grid, the others do not
+    assert blocks[(L_MAX, L_MAX)][0].shape == (len(coarse) - 1, len(coarse) - 1)
+    assert blocks[(1, 1)][0].shape == (N_GS, N_GS)
+    # and the cross block's SHAPE axis followed it. The reader lifts LB=6 onto
+    # the union of its two grids, so the column count is the union's, not the
+    # native 2 -- what matters is that it is no longer describing 4 parameters
+    # of a_6 independently.
+    cross = blocks[(0, L_MAX)][0]
+    assert cross.shape[1] == len(np.unique(np.concatenate([MAG_EV, coarse]))) - 1
+
+
+def test_a_mesh_that_merges_an_absent_group_into_a_live_one_is_refused(tmp_path):
+    import numpy as np
+    import pytest
+    a_nom_group, _f, c34_post, cx_post = _inputs()
+    a_nom_group[1, 0] = 0.0                     # a_1 absent in base group 1
+    c34_post[1 * L_MAX + 0, :] = 0.0            # keep the null block consistent
+    c34_post[:, 1 * L_MAX + 0] = 0.0
+    cx_post[:, 1 * L_MAX + 0] = 0.0
+    grids = {l: SHAPE_EV for l in range(1, L_MAX + 1)}
+    grids[1] = SHAPE_EV[::2]                    # merges groups 0+1 and 2+3
+    from scripts.build_group_cross import write_consistent_mf34
+    with pytest.raises(SystemExit, match="absent group with a live one"):
+        write_consistent_mf34(
+            out_path=tmp_path / "bad.endf", source_endf=_source_endf(tmp_path),
+            c34_post=c34_post, cx_post=cx_post, a_nom_group=a_nom_group,
+            shape_ev=SHAPE_EV, mag_ev=MAG_EV, c34_rel_ship=_rel_ship(),
+            order_grids_ev=grids, base_valid_width=_valid_width(),
+        )
+
+
+def test_null_fill_ship_is_refused_with_a_mesh_per_order(tmp_path):
+    import pytest
+    with pytest.raises(SystemExit, match="null-fill"):
+        _write(tmp_path, "ship.endf", null_fill="ship",
+               order_grids_ev={l: SHAPE_EV for l in range(1, L_MAX + 1)},
+               base_valid_width=_valid_width())
+
+
+def _mesh_blocks(grids):
+    """`mf34_group_edges_ev`-shaped dict with a diagonal block per order."""
+    import numpy as np
+    out = {}
+    for l, e in grids.items():
+        e = np.asarray(e, float)
+        out[f"e_{l}_{l}"] = e
+        out[f"m_{l}_{l}"] = np.zeros((len(e) - 1, len(e) - 1))
+    return out
+
+
+def test_the_run_s_own_mesh_beats_the_tape_s_grid(tmp_path):
+    """The npz is the authority: the tape's grid has been through the host merge."""
+    import numpy as np
+    from scripts.build_group_cross import per_order_shape_grids
+
+    base = np.array([0.85e6, 1.5e6, 2.5e6, 3.2e6, 4.0e6])
+    mesh = {l: base for l in range(1, L_MAX + 1)}
+    mesh[L_MAX] = base[::2]                      # the mesh merged 0+1 and 2+3
+    np.savez(tmp_path / "mf34_per_order_mesh.npz",
+             **{f"e_{l}": mesh[l] for l in mesh})
+    # the tape kept all four groups at a_6 — the host merge re-split them
+    tape = _mesh_blocks({l: base for l in range(1, L_MAX + 1)})
+
+    got = per_order_shape_grids(tape, base, run_dir=tmp_path)
+    np.testing.assert_array_equal(got[L_MAX], base[::2])
+    np.testing.assert_array_equal(got[1], base)
+
+
+def test_a_mesh_narrower_than_the_base_keeps_the_base_s_outer_boundaries(tmp_path):
+    """The host merge gave the tape coverage outside our fits; it must survive.
+
+    Our mesh spans only the fitted window. Emitting on it alone would drop the
+    groups the merge added, changing what the file declares rather than only its
+    resolution — so the base's outer boundaries are spliced back.
+    """
+    import numpy as np
+    from scripts.build_group_cross import per_order_shape_grids
+
+    base = np.array([0.05e6, 0.85e6, 1.5e6, 2.5e6, 4.0e6, 19.0e6])
+    window = base[1:5]                           # what the pipeline fitted
+    np.savez(tmp_path / "mf34_per_order_mesh.npz",
+             **{f"e_{l}": window for l in range(1, L_MAX + 1)})
+    got = per_order_shape_grids(_mesh_blocks({l: base for l in range(1, L_MAX + 1)}),
+                                base, run_dir=tmp_path)
+    for l in range(1, L_MAX + 1):
+        np.testing.assert_array_equal(got[l], base)
+
+
+def test_a_mesh_that_is_not_a_subset_of_the_base_is_refused(tmp_path):
+    import numpy as np
+    import pytest
+    from scripts.build_group_cross import per_order_shape_grids
+
+    base = np.array([0.85e6, 1.5e6, 2.5e6, 4.0e6])
+    np.savez(tmp_path / "mf34_per_order_mesh.npz",
+             **{f"e_{l}": np.array([0.85e6, 1.9e6, 4.0e6]) for l in range(1, L_MAX + 1)})
+    with pytest.raises(SystemExit, match="not a subset"):
+        per_order_shape_grids(_mesh_blocks({l: base for l in range(1, L_MAX + 1)}),
+                              base, run_dir=tmp_path)

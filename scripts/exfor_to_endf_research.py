@@ -216,7 +216,9 @@ GENERATE_NOMINAL_ENDF = True             # Fine-grid tape: MF4 central + fine MF
 GENERATE_MULTIGROUP_COVARIANCE = True    # Collapse MF34 onto an adaptive group grid
 GENERATE_MF3_MF33 = 1                    # 0/1. Write the elastic magnitude covariance (MF33 MT2).
                                          # MF3 itself is NOT rewritten: the central stays at the host.
-GENERATE_CROSS_TERM_ENDF = True          # Write the final _a0cross tape (needs all three above)
+# Write the final _a0cross tape (needs all three above). Env-selectable for
+# variants; unset leaves it True, which is what every run so far had.
+GENERATE_CROSS_TERM_ENDF = _env_flag("KIKA_GENERATE_CROSS_TERM_ENDF", True)
 MF34_COVARIANCE_TYPE = "both"            # Which MF34 to write: "fine" | "multigroup" | "both"
 MF33_MG_REPRESENTATION = "fine"          # MF33 in the _mg tape: "fine" (full MF4 grid) | "multigroup".
                                          # Fine is shipped: grouping MF33 is irreversible and damps
@@ -573,6 +575,35 @@ MULTIGROUP_REGROUP_AFTER_SMOOTH = False          # Second regrouping pass after 
 USE_ORIGINAL_MF34_GRID = False                   # Force the grid from the host MF34
 MERGE_ORIGINAL_MF34 = True                       # Merge our MF34 with the host's over its full range
 
+# --- A MESH PER LEGENDRE ORDER (roadmap §10.8) ------------------------------ #
+# ENDF-6 states the energy grids INSIDE each (L, L1) sub-subsection, so an order
+# whose coefficient is well resolved need not be written at the resolution the
+# noisiest one needs. `scripts.per_order_mesh` chooses each order's partition of
+# the multigroup mesh above by a parameter-free DP (fewest degenerate segments,
+# then least information destroyed) and the covariance is carried onto it in
+# RELATIVE space, which is exact and does not go through an absolute matrix the
+# post-processing has no counterpart for.
+#
+# ⚑ OFF reproduces the shared-mesh emission byte for byte -- with every order on
+# the mesh it already has, the aggregators are the identity and the blocks are
+# slices. That is the property `test_per_order_mesh.py` gates, and it is what
+# makes this switchable rather than a fork.
+#
+# The CROSS term travels with it. `build_group_cross` picks the mesh up from the
+# `mf34_per_order_mesh.npz` this run writes and collapses shape and cross onto it
+# with the SAME U, in one congruence at the point of emission -- so the deliverable
+# _a0cross tape carries the mesh, not just the intermediate _mg.
+#
+# ⚠ The _mg tape does NOT keep the compression: `merge_mf34` with the host goes
+# through `to_ang_covmat`, which squares the ragged LB=6 off-diagonals onto the
+# union of their two grids. That is content-preserving (duplication onto a finer
+# grid is the same bilinear form) and size-inflating, and it does not reach the
+# deliverable, which `write_consistent_mf34` re-emits ragged.
+#
+# Measured on the mixture object (run 94's grids, 703 groups): 679/703/637/472/
+# 299/105 groups, MF34 entries -52.9 % in the ragged emission.
+MF34_PER_ORDER_MESH = _env_flag("KIKA_MF34_PER_ORDER_MESH", False)
+
 # =============================================================================
 # MF33 ELASTIC MAGNITUDE CHANNEL
 # =============================================================================
@@ -679,6 +710,15 @@ def _preflight_products():
             problems.append(f"CROSS_NULL_FILL must be 'zero' or 'ship', not {CROSS_NULL_FILL!r}")
         if CROSS_MAG_GRID == "fine" and CROSS_NULL_FILL != "zero":
             problems.append("CROSS_MAG_GRID='fine' requires CROSS_NULL_FILL='zero'")
+        if MF34_PER_ORDER_MESH and CROSS_NULL_FILL != "zero":
+            # The cross step collapses shape and cross onto the per-order meshes
+            # with one U, in relative space. `--null-fill ship` writes the FILE's
+            # own relative values where a_l is exactly zero, and those slots are
+            # not what U averages -- so the two are incompatible. `zero` is what
+            # every shipped run uses; `ship` is the run-89 failure mode.
+            problems.append(
+                f"MF34_PER_ORDER_MESH needs CROSS_NULL_FILL='zero', not "
+                f"{CROSS_NULL_FILL!r}")
     if problems:
         raise SystemExit(
             "Product configuration cannot produce what it asks for:\n  - "
@@ -1553,6 +1593,32 @@ def _log_mc_bin_failures(bin_results, nominal_results, warning_counts, logger):
         warning_counts['mc_bin_failures'] = (
             warning_counts.get('mc_bin_failures', 0) + n_failed
         )
+
+
+def _per_order_mf34_args(cov_rel, means, edges_ev, max_order, window_ev, logger):
+    """`(cov_matrix, energy_grid_ev)` for `create_mf34_from_covariance`, per order.
+
+    Returns the dict forms the writer takes when each order carries a mesh of its
+    own, plus the aggregators, which the CROSS term must be collapsed with too:
+    a cross block whose columns sit on a different mesh than the shape block it
+    correlates with is silently wrong and nothing downstream can detect it.
+
+    ⚑ THE MESH DEPENDS ON WHICH ORDERS ARE DECLARED, so it must be computed from
+    the same central values the tape ships. Under the AICc mixture a_l is present
+    at 703/703 groups for l <= 5 and 694/703 for a_6; under winner-take-all the
+    same object declares a_6 at 74. Feeding this the winner's means would choose
+    a mesh for a file that does not exist.
+    """
+    from scripts.per_order_mesh import (
+        collapse_relative_per_order, mesh_report, per_order_meshes,
+    )
+
+    meshes = per_order_meshes(edges_ev, cov_rel, means, max_order,
+                              window_ev=window_ev, logger=logger)
+    blocks, grids, weights = collapse_relative_per_order(
+        edges_ev, cov_rel, means, max_order, meshes)
+    logger.info("  " + mesh_report(edges_ev, meshes, max_order))
+    return blocks, grids, weights
 
 
 def _write_cross_term_endf(mg_endf, output_path, logger):
@@ -3102,6 +3168,7 @@ def run_exfor_to_endf_sampling_v2(
     if generate_mf34_samples:
         _logger.info(f"  SAMPLING_RESOLUTION = {sampling_resolution}")
         _logger.info(f"  MERGE_ORIGINAL_MF34 = {merge_original_mf34}")
+        _logger.info(f"  MF34_PER_ORDER_MESH = {MF34_PER_ORDER_MESH}")
         _logger.info(f"  SAMPLING_SPACE = {sampling_space}")
         _logger.info(f"  SAMPLING_DECOMPOSITION = {sampling_decomposition}")
         _logger.info(f"  SAMPLING_METHOD = {sampling_method}")
@@ -5550,6 +5617,41 @@ def run_exfor_to_endf_sampling_v2(
                         logger=_logger,
                     )
 
+            # ── a mesh per Legendre order, for the NOMINAL tape only ─────────
+            #
+            # The average tape keeps the shared mesh on purpose. Collapsing a
+            # RELATIVE covariance needs the central values it is relative TO, and
+            # `multigroup_result.cov_grouped` does not state its denominator
+            # anywhere the caller can read; `cov_grouped_nominal` does
+            # (`nom_mean_grouped`, by construction two lines from where it is
+            # built). The nominal tape is also the only one the cross-term step
+            # reads back, so it is the only one whose mesh has a consumer.
+            _po_blocks = _po_grids = _po_weights = None
+            if MF34_PER_ORDER_MESH and cov_grouped_nominal is not None:
+                _po_window = None
+                _po_bins = [energy_bins[i] for i, nr in enumerate(nominal_results)
+                            if not nr.interpolated and nr.has_data]
+                if _po_bins:
+                    _po_window = (min(eb.bin_lower_mev for eb in _po_bins) * 1e6,
+                                  max(eb.bin_upper_mev for eb in _po_bins) * 1e6)
+                _logger.info("  MF34_PER_ORDER_MESH is ON — choosing a mesh per order")
+                _po_blocks, _po_grids, _po_weights = _per_order_mf34_args(
+                    cov_rel=cov_grouped_nominal,
+                    means=nom_mean_grouped,
+                    edges_ev=np.asarray(multigroup_result.group_boundaries_ev, float),
+                    max_order=max_degree,
+                    window_ev=_po_window,
+                    logger=_logger,
+                )
+                np.savez_compressed(
+                    output_path / "mf34_per_order_mesh.npz",
+                    **{f"e_{l}": _po_grids[l] for l in _po_grids},
+                    **{f"w_{l}": _po_weights[l] for l in _po_weights},
+                )
+                _logger.info("  per-order meshes + aggregators saved to "
+                             "mf34_per_order_mesh.npz (the cross term MUST "
+                             "collapse with the same weights)")
+
             if mf34_covariance_type in ("multigroup", "both") and cov_grouped_nominal is not None:
                 if average_file:
                     _logger.info(f"  Pre-MF34 check (MG avg): cov shape={multigroup_result.cov_grouped.shape}, "
@@ -5583,8 +5685,10 @@ def run_exfor_to_endf_sampling_v2(
                                  f"grid len={len(multigroup_result.group_boundaries_ev)}, "
                                  f"grid finite={np.all(np.isfinite(multigroup_result.group_boundaries_ev))}")
                     mf34_mg_nom = create_mf34_from_covariance(
-                        cov_matrix=cov_grouped_nominal,
-                        energy_grid_ev=multigroup_result.group_boundaries_ev,
+                        cov_matrix=(_po_blocks if _po_blocks is not None
+                                    else cov_grouped_nominal),
+                        energy_grid_ev=(_po_grids if _po_grids is not None
+                                        else multigroup_result.group_boundaries_ev),
                         max_order=max_degree,
                         za=za,
                         awr=awr,
