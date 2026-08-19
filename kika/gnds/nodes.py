@@ -107,8 +107,9 @@ class NodeSpec:
     """One node at one choice point.
 
     ``cls`` is the model class the node becomes, or ``None`` where there is no
-    class — a ``branching1d`` multiplicity is *named* by the reader and turned
-    into nothing. It is the class→tag direction, and it lives here rather than
+    class — ``recoil`` is read onto :attr:`AngularTwoBody.recoilHref` and has no
+    class of its own, and every ``NEITHER`` entry has none by definition. It is
+    the class→tag direction, and it lives here rather than
     on the class: ``gndsNodeName`` exists on exactly three families of model
     class and in all three it means "the node name is **not** the class name
     lower-cased", i.e. it marks an exception. Adding it to the twenty-one
@@ -133,12 +134,12 @@ def _spec(*args, **kwargs) -> Tuple[Tuple[str, str], NodeSpec]:
     return spec.key, spec
 
 
-#: Phase 7b's landing strip: the §18 laws and the multiplicity forms kika
-#: declares are already here as ``READ_ONLY``/``NEITHER`` entries with a reason.
-#: When their writers land they become ``PAIRED``, and :func:`check` is what
-#: notices that the declaration and the code agree again.
-#:
 #: **Phase 7b's landing strip is empty, which is what finishing it means.**
+#: The strip was the §18 laws and the multiplicity forms kika declared but did
+#: not implement, sitting here as ``READ_ONLY``/``NEITHER`` entries with a
+#: reason until their writers landed and :func:`check` noticed the declaration
+#: and the code agreeing again. Every one of them has.
+#:
 #: There was a ``_PHASE_7B`` reason here, carried by four §18 entries before
 #: ``uncorrelated`` and by three ``multiplicityForm`` entries after it. Every
 #: one of them is ``PAIRED`` now, so the constant had no users and is gone
@@ -154,15 +155,42 @@ def _spec(*args, **kwargs) -> Tuple[Tuple[str, str], NodeSpec]:
 #: guinea pig (see :func:`reads` and its test). ``branching3d`` held that job
 #: until §18.1.1 was finished and it became a real entry.
 
-#: The six analytic fission/evaporation spectra of §18.3. Each is a formula
-#: with named parameters, not a table, so kika reports one rather than
-#: tabulating it: a tabulation would put numbers in the file that the evaluator
-#: never wrote. None occurs in a committed fixture; on the ENDF side they are
-#: MF5's LF=5/7/9/11/12, which `MF5PartialRaw` keeps as verbatim bytes, so
-#: there is nothing to fill them from today either. Census pending.
-_ANALYTIC_SPECTRUM = ("an analytic §18.3 spectrum: a formula with named "
-                      "parameters, reported rather than tabulated, and "
-                      "with no witness in a committed fixture — ")
+#: The six analytic fission/evaporation spectra of §18.3, **with the census's
+#: numbers**. Each is a formula with named parameters, not a table, so kika
+#: reports one rather than tabulating it: a tabulation would put numbers in the
+#: file that the evaluator never wrote. On the ENDF side they are MF5's
+#: LF=5/7/9/11/12, which `MF5PartialRaw` keeps as verbatim bytes, so there is
+#: nothing to fill them from today either.
+#:
+#: **The census has run, so "no witness" is a measurement and not a guess** —
+#: and it says the six split four to two. ``generalEvaporation``,
+#: ``evaporation``, ``weightedFunctionals`` and ``simpleMaxwellianFission`` all
+#: have a reachable witness in the distribution; ``Watt`` and ``MadlandNix``
+#: occur **zero times**, which puts them with ``Ys1d`` and ``regions3d`` rather
+#: than with their four siblings. Reading a node no evaluation contains is
+#: untested code; reading one that 192 files contain is work with a witness
+#: waiting. The reason has to say which, so it carries the count.
+_ANALYTIC_SPECTRUM_OCCURRENCES = {
+    "generalEvaporation": 192,
+    "evaporation": 33,
+    "weightedFunctionals": 28,
+    "simpleMaxwellianFission": 15,
+    "Watt": 0,
+    "MadlandNix": 0,
+}
+
+
+def _analyticSpectrum(tag: str, line: str) -> str:
+    """The §18.3 analytic-spectrum reason for one node, with its own count."""
+    count = _ANALYTIC_SPECTRUM_OCCURRENCES[tag]
+    witness = (f"{count} occurrences across the 558 distributed neutron "
+               f"evaluations, so a witness is available"
+               if count else
+               "**zero** occurrences across the 558 distributed neutron "
+               "evaluations, so reading it would be untested code — the Ys1d "
+               "case")
+    return (f"an analytic §18.3 spectrum: a formula with named parameters, "
+            f"reported rather than tabulated; {witness}. {line}")
 
 #: Two of the six names in
 #: :data:`~kika.nuclear_data.model.distributions.NOT_IMPLEMENTED_DISTRIBUTIONS`
@@ -173,7 +201,7 @@ _ANALYTIC_SPECTRUM = ("an analytic §18.3 spectrum: a formula with named "
 NOT_A_DISTRIBUTION_FORM = {
     "recoil": "angularTwoBodyForm — gnds.xsd:1670, where it is already PAIRED "
               "as a bare <recoil href=…/> onto AngularTwoBody.recoilHref",
-    "NBodyPhaseSpace": "§18.3's energy choice — gnds.xsd:1770, inside "
+    "NBodyPhaseSpace": "§18.3's energy choice — gnds.xsd:1697, inside "
                        "uncorrelated/energy, where it is PAIRED under "
                        "the uncorrelatedEnergyForm family since phase "
                        "7b and lands with uncorrelated",
@@ -265,9 +293,12 @@ NODES: Dict[Tuple[str, str], NodeSpec] = dict([
     _spec("isotropic2d", "uncorrelatedAngularForm", "§18.3", Isotropic2d,
           Status.PAIRED),
     _spec("forward", "uncorrelatedAngularForm", "§18.3", None, Status.NEITHER,
-          "gnds.xsd:1694, an empty node meaning P(mu|E) is a delta at mu=1; "
-          "no committed fixture carries one and the model has no class for it "
-          "— census pending"),
+          "gnds.xsd:1694, an empty node meaning P(mu|E) is a delta at mu=1. "
+          "**Zero** occurrences across the 558 distributed neutron evaluations "
+          "— the census measured it, so this is not a fixture that happens to "
+          "be missing but a node the library does not contain. Same standing "
+          "as Ys1d and regions3d, and the reason a model class for it would be "
+          "untested code"),
 
     # -- §18.3's uncorrelated/energy forms. gnds.xsd:1697, an xs:choice of
     #    eleven. XYs2d and regions2d delegate to the functional family; the
@@ -281,17 +312,17 @@ NODES: Dict[Tuple[str, str], NodeSpec] = dict([
     _spec("NBodyPhaseSpace", "uncorrelatedEnergyForm", "§18.3",
           NBodyPhaseSpace, Status.PAIRED),
     _spec("evaporation", "uncorrelatedEnergyForm", "§18.3", None,
-          Status.NEITHER, _ANALYTIC_SPECTRUM + "gnds.xsd:1714"),
+          Status.NEITHER, _analyticSpectrum("evaporation", "gnds.xsd:1714")),
     _spec("generalEvaporation", "uncorrelatedEnergyForm", "§18.3", None,
-          Status.NEITHER, _ANALYTIC_SPECTRUM + "gnds.xsd:1740"),
+          Status.NEITHER, _analyticSpectrum("generalEvaporation", "gnds.xsd:1740")),
     _spec("simpleMaxwellianFission", "uncorrelatedEnergyForm", "§18.3", None,
-          Status.NEITHER, _ANALYTIC_SPECTRUM + "gnds.xsd:1748"),
+          Status.NEITHER, _analyticSpectrum("simpleMaxwellianFission", "gnds.xsd:1748")),
     _spec("Watt", "uncorrelatedEnergyForm", "§18.3", None,
-          Status.NEITHER, _ANALYTIC_SPECTRUM + "gnds.xsd:1731"),
+          Status.NEITHER, _analyticSpectrum("Watt", "gnds.xsd:1731")),
     _spec("MadlandNix", "uncorrelatedEnergyForm", "§18.3", None,
-          Status.NEITHER, _ANALYTIC_SPECTRUM + "gnds.xsd:1722"),
+          Status.NEITHER, _analyticSpectrum("MadlandNix", "gnds.xsd:1722")),
     _spec("weightedFunctionals", "uncorrelatedEnergyForm", "§18.3", None,
-          Status.NEITHER, _ANALYTIC_SPECTRUM + "gnds.xsd:1756"),
+          Status.NEITHER, _analyticSpectrum("weightedFunctionals", "gnds.xsd:1756")),
 
     # -- §25 covariance forms. covariances.xsd:83-87, an xs:choice.
     _spec("covarianceMatrix", "covarianceForm", "§25.2", CovarianceMatrix,

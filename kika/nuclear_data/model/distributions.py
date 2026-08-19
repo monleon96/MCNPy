@@ -1,12 +1,21 @@
-"""GNDS-2.1 §18 ``distribution``, with the laws declared and unimplemented.
+"""GNDS-2.1 §18 ``distribution`` — every law the library uses, implemented.
 
-The roadmap's rule: **empty slots exist, they are not absent.** Filling these is
-phase 7b. Until then each law is declared, so a reader meeting one can say which
-GNDS node it cannot handle instead of failing somewhere unrelated, and so that
-adding the implementation later restructures nothing.
+The roadmap's rule was **empty slots exist, they are not absent**: each law was
+declared before it was filled, so a reader meeting one could say which GNDS node
+it could not handle instead of failing somewhere unrelated, and so that adding
+the implementation later restructured nothing. Phase 7b filled them, and the
+rule is what made that a series of small commits rather than one large one.
 
-``angularTwoBody`` and ``isotropic2d`` are the exceptions: MF4 is inside kika's
-current parser coverage, so phase 3c fills them and they are real containers.
+**All seven §18.1.1 members the library contains are here** —
+``angularTwoBody``, ``unspecified``, ``uncorrelated``, ``energyAngular``,
+``angularEnergy``, ``KalbachMann`` and ``branching3d``. The other five members
+of that choice occur **zero times** across the 558 distributed neutron
+evaluations, so they are not modelled and ``kika/gnds/nodes.py`` says so with
+the count.
+
+What remains declared-and-empty is :class:`Recoil`, which is not a
+``<distribution>`` form at all and whose docstring explains where it really
+lives.
 """
 from __future__ import annotations
 
@@ -129,12 +138,17 @@ class Unspecified:
 
 class _UnimplementedDistribution:
     gndsNodeName = "?"
-    #: Why this one is empty. A phase number is the *usual* answer and not the
-    #: only one — ``angularEnergy``'s emptiness is a decision — so the sentence
-    #: belongs to the class rather than being spelled once for everybody. The
-    #: 2-d/3-d functionals learned the same lesson; see
+    #: Why this one is empty. A phase number was the *usual* answer and never
+    #: the only one — ``angularEnergy``'s emptiness was a decision, and the
+    #: census settled it — so the sentence belongs to the class rather than
+    #: being spelled once for everybody. The 2-d/3-d functionals learned the
+    #: same lesson; see
     #: :attr:`~kika.nuclear_data.model.functions.higher._UnimplementedNode.plannedFor`.
-    plannedFor = "scheduled for phase 7b"
+    #:
+    #: The default is no longer a phase, because :class:`Recoil` is the only
+    #: subclass left and it is not waiting for one — it is a node that belongs
+    #: somewhere else entirely.
+    plannedFor = "no phase scheduled"
 
     def __init__(self, *args, **kwargs):
         raise NotImplementedError(
@@ -185,7 +199,7 @@ class PrimaryGamma:
 
 @dataclass
 class NBodyPhaseSpace:
-    """§18.3's *energy* form for an N-body break-up — ``gnds.xsd:1770``.
+    """§18.3's *energy* form for an N-body break-up — ``gnds.xsd:1703``.
 
     **Not a `<distribution>` form**, which is the mistake worth not making: it
     is one of the eleven choices inside ``uncorrelated/energy``, so it arrives

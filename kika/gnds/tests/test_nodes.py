@@ -264,14 +264,17 @@ def test_a_paired_entry_with_no_writer_fails_the_check():
 def test_every_unimplemented_distribution_is_placed_at_a_choice_point():
     """The model's list of unimplemented distributions is not a list of §18 laws.
 
-    One of its two names is not a member of §18.1.1's choice at all —
+    **Its one remaining name is not a member of §18.1.1's choice at all.**
     ``recoil`` belongs to ``angularTwoBody`` (``gnds.xsd:1670``), where it is
-    already read and written — and ``NBodyPhaseSpace``, which
-    :data:`nodes.NOT_A_DISTRIBUTION_FORM` also places, is an §18.3 *energy* form
-    (``gnds.xsd:1703``). Both read like laws phase 7b owes, and treating them as
-    such would mean adding a ``distributionForm`` entry the schema does not
-    admit — the same class of mistake as the ``isotropic2d`` the writer used to
-    emit under ``distribution``.
+    already read and written; so does ``NBodyPhaseSpace``, which
+    :data:`nodes.NOT_A_DISTRIBUTION_FORM` also places at its real home, an §18.3
+    *energy* form (``gnds.xsd:1703``). Both read like laws phase 7b owed, and
+    treating them as such would have meant adding a ``distributionForm`` entry
+    the schema does not admit — the same class of mistake as the ``isotropic2d``
+    the writer used to emit under ``distribution``.
+
+    That the dict is down to a misplaced name and holds **no unimplemented §18
+    law at all** is what phase 7b finishing looks like from this side.
 
     So each name is either an entry here or explicitly placed elsewhere, and
     this is what stops a third state — named in the model, absent from both.
@@ -279,10 +282,10 @@ def test_every_unimplemented_distribution_is_placed_at_a_choice_point():
     from kika.nuclear_data.model.distributions import \
         NOT_IMPLEMENTED_DISTRIBUTIONS
 
-    # Down to two: `uncorrelated`, `energyAngular` and `angularEnergy` have all
-    # landed, and what is left is `KalbachMann` plus the misplaced `recoil`. The
-    # assert is what stops this loop from passing on an empty dict the day the
-    # list finally empties, which would read as "all placed" and mean "none
+    # Down to one: `uncorrelated`, `energyAngular`, `angularEnergy` and
+    # `KalbachMann` have all landed, and what is left is the misplaced `recoil`.
+    # The assert is what stops this loop from passing on an empty dict the day
+    # the list finally empties, which would read as "all placed" and mean "none
     # checked".
     assert NOT_IMPLEMENTED_DISTRIBUTIONS
     for name in NOT_IMPLEMENTED_DISTRIBUTIONS:

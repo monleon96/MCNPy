@@ -65,7 +65,13 @@ def test_the_report_is_hung_on_the_suite_as_well_as_returned(h2):
     """`suite.report` is how a caller who dropped the tuple still finds out."""
     suite, report = h2
     assert suite.report is report
-    assert not report.isClean  # §18's uncorrelated laws are phase 7b
+    # Unclean from `losses`, never from `unsupported`: since phase 7b closed,
+    # H-2's unsupported list is **empty** and what is left are the four known
+    # drops — applicationData, the uncertainty back-links, PoPs aliases and
+    # the documentation block. `isClean` covers both, which is why it is
+    # still False.
+    assert not report.isClean
+    assert report.unsupported == []
 
 
 # ---------------------------------------------------------------------------

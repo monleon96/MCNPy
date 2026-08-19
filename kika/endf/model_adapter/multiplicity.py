@@ -35,7 +35,9 @@ products plus the delayed sum).
 **What ENDF has that the model does not get filled with.** MF1/455 gives the
 *aggregate* delayed nu-bar and NNF decay constants. The per-family
 multiplicities — what the aggregate is the sum of — are the MF5/455 subsection
-weights, and MF5 is not decoded into the model (phase 7b). So the families are
+weights, and nothing decodes MF5 into the model. **The gap is this adapter and
+not a missing model node** — GNDS phase 7b built the §18 slots, in the other
+direction. So the families are
 created with their rates and an empty multiplicity, the aggregate goes on the
 ``multiplicitySum``, and the ``summands`` list stays empty rather than being
 filled with links to nodes that hold nothing.

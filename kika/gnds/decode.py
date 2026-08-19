@@ -24,12 +24,14 @@ data. What the census settled:
 ``distribution``           ``uncorrelated`` 126 501, ``angularTwoBody`` 45 080,
                            ``unspecified`` 31 623, ``branching3d`` 14 032,
                            ``KalbachMann`` 3 730, ``energyAngular`` 2 948,
-                           ``angularEnergy`` 2. **Five of the seven are read**
-                           — ``uncorrelated``, ``energyAngular`` and
-                           ``angularEnergy`` joined ``angularTwoBody`` and
-                           ``unspecified`` in phase 7b. What is left is
-                           ``KalbachMann`` and ``branching3d``. Each unread one
-                           met is named in the report with its xPath.
+                           ``angularEnergy`` 2. **All seven are read**:
+                           ``uncorrelated``, ``energyAngular``,
+                           ``angularEnergy``, ``KalbachMann`` and
+                           ``branching3d`` joined ``angularTwoBody`` and
+                           ``unspecified`` over phase 7b. The report's
+                           ``unsupported`` list is empty on every distributed
+                           evaluation, and ``test_cross_section_oracle`` pins
+                           that on the 18.8 MB Fe-56 file.
 ``angularTwoBody``         ``recoil`` 22 540, ``XYs2d`` 21 649,
                            ``isotropic2d`` 780, ``regions2d`` 111.
 ``styles``                 ``evaluated`` 558, ``crossSectionReconstructed``
@@ -379,7 +381,9 @@ class _SuiteReader:
         if element.find("doubleDifferentialCrossSection") is not None:
             self.unsupported(
                 "doubleDifferentialCrossSection", here,
-                "the model declares the slot and phase 7b fills it"
+                "the model declares the slot and nothing fills it; §14's "
+                "double-differential data is not a §18 law and was never in "
+                "phase 7b's scope, so no phase is scheduled for it"
             )
         return Reaction(
             id=ReactionId(
@@ -495,7 +499,9 @@ class _SuiteReader:
             self.unsupported(
                 "fissionFragmentData", here,
                 "delayed neutrons and fission energy release are read from ENDF "
-                "MF1/455 and MF1/458 today; the GNDS side is phase 7b"
+                "MF1/455 and MF1/458 today; the GNDS side has no phase "
+                "scheduled — §18.4 fission fragment data is not a §18.1.1 "
+                "distribution law and was not in phase 7b's scope"
             )
         return channel
 
