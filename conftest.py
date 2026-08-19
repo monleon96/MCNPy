@@ -173,6 +173,15 @@ _TAPES: Dict[str, Sequence[str]] = {
     # between them is a reader defect rather than a physics difference. Not the
     # same tape as ``fe56_host`` — that is JEFF-4.0 with a JEFF-3.3 MF4 graft.
     "fe56_b81": ("endfb81/n-026_Fe_056.endf", "n-026_Fe_056.endf"),
+    # MF6, the energy-angle distributions. These three are not a sample: they
+    # are the carriers. Swept over all 557 ENDF/B-VIII.1 neutron tapes, LAW=7
+    # occurs twice in the whole library and both are in Be-9's MT16 (which is
+    # also one of only 29 LCT=1 sections); LAW=6 occurs five times and three of
+    # them are Li-6's MT41; and C-12's MT5 is the readiest LCT=3. See
+    # ``docs/mf6_notes.md`` in kika-workspace for the census.
+    "be9_b81": ("endfb81/n-004_Be_009.endf", "n-004_Be_009.endf"),
+    "li6_b81": ("endfb81/n-003_Li_006.endf", "n-003_Li_006.endf"),
+    "c12_b81": ("endfb81/n-006_C_012.endf", "n-006_C_012.endf"),
     "fe56_gnds_cov": (
         "ENDF-B-VIII.1-GNDS/ENDF-B-VIII.1-GNDS/neutrons/Covariances/"
         "n-026_Fe_056.endf.gnds-covar.xml",
@@ -436,6 +445,12 @@ u5_boxer_tape = _tape_fixture("u5_boxer")
 fe56_gnds_tape = _tape_fixture("fe56_gnds")
 fe56_gnds_cov_tape = _tape_fixture("fe56_gnds_cov")
 fe56_b81_tape = _tape_fixture("fe56_b81")
+
+#: The MF6 law carriers. Named one at a time rather than looped, to match the
+#: block above; the census that picked them is in ``docs/mf6_notes.md``.
+be9_b81_tape = _tape_fixture("be9_b81")
+li6_b81_tape = _tape_fixture("li6_b81")
+c12_b81_tape = _tape_fixture("c12_b81")
 
 tsl_h_h2o_tape = _tape_fixture("tsl_h_h2o")
 tsl_ortho_h_tape = _tape_fixture("tsl_ortho_h")

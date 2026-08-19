@@ -309,23 +309,29 @@ def test_the_front_door_and_the_low_road_agree_on_the_report(micro_cov_tape):
 
 def test_an_mf_with_no_parser_is_reported_rather_than_passed_over(tmp_path, micro_tape):
     """``endf.mf`` holds only the MFs that *had* a parser, so the parsed object
-    cannot answer "did this tape carry an MF6?". The door rescans the tape.
+    cannot answer "did this tape carry an MF8?". The door rescans the tape.
 
-    Built by appending a minimal MF6 section to a real tape, so the rest of the
+    Built by appending a minimal MF8 section to a real tape, so the rest of the
     decode is unchanged and the only difference is the section under test.
+
+    **This test used to inject an MF6, and MF6 gained a parser.** It kept
+    passing, because the door reported MF6 for a *different* reason — the
+    adapter's "registry does not cover it" branch, which by then was false. The
+    stand-in has to be an MF that genuinely has no parser, and MF8 is one; if it
+    ever gains one, this test must move again rather than be deleted.
     """
     lines = micro_tape.read_text().splitlines(keepends=True)
     mat = int(lines[1][66:70])
     injected = (
         f"{' 0.000000+0 0.000000+0          0          0          0          0':<66}"
-        f"{mat:>4}{6:>2}{5:>3}{1:>5}\n"
+        f"{mat:>4}{8:>2}{457:>3}{1:>5}\n"
     )
-    doctored = tmp_path / "with_mf6.endf"
+    doctored = tmp_path / "with_mf8.endf"
     doctored.write_text("".join(lines[:-1] + [injected] + lines[-1:]))
 
     report = kika.read(doctored).report
-    assert any("MF6" in m for m in report.unsupported), (
-        f"MF6 was on the tape and no parser read it, yet the report is silent: "
+    assert any("MF8" in m for m in report.unsupported), (
+        f"MF8 was on the tape and no parser read it, yet the report is silent: "
         f"{report.unsupported}"
     )
 

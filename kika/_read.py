@@ -16,7 +16,8 @@ still the low road, as ``read_endf`` and ``read_ace`` are.
 
 **The low road stays first-class.** ``read_endf`` and ``read_ace`` are not
 deprecated and are not going away. Two reasons, both concrete. The model does not
-yet cover MF5, MF6 or MF12-15 (phase 7), so a user who needs those needs the file
+yet cover MF5, MF6 or MF12-15 (phase 7) — MF5 and MF6 are *parsed* but not
+modelled, MF12-15 not read at all — so a user who needs those needs the file
 itself; and evaluators legitimately work in ENDF's own terms — the Fe-56 chi2
 work reads MF33/MF34 structure directly and should keep doing so. What this door
 adds is a *default*, not a monopoly.
@@ -58,9 +59,10 @@ __all__ = ["read", "sniff_format", "UnknownFormatError"]
 #: Measured on this machine, warm cache, nothing else running: ENDF/B-VIII.1's
 #: Fe-56 through this door costs **2.85 s as GNDS** (18.8 MB, and that includes
 #: following the externalFile and reading its 7 covariance sections) against
-#: **5.97 s as ENDF-6** (25.6 MB, MF1/2/3/4/33 — the tape's MF6, MF12 and MF14
-#: have no parser and are not read at all). Neither is the six minutes the JEFF
-#: host tape costs; that tape is larger and carries MF34.
+#: **5.97 s as ENDF-6** (25.6 MB, MF1/2/3/4/33 — the tape's MF12 and MF14 have
+#: no parser and are not read at all; its MF6 was in that list until MF6 gained
+#: one, so this figure predates six MF6 sections now being read). Neither is
+#: the six minutes the JEFF host tape costs; that tape is larger and carries MF34.
 FORMATS = ("endf", "ace", "gnds")
 
 #: MF numbers whose content belongs to the covarianceSuite rather than the
@@ -208,9 +210,9 @@ def read(path, format: Optional[str] = None, covariances: bool = True):
     -------
     ReactionSuite
         With ``suite.report`` set — what the decode lost, approximated or could
-        not represent. Check it. A partial decode is normal today (MF5, MF6 and
-        MF12-15 are not modelled until phase 7) and the report is the only thing
-        that says so.
+        not represent. Check it. A partial decode is normal today (MF5 and MF6
+        are parsed but not modelled, MF12-15 not read at all, until phase 7)
+        and the report is the only thing that says so.
     """
     if format is None:
         format = sniff_format(path)
@@ -335,7 +337,7 @@ def _noteUnparsedMFs(path, endf, report) -> None:
     Without this the report is silent about them, and silence reads as "nothing
     was lost". ``endf.mf`` holds only the MFs that had a registered parser —
     ``parse_endf.py`` computes ``skipped_mfs`` and drops it into a log line
-    nobody reads — so the question "did this tape have an MF6?" cannot be
+    nobody reads — so the question "did this tape have an MF12?" cannot be
     answered from the parsed object at all. The tape is rescanned here with the
     same helper the parser uses, so the two can never disagree.
     """

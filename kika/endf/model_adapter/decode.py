@@ -54,13 +54,14 @@ __all__ = ["decodeMF3MT", "decodeMF1MT451", "decodeReactionSuite"]
 
 #: MF numbers kika's parser registry covers. Everything else is declared
 #: unsupported by the report rather than silently skipped.
-SUPPORTED_MF = (1, 2, 3, 4, 5, 31, 32, 33, 34, 35)
+SUPPORTED_MF = (1, 2, 3, 4, 5, 6, 31, 32, 33, 34, 35)
 
 #: Of those, the ones whose content belongs to the ``covarianceSuite``
 #: (§25.1.1) rather than to the ``reactionSuite``. Kept as a set of its own
 #: because MF5 broke the rule the redirect loop used to assume — that
 #: "supported and not one of 1, 2, 3, 4" meant "covariance". MF5 is neither:
-#: it is reactionSuite content that this adapter does not decode yet.
+#: it is reactionSuite content that this adapter does not decode yet. MF6 is the
+#: second of the same kind, added when its parser landed.
 COVARIANCE_MF = (31, 32, 33, 34, 35)
 
 
@@ -295,6 +296,23 @@ def decodeReactionSuite(endf, report: Optional[ConversionReport] = None):
         )
         for mt in sorted(getattr(mf5, "mt", {})):
             for gap in getattr(mf5.mt[mt], "report_gaps", list)():
+                report.unsupportedNode(gap)
+
+    # MF6 is the same case as MF5 and needs the same notice. Its `report_gaps`
+    # is worth reading even though every MF6 law *is* decoded: a product whose
+    # LAW is -14 or -15 defers its distribution to MF14 or MF15, and those have
+    # no parser — so the section can be read in full and still not have the
+    # distribution in hand.
+    mf6 = endf.mf.get(6) if hasattr(endf, "mf") else None
+    if mf6 is not None:
+        report.unsupportedNode(
+            "MF6 (product energy-angle distributions) is present and parsed by "
+            "kika, but decoding it into this reactionSuite is GNDS phase 7b; "
+            "the distributions are absent from the products below. The parsed "
+            "sections are reachable as endf.mf[6]."
+        )
+        for mt in sorted(getattr(mf6, "mt", {})):
+            for gap in getattr(mf6.mt[mt], "report_gaps", list)():
                 report.unsupportedNode(gap)
 
     if style is not None:
