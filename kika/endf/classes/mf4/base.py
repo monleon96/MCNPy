@@ -37,6 +37,17 @@ class MF4MT(MT):
         return self._awr
     
     @property
+    def ltt(self) -> int:
+        """LTT: 0 isotropic, 1 Legendre, 2 tabulated, 3 mixed.
+
+        The numeric flag behind :attr:`type`. Exposed because a consumer often
+        needs to branch on the representation rather than describe it — whether
+        ``extract_legendre_coefficients`` interpolates per order or has to
+        project tabulated distributions onto Legendre first, for instance.
+        """
+        return self._ltt
+
+    @property
     def type(self) -> str:
         """Angular distribution format flag"""
         dist_type = ''
