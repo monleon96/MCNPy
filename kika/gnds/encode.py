@@ -46,7 +46,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from kika.nuclear_data.model import (AngularTwoBody,
+from kika.nuclear_data.model import (AngularEnergy, AngularTwoBody,
                                      AverageParameterCovariance, Background,
                                      BreitWigner, ConversionReport,
                                      Constant1d, CovarianceMatrix,
@@ -712,6 +712,8 @@ class _SuiteWriter:
                 self.uncorrelated(element, form, label, where)
             elif isinstance(form, EnergyAngular):
                 self.energyAngular(element, form, label, where)
+            elif isinstance(form, AngularEnergy):
+                self.angularEnergy(element, form, label, where)
             elif isinstance(form, AngularTwoBody):
                 self.angularTwoBody(element, form, label, where)
             elif isinstance(form, Isotropic2d):
@@ -750,14 +752,13 @@ class _SuiteWriter:
             # that `declareWhatIsMissing` is there to put in the report.
             self.incompleteProducts.append(where)
 
-    @writes("distributionForm", "energyAngular")
-    def energyAngular(self, parent: ET.Element, form, label: str,
-                      where: str) -> None:
-        """§18.4, and **the one child or none**.
+    def _distributionAE(self, parent: ET.Element, form, label: str, tag: str,
+                        where: str) -> None:
+        """§18.4 and §18.5, and **the one child or none**.
 
-        ``DistributionAEType`` (``gnds.xsd:1797-1803``) is an ``xs:sequence`` of
-        one ``XYs3d``, so an ``energyAngular`` whose function kika could not
-        read is not a partial node but an invalid one — the same judgement
+        ``DistributionAEType`` (``gnds.xsd:1797-1803``) is the type of both, an
+        ``xs:sequence`` of one ``XYs3d``, so a node whose function kika could
+        not read is not a partial one but an invalid one — the same judgement
         :meth:`uncorrelated` makes about its two halves, made in the same place
         and for the same reason.
 
@@ -765,24 +766,49 @@ class _SuiteWriter:
         (``xData_XYs3d_primary``), so it carries its own ``axes``, which
         ``:2260`` makes a required child rather than an optional one.
 
+        **The tag is the caller's**, never ``type(form).__name__`` lower-cased
+        or anything else derived here: the element name is the only thing in a
+        written file that says which variable is outermost, so it comes from
+        the ``isinstance`` branch that already decided, not from a rule that
+        could quietly start agreeing with the wrong class.
+
         **A known way this writes an invalid file, and it is not a defect
         here.** ``xData_XYs3d_primary`` declares no ``interpolation`` attribute
-        where every 2-d type does (``library-gaps.md`` D24). If a real
-        ``energyAngular`` states a non-lin-lin law on its outermost axis, the
-        round trip writes it back and the file fails validation — which is
-        correct: dropping the attribute would validate by discarding what the
-        evaluation said.
+        where every 2-d type does (``library-gaps.md`` D24). If a real node
+        states a non-lin-lin law on its outermost axis, the round trip writes
+        it back and the file fails validation — which is correct: dropping the
+        attribute would validate by discarding what the evaluation said.
         """
         if not form.isComplete:
             self.report.unsupportedNode(
-                f"{where}: an <energyAngular> whose XYs3d kika could not read; "
+                f"{where}: an <{tag}> whose XYs3d kika could not read; "
                 f"gnds.xsd:1798-1800 requires the child, so the node is not "
                 f"written at all"
             )
             return
-        element = ET.SubElement(parent, "energyAngular")
+        element = ET.SubElement(parent, tag)
         _set(element, label=label, productFrame=str(form.productFrame))
         _function(element, form.xys3d, self.report, where)
+
+    @writes("distributionForm", "energyAngular")
+    def energyAngular(self, parent: ET.Element, form, label: str,
+                      where: str) -> None:
+        """§18.4: the outgoing energy outermost."""
+        self._distributionAE(parent, form, label, "energyAngular", where)
+
+    @writes("distributionForm", "angularEnergy")
+    def angularEnergy(self, parent: ET.Element, form, label: str,
+                      where: str) -> None:
+        """§18.5: the angle outermost, and the same complexType.
+
+        Separate from the method above for the reason
+        :class:`~kika.nuclear_data.model.distributions.AngularEnergy` gives:
+        emitting one where the other belongs produces a file that **validates
+        and states the wrong physics**, so the two names are reached by two
+        ``isinstance`` branches and never by a parameter a caller could get
+        backwards.
+        """
+        self._distributionAE(parent, form, label, "angularEnergy", where)
 
     @writes("distributionForm", "uncorrelated")
     @writes("uncorrelatedAngularForm", "isotropic2d")

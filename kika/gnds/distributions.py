@@ -18,11 +18,11 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from typing import Callable, Optional
 
-from kika.nuclear_data.model import (AngularTwoBody, ConversionReport,
-                                     DiscreteGamma, EnergyAngular, Frame,
-                                     Isotropic2d, NBodyPhaseSpace,
-                                     PhysicalQuantity, PrimaryGamma,
-                                     Uncorrelated, Unspecified)
+from kika.nuclear_data.model import (AngularEnergy, AngularTwoBody,
+                                     ConversionReport, DiscreteGamma,
+                                     EnergyAngular, Frame, Isotropic2d,
+                                     NBodyPhaseSpace, PhysicalQuantity,
+                                     PrimaryGamma, Uncorrelated, Unspecified)
 from kika.nuclear_data.model.distributions import Distribution
 
 from .nodes import NODES, Status, reads
@@ -97,6 +97,8 @@ class _DistributionReader:
                 form = self.uncorrelated(child, here)
             elif child.tag == "energyAngular":
                 form = self.energyAngular(child, here)
+            elif child.tag == "angularEnergy":
+                form = self.angularEnergy(child, here)
             elif child.tag == "unspecified":
                 form = Unspecified(
                     label=label,
@@ -255,27 +257,29 @@ class _DistributionReader:
         return None
 
 
-    # -- §18.4, energyAngular -----------------------------------------------
+    # -- §18.4 and §18.5, the two orderings of DistributionAEType -----------
 
-    @reads("distributionForm", "energyAngular")
-    def energyAngular(self, element: ET.Element, path: str) -> EnergyAngular:
-        """§18.4's ``energyAngular``: P(E′,mu|E) as one correlated node.
+    def _distributionAE(self, element: ET.Element, path: str, tag: str,
+                        cls: type):
+        """The body both §18.4 and §18.5 have, because the schema gives them
+        one complexType (``gnds.xsd:1797-1803``): an ``xs:sequence`` of a
+        single ``XYs3d``, ``label`` and ``productFrame``.
 
-        ``DistributionAEType`` (``gnds.xsd:1797-1803``) is an ``xs:sequence`` of
-        a single ``XYs3d``, so there is no choice to walk — but the child is
-        still read through :func:`readFunction3d` rather than assumed, because a
-        file that puts something else there should be *reported*, not decoded as
-        if it were the expected node.
+        There is no choice to walk — but the child is still read through
+        :func:`readFunction3d` rather than assumed, because a file that puts
+        something else there should be *reported*, not decoded as if it were
+        the expected node.
 
-        ``angularEnergy`` is **not** read here even though the schema gives it
-        the identical type. The two differ only in which variable is outermost,
-        which no schema can check, so kika reports it by name instead of
-        decoding it into a class that means the other thing. See
-        :class:`~kika.nuclear_data.model.distributions.EnergyAngular`.
+        **Both the tag and the class come from the caller, and neither is read
+        off the element.** The two methods below are what say which ordering
+        this is, each keyed by the tag it registered against, so the one thing
+        the schema cannot express is decided by dispatch rather than by a
+        string comparison in here. Sharing the body is safe precisely because
+        the naming is not part of it.
         """
         label = element.attrib.get("label", "")
-        here = f"{path}/energyAngular{_quoted(label)}"
-        form = EnergyAngular(
+        here = f"{path}/{tag}{_quoted(label)}"
+        form = cls(
             label=label,
             productFrame=Frame(element.attrib.get("productFrame", "lab")),
         )
@@ -287,6 +291,25 @@ class _DistributionReader:
             except UnsupportedNode as exc:
                 self.unsupported(child.tag, here, exc.args[0])
         return form
+
+    @reads("distributionForm", "energyAngular")
+    def energyAngular(self, element: ET.Element, path: str) -> EnergyAngular:
+        """§18.4: P(E′,mu|E), the outgoing energy outermost."""
+        return self._distributionAE(element, path, "energyAngular",
+                                    EnergyAngular)
+
+    @reads("distributionForm", "angularEnergy")
+    def angularEnergy(self, element: ET.Element, path: str) -> AngularEnergy:
+        """§18.5: P(mu,E′|E), the *angle* outermost.
+
+        A separate method rather than a flag on the one above, for the reason
+        :class:`~kika.nuclear_data.model.distributions.AngularEnergy` gives:
+        the element name is the only thing in the file that distinguishes the
+        two, so decoding one into the other's class is a mistake nothing
+        downstream could detect.
+        """
+        return self._distributionAE(element, path, "angularEnergy",
+                                    AngularEnergy)
 
 
 def readDistribution(element: ET.Element, path: str,

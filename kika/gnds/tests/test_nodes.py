@@ -245,9 +245,10 @@ def test_a_paired_entry_with_no_writer_fails_the_check():
 def test_every_unimplemented_distribution_is_placed_at_a_choice_point():
     """The model's list of unimplemented distributions is not a list of §18 laws.
 
-    Two of its three names are not members of §18.1.1's choice at all —
+    One of its two names is not a member of §18.1.1's choice at all —
     ``recoil`` belongs to ``angularTwoBody`` (``gnds.xsd:1670``), where it is
-    already read and written, and ``NBodyPhaseSpace`` is an §18.3 *energy* form
+    already read and written — and ``NBodyPhaseSpace``, which
+    :data:`nodes.NOT_A_DISTRIBUTION_FORM` also places, is an §18.3 *energy* form
     (``gnds.xsd:1703``). Both read like laws phase 7b owes, and treating them as
     such would mean adding a ``distributionForm`` entry the schema does not
     admit — the same class of mistake as the ``isotropic2d`` the writer used to
@@ -259,9 +260,11 @@ def test_every_unimplemented_distribution_is_placed_at_a_choice_point():
     from kika.nuclear_data.model.distributions import \
         NOT_IMPLEMENTED_DISTRIBUTIONS
 
-    # Down to three since `uncorrelated` and `energyAngular` landed. The assert
-    # is what stops this loop from passing on an empty dict the day the list
-    # finally empties, which would read as "all placed" and mean "none checked".
+    # Down to two: `uncorrelated`, `energyAngular` and `angularEnergy` have all
+    # landed, and what is left is `KalbachMann` plus the misplaced `recoil`. The
+    # assert is what stops this loop from passing on an empty dict the day the
+    # list finally empties, which would read as "all placed" and mean "none
+    # checked".
     assert NOT_IMPLEMENTED_DISTRIBUTIONS
     for name in NOT_IMPLEMENTED_DISTRIBUTIONS:
         elsewhere = nodes.NOT_A_DISTRIBUTION_FORM.get(name)

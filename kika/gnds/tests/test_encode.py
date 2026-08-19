@@ -1011,6 +1011,32 @@ def test_a_grafted_energy_angular_validates_inside_a_whole_file(
     assert not [entry for entry in report.losses if "axes of its own" in entry]
 
 
+def test_the_angular_energy_witness_is_written_back_valid(micro_be9_gnds,
+                                                          tmp_path):
+    """§18.5 through the whole pipeline on the file that actually has one.
+
+    Not a graft: ``micro_be9`` is trimmed from ``n-004_Be_009``, the only
+    evaluation in the distribution carrying an ``angularEnergy``, and it holds
+    both of the two that exist. Writing it back and validating the whole
+    document is the strongest gate §18.5 can have, because there is no tape to
+    put behind it the way ``fe56_gnds`` stands behind §18.4.
+
+    The tag assertion is not decoration. ``DistributionAEType`` is shared, so a
+    writer that emitted ``<energyAngular>`` here would produce a file that
+    **validates** — ``_schemaErrors == []`` would pass on it — and states the
+    wrong physics. The two asserts together are what close that.
+    """
+    written, _report = _write(kika.read(micro_be9_gnds, covariances=False),
+                              tmp_path)
+    root = ET.parse(written).getroot()
+
+    assert len(list(root.iter("angularEnergy"))) == 2
+    assert not list(root.iter("energyAngular")), (
+        "an <angularEnergy> was written as its mirror; the file would validate"
+    )
+    assert _schemaErrors(written) == []
+
+
 def test_every_committed_covariance_fixture_can_be_written(
         gnds_covariance_fixture, tmp_path):
     """The gate whose absence let two writer defects live in a shipped module.

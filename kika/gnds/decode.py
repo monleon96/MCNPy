@@ -24,13 +24,12 @@ data. What the census settled:
 ``distribution``           ``uncorrelated`` 126 501, ``angularTwoBody`` 45 080,
                            ``unspecified`` 31 623, ``branching3d`` 14 032,
                            ``KalbachMann`` 3 730, ``energyAngular`` 2 948,
-                           ``angularEnergy`` 2. **Four of the seven are read**
-                           — ``uncorrelated`` and ``energyAngular`` joined
-                           ``angularTwoBody`` and ``unspecified`` in phase 7b —
-                           and of the three left, ``angularEnergy``'s two
-                           occurrences are why it is a decision rather than a
-                           task. Each unread one met is named in the report
-                           with its xPath.
+                           ``angularEnergy`` 2. **Five of the seven are read**
+                           — ``uncorrelated``, ``energyAngular`` and
+                           ``angularEnergy`` joined ``angularTwoBody`` and
+                           ``unspecified`` in phase 7b. What is left is
+                           ``KalbachMann`` and ``branching3d``. Each unread one
+                           met is named in the report with its xPath.
 ``angularTwoBody``         ``recoil`` 22 540, ``XYs2d`` 21 649,
                            ``isotropic2d`` 780, ``regions2d`` 111.
 ``styles``                 ``evaluated`` 558, ``crossSectionReconstructed``

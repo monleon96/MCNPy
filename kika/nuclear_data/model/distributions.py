@@ -276,23 +276,41 @@ class EnergyAngular:
         return self.xys3d is not None
 
 
-class AngularEnergy(_UnimplementedDistribution):
-    """§18.5, and **deliberately still empty** — ``gnds.xsd:1797``, the same type.
+@dataclass
+class AngularEnergy:
+    """§18.5. P(mu,E′|E) — ``gnds.xsd:1797``, the *same* ``DistributionAEType``.
 
-    Not blocked by anything: :class:`EnergyAngular` shows the whole
-    implementation is a dataclass, a reader and a writer. It is unwritten
-    because it occurs **twice** in the 558 distributed neutron evaluations, and
-    what to do with a node that rare is a decision (implement it, or retire the
-    declaration and report it by name) rather than a task. The census settles
-    which.
+    :class:`EnergyAngular`'s mirror, and everything that class's docstring says
+    about why the two are separate classes applies here from the other side. The
+    complexType is shared exactly; the element name is the **only** thing in the
+    file that says which variable is outermost, so a reader that decoded one
+    into the other would produce a model that is wrong in a way no schema can
+    see. Hence two dataclasses and an ``isinstance`` dispatch, not one class
+    with a flag.
+
+    **It exists because the census counted, and the count was not zero.** It was
+    left unwritten while the answer was unknown — the standing recommendation
+    was to retire the declaration if it turned out to occur nowhere, as
+    ``forward``, ``regions3d``, ``Ys1d``, ``gridded1d``, ``gridded3d``, ``Watt``
+    and ``MadlandNix`` all do. It occurs **twice**, both in
+    ``n-004_Be_009.endf.gnds.xml``, which is the entire population across the
+    558 distributed neutron evaluations. Two is not zero: the sentence "no
+    distributed evaluation carries one" would have been **false**, and with a
+    witness in hand and the complexType already implemented for its mirror,
+    writing it costs less than documenting why it is absent.
     """
 
-    gndsNodeName = "angularEnergy"
-    plannedFor = (
-        "not scheduled but undecided: it occurs twice in the 558 distributed "
-        "neutron evaluations, and whether to implement it or retire the "
-        "declaration is a decision the census settles"
-    )
+    xys3d: Optional[XYs3d] = None
+    label: Optional[str] = None
+    productFrame: Frame = Frame.lab
+
+    def __post_init__(self) -> None:
+        self.productFrame = Frame(self.productFrame)
+
+    @property
+    def isComplete(self) -> bool:
+        """The one child present, which is the only shape the schema admits."""
+        return self.xys3d is not None
 
 
 class KalbachMann(_UnimplementedDistribution):
@@ -312,13 +330,14 @@ class Recoil(_UnimplementedDistribution):
     gndsNodeName = "recoil"
 
 
-#: What a reader meeting one of these can be told is missing. **Two of the three
-#: are not members of §18.1.1's choice at all** — see the two docstrings above —
-#: which is why :data:`kika.gnds.nodes.NOT_A_DISTRIBUTION_FORM` names their real
-#: choice point and a test holds the two lists against each other.
+#: What a reader meeting one of these can be told is missing. **One of the two
+#: is not a member of §18.1.1's choice at all** — see :class:`Recoil` above —
+#: which is why :data:`kika.gnds.nodes.NOT_A_DISTRIBUTION_FORM` names its real
+#: choice point and a test holds the two lists against each other. It was three
+#: until §18.5 landed and :class:`AngularEnergy` became a dataclass.
 NOT_IMPLEMENTED_DISTRIBUTIONS = {
     cls.gndsNodeName: cls
-    for cls in (AngularEnergy, KalbachMann, Recoil)
+    for cls in (KalbachMann, Recoil)
 }
 
 

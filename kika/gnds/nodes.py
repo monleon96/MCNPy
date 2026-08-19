@@ -138,9 +138,11 @@ def _spec(*args, **kwargs) -> Tuple[Tuple[str, str], NodeSpec]:
 #:
 #: **One §18 entry carries this now, and it was four before ``uncorrelated``.**
 #: ``gnds.xsd:1647-1662`` gives §18.1.1's choice twelve members; kika names six
-#: of them below and the count of *unimplemented* ones is down to two —
-#: ``KalbachMann``, which carries this reason, and ``angularEnergy``, which
-#: carries one of its own because its emptiness is a decision and not a queue.
+#: of them below and the count of *unimplemented* ones is down to one —
+#: ``KalbachMann``. ``angularEnergy`` left this list when §18.5 landed: the
+#: census found two occurrences rather than the zero that would have retired
+#: the declaration, and with a witness and its mirror's complexType already
+#: implemented it was cheaper to write than to justify.
 #: ``branching3d`` is deliberately absent,
 #: as the guinea pig of the import-time ratchet (see :func:`reads` and its
 #: test). The remaining five — ``reference``, ``CoulombPlusNuclearElastic``,
@@ -241,13 +243,7 @@ NODES: Dict[Tuple[str, str], NodeSpec] = dict([
     _spec("energyAngular", "distributionForm", "§18.4", EnergyAngular,
           Status.PAIRED),
     _spec("angularEnergy", "distributionForm", "§18.5", AngularEnergy,
-          Status.NEITHER,
-          "§18.5 shares energyAngular's complexType (gnds.xsd:1797) and differs "
-          "only in which variable is outermost, which no schema checks — so it "
-          "is reported by name rather than decoded into the class that means "
-          "the other thing. Unwritten because it occurs twice in the 558 "
-          "distributed neutron evaluations; the census decides whether it is "
-          "implemented or the declaration is retired"),
+          Status.PAIRED),
     _spec("KalbachMann", "distributionForm", "§18.6", KalbachMann,
           Status.NEITHER, _PHASE_7B),
 

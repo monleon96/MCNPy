@@ -316,7 +316,7 @@ _NJOY_FIXTURES = frozenset({"njoy_exe"})
 #: docstring above claimed it was applied automatically. It is applied now.
 _GNDS_FIXTURES = frozenset({
     "fe56_gnds_tape", "fe56_gnds_cov_tape",
-    "gnds_data_dir", "micro_fe56_gnds", "micro_ta182_gnds",
+    "gnds_data_dir", "micro_fe56_gnds", "micro_ta182_gnds", "micro_be9_gnds",
     "h2_gnds", "h2_gnds_cov", "h3_gnds",
     "gnds_covariance_fixture",
 })
@@ -768,6 +768,29 @@ def micro_ta182_gnds() -> Path:
     it is abridged and is not physics. Built by the same script.
     """
     return _gnds_file("micro_ta182.gnds.xml")
+
+
+@pytest.fixture(scope="session")
+def micro_be9_gnds() -> Path:
+    """Be-9's ``2n + 2He4`` reaction, trimmed. The **only** §18.5 witness there is.
+
+    ``angularEnergy`` occurs **twice in the whole ENDF/B-VIII.1 GNDS
+    distribution**, and both are in ``n-004_Be_009`` — in this one reaction, one
+    per product. There is no second file to choose instead, so the alternative
+    to trimming was committing 0.92 MB for two nodes.
+
+    It is trimmed rather than copied for the reason the other two are: the
+    construct exists only in a file too big to commit. Its ``resonances`` is a
+    lone ``scatteringRadius`` with no ``resonanceReactions``, so unlike Fe-56
+    and Ta-182 the kept reaction is chosen by what it *carries*, not by what the
+    resonance block links to.
+
+    Same warning as the other trims: **the numbers are abridged and are not
+    physics.** What is faithful is the shape — including the axis order, which
+    is the one thing that distinguishes §18.5 from §18.4 and which no schema
+    checks.
+    """
+    return _gnds_file("micro_be9.gnds.xml")
 
 
 #: Covariance fixture -> the construct it is here for. Each is the *smallest*

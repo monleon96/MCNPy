@@ -29,13 +29,16 @@ three fixtures are ``isotropic2d`` twenty-five times out of twenty-five, so the
 at 406 occurrences in 144 of the 558 distributed evaluations — not a rare
 shape, just one the committed set happened to miss.
 
-**``energyAngular`` has no witness among the three**, so its tests graft one in.
-The only registered tape that carries a real one is ``fe56_gnds`` — 18.8 MB, on
-the share, marked ``tape`` — and the gate that uses it is
-``test_cross_section_oracle.py``'s report set. A grafted node still walks the
-whole pipeline (``kika.read`` → ``kika.write`` → ``kika.read``) rather than the
-writer alone, so what it does not cover is *the shapes a real evaluation uses*,
-not the wiring.
+**Neither ordering of ``DistributionAEType`` has a witness among the four**, so
+their tests graft one in. For ``energyAngular`` the registered tape that carries
+real ones is ``fe56_gnds`` — 18.8 MB, on the share, marked ``tape`` — and the
+gate that uses it is ``test_cross_section_oracle.py``'s report set. For
+``angularEnergy`` there is no tape at all: the census found **two occurrences in
+the whole distribution**, both in ``n-004_Be_009``, which is what
+``micro_be9_gnds`` is trimmed from. A grafted node still walks the whole
+pipeline (``kika.read`` → ``kika.write`` → ``kika.read``) rather than the writer
+alone, so what it does not cover is *the shapes a real evaluation uses*, not the
+wiring.
 """
 from __future__ import annotations
 
@@ -46,9 +49,10 @@ import pytest
 import kika
 from kika.gnds.decode import readReactionSuite
 from kika.gnds.xpath import Document
-from kika.nuclear_data.model import (DiscreteGamma, EnergyAngular,
-                                     Isotropic2d, NBodyPhaseSpace,
-                                     PrimaryGamma, Uncorrelated, XYs2d, XYs3d)
+from kika.nuclear_data.model import (AngularEnergy, DiscreteGamma,
+                                     EnergyAngular, Isotropic2d,
+                                     NBodyPhaseSpace, PrimaryGamma,
+                                     Uncorrelated, XYs2d, XYs3d)
 
 
 def _uncorrelated(suite):
@@ -384,7 +388,13 @@ def _grafted(source, tmp_path, xml: str = ENERGY_ANGULAR_XML):
     return readReactionSuite(Document.parse(path))
 
 
-def _energyAngulars(suite):
+def _formsOfType(suite, cls):
+    """Every distribution form of exactly one class, in document order.
+
+    ``isinstance`` and not ``type() is``: it is the same check the writer
+    dispatches on, so a subclass relationship between the two orderings would
+    show up here as it would there. There is none, and that is the point.
+    """
     forms = []
     for container in (suite.reactions, suite.orphanProducts, suite.sums,
                       suite.productions, suite.fissionComponents):
@@ -396,8 +406,16 @@ def _energyAngulars(suite):
                 if product.distribution is None:
                     continue
                 forms.extend(f for f in product.distribution.forms.values()
-                             if isinstance(f, EnergyAngular))
+                             if isinstance(f, cls))
     return forms
+
+
+def _energyAngulars(suite):
+    return _formsOfType(suite, EnergyAngular)
+
+
+def _angularEnergies(suite):
+    return _formsOfType(suite, AngularEnergy)
 
 
 def _products(channel):
@@ -479,22 +497,133 @@ def test_an_energy_angular_with_no_function_is_not_written_at_all(
     assert any("requires the child" in entry for entry in report.unsupported)
 
 
-def test_angular_energy_is_reported_rather_than_read_as_its_mirror(
+def test_an_angular_energy_reads_into_its_own_class_and_never_the_mirror(
         h2_gnds, tmp_path):
     """The two share a complexType and differ only in which variable is outer.
 
     So the same bytes are a *valid* ``angularEnergy`` and a *valid*
-    ``energyAngular``, and nothing in the schema distinguishes them — which is
-    exactly why kika does not reuse the reader. Decoding one into
-    :class:`EnergyAngular` would produce a model, and a file written back from
-    it, that states the wrong physics with no gate anywhere able to see it.
+    ``energyAngular``, and **nothing in the schema distinguishes them**. That is
+    what makes this pair worth a test of its own rather than a copy of §18.4's:
+    the element name is the entire signal, so the only failure mode that matters
+    is the two crossing over, and no validator anywhere downstream could catch
+    it. Read one, assert it is not the other; then the mirror image below.
+
+    This test used to assert the opposite — that an ``angularEnergy`` was
+    *reported* rather than read — because §18.5 was undecided rather than
+    queued. The census settled it at two occurrences, so it is now implemented
+    and this is the stronger statement in the same place.
     """
     mirrored = ENERGY_ANGULAR_XML.replace("energyAngular", "angularEnergy")
     suite, report = _grafted(h2_gnds, tmp_path, mirrored)
 
+    forms = _angularEnergies(suite)
+    assert len(forms) == 1
+    assert isinstance(forms[0].xys3d, XYs3d)
+    assert [f.outerDomainValue for f in forms[0].xys3d.function2ds] == [1e6, 2e6]
     assert _energyAngulars(suite) == [], (
         "an angularEnergy must not arrive as an EnergyAngular"
     )
-    assert [e for e in report.unsupported if "/angularEnergy:" in e], \
+    assert not [e for e in report.unsupported if "angularEnergy" in e], \
         report.unsupported
+
+
+def test_an_energy_angular_never_arrives_as_an_angular_energy(h2_gnds,
+                                                              tmp_path):
+    """The other half of the pair, and it is not redundant.
+
+    A dispatch that collapsed both tags onto one class would pass the test
+    above as long as that class happened to be :class:`AngularEnergy`. Reading
+    the unmirrored XML and asserting the *complement* is what makes the pair
+    say "these two are distinguished", rather than "one of them is recognised".
+    """
+    suite, report = _grafted(h2_gnds, tmp_path)
+
+    assert len(_energyAngulars(suite)) == 1
+    assert _angularEnergies(suite) == []
+    assert report.unsupported == []
+
+
+def test_the_real_angular_energy_puts_mu_outside_the_outgoing_energy(
+        micro_be9_gnds):
+    """The two §18.5 nodes that exist, and the axes are what make them §18.5.
+
+    ``micro_be9`` is the trim of the only file in the distribution that carries
+    an ``angularEnergy``, and both of its occurrences are here — one per product
+    of ``2n + 2He4``.
+
+    **The assertion that matters is the axis order.** ``DistributionAEType``
+    (``gnds.xsd:1797``) is shared with ``energyAngular``, so nothing structural
+    tells the two apart; what does is which variable the file nests outermost,
+    and the axes say it in words. Here it reads ``energy_in`` → ``mu`` →
+    ``energy_out``, and the grafted ``energyAngular`` beside it reads
+    ``energy_in`` → ``energy_out`` → ``mu``. If kika ever decoded one into the
+    other's class this test is where the evaluation itself contradicts it.
+    """
+    suite, report = readReactionSuite(Document.parse(micro_be9_gnds))
+
+    forms = _angularEnergies(suite)
+    assert len(forms) == 2
+    assert _energyAngulars(suite) == []
+    assert report.unsupported == []
+    for form in forms:
+        assert form.isComplete
+        assert form.productFrame == "lab"
+        assert [axis.label for axis in form.xys3d.axes.axes] == [
+            "energy_in", "mu", "energy_out", "P(mu,energy_out|energy_in)"]
+        assert form.xys3d.function2ds, "an XYs3d with no children is invalid"
+
+
+def test_a_real_angular_energy_survives_a_round_trip(micro_be9_gnds, tmp_path):
+    """Read → write → read on the witness, not on a graft.
+
+    The graft tests below cover the wiring; this covers the shapes an actual
+    evaluation uses, which is the whole reason the file was committed. The tag
+    has to come back as ``angularEnergy``, and the axis order with it — writing
+    the axes in the other order would be the same error as writing the other
+    tag, and just as invisible to a validator.
+    """
+    first, _ = readReactionSuite(Document.parse(micro_be9_gnds))
+    path = tmp_path / "be9-out.gnds.xml"
+    kika.write(first, path)
+    second, report = readReactionSuite(Document.parse(path))
+
+    before, after = _angularEnergies(first), _angularEnergies(second)
+    assert len(before) == len(after) == 2
+    assert _energyAngulars(second) == []
+    assert list(ET.parse(path).getroot().iter("angularEnergy"))
+    for one, two in zip(before, after):
+        assert one.label == two.label
+        assert one.productFrame == two.productFrame
+        assert [a.label for a in one.xys3d.axes.axes] == \
+            [a.label for a in two.xys3d.axes.axes]
+        assert [f.outerDomainValue for f in one.xys3d.function2ds] == \
+            [f.outerDomainValue for f in two.xys3d.function2ds]
+
+
+def test_the_two_orderings_write_back_the_tag_they_were_read_from(h2_gnds,
+                                                                  tmp_path):
+    """Read → write, once per ordering, checking the element name survives.
+
+    The model round trip above proves the class is right; this proves the
+    *writer* does not collapse them either. Both directions matter because the
+    reader and the writer dispatch through different mechanisms — a tag
+    comparison one way, ``isinstance`` the other — so a defect in one is
+    invisible to a test of the other.
+    """
+    for tag in ("energyAngular", "angularEnergy"):
+        xml = ENERGY_ANGULAR_XML.replace("energyAngular", tag)
+        source = graftDistributionForm(h2_gnds, tmp_path / f"{tag}.gnds.xml",
+                                       xml)
+        suite, _ = readReactionSuite(Document.parse(source))
+
+        written = tmp_path / f"{tag}-out.gnds.xml"
+        kika.write(suite, written)
+        root = ET.parse(written).getroot()
+
+        assert len(list(root.iter(tag))) == 1, tag
+        other = "angularEnergy" if tag == "energyAngular" else "energyAngular"
+        assert not list(root.iter(other)), (
+            f"a <{tag}> was written back as a <{other}>, which validates and "
+            f"states the wrong physics"
+        )
 
