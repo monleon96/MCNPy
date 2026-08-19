@@ -15,6 +15,7 @@ from .read_endf import (
     read_mf7_mt,
 )
 from .classes.mf7.scatterer import ThermalScatterer, thermal_scatterer
+from . import dcs
 from .remote import (
     fetch_endf,
     download_endf,
@@ -29,6 +30,9 @@ from .remote import (
 )
 
 __all__ = [
+    # Differential cross sections from MF4 + MF3 (angular reconstruction, the
+    # elastic frame transform, and the three readings of sigma(E))
+    "dcs",
     # Local file reading
     "read_endf",
     "read_mt451",
