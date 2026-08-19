@@ -19,13 +19,15 @@ import xml.etree.ElementTree as ET
 from typing import Callable, Optional
 
 from kika.nuclear_data.model import (AngularTwoBody, ConversionReport,
-                                     DiscreteGamma, Frame, Isotropic2d,
-                                     NBodyPhaseSpace, PhysicalQuantity,
-                                     PrimaryGamma, Uncorrelated, Unspecified)
+                                     DiscreteGamma, EnergyAngular, Frame,
+                                     Isotropic2d, NBodyPhaseSpace,
+                                     PhysicalQuantity, PrimaryGamma,
+                                     Uncorrelated, Unspecified)
 from kika.nuclear_data.model.distributions import Distribution
 
 from .nodes import NODES, Status, reads
-from .primitives import UnsupportedNode, readAxes, readFunction2d
+from .primitives import (UnsupportedNode, readAxes, readFunction2d,
+                         readFunction3d)
 
 __all__ = ["readDistribution"]
 
@@ -53,6 +55,11 @@ def _declaredAndUnread(family: str) -> dict:
 #: the decorators — those register *against* it.
 UNREAD_ANGULAR_FORMS = _declaredAndUnread("uncorrelatedAngularForm")
 UNREAD_ENERGY_FORMS = _declaredAndUnread("uncorrelatedEnergyForm")
+#: §18.1.1's own choice, same derivation. It used to be one hard-coded sentence
+#: saying "phase 7b" about every law, which is false for ``angularEnergy``:
+#: nothing is queued for it, its two occurrences in the library are why it is a
+#: decision instead. The registry already carries each reason; this reads them.
+UNREAD_DISTRIBUTION_FORMS = _declaredAndUnread("distributionForm")
 
 
 def _quoted(label: str) -> str:
@@ -88,16 +95,25 @@ class _DistributionReader:
                 form = self.angularTwoBody(child, here)
             elif child.tag == "uncorrelated":
                 form = self.uncorrelated(child, here)
+            elif child.tag == "energyAngular":
+                form = self.energyAngular(child, here)
             elif child.tag == "unspecified":
                 form = Unspecified(
                     label=label,
                     productFrame=Frame(child.attrib.get("productFrame", "lab")),
                 )
             else:
+                # `branching3d` and anything else with no entry falls to the
+                # generic sentence: the table deliberately omits it as the
+                # import-time ratchet's guinea pig (see `nodes.reads`).
                 self.unsupported(
                     child.tag, here,
-                    "a §18 law kika declares and does not implement (phase 7b); "
-                    "the product keeps its multiplicity and loses only this form"
+                    UNREAD_DISTRIBUTION_FORMS.get(
+                        child.tag,
+                        "a §18 law kika declares and does not implement; the "
+                        "product keeps its multiplicity and loses only this "
+                        "form",
+                    )
                 )
                 continue
             distribution[label] = form
@@ -237,6 +253,40 @@ class _DistributionReader:
             except UnsupportedNode as exc:
                 self.unsupported(child.tag, here, exc.args[0])
         return None
+
+
+    # -- §18.4, energyAngular -----------------------------------------------
+
+    @reads("distributionForm", "energyAngular")
+    def energyAngular(self, element: ET.Element, path: str) -> EnergyAngular:
+        """§18.4's ``energyAngular``: P(E′,mu|E) as one correlated node.
+
+        ``DistributionAEType`` (``gnds.xsd:1797-1803``) is an ``xs:sequence`` of
+        a single ``XYs3d``, so there is no choice to walk — but the child is
+        still read through :func:`readFunction3d` rather than assumed, because a
+        file that puts something else there should be *reported*, not decoded as
+        if it were the expected node.
+
+        ``angularEnergy`` is **not** read here even though the schema gives it
+        the identical type. The two differ only in which variable is outermost,
+        which no schema can check, so kika reports it by name instead of
+        decoding it into a class that means the other thing. See
+        :class:`~kika.nuclear_data.model.distributions.EnergyAngular`.
+        """
+        label = element.attrib.get("label", "")
+        here = f"{path}/energyAngular{_quoted(label)}"
+        form = EnergyAngular(
+            label=label,
+            productFrame=Frame(element.attrib.get("productFrame", "lab")),
+        )
+        for child in element:
+            if child.tag in IGNORED:
+                continue
+            try:
+                form.xys3d = readFunction3d(child, readAxes(child, self.resolve))
+            except UnsupportedNode as exc:
+                self.unsupported(child.tag, here, exc.args[0])
+        return form
 
 
 def readDistribution(element: ET.Element, path: str,

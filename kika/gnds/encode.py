@@ -51,7 +51,7 @@ from kika.nuclear_data.model import (AngularTwoBody,
                                      BreitWigner, ConversionReport,
                                      Constant1d, CovarianceMatrix,
                                      CrossSectionSum, DiscreteGamma,
-                                     Evaluated, Isotropic2d,
+                                     EnergyAngular, Evaluated, Isotropic2d,
                                      Legendre, Mixed, NBodyPhaseSpace,
                                      Nuclide, ParameterCovariance,
                                      Polynomial1d, PrimaryGamma,
@@ -710,6 +710,8 @@ class _SuiteWriter:
         for label, form in forms.items():
             if isinstance(form, Uncorrelated):
                 self.uncorrelated(element, form, label, where)
+            elif isinstance(form, EnergyAngular):
+                self.energyAngular(element, form, label, where)
             elif isinstance(form, AngularTwoBody):
                 self.angularTwoBody(element, form, label, where)
             elif isinstance(form, Isotropic2d):
@@ -747,6 +749,40 @@ class _SuiteWriter:
             # file came out invalid without the "does not validate" sentence
             # that `declareWhatIsMissing` is there to put in the report.
             self.incompleteProducts.append(where)
+
+    @writes("distributionForm", "energyAngular")
+    def energyAngular(self, parent: ET.Element, form, label: str,
+                      where: str) -> None:
+        """§18.4, and **the one child or none**.
+
+        ``DistributionAEType`` (``gnds.xsd:1797-1803``) is an ``xs:sequence`` of
+        one ``XYs3d``, so an ``energyAngular`` whose function kika could not
+        read is not a partial node but an invalid one — the same judgement
+        :meth:`uncorrelated` makes about its two halves, made in the same place
+        and for the same reason.
+
+        ``nested=False`` on the child: it is the *primary* of its container
+        (``xData_XYs3d_primary``), so it carries its own ``axes``, which
+        ``:2260`` makes a required child rather than an optional one.
+
+        **A known way this writes an invalid file, and it is not a defect
+        here.** ``xData_XYs3d_primary`` declares no ``interpolation`` attribute
+        where every 2-d type does (``library-gaps.md`` D24). If a real
+        ``energyAngular`` states a non-lin-lin law on its outermost axis, the
+        round trip writes it back and the file fails validation — which is
+        correct: dropping the attribute would validate by discarding what the
+        evaluation said.
+        """
+        if not form.isComplete:
+            self.report.unsupportedNode(
+                f"{where}: an <energyAngular> whose XYs3d kika could not read; "
+                f"gnds.xsd:1798-1800 requires the child, so the node is not "
+                f"written at all"
+            )
+            return
+        element = ET.SubElement(parent, "energyAngular")
+        _set(element, label=label, productFrame=str(form.productFrame))
+        _function(element, form.xys3d, self.report, where)
 
     @writes("distributionForm", "uncorrelated")
     @writes("uncorrelatedAngularForm", "isotropic2d")

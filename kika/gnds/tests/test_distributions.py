@@ -1,4 +1,5 @@
-"""§18 distributions, read and written back — phase 7b's ``uncorrelated``.
+"""§18 distributions, read and written back — phase 7b's ``uncorrelated``
+and ``energyAngular``.
 
 Beside ``test_resonances.py`` and for the same reason: the chapter has its own
 reader module now, and the assertions that belong to it are the shapes §18.3
@@ -19,6 +20,14 @@ So four of ``uncorrelated/energy``'s eleven choices have a witness here and
 seven do not — the six analytic spectra and ``regions2d``. Those are declared
 in :data:`kika.gnds.nodes.NODES` and reported, and the tests at the bottom are
 about the reporting rather than about the forms.
+
+**``energyAngular`` has no witness among the three**, so its tests graft one in.
+The only registered tape that carries a real one is ``fe56_gnds`` — 18.8 MB, on
+the share, marked ``tape`` — and the gate that uses it is
+``test_cross_section_oracle.py``'s report set. A grafted node still walks the
+whole pipeline (``kika.read`` → ``kika.write`` → ``kika.read``) rather than the
+writer alone, so what it does not cover is *the shapes a real evaluation uses*,
+not the wiring.
 """
 from __future__ import annotations
 
@@ -29,9 +38,9 @@ import pytest
 import kika
 from kika.gnds.decode import readReactionSuite
 from kika.gnds.xpath import Document
-from kika.nuclear_data.model import (DiscreteGamma, Isotropic2d,
-                                     NBodyPhaseSpace, PrimaryGamma,
-                                     Uncorrelated, XYs2d)
+from kika.nuclear_data.model import (DiscreteGamma, EnergyAngular,
+                                     Isotropic2d, NBodyPhaseSpace,
+                                     PrimaryGamma, Uncorrelated, XYs2d, XYs3d)
 
 
 def _uncorrelated(suite):
@@ -261,3 +270,174 @@ def test_a_half_read_uncorrelated_is_not_written_at_all(h2_gnds, tmp_path):
     )
     assert any("requires both children" in entry
                for entry in report.unsupported)
+
+
+# ---------------------------------------------------------------------------
+# §18.4 energyAngular — grafted, because no committed fixture carries one
+# ---------------------------------------------------------------------------
+
+#: One ``<energyAngular>``: P(E′,mu|E) over two incident energies, the inner
+#: ``XYs2d`` giving P(mu) at two outgoing energies each. Small on purpose — the
+#: shape is what is under test, not the numbers.
+ENERGY_ANGULAR_XML = """
+<energyAngular label="graft" productFrame="lab">
+  <XYs3d interpolationQualifier="unitbase">
+    <axes>
+      <axis index="3" label="energy_in" unit="eV"/>
+      <axis index="2" label="energy_out" unit="eV"/>
+      <axis index="1" label="mu" unit=""/>
+      <axis index="0" label="P(mu,energy_out|energy_in)" unit=""/>
+    </axes>
+    <function2ds>
+      <XYs2d outerDomainValue="1e6">
+        <function1ds>
+          <XYs1d outerDomainValue="1e4"><values>-1 0.4 1 0.6</values></XYs1d>
+          <XYs1d outerDomainValue="2e4"><values>-1 0.3 1 0.7</values></XYs1d>
+        </function1ds>
+      </XYs2d>
+      <XYs2d outerDomainValue="2e6">
+        <function1ds>
+          <XYs1d outerDomainValue="1e4"><values>-1 0.2 1 0.8</values></XYs1d>
+          <XYs1d outerDomainValue="3e4"><values>-1 0.1 1 0.9</values></XYs1d>
+        </function1ds>
+      </XYs2d>
+    </function2ds>
+  </XYs3d>
+</energyAngular>
+"""
+
+
+def graftDistributionForm(source, destination, xml: str):
+    """Append one distribution form to the first ``<distribution>`` of a file.
+
+    ``DistributionType`` (``gnds.xsd:1647``) is an unbounded ``xs:choice``, so a
+    second form beside the one already there is what the schema expects of a
+    file that states its distribution two ways, and the labels key them apart.
+    """
+    tree = ET.parse(source)
+    distribution = tree.getroot().find(".//distribution")
+    assert distribution is not None, source
+    distribution.append(ET.fromstring(xml))
+    tree.write(destination)
+    return destination
+
+
+def _grafted(source, tmp_path, xml: str = ENERGY_ANGULAR_XML):
+    path = graftDistributionForm(source, tmp_path / "grafted.gnds.xml", xml)
+    return readReactionSuite(Document.parse(path))
+
+
+def _energyAngulars(suite):
+    forms = []
+    for container in (suite.reactions, suite.orphanProducts, suite.sums,
+                      suite.productions, suite.fissionComponents):
+        for reaction in container:
+            channel = getattr(reaction, "outputChannel", None)
+            if channel is None:
+                continue
+            for product in _products(channel):
+                if product.distribution is None:
+                    continue
+                forms.extend(f for f in product.distribution.forms.values()
+                             if isinstance(f, EnergyAngular))
+    return forms
+
+
+def _products(channel):
+    for product in channel.products:
+        yield product
+        if product.outputChannel is not None:
+            yield from _products(product.outputChannel)
+
+
+def test_an_energy_angular_reads_into_one_xys3d(h2_gnds, tmp_path):
+    """§18.4 is an ``xs:sequence`` of one ``XYs3d`` and the model says so.
+
+    The label and ``productFrame`` are required attributes of the node, not of
+    the function, so they live on :class:`EnergyAngular` — and the outermost
+    grid belongs to the ``XYs3d``, which is what makes it a 3-d form rather
+    than a dictionary of 2-d ones.
+    """
+    suite, report = _grafted(h2_gnds, tmp_path)
+    forms = _energyAngulars(suite)
+    assert len(forms) == 1
+    form = forms[0]
+    assert form.label == "graft"
+    assert str(form.productFrame) == "lab"
+    assert form.isComplete
+    assert isinstance(form.xys3d, XYs3d)
+    assert form.xys3d.outerDomainValues == [1e6, 2e6]
+    assert [c.outerDomainValue for c in form.xys3d[1]] == [1e4, 3e4]
+    assert not [e for e in report.unsupported if "energyAngular" in e]
+
+
+def test_an_energy_angular_survives_a_round_trip(h2_gnds, tmp_path):
+    """Through the whole pipeline, not through the writer alone.
+
+    The ``axes`` identity is the part that a writer-only test cannot see: the
+    reader shares one object from the ``XYs3d`` down to its 1-d grandchildren
+    and the writer decides inheritance by ``is``, so a second read of what was
+    written is what proves the file did not repeat them.
+    """
+    suite, _ = _grafted(h2_gnds, tmp_path)
+    written = tmp_path / "out.gnds.xml"
+    report = kika.write(suite, written)
+    again, _ = readReactionSuite(Document.parse(written))
+
+    before, after = _energyAngulars(suite)[0], _energyAngulars(again)[0]
+    assert after.label == before.label
+    assert after.productFrame == before.productFrame
+    assert after.xys3d.outerDomainValues == before.xys3d.outerDomainValues
+    assert after.xys3d.interpolationQualifier == \
+        before.xys3d.interpolationQualifier
+    for child in after.xys3d:
+        assert child.axes is after.xys3d.axes
+        for grandchild in child:
+            assert grandchild.axes is after.xys3d.axes
+    assert not [e for e in report.losses if "axes of its own" in e], \
+        report.losses
+
+
+def test_an_energy_angular_with_no_function_is_not_written_at_all(
+        h2_gnds, tmp_path):
+    """``gnds.xsd:1798-1800`` is an ``xs:sequence``: the child or nothing.
+
+    :meth:`uncorrelated`'s judgement about its two halves, one node over. A
+    ``<energyAngular>`` with no ``XYs3d`` is not a partial statement, it is an
+    invalid one, so the refusal is the writer's and it reports why.
+    """
+    empty = ENERGY_ANGULAR_XML[:ENERGY_ANGULAR_XML.index("<XYs3d")] + \
+        "<gridded3d/>" + \
+        ENERGY_ANGULAR_XML[ENERGY_ANGULAR_XML.index("</energyAngular>"):]
+    suite, readReport = _grafted(h2_gnds, tmp_path, empty)
+
+    assert _energyAngulars(suite)[0].isComplete is False
+    assert [e for e in readReport.unsupported if "gridded3d" in e], \
+        readReport.unsupported
+
+    written = tmp_path / "out.gnds.xml"
+    report = kika.write(suite, written)
+    root = ET.parse(written).getroot()
+    assert not list(root.iter("energyAngular"))
+    assert any("requires the child" in entry for entry in report.unsupported)
+
+
+def test_angular_energy_is_reported_rather_than_read_as_its_mirror(
+        h2_gnds, tmp_path):
+    """The two share a complexType and differ only in which variable is outer.
+
+    So the same bytes are a *valid* ``angularEnergy`` and a *valid*
+    ``energyAngular``, and nothing in the schema distinguishes them — which is
+    exactly why kika does not reuse the reader. Decoding one into
+    :class:`EnergyAngular` would produce a model, and a file written back from
+    it, that states the wrong physics with no gate anywhere able to see it.
+    """
+    mirrored = ENERGY_ANGULAR_XML.replace("energyAngular", "angularEnergy")
+    suite, report = _grafted(h2_gnds, tmp_path, mirrored)
+
+    assert _energyAngulars(suite) == [], (
+        "an angularEnergy must not arrive as an EnergyAngular"
+    )
+    assert [e for e in report.unsupported if "/angularEnergy:" in e], \
+        report.unsupported
+

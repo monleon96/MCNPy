@@ -212,7 +212,12 @@ def test_the_full_evaluation_reads_with_a_report_that_names_every_gap(fromGnds):
     # skipped" is answerable without reading the reader.
     assert all(entry.startswith("/reactionSuite") for entry in report.unsupported)
     laws = {entry.rsplit("/", 1)[-1].split(":")[0] for entry in report.unsupported}
-    assert laws == {"uncorrelated", "energyAngular", "branching1d",
-                    "branching3d"}
+    # Two names left this set in phase 7b and the set is the record of it:
+    # `uncorrelated` with increment 1, `energyAngular` with the XYs3d one. What
+    # remains is the two branching nodes, which are §14 isomeric transitions
+    # rather than §18 laws. This assert is the gate those increments are
+    # measured by — the 18.8 MB evaluation, not a trim of it — so it is edited
+    # when a law lands and never loosened to make a run pass.
+    assert laws == {"branching1d", "branching3d"}
     # §19 is read, so it is not in that list; the resonance oracle checks it.
     assert gnds.hasResonances

@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Union
 
 from .axes import Axes
 from .enums import Frame
-from .functions import Function1d, Function2d, Regions2d, XYs2d
+from .functions import Function1d, Function2d, Regions2d, XYs2d, XYs3d
 from .quantities import PhysicalQuantity
 
 __all__ = [
@@ -129,12 +129,18 @@ class Unspecified:
 
 class _UnimplementedDistribution:
     gndsNodeName = "?"
+    #: Why this one is empty. A phase number is the *usual* answer and not the
+    #: only one — ``angularEnergy``'s emptiness is a decision — so the sentence
+    #: belongs to the class rather than being spelled once for everybody. The
+    #: 2-d/3-d functionals learned the same lesson; see
+    #: :attr:`~kika.nuclear_data.model.functions.higher._UnimplementedNode.plannedFor`.
+    plannedFor = "scheduled for phase 7b"
 
     def __init__(self, *args, **kwargs):
         raise NotImplementedError(
             f"GNDS distribution {self.gndsNodeName!r} is declared but not "
-            f"implemented (phase 7b). It is present rather than absent so that a "
-            f"reader meeting one is told what is missing."
+            f"implemented ({self.plannedFor}). It is present rather than absent "
+            f"so that a reader meeting one is told what is missing."
         )
 
 
@@ -230,12 +236,63 @@ class Uncorrelated:
         return self.angular is not None and self.energy is not None
 
 
-class EnergyAngular(_UnimplementedDistribution):
-    gndsNodeName = "energyAngular"
+@dataclass
+class EnergyAngular:
+    """§18.4. P(E′,mu|E) as one node — ``gnds.xsd:1797``, ``DistributionAEType``.
+
+    The correlated counterpart of :class:`Uncorrelated`: where that one states
+    P(mu|E) and P(E′|E) separately because the evaluation did, this one states
+    the joint distribution, which is what ENDF MF6 carries.
+
+    **The field is named after its type because the schema admits exactly one.**
+    ``DistributionAEType`` is an ``xs:sequence`` of a single ``XYs3d`` — no
+    choice, no ``regions3d`` (which cannot occur anywhere; see
+    :class:`~kika.nuclear_data.model.functions.higher.Regions3d`), no isotropic
+    shorthand. ``AngularTwoBody.angular`` is spelled neutrally because four
+    shapes can land there; here a neutral name would suggest an abstraction that
+    does not exist.
+
+    **Why this is not :class:`AngularEnergy` with a flag**, though the two share
+    a complexType exactly. The nesting order is the physics: ``energyAngular``
+    is P(E′|E) outermost with P(mu|E,E′) inside it, and ``angularEnergy`` is the
+    same two variables the other way round. Writing one as the other produces a
+    file that **validates and states the wrong physics** — no schema can catch
+    it, and the axes labels are the only thing that would disagree. The writer
+    dispatches on ``isinstance``, so two classes make that failure impossible
+    rather than merely unlikely. A shared class with a boolean makes it one
+    wrong default away.
+    """
+
+    xys3d: Optional[XYs3d] = None
+    label: Optional[str] = None
+    productFrame: Frame = Frame.lab
+
+    def __post_init__(self) -> None:
+        self.productFrame = Frame(self.productFrame)
+
+    @property
+    def isComplete(self) -> bool:
+        """The one child present, which is the only shape the schema admits."""
+        return self.xys3d is not None
 
 
 class AngularEnergy(_UnimplementedDistribution):
+    """§18.5, and **deliberately still empty** — ``gnds.xsd:1797``, the same type.
+
+    Not blocked by anything: :class:`EnergyAngular` shows the whole
+    implementation is a dataclass, a reader and a writer. It is unwritten
+    because it occurs **twice** in the 558 distributed neutron evaluations, and
+    what to do with a node that rare is a decision (implement it, or retire the
+    declaration and report it by name) rather than a task. The census settles
+    which.
+    """
+
     gndsNodeName = "angularEnergy"
+    plannedFor = (
+        "not scheduled but undecided: it occurs twice in the 558 distributed "
+        "neutron evaluations, and whether to implement it or retire the "
+        "declaration is a decision the census settles"
+    )
 
 
 class KalbachMann(_UnimplementedDistribution):
@@ -255,13 +312,13 @@ class Recoil(_UnimplementedDistribution):
     gndsNodeName = "recoil"
 
 
-#: What a reader meeting one of these can be told is missing. **Two of the six
+#: What a reader meeting one of these can be told is missing. **Two of the three
 #: are not members of §18.1.1's choice at all** — see the two docstrings above —
 #: which is why :data:`kika.gnds.nodes.NOT_A_DISTRIBUTION_FORM` names their real
 #: choice point and a test holds the two lists against each other.
 NOT_IMPLEMENTED_DISTRIBUTIONS = {
     cls.gndsNodeName: cls
-    for cls in (EnergyAngular, AngularEnergy, KalbachMann, Recoil)
+    for cls in (AngularEnergy, KalbachMann, Recoil)
 }
 
 

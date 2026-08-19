@@ -74,6 +74,7 @@ def test_resonances_is_the_one_child_allowed_to_be_none(suite):
 
 def test_the_declared_but_unimplemented_nodes_name_themselves():
     """A reader meeting one is told which GNDS node is missing."""
+    assert m.NOT_IMPLEMENTED_DISTRIBUTIONS
     for name, cls in m.NOT_IMPLEMENTED_DISTRIBUTIONS.items():
         with pytest.raises(NotImplementedError, match=name):
             cls()

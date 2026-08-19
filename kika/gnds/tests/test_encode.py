@@ -913,8 +913,8 @@ def test_an_xys3d_validates_against_the_schema(tmp_path):
     """``xData_XYs3d_primary`` has no global element, so the root is declared here.
 
     ``XYs3d`` occurs in ``gnds.xsd`` only inside ``DistributionAEType``
-    (``:1797``), which is ``energyAngular``/``angularEnergy`` — the *next*
-    increment. Validating the fragment needs a global declaration of its type,
+    (``:1797``), which is ``energyAngular``/``angularEnergy``, and neither has a
+    global declaration either. Validating the fragment needs one of its type,
     and a two-line schema that ``xs:include``s FUDGE's is the least that
     provides one. ``gnds.xsd`` carries no ``targetNamespace``, so the include
     is a plain textual merge and the type is FUDGE's own, unmodified.
@@ -982,6 +982,33 @@ def test_a_non_linlin_xys3d_cannot_be_written_valid_and_that_is_the_schema(tmp_p
     assert len(errors) == 1, errors
     assert "attribute 'interpolation': The attribute 'interpolation' is not " \
            "allowed" in errors[0], errors[0]
+
+
+def test_a_grafted_energy_angular_validates_inside_a_whole_file(
+        h2_gnds, tmp_path):
+    """§18.4 written back into a file that validates end to end.
+
+    The fragment tests above pin the ``XYs3d`` against a declaration this test
+    file makes up. This one is the real shape: an ``<energyAngular>`` inside a
+    ``<distribution>`` inside a product of a committed evaluation, validated as
+    a whole document against FUDGE's schema with nothing declared by us.
+
+    ``h2_gnds`` is the fixture that round-trips clean today, so any error here
+    is the grafted node's. Grafted because **no committed fixture carries an
+    ``energyAngular``** — the witness is ``fe56_gnds`` on the share, and the
+    gate that uses it is ``test_cross_section_oracle``'s report set.
+    """
+    from kika.gnds.tests.test_distributions import (ENERGY_ANGULAR_XML,
+                                                    graftDistributionForm)
+
+    source = graftDistributionForm(h2_gnds, tmp_path / "grafted.gnds.xml",
+                                   ENERGY_ANGULAR_XML)
+    written, report = _write(kika.read(source, covariances=False), tmp_path)
+
+    assert list(ET.parse(written).getroot().iter("energyAngular")), (
+        "the graft has to survive to the output for this to be a gate")
+    assert _schemaErrors(written) == []
+    assert not [entry for entry in report.losses if "axes of its own" in entry]
 
 
 def test_every_committed_covariance_fixture_can_be_written(

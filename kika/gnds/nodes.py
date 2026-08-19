@@ -136,10 +136,11 @@ def _spec(*args, **kwargs) -> Tuple[Tuple[str, str], NodeSpec]:
 #: When their writers land they become ``PAIRED``, and :func:`check` is what
 #: notices that the declaration and the code agree again.
 #:
-#: **Three §18 entries carry this, and it was four until ``uncorrelated``
-#: landed.** ``gnds.xsd:1647-1662`` gives §18.1.1's choice twelve members; kika
-#: names six of them below and the count of *unimplemented* ones is now three —
-#: ``energyAngular``, ``angularEnergy``, ``KalbachMann``.
+#: **One §18 entry carries this now, and it was four before ``uncorrelated``.**
+#: ``gnds.xsd:1647-1662`` gives §18.1.1's choice twelve members; kika names six
+#: of them below and the count of *unimplemented* ones is down to two —
+#: ``KalbachMann``, which carries this reason, and ``angularEnergy``, which
+#: carries one of its own because its emptiness is a decision and not a queue.
 #: ``branching3d`` is deliberately absent,
 #: as the guinea pig of the import-time ratchet (see :func:`reads` and its
 #: test). The remaining five — ``reference``, ``CoulombPlusNuclearElastic``,
@@ -238,9 +239,15 @@ NODES: Dict[Tuple[str, str], NodeSpec] = dict([
     _spec("uncorrelated", "distributionForm", "§18.3", Uncorrelated,
           Status.PAIRED),
     _spec("energyAngular", "distributionForm", "§18.4", EnergyAngular,
-          Status.NEITHER, _PHASE_7B),
+          Status.PAIRED),
     _spec("angularEnergy", "distributionForm", "§18.5", AngularEnergy,
-          Status.NEITHER, _PHASE_7B),
+          Status.NEITHER,
+          "§18.5 shares energyAngular's complexType (gnds.xsd:1797) and differs "
+          "only in which variable is outermost, which no schema checks — so it "
+          "is reported by name rather than decoded into the class that means "
+          "the other thing. Unwritten because it occurs twice in the 558 "
+          "distributed neutron evaluations; the census decides whether it is "
+          "implemented or the declaration is retired"),
     _spec("KalbachMann", "distributionForm", "§18.6", KalbachMann,
           Status.NEITHER, _PHASE_7B),
 
