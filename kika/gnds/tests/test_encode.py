@@ -521,28 +521,32 @@ def test_the_endf_decoded_suites_schema_errors_are_pinned(micro_tape, tmp_path):
 
 
 #: D25. What is wrong with a ``covarianceSuite`` **written from an ENDF decode**,
-#: by kind. Both are the same shape of hole: an attribute §25 makes required
-#: that the ENDF side has no concept of and therefore never sets.
+#: by kind. **Empty, and it was two.** Both were the same shape of hole — an
+#: attribute §25 makes required that the ENDF side has no concept of and
+#: therefore never set — and both are closed:
 #:
-#: ``covarianceMatrix/@label`` is the one already fixed one level down —
-#: ``_parameterCovarianceMatrix`` fills it from the synthesised style because
-#: ``kika/endf/model_adapter/parameter_covariances.py`` builds every matrix with
-#: ``label=None``. ``kika/endf/model_adapter/covariances.py:113`` does exactly
-#: the same for the gridded ones and nothing filled those.
-#: ``covarianceSuite/@target`` is not a matrix attribute at all: it is the root
-#: saying what nuclide the file is about, and ``decodeCovarianceSuite`` never
-#: took one.
-ENDF_COVARIANCE_SCHEMA_GAPS = (
-    "Element 'covarianceSuite': The attribute 'target' is required but missing",
-    "Element 'covarianceMatrix': The attribute 'label' is required but missing",
-)
+#: ``covarianceMatrix/@label``, 4 on Fe-56 and 2 on the PFNS tape, was the hole
+#: §25.3 had already patched one level down for ``parameterCovarianceMatrix``.
+#: ``covariances.xsd`` requires the attribute on **all four** forms, so
+#: ``encode._formLabel`` now fills it from the style ``writeCovarianceSuite``
+#: synthesises, for all four rather than for the one that was measured.
+#: ``covarianceSuite/@target``, 1 on each, was not a matrix attribute at all:
+#: the root saying what nuclide the file is about. It comes from the
+#: ``reactionSuite`` through ``decodeCovarianceSuite(target=…)``, the same route
+#: ``evaluation`` already took, because ENDF has no such string and the two
+#: documents of one pair must not derive it twice.
+#:
+#: The tuple stays rather than being deleted with the last entry: it is what a
+#: newly-introduced gap would be measured against, and an empty tuple asserts
+#: something an absent one does not.
+ENDF_COVARIANCE_SCHEMA_GAPS = ()
 
 #: ``(fixture name, error count)``. Two tapes rather than one because MF35 is a
 #: different route into the same writer — ``micro_pfns_cov`` reaches
 #: ``_covarianceMatrix`` through ``decodeMF35MT`` where ``micro_fe56_cov``
 #: reaches it through MF33 and MF34 — and a gap that only one of them shows is
 #: worth telling apart from one both do. Today they show the same two kinds.
-ENDF_COVARIANCE_TAPES = (("micro_cov_tape", 5), ("micro_pfns_cov_tape", 3))
+ENDF_COVARIANCE_TAPES = (("micro_cov_tape", 0), ("micro_pfns_cov_tape", 0))
 
 
 def _endfCovarianceSchemaErrors(tape, tmp_path):
@@ -574,17 +578,20 @@ def test_the_endf_decoded_covariance_sibling_is_pinned(fixture, expected,
     every evaluation that has covariances was never looked at by anything. The
     same hole, one level further out, surviving the fix for itself.
 
-    This test lands **declaring the damage rather than repairing it**, which is
-    the opposite order from D20 and is why it goes first: a number that is
+    This test landed **declaring the damage rather than repairing it**, which is
+    the opposite order from D20 and is why it went first: a number that is
     pinned can be lowered by anyone, and a number nobody measures is what let
-    D19 live for a phase.
+    D19 live for a phase. It was pinned at 5 and 3 for exactly one commit; both
+    kinds are described in :data:`ENDF_COVARIANCE_SCHEMA_GAPS`, which is now
+    empty.
 
     **The count is not monotone downwards.** An absent required *child* makes
     its whole subtree unreachable to the validator, so repairing one can raise
     the count by exposing what it was standing in front of — the MF4 angular
-    ``axes`` hid 3 999 errors behind one. Both gaps here are *attributes*, which
-    do not hide a subtree, so this particular pair should fall cleanly; that is
-    a property of these two and not a rule.
+    ``axes`` hid 3 999 errors behind one. Both gaps here were *attributes*, which
+    do not hide a subtree, and they did fall cleanly — 5 → 0 and 3 → 0. That was
+    a property of those two and is not a rule: the next entry here may well go
+    up before it goes down.
     """
     tape = request.getfixturevalue(fixture)
     _sibling, errors = _endfCovarianceSchemaErrors(tape, tmp_path)
@@ -593,6 +600,69 @@ def test_the_endf_decoded_covariance_sibling_is_pinned(fixture, expected,
                if not any(kind in e for kind in ENDF_COVARIANCE_SCHEMA_GAPS)]
     assert unknown == [], unknown
     assert len(errors) == expected
+
+
+def test_the_covariance_sibling_says_the_same_target_as_the_evaluation(
+        micro_cov_tape, tmp_path):
+    """D25, half one. The pair must not disagree about what it is about.
+
+    ENDF has no target *string* anywhere: the nuclide name is derived from
+    MF1/451's ZA through PoPs, and ``decodeReactionSuite`` has already done that
+    work. So the covariance suite is handed the answer instead of re-deriving
+    it — a second derivation is a second chance for the two documents of one
+    pair to name different nuclides, and a reader following the ``externalFile``
+    from one to the other would have no way to tell which was right.
+
+    Asserted **against the evaluation's own value**, not against a literal:
+    ``target`` is ``'unknown'`` on this micro-tape, which is what
+    ``decode.py:235`` says when PoPs comes back empty. Mirroring that is
+    correct; inventing a nuclide name to make the file look finished would not
+    be.
+    """
+    suite = kika.read(micro_cov_tape)
+    path = tmp_path / "out.gnds.xml"
+    kika.write(suite, path)
+
+    evaluation = ET.parse(path).getroot()
+    sibling = ET.parse(path.parent / "Covariances" / "out.gnds-covar.xml").getroot()
+
+    assert sibling.attrib["target"] == evaluation.attrib["target"]
+    assert sibling.attrib["target"] == suite.target
+    assert sibling.attrib["projectile"] == evaluation.attrib["projectile"]
+
+
+def test_every_endf_built_covariance_form_gets_the_label_the_schema_requires(
+        micro_cov_tape, tmp_path):
+    """D25, half two — and the fix is for four forms, not for the one measured.
+
+    ``covariances.xsd`` marks ``label`` required on ``covarianceMatrix``
+    (:118), ``shortRangeSelfScalingVariance`` (:126), ``mixed`` (:135) and
+    ``sum`` (:143). Only the first occurs in an ENDF decode today, so only the
+    first was in the error count — patching just that one would leave three
+    forms one MF away from reintroducing D25 with nothing to notice.
+
+    The approximation is **reported**, which is the part that matters more than
+    the attribute: a reader of the written file cannot tell a style label kika
+    invented from one an evaluator chose, and the report is the only place that
+    difference exists.
+    """
+    from kika.gnds.encode import SYNTHESISED_STYLE_LABEL
+
+    suite = kika.read(micro_cov_tape)
+    path = tmp_path / "out.gnds.xml"
+    report = kika.write(suite, path)
+
+    sibling = ET.parse(path.parent / "Covariances" / "out.gnds-covar.xml").getroot()
+    forms = [element for element in sibling.iter()
+             if element.tag in ("covarianceMatrix", "mixed", "sum",
+                                "shortRangeSelfScalingVariance")]
+    assert forms, "the tape has covariances and none of them reached the file"
+    for form in forms:
+        assert form.attrib.get("label") == SYNTHESISED_STYLE_LABEL, form.attrib
+
+    assert sum("carried no label" in entry
+               for entry in report.approximations) == len(forms), (
+        report.approximations)
 
 
 def test_a_bare_isotropic2d_goes_where_the_schema_admits_it(micro_tape, tmp_path):

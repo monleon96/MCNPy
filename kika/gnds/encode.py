@@ -1062,6 +1062,47 @@ def _dataLink(parent: ET.Element, tag: str, link) -> None:
                  domainUnit=entry.domainUnit or None)
 
 
+#: The style label ``writeCovarianceSuite`` synthesises for a suite that has
+#: none. It is also what :func:`_formLabel` falls back to, and the two are the
+#: same constant on purpose rather than by coincidence: the suites that arrive
+#: without styles are exactly the suites whose forms arrive without labels —
+#: both are things ENDF has no concept of — so the label the fallback invents is
+#: always the label of a style the same call has just written.
+SYNTHESISED_STYLE_LABEL = "eval"
+
+
+def _formLabel(form, report, where: str) -> str:
+    """``label`` for a §25 form, and **all four of them require one.**
+
+    ``covariances.xsd`` marks it ``use="required"`` on ``covarianceMatrix``
+    (:118), ``shortRangeSelfScalingVariance`` (:126), ``mixed`` (:135) and
+    ``sum`` (:143), and the ENDF adapter sets it on none of them —
+    ``covariances.py:113`` builds every gridded matrix without one, because in
+    ENDF a covariance belongs to a file and a section, not to a *style*. So a
+    covariance sibling written from a tape was invalid once per matrix, which is
+    D25 and is what ``test_the_endf_decoded_covariance_sibling_is_pinned``
+    measures.
+
+    The value is not invented out of nothing: in GNDS a form's label names the
+    style it belongs to, and the only suites reaching this branch are the ones
+    ``writeCovarianceSuite`` has just given a synthesised ``evaluated`` style
+    called :data:`SYNTHESISED_STYLE_LABEL`. It is still reported — the source
+    said nothing about which style any of this belongs to, and a reader of the
+    written file cannot tell the synthesis from an evaluator's choice.
+    """
+    label = getattr(form, "label", None)
+    if label is not None:
+        return label
+    report.approximated(
+        f"{where}: the form carried no label and §25 requires one on all four "
+        f"covariance forms, so it is written as "
+        f"{SYNTHESISED_STYLE_LABEL!r} -- the style label the suite writer "
+        f"synthesises for a suite that has no styles, which is the same case. "
+        f"The source said nothing about which style this form belongs to"
+    )
+    return SYNTHESISED_STYLE_LABEL
+
+
 @writes("covarianceForm", "covarianceMatrix", "mixed", "sum",
         "shortRangeSelfScalingVariance")
 def _covarianceForm(parent: ET.Element, form, report, where: str) -> None:
@@ -1085,17 +1126,20 @@ def _covarianceForm(parent: ET.Element, form, report, where: str) -> None:
         element = _covarianceMatrix(parent, "shortRangeSelfScalingVariance",
                                     form.matrix, report, where)
         if element is not None:
-            _set(element, label=form.label,
+            # Its own label overwrites the wrapped matrix's, which is the right
+            # way round: `covariances.xsd:126` requires the attribute on *this*
+            # element, and the matrix inside it is not a node of its own here.
+            _set(element, label=_formLabel(form, report, where),
                  dependenceOnProcessedGroupWidth=
                  form.dependenceOnProcessedGroupWidth)
     elif isinstance(form, Mixed):
         element = ET.SubElement(parent, "mixed")
-        _set(element, label=form.label)
+        _set(element, label=_formLabel(form, report, where))
         for component in form.components:
             _covarianceForm(element, component, report, where)
     elif isinstance(form, Sum):
         element = ET.SubElement(parent, "sum")
-        _set(element, label=form.label,
+        _set(element, label=_formLabel(form, report, where),
              domainMin=None if form.domainMin is None else _number(form.domainMin),
              domainMax=None if form.domainMax is None else _number(form.domainMax),
              domainUnit=form.domainUnit or None)
@@ -1113,7 +1157,7 @@ def _covarianceForm(parent: ET.Element, form, report, where: str) -> None:
 def _covarianceMatrix(parent: ET.Element, tag: str, form, report,
                       where: str) -> Optional[ET.Element]:
     element = ET.SubElement(parent, tag)
-    _set(element, label=form.label,
+    _set(element, label=_formLabel(form, report, where),
          type="relative" if form.isRelative else "absolute")
     gridded = ET.SubElement(element, "gridded2d")
     axes = ET.SubElement(gridded, "axes")
@@ -1266,22 +1310,10 @@ def _parameterCovarianceMatrix(parent: ET.Element, form, report,
     of counts would notice, because the counts would still sum to the order.
     """
     element = ET.SubElement(parent, "parameterCovarianceMatrix")
-    label = form.label
-    if label is None:
-        # §25.3.2 makes `label` required, and the ENDF adapter never sets one:
-        # `kika/endf/model_adapter/parameter_covariances.py` builds every
-        # `ParameterCovarianceMatrix` without it, because MF32 has no such
-        # concept. In GNDS the label names the style the form belongs to, and
-        # the suite writer has already synthesised an `evaluated` style called
-        # `eval` for exactly this case.
-        label = "eval"
-        report.approximated(
-            f"{where}: its matrix carried no label and §25.3.2 requires one, so "
-            f"it is written as 'eval' -- the style label the suite writer "
-            f"synthesises. The source said nothing about which style this "
-            f"matrix belongs to"
-        )
-    _set(element, label=label,
+    # §25.3.2 requires `label` exactly as §25.2.2 does, and
+    # `kika/endf/model_adapter/parameter_covariances.py` sets it exactly as
+    # rarely -- never. Same hole, same fallback, one function.
+    _set(element, label=_formLabel(form, report, where),
          type="relative" if form.isRelative else "absolute")
 
     container = ET.SubElement(element, "parameters")
