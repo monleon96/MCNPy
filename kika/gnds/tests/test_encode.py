@@ -631,6 +631,34 @@ def test_the_covariance_sibling_says_the_same_target_as_the_evaluation(
     assert sibling.attrib["projectile"] == evaluation.attrib["projectile"]
 
 
+def test_a_covariance_suite_decoded_without_a_target_says_so(micro_cov_tape):
+    """The consequence is announced where the absence is, not where it bites.
+
+    ``decodeCovarianceSuite`` is reachable without a ``reactionSuite`` — the
+    samplers at ``sampling/endf_perturbation.py:663`` and
+    ``sampling/mf35_sampling.py:177`` call it that way, and they are right to:
+    they want the matrices, not a document. But the suite they get back cannot
+    be written as valid GNDS, and without this line the next caller learns that
+    from ``xmllint``, three steps later and in another session.
+
+    The signature keeps its default rather than making ``target`` required: the
+    samplers have no reaction suite to take one from, and breaking them to
+    protect a writer they never call would be the wrong trade.
+    """
+    from kika.endf.model_adapter.covariances import decodeCovarianceSuite
+    from kika.endf.read_endf import read_endf
+
+    endf = read_endf(str(micro_cov_tape))
+
+    _suite, report = decodeCovarianceSuite(endf)
+    assert any("cannot be written as valid GNDS" in entry
+               for entry in report.warnings), report.warnings
+
+    _suite, report = decodeCovarianceSuite(endf, target="Fe56")
+    assert not [entry for entry in report.warnings
+                if "cannot be written as valid GNDS" in entry], report.warnings
+
+
 def test_every_endf_built_covariance_form_gets_the_label_the_schema_requires(
         micro_cov_tape, tmp_path):
     """D25, half two — and the fix is for four forms, not for the one measured.

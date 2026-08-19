@@ -735,6 +735,20 @@ def decodeCovarianceSuite(endf, report: Optional[ConversionReport] = None,
     is honest: nothing said what it was about.
     """
     report = report if report is not None else ConversionReport()
+    if target is None:
+        # Announced where the absence happens, not where it bites. Without this
+        # the caller finds out from `xmllint` three steps later and in another
+        # session -- and the two callers that hit it (the samplers) never write
+        # GNDS at all, so for them the line is information rather than a fault.
+        report.warn(
+            "decodeCovarianceSuite was called without a target, so the "
+            "covarianceSuite says nothing about which nuclide it is about. "
+            "§25.1.1 makes `target` a required attribute of the root, so this "
+            "suite **cannot be written as valid GNDS**. ENDF has no target "
+            "string anywhere -- it is derived from MF1/451's ZA through PoPs by "
+            "decodeReactionSuite -- so the value has to come from the caller, "
+            "which is what `kika.read` does"
+        )
     suite = CovarianceSuite(evaluation=evaluation, projectile="n",
                             target=target, interaction="nuclear")
 
