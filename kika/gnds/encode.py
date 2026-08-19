@@ -52,7 +52,8 @@ from kika.nuclear_data.model import (AngularEnergy, AngularTwoBody,
                                      Constant1d, CovarianceMatrix,
                                      CrossSectionSum, DiscreteGamma,
                                      EnergyAngular, Evaluated, Isotropic2d,
-                                     Legendre, Mixed, NBodyPhaseSpace,
+                                     KalbachMann, Legendre, Mixed,
+                                     NBodyPhaseSpace,
                                      Nuclide, ParameterCovariance,
                                      Polynomial1d, PrimaryGamma,
                                      GndsProvenance, Reference,
@@ -714,6 +715,8 @@ class _SuiteWriter:
                 self.energyAngular(element, form, label, where)
             elif isinstance(form, AngularEnergy):
                 self.angularEnergy(element, form, label, where)
+            elif isinstance(form, KalbachMann):
+                self.kalbachMann(element, form, label, where)
             elif isinstance(form, AngularTwoBody):
                 self.angularTwoBody(element, form, label, where)
             elif isinstance(form, Isotropic2d):
@@ -809,6 +812,44 @@ class _SuiteWriter:
         backwards.
         """
         self._distributionAE(parent, form, label, "angularEnergy", where)
+
+    @writes("distributionForm", "KalbachMann")
+    def kalbachMann(self, parent: ET.Element, form, label: str,
+                    where: str) -> None:
+        """§18.6, in the schema's order and with ``a`` only if it is there.
+
+        ``gnds.xsd:1806-1811`` is an ``xs:sequence``, so ``f`` before ``r``
+        before ``a`` is not a style choice — a file that swapped them would not
+        validate. Each child is an ``XYs2dWrapperType`` (``:2204``): a wrapper
+        element carrying **no attributes**, with the primary ``XYs2d`` inside
+        it. Hence ``nested=False`` on the inner call, the same as §18.4's:
+        ``xData_XYs2d_primary`` (``:2195``) makes ``axes`` a required first
+        child, so the function writes its own.
+
+        **``a`` is emitted only when present, and that is a measurement rather
+        than caution.** The census puts it at **0 of 3 730** across the
+        distribution, so writing an empty ``<a>`` on every node would add a
+        node no evaluation has ever carried to 3 730 places.
+
+        ``f`` and ``r`` are required, so a node missing either is invalid and
+        not partial — the same judgement :meth:`uncorrelated` makes about its
+        two halves and :meth:`_distributionAE` about its one child.
+        """
+        if not form.isComplete:
+            self.report.unsupportedNode(
+                f"{where}: a <KalbachMann> without both <f> and <r>; "
+                f"gnds.xsd:1808-1809 requires them, so the node is not written "
+                f"at all"
+            )
+            return
+        element = ET.SubElement(parent, "KalbachMann")
+        _set(element, label=label, productFrame=str(form.productFrame))
+        for name in ("f", "r", "a"):
+            function = getattr(form, name)
+            if function is None:
+                continue
+            _function(ET.SubElement(element, name), function, self.report,
+                      where)
 
     @writes("distributionForm", "uncorrelated")
     @writes("uncorrelatedAngularForm", "isotropic2d")

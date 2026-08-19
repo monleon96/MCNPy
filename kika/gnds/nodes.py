@@ -136,22 +136,21 @@ def _spec(*args, **kwargs) -> Tuple[Tuple[str, str], NodeSpec]:
 #: When their writers land they become ``PAIRED``, and :func:`check` is what
 #: notices that the declaration and the code agree again.
 #:
-#: **One §18 entry carries this now, and it was four before ``uncorrelated``.**
+#: **No §18 entry carries this any more, and four did before ``uncorrelated``.**
 #: ``gnds.xsd:1647-1662`` gives §18.1.1's choice twelve members; kika names six
-#: of them below and the count of *unimplemented* ones is down to one —
-#: ``KalbachMann``. ``angularEnergy`` left this list when §18.5 landed: the
-#: census found two occurrences rather than the zero that would have retired
-#: the declaration, and with a witness and its mirror's complexType already
-#: implemented it was cheaper to write than to justify.
+#: of them below and **every one of the six is now ``PAIRED``** —
+#: ``uncorrelated``, then ``energyAngular``, then ``angularEnergy`` and
+#: ``KalbachMann``, all in phase 7b. What still carries this reason are the
+#: three ``multiplicityForm`` entries, which is where the phase goes next.
 #: ``branching3d`` is deliberately absent,
 #: as the guinea pig of the import-time ratchet (see :func:`reads` and its
 #: test). The remaining five — ``reference``, ``CoulombPlusNuclearElastic``,
 #: ``coherentPhotonScattering``, ``incoherentPhotonScattering``,
 #: ``thermalNeutronScatteringLaw`` — occur **zero times** across the 558 neutron
 #: evaluations the census walked, which is why they are not entries.
-_PHASE_7B = ("declared in the model and not implemented — §18.1.1's choice at "
-             "gnds.xsd:1647, and kika/nuclear_data/model/distributions.py's "
-             "NOT_IMPLEMENTED_DISTRIBUTIONS lists them — scheduled for phase 7b")
+_PHASE_7B = ("a member of §17.3's multiplicity choice (gnds.xsd:1626) that the "
+             "reader names and reports and no writer emits — scheduled for "
+             "phase 7b")
 
 #: The six analytic fission/evaporation spectra of §18.3. Each is a formula
 #: with named parameters, not a table, so kika reports one rather than
@@ -245,7 +244,7 @@ NODES: Dict[Tuple[str, str], NodeSpec] = dict([
     _spec("angularEnergy", "distributionForm", "§18.5", AngularEnergy,
           Status.PAIRED),
     _spec("KalbachMann", "distributionForm", "§18.6", KalbachMann,
-          Status.NEITHER, _PHASE_7B),
+          Status.PAIRED),
 
     # -- §18.2's angularTwoBody forms. gnds.xsd:1665, an xs:choice.
     #    XYs2d and regions2d delegate to the functional family.

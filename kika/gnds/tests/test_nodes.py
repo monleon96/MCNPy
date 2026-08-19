@@ -226,17 +226,36 @@ def test_the_known_defects_are_pinned_by_count():
 
 def test_a_paired_entry_with_no_writer_fails_the_check():
     """Plant one and watch it fail. Without this the checker could be a no-op
-    returning ``()`` and every test above would still pass."""
+    returning ``()`` and every test above would still pass.
+
+    **The victim has to be an entry that will never be implemented**, or this
+    test goes quietly vacuous the day it is: planting ``PAIRED`` on something
+    already ``PAIRED`` changes nothing and the assert below stops testing the
+    checker. It used to be ``("distributionForm", "KalbachMann")`` and moved
+    when §18.6 landed.
+
+    ``("function3d", "regions3d")`` is immune, and not merely unimplemented.
+    ``gnds.xsd`` gives ``regions3d`` **no element declaration anywhere**, and
+    the two complexTypes that would reach one — ``function3ds_inRegions`` and
+    ``xData_regions_3d_primary`` — are referenced only by each other, so the
+    branch is unreachable from any document. The census agrees from the other
+    end: **0 occurrences in 2 950 ``XYs3d`` across 558 evaluations**. A schema
+    argument and a measurement, which is what makes it safe to build a test on.
+    """
     from kika.gnds.nodes import NodeSpec
 
-    key = ("distributionForm", "KalbachMann")
+    key = ("function3d", "regions3d")
     original = NODES[key]
+    assert original.status is Status.NEITHER, (
+        f"{key} was chosen as the victim because it can never be implemented; "
+        f"it is now {original.status.value}, so this test is measuring nothing"
+    )
     NODES[key] = NodeSpec(tag=original.tag, family=original.family,
                           section=original.section, cls=original.cls,
                           status=Status.PAIRED)
     try:
         problems = nodes.check()
-        assert any("KalbachMann" in problem for problem in problems), problems
+        assert any("regions3d" in problem for problem in problems), problems
     finally:
         NODES[key] = original
     assert nodes.check() == (), "the table was not restored"

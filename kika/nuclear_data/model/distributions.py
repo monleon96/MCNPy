@@ -313,8 +313,48 @@ class AngularEnergy:
         return self.xys3d is not None
 
 
-class KalbachMann(_UnimplementedDistribution):
-    gndsNodeName = "KalbachMann"
+@dataclass
+class KalbachMann:
+    """§18.6. The Kalbach-Mann systematics — ``gnds.xsd:1805-1814``.
+
+    A pre-equilibrium emission spectrum stated as **shape and asymmetry rather
+    than as a table of P(mu,E′|E)**: ``f`` is the energy spectrum and ``r`` the
+    pre-equilibrium fraction, and the angular distribution is reconstructed from
+    them by the systematics. That is why this is a law of its own and not an
+    ``energyAngular`` — the file gives the parameters, not the joint function.
+
+    **An ``xs:sequence``, so the order is the schema's and not a preference**:
+    ``f``, then ``r``, then ``a``. Each of the three is an ``XYs2dWrapperType``
+    (``:2204-2208``) — a bare wrapper element with **no attributes of its own**
+    holding exactly one primary ``XYs2d``, which carries its own ``axes``.
+
+    **``f`` and ``r`` are required and ``a`` is not**, which is the schema's
+    statement (``minOccurs="0"`` on ``a`` alone) and also the library's: the
+    census counted **3 730 KalbachMann nodes across 272 evaluations and every
+    one of them is ``f`` + ``r``**. ``a`` appears zero times. It is modelled
+    because the schema admits it and the data could exist tomorrow, and the
+    writer emits it only when it is there — a *reading* branch for a node nobody
+    has ever seen is the ``Ys1d`` case, and this stops short of it.
+    """
+
+    f: Optional[XYs2d] = None
+    r: Optional[XYs2d] = None
+    #: Zero occurrences in 3 730. Present so a file that has one round trips.
+    a: Optional[XYs2d] = None
+    label: Optional[str] = None
+    productFrame: Frame = Frame.centerOfMass
+
+    def __post_init__(self) -> None:
+        self.productFrame = Frame(self.productFrame)
+
+    @property
+    def isComplete(self) -> bool:
+        """``f`` and ``r``, which is what ``:1808-1809`` makes mandatory.
+
+        ``a`` is deliberately not in this test: a node without it is the
+        ordinary case and the only one the distribution contains.
+        """
+        return self.f is not None and self.r is not None
 
 
 class Recoil(_UnimplementedDistribution):
@@ -330,14 +370,19 @@ class Recoil(_UnimplementedDistribution):
     gndsNodeName = "recoil"
 
 
-#: What a reader meeting one of these can be told is missing. **One of the two
-#: is not a member of §18.1.1's choice at all** — see :class:`Recoil` above —
-#: which is why :data:`kika.gnds.nodes.NOT_A_DISTRIBUTION_FORM` names its real
+#: What a reader meeting one of these can be told is missing. **The one name
+#: left is not a member of §18.1.1's choice at all** — see :class:`Recoil` above
+#: — which is why :data:`kika.gnds.nodes.NOT_A_DISTRIBUTION_FORM` names its real
 #: choice point and a test holds the two lists against each other. It was three
-#: until §18.5 landed and :class:`AngularEnergy` became a dataclass.
+#: until §18.5 and §18.6 landed and :class:`AngularEnergy` and
+#: :class:`KalbachMann` became dataclasses.
+#:
+#: **It is down to a dict that no longer contains an unimplemented §18 law**,
+#: which is what phase 7b set out to do. The entry that remains is a misplaced
+#: name and not a gap; the test above is what keeps the distinction.
 NOT_IMPLEMENTED_DISTRIBUTIONS = {
     cls.gndsNodeName: cls
-    for cls in (KalbachMann, Recoil)
+    for cls in (Recoil,)
 }
 
 

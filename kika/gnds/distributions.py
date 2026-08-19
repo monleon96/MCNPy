@@ -21,8 +21,9 @@ from typing import Callable, Optional
 from kika.nuclear_data.model import (AngularEnergy, AngularTwoBody,
                                      ConversionReport, DiscreteGamma,
                                      EnergyAngular, Frame, Isotropic2d,
-                                     NBodyPhaseSpace, PhysicalQuantity,
-                                     PrimaryGamma, Uncorrelated, Unspecified)
+                                     KalbachMann, NBodyPhaseSpace,
+                                     PhysicalQuantity, PrimaryGamma,
+                                     Uncorrelated, Unspecified)
 from kika.nuclear_data.model.distributions import Distribution
 
 from .nodes import NODES, Status, reads
@@ -99,6 +100,8 @@ class _DistributionReader:
                 form = self.energyAngular(child, here)
             elif child.tag == "angularEnergy":
                 form = self.angularEnergy(child, here)
+            elif child.tag == "KalbachMann":
+                form = self.kalbachMann(child, here)
             elif child.tag == "unspecified":
                 form = Unspecified(
                     label=label,
@@ -310,6 +313,61 @@ class _DistributionReader:
         """
         return self._distributionAE(element, path, "angularEnergy",
                                     AngularEnergy)
+
+    # -- §18.6, KalbachMann -------------------------------------------------
+
+    #: The three children of ``DistributionKalbachMannType`` in schema order.
+    #: ``a`` is last and optional (``gnds.xsd:1810``); the other two are not.
+    _KALBACH_CHILDREN = ("f", "r", "a")
+
+    @reads("distributionForm", "KalbachMann")
+    def kalbachMann(self, element: ET.Element, path: str) -> KalbachMann:
+        """§18.6's ``KalbachMann``: the systematics' two (or three) parameters.
+
+        ``gnds.xsd:1805-1814`` is an ``xs:sequence`` of ``f``, ``r`` and an
+        optional ``a``, each an ``XYs2dWrapperType`` (``:2204-2208``) — a
+        wrapper with no attributes holding exactly one primary ``XYs2d``. So
+        the read is: unwrap, then hand the ``XYs2d`` to the functional reader,
+        which is where ``axes`` and the interpolation attributes are already
+        handled.
+
+        **The wrapper is unwrapped rather than assumed away.** A ``<f>`` that
+        holds something other than an ``XYs2d``, or nothing at all, is reported
+        with its xPath instead of silently leaving the slot empty — the slot
+        being empty is what :attr:`KalbachMann.isComplete` reads as "do not
+        write this node", and the two must not be the same signal.
+
+        An unknown child is reported and skipped: the sequence is closed, so
+        anything else is a file kika should say something about rather than
+        drop.
+        """
+        label = element.attrib.get("label", "")
+        here = f"{path}/KalbachMann{_quoted(label)}"
+        form = KalbachMann(
+            label=label,
+            productFrame=Frame(element.attrib.get("productFrame",
+                                                  "centerOfMass")),
+        )
+        for child in element:
+            if child.tag in IGNORED:
+                continue
+            if child.tag not in self._KALBACH_CHILDREN:
+                self.unsupported(
+                    child.tag, here,
+                    f"gnds.xsd:1806-1811 gives <KalbachMann> the children "
+                    f"{list(self._KALBACH_CHILDREN)} and nothing else"
+                )
+                continue
+            for wrapped in child:
+                if wrapped.tag in IGNORED:
+                    continue
+                try:
+                    setattr(form, child.tag, readFunction2d(
+                        wrapped, readAxes(wrapped, self.resolve)))
+                except UnsupportedNode as exc:
+                    self.unsupported(wrapped.tag, f"{here}/{child.tag}",
+                                     exc.args[0])
+        return form
 
 
 def readDistribution(element: ET.Element, path: str,

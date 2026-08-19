@@ -47,14 +47,42 @@ SCHEMA = Path("/soft_snc/FUDGE/6.10.0/fudge/fudge/gnds.xsd")
 COVARIANCE_SCHEMA = Path(
     "/soft_snc/FUDGE/6.10.0/fudge/fudge/covariances/covariances.xsd")
 
-#: The three committed evaluations, by conftest fixture name. Between them they
-#: carry every node the writer emits.
-FIXTURES = ("h2_gnds", "micro_fe56_gnds", "micro_ta182_gnds")
+#: The committed evaluations, by conftest fixture name. Between them they carry
+#: every node the writer emits. It was three until phase 7b needed witnesses:
+#: ``h3`` for ``uncorrelated/angular``'s ``XYs2d``, ``micro_be9`` for
+#: ``angularEnergy``, ``s36`` for ``KalbachMann``.
+FIXTURES = ("h2_gnds", "micro_fe56_gnds", "micro_ta182_gnds", "h3_gnds",
+            "micro_be9_gnds", "s36_gnds")
+
+#: The ones that still write an empty ``<distribution/>``, and the law that
+#: makes them. **Named rather than left out of** :data:`FIXTURES`, so that "not
+#: yet complete" is a statement in the file instead of an absence nobody
+#: notices; the invariant test below runs on all of them and the *fact* test
+#: skips exactly these.
+#:
+#: ``s36`` carries five ``branching3d``, the last unread §18 node. When it
+#: lands this becomes empty and both tests run on everything — which is the
+#: acceptance gate phase 7b was written around.
+INCOMPLETE_FIXTURES = {"s36_gnds": "branching3d"}
 
 
 @pytest.fixture(params=FIXTURES)
 def evaluation(request):
     """Each committed reactionSuite in turn, as a path."""
+    return request.getfixturevalue(request.param)
+
+
+@pytest.fixture(params=FIXTURES)
+def completeEvaluation(request):
+    """The same, minus the ones :data:`INCOMPLETE_FIXTURES` names.
+
+    A skip and not a filtered list: the skip says *which* file and *which* law
+    on the run, so an entry that outlives its reason is visible rather than
+    quietly absent from the parametrisation.
+    """
+    law = INCOMPLETE_FIXTURES.get(request.param)
+    if law is not None:
+        pytest.skip(f"{request.param} still carries an unread {law}")
     return request.getfixturevalue(request.param)
 
 
@@ -292,29 +320,48 @@ def _schemaErrors(path: Path, schema: Path = SCHEMA):
             if "Schemas validity error : " in line]
 
 
-def test_the_only_schema_errors_are_the_distributions_phase_7b_will_fill(
+def test_the_only_schema_errors_are_the_nodes_phase_7b_will_fill(
         evaluation, tmp_path):
     """Every node the writer emits validates, except the ones it leaves empty.
 
     A product whose §18 law kika does not read gets an empty
-    ``<distribution/>``. That is deliberate and it is the *only* thing wrong
-    with the file — this test says so by counting, so the day §18 lands the
-    number goes to zero and this test is what notices.
+    ``<distribution/>``, and one whose §17.3 multiplicity form it does not
+    model gets an empty ``<multiplicity/>``. Both are deliberate and both are
+    invalid, which is the point: the file announces its own incompleteness to
+    any validator rather than asserting, on the evaluator's behalf, that
+    nothing was given. This test says those are the *only* things wrong with
+    the file, so the day the last one lands the count goes to zero and this is
+    what notices.
+
+    **The multiplicity half was not here until ``s36`` was committed**, and its
+    absence was not a decision — no committed fixture carried a ``branching1d``,
+    ``reference`` or ``unspecified`` multiplicity, so a whole second family of
+    deliberate invalidity had never been written by a test. 14 032 + 3 539 + 178
+    occurrences across the distribution say it is not the rare half.
     """
     suite = kika.read(evaluation, covariances=False)
     path, report = _write(suite, tmp_path)
 
     errors = _schemaErrors(path)
     assert all("Element 'distribution': Missing child element" in error
+               or "Element 'multiplicity': Missing child element" in error
                for error in errors), errors
 
+    products = [product for reaction in _everyReaction(suite)
+                for product in _everyProduct(reaction.outputChannel)]
     withoutDistribution = sum(
-        1 for reaction in _everyReaction(suite)
-        for product in _everyProduct(reaction.outputChannel)
+        1 for product in products
         if product.distribution is None or len(product.distribution) == 0
     )
-    assert len(errors) == withoutDistribution
-    if errors:
+    withoutMultiplicity = sum(
+        1 for product in products
+        if product.multiplicity is not None
+        and product.multiplicity.constant is None
+        and product.multiplicity.function is None
+    )
+    assert len(errors) == withoutDistribution + withoutMultiplicity, errors
+
+    if withoutDistribution:
         assert any(str(withoutDistribution) in entry
                    for entry in report.unsupported), report.unsupported
 
@@ -333,19 +380,22 @@ def _everyProduct(channel):
             yield from _everyProduct(product.outputChannel)
 
 
-def test_every_committed_gnds_fixture_now_validates_completely(evaluation,
-                                                               tmp_path):
+def test_every_committed_gnds_fixture_now_validates_completely(
+        completeEvaluation, tmp_path):
     """Phase 7b's acceptance gate, and the number it moves.
 
-    Before ``uncorrelated`` landed these three fixtures wrote 3, 1 and 21 empty
-    ``<distribution/>`` elements — 25 schema errors that were deliberate, one
-    per product whose law kika could not read. All 25 were the same law. The
+    Before ``uncorrelated`` landed the first three fixtures wrote 3, 1 and 21
+    empty ``<distribution/>`` elements — 25 schema errors that were deliberate,
+    one per product whose law kika could not read. All 25 were the same law. The
     sibling test above still holds the *invariant* (whatever errors there are,
     they are only that kind, and their count matches the model); this one holds
     the **fact**, so that a law regressing into unread shows up as a failure
     here rather than as a silently-true invariant.
+
+    It runs on every fixture except those :data:`INCOMPLETE_FIXTURES` names,
+    which is one: ``s36`` and its five ``branching3d``.
     """
-    suite = kika.read(evaluation, covariances=False)
+    suite = kika.read(completeEvaluation, covariances=False)
     path, _ = _write(suite, tmp_path)
     assert _schemaErrors(path) == []
 

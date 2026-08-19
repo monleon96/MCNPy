@@ -317,7 +317,7 @@ _NJOY_FIXTURES = frozenset({"njoy_exe"})
 _GNDS_FIXTURES = frozenset({
     "fe56_gnds_tape", "fe56_gnds_cov_tape",
     "gnds_data_dir", "micro_fe56_gnds", "micro_ta182_gnds", "micro_be9_gnds",
-    "h2_gnds", "h2_gnds_cov", "h3_gnds",
+    "h2_gnds", "h2_gnds_cov", "h3_gnds", "s36_gnds",
     "gnds_covariance_fixture",
 })
 
@@ -768,6 +768,23 @@ def micro_ta182_gnds() -> Path:
     it is abridged and is not physics. Built by the same script.
     """
     return _gnds_file("micro_ta182.gnds.xml")
+
+
+@pytest.fixture(scope="session")
+def s36_gnds() -> Path:
+    """n + S36 from ENDF/B-VIII.1, **unmodified**, and the witness of three nodes.
+
+    Committed for ``KalbachMann`` — it is the smallest of the 272 evaluations
+    carrying one and holds **six** — and it turned out to be the smallest file
+    carrying ``branching1d`` and ``branching3d`` as well, five of each. 226 kB
+    for three of the four nodes phase 7b had left, which is why it is copied
+    whole rather than trimmed: the trim would have had to keep most of it.
+
+    All six ``KalbachMann`` are ``f`` + ``r`` with no ``a``, which is not this
+    file being unusual — the census counted **0 ``a`` in 3 730** across the
+    distribution.
+    """
+    return _gnds_file("n-016_S_036.endf.gnds.xml")
 
 
 @pytest.fixture(scope="session")

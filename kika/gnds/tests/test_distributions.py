@@ -50,7 +50,7 @@ import kika
 from kika.gnds.decode import readReactionSuite
 from kika.gnds.xpath import Document
 from kika.nuclear_data.model import (AngularEnergy, DiscreteGamma,
-                                     EnergyAngular, Isotropic2d,
+                                     EnergyAngular, Isotropic2d, KalbachMann,
                                      NBodyPhaseSpace, PrimaryGamma,
                                      Uncorrelated, XYs2d, XYs3d)
 
@@ -541,6 +541,84 @@ def test_an_energy_angular_never_arrives_as_an_angular_energy(h2_gnds,
     assert len(_energyAngulars(suite)) == 1
     assert _angularEnergies(suite) == []
     assert report.unsupported == []
+
+
+def _kalbachManns(suite):
+    return _formsOfType(suite, KalbachMann)
+
+
+def test_the_kalbach_mann_witness_reads_f_and_r_and_no_a(s36_gnds):
+    """§18.6 on the smallest evaluation that has one, and it has six.
+
+    The three assertions that matter are what the schema and the census
+    together say. ``f`` and ``r`` are mandatory (``gnds.xsd:1808-1809``) and
+    both arrive; ``a`` is optional (``:1810``) and is absent from **all six**,
+    which is this file agreeing with the census's 0 in 3 730; and each of the
+    two is unwrapped from its own ``XYs2dWrapperType`` with its own ``axes``,
+    which is how you can tell they were not read as one node twice.
+
+    The axis labels are the check that ``f`` and ``r`` did not get swapped:
+    the evaluation names the third axis after the quantity, so an ``f`` read
+    into ``r`` shows up here and nowhere else.
+    """
+    suite, report = readReactionSuite(Document.parse(s36_gnds))
+
+    forms = _kalbachManns(suite)
+    assert len(forms) == 6
+    for form in forms:
+        assert form.isComplete
+        assert form.productFrame == "centerOfMass"
+        assert isinstance(form.f, XYs2d) and isinstance(form.r, XYs2d)
+        assert form.a is None, (
+            "the census counted zero <a> in 3 730 KalbachMann nodes; one here "
+            "means either the corpus or the reader has changed"
+        )
+        assert form.f.axes is not None and form.r.axes is not None
+        assert form.f.axes is not form.r.axes
+        assert [axis.label for axis in form.f.axes.axes] == [
+            "energy_in", "energy_out", "f"]
+        assert [axis.label for axis in form.r.axes.axes] == [
+            "energy_in", "energy_out", "r"]
+        assert form.f.function1ds and form.r.function1ds
+
+    # Nothing else in this file is unread yet, and the two that are go together
+    # in the next increment. Pinning them here is what makes that visible.
+    unread = {entry.rsplit("/", 1)[-1].split(":")[0]
+              for entry in report.unsupported}
+    assert unread == {"branching1d", "branching3d"}
+
+
+def test_a_kalbach_mann_survives_a_round_trip(s36_gnds, tmp_path):
+    """Read → write → read on the witness, with the schema order checked.
+
+    ``gnds.xsd:1806-1811`` is an ``xs:sequence``, so ``f`` before ``r`` is not
+    a preference and a writer that emitted them the other way round produces a
+    file that does **not** validate. The element order is asserted on the
+    written XML rather than only on the model, because the model is a dataclass
+    with named fields and cannot express the mistake.
+    """
+    first, _ = readReactionSuite(Document.parse(s36_gnds))
+    path = tmp_path / "s36-out.gnds.xml"
+    kika.write(first, path)
+    second, _ = readReactionSuite(Document.parse(path))
+
+    before, after = _kalbachManns(first), _kalbachManns(second)
+    assert len(before) == len(after) == 6
+    for one, two in zip(before, after):
+        assert one.label == two.label
+        assert one.productFrame == two.productFrame
+        assert two.a is None
+        for name in ("f", "r"):
+            oneSide, twoSide = getattr(one, name), getattr(two, name)
+            assert len(oneSide) == len(twoSide)
+            assert [f.outerDomainValue for f in oneSide.function1ds] == \
+                [f.outerDomainValue for f in twoSide.function1ds]
+            assert [a.label for a in oneSide.axes.axes] == \
+                [a.label for a in twoSide.axes.axes]
+
+    written = [[child.tag for child in node]
+               for node in ET.parse(path).getroot().iter("KalbachMann")]
+    assert written == [["f", "r"]] * 6, written
 
 
 def test_the_real_angular_energy_puts_mu_outside_the_outgoing_energy(
