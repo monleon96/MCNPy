@@ -520,6 +520,81 @@ def test_the_endf_decoded_suites_schema_errors_are_pinned(micro_tape, tmp_path):
     assert len(errors) == 7
 
 
+#: D25. What is wrong with a ``covarianceSuite`` **written from an ENDF decode**,
+#: by kind. Both are the same shape of hole: an attribute §25 makes required
+#: that the ENDF side has no concept of and therefore never sets.
+#:
+#: ``covarianceMatrix/@label`` is the one already fixed one level down —
+#: ``_parameterCovarianceMatrix`` fills it from the synthesised style because
+#: ``kika/endf/model_adapter/parameter_covariances.py`` builds every matrix with
+#: ``label=None``. ``kika/endf/model_adapter/covariances.py:113`` does exactly
+#: the same for the gridded ones and nothing filled those.
+#: ``covarianceSuite/@target`` is not a matrix attribute at all: it is the root
+#: saying what nuclide the file is about, and ``decodeCovarianceSuite`` never
+#: took one.
+ENDF_COVARIANCE_SCHEMA_GAPS = (
+    "Element 'covarianceSuite': The attribute 'target' is required but missing",
+    "Element 'covarianceMatrix': The attribute 'label' is required but missing",
+)
+
+#: ``(fixture name, error count)``. Two tapes rather than one because MF35 is a
+#: different route into the same writer — ``micro_pfns_cov`` reaches
+#: ``_covarianceMatrix`` through ``decodeMF35MT`` where ``micro_fe56_cov``
+#: reaches it through MF33 and MF34 — and a gap that only one of them shows is
+#: worth telling apart from one both do. Today they show the same two kinds.
+ENDF_COVARIANCE_TAPES = (("micro_cov_tape", 5), ("micro_pfns_cov_tape", 3))
+
+
+def _endfCovarianceSchemaErrors(tape, tmp_path):
+    """Write the pair and validate **the sibling**, which is the whole point.
+
+    ``kika.write`` emits two documents (``_write.py:_writeLinkedPair``): the
+    evaluation, and ``Covariances/<name>-covar.xml`` beside it. Everything that
+    validated an ENDF-decoded file so far validated the first one — and read it
+    with ``covariances=False``, so the second was never even built.
+    """
+    suite = kika.read(tape)
+    path = tmp_path / "out.gnds.xml"
+    kika.write(suite, path)
+    sibling = path.parent / "Covariances" / "out.gnds-covar.xml"
+    assert sibling.is_file(), f"kika.write emitted no covariance sibling at {sibling}"
+    return sibling, _schemaErrors(sibling, COVARIANCE_SCHEMA)
+
+
+@pytest.mark.parametrize("fixture,expected", ENDF_COVARIANCE_TAPES)
+def test_the_endf_decoded_covariance_sibling_is_pinned(fixture, expected,
+                                                       request, tmp_path):
+    """D25. The gate that was missing one level below the gate that was missing.
+
+    ``test_the_endf_decoded_suites_schema_errors_are_pinned`` closed D20 — "no
+    test validates a suite decoded from ENDF" — and it closed it for the
+    ``reactionSuite`` only: it reads with ``covariances=False`` and validates
+    against ``gnds.xsd``. A ``covarianceSuite`` is a **root in its own right**
+    (§25.1.1) with **its own schema**, so the sibling ``kika.write`` puts beside
+    every evaluation that has covariances was never looked at by anything. The
+    same hole, one level further out, surviving the fix for itself.
+
+    This test lands **declaring the damage rather than repairing it**, which is
+    the opposite order from D20 and is why it goes first: a number that is
+    pinned can be lowered by anyone, and a number nobody measures is what let
+    D19 live for a phase.
+
+    **The count is not monotone downwards.** An absent required *child* makes
+    its whole subtree unreachable to the validator, so repairing one can raise
+    the count by exposing what it was standing in front of — the MF4 angular
+    ``axes`` hid 3 999 errors behind one. Both gaps here are *attributes*, which
+    do not hide a subtree, so this particular pair should fall cleanly; that is
+    a property of these two and not a rule.
+    """
+    tape = request.getfixturevalue(fixture)
+    _sibling, errors = _endfCovarianceSchemaErrors(tape, tmp_path)
+
+    unknown = [e for e in errors
+               if not any(kind in e for kind in ENDF_COVARIANCE_SCHEMA_GAPS)]
+    assert unknown == [], unknown
+    assert len(errors) == expected
+
+
 def test_a_bare_isotropic2d_goes_where_the_schema_admits_it(micro_tape, tmp_path):
     """D19. ``<isotropic2d>`` is not a child of ``<distribution>``.
 
