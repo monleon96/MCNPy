@@ -322,20 +322,42 @@ export KIKA_UNCERTAINTY_MANIFEST_PATH=/share_snc/snc/JuanMonleon/EXFOR/uncertain
 
 R98=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_98_meshraw
 
-grep -q "RUN 98 PASA" slurm-*.out 2>/dev/null \
-  || { echo "⛔ no encuentro '✅ RUN 98 PASA'. El entregable existe pero su gate"; \
-       echo "   no consta; comprueba antes de puntuar."; exit 1; }
-ls -la $R98/26-Fe-56g_nominal_a0cross_mg.endf || exit 1
+# ⛔ DESACTIVADO 2026-08-19 21:20. Lanzarlo tal cual vuelve a morir en segundos
+# (job 8518595): nuestra ruta de plegado NO PUEDE LEER el MF34 de la 98.
+#
+#   Loading This work ... MF34: not available (block 1 (L=1,2) sits on a grid of
+#   700 edges while block 0 has 692 -- §L18's four-grid problem)
+#
+# La cinta es ENDF-6 legal; el formato declara las rejillas dentro de cada
+# (L, L1) precisamente para esto. Es el fold el que exige UNA rejilla junto a
+# los bloques a_0, y por eso las runs 91/94/96 -- sin malla por orden -- si se
+# puntuaban.
+#
+# Y aunque se arreglara cuadrando la malla sobre la union (~10 lineas), el
+# numero quedaria obsoleto: la decision pendiente sobre a_5/a_6 no cambia la
+# representacion, CAMBIA LA COVARIANZA. Recuperar los bloques propios donde hoy
+# hay ceros mete incertidumbre real en el 36.6 % de las casillas y el chi2 TIENE
+# que moverse. Puntuar antes de eso es gastar 1.5 h y 11 GB en un objeto que
+# vamos a cambiar.
+#
+# ⇒ Descomentar SOLO despues de decidir a_5/a_6 y reemitir. Ver
+#   docs/handoff_2026-08-20.md §0 en kika-workspace.
+#
+# grep -q "RUN 98 PASA" slurm-*.out 2>/dev/null \
+#   || { echo "⛔ no encuentro '✅ RUN 98 PASA'."; exit 1; }
+# ls -la $R98/26-Fe-56g_nominal_a0cross_mg.endf || exit 1
+#
+# KIKA_THIS_WORK_DIR=$R98 \
+# KIKA_THIS_WORK_ENDF=26-Fe-56g_nominal_a0cross_mg.endf \
+# KIKA_MF33_MF34_CROSS_FROM_FILE=1 \
+# KIKA_RUN_TAG=98raw \
+#     python precompute_chi2_predictive.py || exit 1
+#
+# KIKA_CHI2_METHODOLOGIES=predictive_98raw \
+# KIKA_CHI2_RUN_ID=98raw \
+#     python chi2_analysis_cluster.py || exit 1
 
-KIKA_THIS_WORK_DIR=$R98 \
-KIKA_THIS_WORK_ENDF=26-Fe-56g_nominal_a0cross_mg.endf \
-KIKA_MF33_MF34_CROSS_FROM_FILE=1 \
-KIKA_RUN_TAG=98raw \
-    python precompute_chi2_predictive.py || exit 1
-
-KIKA_CHI2_METHODOLOGIES=predictive_98raw \
-KIKA_CHI2_RUN_ID=98raw \
-    python chi2_analysis_cluster.py || exit 1
+echo "run_chi.sh no tiene ningun trabajo activo: ver docs/handoff_2026-08-20.md §0"
 
 # --- YA HECHO: reconstruir el cruzado de la 98 (90 s). Descomentar si hace ---
 # --- falta rehacerlo tras tocar build_group_cross.py ------------------------
