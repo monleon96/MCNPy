@@ -333,6 +333,23 @@ def _everyProduct(channel):
             yield from _everyProduct(product.outputChannel)
 
 
+def test_every_committed_gnds_fixture_now_validates_completely(evaluation,
+                                                               tmp_path):
+    """Phase 7b's acceptance gate, and the number it moves.
+
+    Before ``uncorrelated`` landed these three fixtures wrote 3, 1 and 21 empty
+    ``<distribution/>`` elements — 25 schema errors that were deliberate, one
+    per product whose law kika could not read. All 25 were the same law. The
+    sibling test above still holds the *invariant* (whatever errors there are,
+    they are only that kind, and their count matches the model); this one holds
+    the **fact**, so that a law regressing into unread shows up as a failure
+    here rather than as a silently-true invariant.
+    """
+    suite = kika.read(evaluation, covariances=False)
+    path, _ = _write(suite, tmp_path)
+    assert _schemaErrors(path) == []
+
+
 def test_an_unreadable_distribution_is_left_empty_and_never_called_unspecified(
         h2_gnds, tmp_path):
     """The one substitution that would make the file valid, and is a forgery.
@@ -340,17 +357,72 @@ def test_an_unreadable_distribution_is_left_empty_and_never_called_unspecified(
     ``<unspecified/>`` is the **evaluator** stating that no distribution is
     given. Writing it where kika merely cannot read the law yet would put that
     statement in their mouth, and nothing downstream could tell the difference.
+
+    **The subject moved when phase 7b landed ``uncorrelated``.** H-2's three
+    empty ``<distribution/>`` elements were its three ``uncorrelated`` laws;
+    they are read now, so the doctrine needs a law that is still unread. One is
+    planted here — an ``<evaporation>``, one of the six analytic §18.3 spectra
+    (``gnds.xsd:1697-1709``) — and it exercises a second rule at the same time:
+    the reader keeps the angular half it *could* read, and the writer refuses
+    to emit a one-child ``<uncorrelated>`` because ``gnds.xsd:1677-1680`` is an
+    ``xs:sequence``. A half node would validate against nothing and read as a
+    complete statement; the empty element does not, and says so.
     """
-    suite = kika.read(h2_gnds, covariances=False)
+    tree = ET.parse(h2_gnds)
+    energy = tree.getroot().find(".//uncorrelated/energy")
+    for child in list(energy):
+        energy.remove(child)
+    ET.SubElement(energy, "evaporation")
+    planted = tmp_path / "evaporation.gnds.xml"
+    tree.write(planted)
+
+    suite = kika.read(planted, covariances=False)
     path, report = _write(suite, tmp_path)
 
     root = ET.parse(path).getroot()
     empty = [d for d in root.iter("distribution") if len(d) == 0]
-    assert len(empty) == 3
+    assert len(empty) == 1
+    assert list(root.iter("uncorrelated")) != [], (
+        "the other two uncorrelated laws must still be written; this test is "
+        "about the one that could not be read, not about the law"
+    )
     # H-2 *does* have a genuine `unspecified`, on its production channel, and
     # it survives — so the absence above is not the writer dropping the node.
     assert len(list(root.iter("unspecified"))) == 2
     assert any("does not validate" in entry for entry in report.unsupported)
+    assert any("requires both children" in entry
+               for entry in report.unsupported)
+    errors = _schemaErrors(path)
+    assert len(errors) == 1
+    assert "Element 'distribution': Missing child element" in errors[0]
+
+
+def test_a_form_the_writer_cannot_serialise_is_counted_as_incomplete(
+        micro_fe56_gnds, tmp_path):
+    """The half of the doctrine that was not being announced.
+
+    ``declareWhatIsMissing`` puts the file's own "this does not validate" line
+    in the report, and it fires off ``incompleteProducts``. That list was built
+    from ``len(distribution) == 0`` — the *model* dict — so a product whose one
+    form the writer has no serialisation for produced a childless
+    ``<distribution/>`` and **no announcement**: an invalid file that claimed
+    to be complete. Counting the written element instead is what closes it.
+    """
+    class _UnknownLaw:
+        productFrame = "lab"
+
+    suite = kika.read(micro_fe56_gnds, covariances=False)
+    product = next(p for reaction in _everyReaction(suite)
+                   for p in _everyProduct(reaction.outputChannel)
+                   if p.distribution is not None and len(p.distribution))
+    product.distribution.forms = {"eval": _UnknownLaw()}
+
+    path, report = _write(suite, tmp_path)
+    assert any("no serialisation for a _UnknownLaw" in entry
+               for entry in report.unsupported)
+    assert any("does not validate" in entry for entry in report.unsupported)
+    root = ET.parse(path).getroot()
+    assert [d for d in root.iter("distribution") if len(d) == 0]
 
 
 def test_the_covariance_sibling_validates_too(h2_gnds, tmp_path):

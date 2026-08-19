@@ -87,8 +87,11 @@ DECLARED_ELSEWHERE = {
         "the model implements it, but no neutron evaluation in "
         "ENDF/B-VIII.1-GNDS contains one, so reading it would be untested code"
     ),
-    "discreteGamma": "no model node; §18 photon energies are phase 7b",
-    "primaryGamma": "no model node; §18 photon energies are phase 7b",
+    # `discreteGamma` and `primaryGamma` were here until phase 7b modelled
+    # them. They are not functionals and never were — they reach the model
+    # through `kika.gnds.distributions`, at the `uncorrelated/energy` choice
+    # point where the schema puts them (gnds.xsd:1697), and a functional reader
+    # should not be the thing that has an opinion about them.
     "branching1d": "no model node; §18 isomeric branching is phase 7b",
 }
 

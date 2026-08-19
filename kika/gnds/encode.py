@@ -49,13 +49,16 @@ import numpy as np
 from kika.nuclear_data.model import (AngularTwoBody, Background,
                                      BreitWigner, ConversionReport,
                                      Constant1d, CovarianceMatrix,
-                                     CrossSectionSum, Evaluated, Isotropic2d,
-                                     Legendre, Mixed, Nuclide, Polynomial1d,
+                                     CrossSectionSum, DiscreteGamma,
+                                     Evaluated, Isotropic2d,
+                                     Legendre, Mixed, NBodyPhaseSpace,
+                                     Nuclide, Polynomial1d, PrimaryGamma,
                                      GndsProvenance, Reference,
                                      Regions1d, Regions2d,
                                      ResonancesWithBackground, RMatrix,
                                      ShortRangeSelfScalingVariance, Sum,
-                                     Unspecified, XYs1d, XYs2d)
+                                     Uncorrelated, Unspecified, XYs1d,
+                                     XYs2d)
 
 from .nodes import writes
 from .primitives import formatFraction
@@ -679,11 +682,11 @@ class _SuiteWriter:
         which is the file telling the next tool the truth.
         """
         element = ET.SubElement(parent, "distribution")
-        if distribution is None or len(distribution) == 0:
-            self.incompleteProducts.append(where)
-            return
-        for label, form in distribution.forms.items():
-            if isinstance(form, AngularTwoBody):
+        forms = {} if distribution is None else distribution.forms
+        for label, form in forms.items():
+            if isinstance(form, Uncorrelated):
+                self.uncorrelated(element, form, label, where)
+            elif isinstance(form, AngularTwoBody):
                 self.angularTwoBody(element, form, label, where)
             elif isinstance(form, Isotropic2d):
                 # A bare Isotropic2d is what `kika/endf/model_adapter/
@@ -713,6 +716,98 @@ class _SuiteWriter:
                     f"{where}: kika's writer has no serialisation for a "
                     f"{type(form).__name__} distribution"
                 )
+        if len(element) == 0:
+            # Counted on the **element**, not on the model dict. A product
+            # whose only form is one this writer cannot serialise leaves the
+            # element childless too, and counting the dict missed it — so the
+            # file came out invalid without the "does not validate" sentence
+            # that `declareWhatIsMissing` is there to put in the report.
+            self.incompleteProducts.append(where)
+
+    @writes("distributionForm", "uncorrelated")
+    @writes("uncorrelatedAngularForm", "isotropic2d")
+    def uncorrelated(self, parent: ET.Element, form, label: str,
+                     where: str) -> None:
+        """§18.3, and **both halves or neither**.
+
+        ``DistributionUncorrelatedType`` (``gnds.xsd:1676-1682``) is an
+        ``xs:sequence`` of ``<angular>`` and ``<energy>``, so a node with one
+        of them is not a partial statement — it is an invalid one. When kika
+        read only one half, the honest output is the same empty
+        ``<distribution/>`` an unread law gets: it fails validation and says so,
+        instead of shipping a node whose missing child a reader would have to
+        guess at.
+        """
+        if not form.isComplete:
+            missing = "angular" if form.angular is None else "energy"
+            self.report.unsupportedNode(
+                f"{where}: an <uncorrelated> whose <{missing}> form kika could "
+                f"not read; gnds.xsd:1677-1680 requires both children, so the "
+                f"half that was read is not written either"
+            )
+            return
+        element = ET.SubElement(parent, "uncorrelated")
+        _set(element, label=label, productFrame=str(form.productFrame))
+        angular = ET.SubElement(element, "angular")
+        if isinstance(form.angular, Isotropic2d):
+            ET.SubElement(angular, "isotropic2d")
+        else:
+            _function(angular, form.angular, self.report, where)
+        self._uncorrelatedEnergy(element, form.energy, where)
+
+    @writes("uncorrelatedEnergyForm", "discreteGamma", "primaryGamma",
+            "NBodyPhaseSpace")
+    def _uncorrelatedEnergy(self, parent: ET.Element, form,
+                            where: str) -> None:
+        """``uncorrelated/energy``: the four non-functional forms, by hand.
+
+        None of the three gamma/phase-space nodes is a functional — no
+        ``function1ds``, no interpolation — so they do not go through
+        :func:`_function`, and their ``<axes>`` is a *required* child rather
+        than the inheritable one §5.1.1 lets a nested functional drop.
+        """
+        element = ET.SubElement(parent, "energy")
+        if isinstance(form, PrimaryGamma):
+            gamma = ET.SubElement(element, "primaryGamma")
+            _set(gamma, value=_number(form.value),
+                 domainMin=_number(form.domainMin),
+                 domainMax=_number(form.domainMax),
+                 finalState=form.finalState)
+            self._gammaAxes(gamma, form.axes, where, "primaryGamma")
+            return
+        if isinstance(form, DiscreteGamma):
+            gamma = ET.SubElement(element, "discreteGamma")
+            _set(gamma, value=_number(form.value),
+                 domainMin=_number(form.domainMin),
+                 domainMax=_number(form.domainMax))
+            self._gammaAxes(gamma, form.axes, where, "discreteGamma")
+            return
+        if isinstance(form, NBodyPhaseSpace):
+            phaseSpace = ET.SubElement(element, "NBodyPhaseSpace")
+            _set(phaseSpace, numberOfProducts=str(form.numberOfProducts))
+            if form.mass is not None:
+                _set(ET.SubElement(phaseSpace, "mass"),
+                     value=_number(form.mass.value), unit=form.mass.unit)
+            return
+        _function(element, form, self.report, where)
+
+    def _gammaAxes(self, parent: ET.Element, axes, where: str,
+                   tag: str) -> None:
+        """``<axes>`` is a *required* child of both gamma nodes.
+
+        Unlike a nested functional's, which §5.1.1 lets it inherit and
+        the schema then forbids it from repeating, this one has nothing
+        to inherit from: the gamma sits inside ``<energy>``, which is a
+        wrapper and not a container. Absent, it is a validation error,
+        so it is reported rather than quietly skipped.
+        """
+        if axes is None:
+            self.report.lost(
+                f"{where}: a <{tag}> with no axes; gnds.xsd:1777/1786 "
+                f"require the child, so the node written is invalid"
+            )
+            return
+        _axes(parent, axes)
 
     @writes("angularTwoBodyForm", "isotropic2d", "recoil")
     def angularTwoBody(self, parent: ET.Element, form, label: str,

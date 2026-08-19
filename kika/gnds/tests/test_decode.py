@@ -23,6 +23,7 @@ import pytest
 
 from kika.gnds.decode import readReactionSuite
 from kika.gnds.xpath import Document
+from kika.nuclear_data import model as m
 from kika.nuclear_data.model import (AngularTwoBody, Background, Constant1d,
                                      CrossSectionSum, Evaluated, Isotropic2d,
                                      Nuclide, Reference, Regions1d, Regions2d,
@@ -300,21 +301,83 @@ def test_an_unspecified_distribution_is_read_as_a_statement(h2):
     assert product.distribution["eval"].productFrame == "lab"
 
 
-def test_an_unimplemented_law_is_named_with_its_xpath(h2):
-    """The report is the only place a partial decode announces itself."""
-    _, report = h2
-    entries = [e for e in report.unsupported if e.endswith("/uncorrelated: "
-               "a §18 law kika declares and does not implement (phase 7b); "
-               "the product keeps its multiplicity and loses only this form")]
-    assert len(entries) == 3
-    assert all(e.startswith("/reactionSuite/reactions/reaction[@label=")
-               for e in entries)
+def test_the_three_uncorrelated_laws_are_read_whole(h2):
+    """Phase 7b's first landing, on the fixture that used to report all three.
+
+    H-2's three ``uncorrelated`` distributions were the subject of
+    ``test_an_unimplemented_law_is_named_with_its_xpath`` until the law was
+    implemented: the report named them and the model held nothing. Now both
+    halves arrive, so the assertion is what they *are* rather than that they
+    are missing. The naming doctrine keeps its own subject in
+    ``test_an_unread_energy_form_is_named_with_its_xpath`` below.
+    """
+    suite, report = h2
+    forms = [form
+             for reaction in suite.reactions
+             for product in reaction.outputChannel.products
+             for form in product.distribution.forms.values()
+             if isinstance(form, m.Uncorrelated)]
+    assert len(forms) == 3
+    assert all(isinstance(f.angular, m.Isotropic2d) for f in forms)
+
+    phaseSpace = [f.energy for f in forms
+                  if isinstance(f.energy, m.NBodyPhaseSpace)]
+    assert len(phaseSpace) == 2
+    assert phaseSpace[0].numberOfProducts == 3
+    assert phaseSpace[0].mass.value == pytest.approx(3.02460278964)
+    assert phaseSpace[0].mass.unit == "amu"
+
+    gamma = [f.energy for f in forms if isinstance(f.energy, m.PrimaryGamma)]
+    assert len(gamma) == 1
+    assert gamma[0].value == pytest.approx(6251002.0)
+    assert gamma[0].domainMax == pytest.approx(1.5e8)
+    # `<axes>` is a required child of the node, so losing it would write an
+    # invalid file back out.
+    assert gamma[0].axes is not None
+
+    assert not [e for e in report.unsupported if "/uncorrelated:" in e]
+
+
+def test_an_unread_energy_form_is_named_with_its_xpath(h2_gnds, tmp_path):
+    """The naming doctrine, on a subject that survives phase 7b.
+
+    Six of ``uncorrelated/energy``'s eleven choices are analytic spectra
+    (``gnds.xsd:1697-1709``) that kika reports rather than tabulates. This
+    plants one into H-2 and checks that the report says which node, where, and
+    that the angular half is still read — losing that as well would throw away
+    something the file did state.
+    """
+    tree = ET.parse(h2_gnds)
+    energy = tree.getroot().find(".//uncorrelated/energy")
+    for child in list(energy):
+        energy.remove(child)
+    ET.SubElement(energy, "evaporation")
+    path = tmp_path / "evaporation.gnds.xml"
+    tree.write(path)
+
+    suite, report = readReactionSuite(Document.parse(path))
+    entries = [e for e in report.unsupported if "/evaporation:" in e]
+    assert len(entries) == 1
+    assert "analytic §18.3 spectrum" in entries[0]
+    assert "gnds.xsd:" in entries[0]
+
+    planted = [form
+               for reaction in suite.reactions
+               for product in reaction.outputChannel.products
+               for form in product.distribution.forms.values()
+               if isinstance(form, m.Uncorrelated) and form.energy is None]
+    assert len(planted) == 1
+    assert isinstance(planted[0].angular, m.Isotropic2d)
+    assert planted[0].isComplete is False
 
 
 def test_a_product_that_loses_its_distribution_keeps_everything_else(h2):
+    """The photon of MT102, which used to lose its distribution entirely."""
     suite, _ = h2
     product = suite.reactions[102].outputChannel.products.byPid("photon")[0]
-    assert len(product.distribution) == 0
+    form = product.distribution["eval"]
+    assert isinstance(form, m.Uncorrelated)
+    assert isinstance(form.energy, m.PrimaryGamma)
     assert product.multiplicity.constant == 1.0
 
 

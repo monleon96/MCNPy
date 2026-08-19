@@ -246,6 +246,23 @@ def test_every_unimplemented_distribution_is_placed_at_a_choice_point():
         )
 
 
+def test_the_misplaced_names_stay_misplaced_after_they_are_implemented():
+    """The loop above visits only names still in the model's unimplemented list,
+    so a placement stops being checked the moment its node lands — which is
+    exactly when the mistake becomes tempting again. ``NBodyPhaseSpace`` is
+    PAIRED now, under ``uncorrelatedEnergyForm``; the one thing that must never
+    happen is it acquiring a ``distributionForm`` entry as well."""
+    assert nodes.NOT_A_DISTRIBUTION_FORM
+    for name, elsewhere in nodes.NOT_A_DISTRIBUTION_FORM.items():
+        assert ("distributionForm", name) not in NODES, (
+            f"{name} is declared not to be a distribution form and has an "
+            f"entry as one"
+        )
+        assert "gnds.xsd:" in elsewhere, (
+            f"{name}'s placement cites no schema line, so it is an opinion"
+        )
+
+
 def test_registering_an_undeclared_node_fails_at_import_time():
     """The other direction, and the one that makes phase 7b safe: a reader for
     a §18 law that nobody declared cannot be added quietly."""

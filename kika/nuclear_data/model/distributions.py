@@ -13,13 +13,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Union
 
+from .axes import Axes
 from .enums import Frame
 from .functions import Function1d, Function2d, Regions2d, XYs2d
+from .quantities import PhysicalQuantity
 
 __all__ = [
     "Distribution", "AngularTwoBody", "Isotropic2d", "Unspecified",
-    "Uncorrelated", "EnergyAngular", "AngularEnergy",
-    "KalbachMann", "NBodyPhaseSpace", "Recoil",
+    "Uncorrelated", "DiscreteGamma", "PrimaryGamma", "NBodyPhaseSpace",
+    "EnergyAngular", "AngularEnergy", "KalbachMann", "Recoil",
     "NOT_IMPLEMENTED_DISTRIBUTIONS",
 ]
 
@@ -136,8 +138,96 @@ class _UnimplementedDistribution:
         )
 
 
-class Uncorrelated(_UnimplementedDistribution):
-    gndsNodeName = "uncorrelated"
+@dataclass
+class DiscreteGamma:
+    """§18.3. A gamma line at one fixed energy — ``gnds.xsd:1777``.
+
+    Not a functional: there is no table, no interpolation and nothing to
+    evaluate between points. The whole content is the line's energy and the
+    incident-energy range over which the reaction emits it, which is why this
+    is three numbers and an ``axes`` rather than an :class:`XYs2d` of one point.
+
+    ``axes`` is a **required** child of the node (the schema says so, and the
+    three distributed fixtures all carry ``energy_in`` / ``energy_out`` /
+    ``P(energy_out|energy_in)``), so it is kept and written back rather than
+    reconstructed from a convention.
+    """
+
+    value: float
+    domainMin: float
+    domainMax: float
+    axes: Optional[Axes] = None
+
+
+@dataclass
+class PrimaryGamma:
+    """§18.3. A gamma whose energy tracks the incident one — ``gnds.xsd:1786``.
+
+    The same four members as :class:`DiscreteGamma` plus the residual level the
+    transition lands on, and **not a subclass of it**: ``value`` means a
+    different thing here — the binding-energy term of E_gamma = value +
+    (A/(A+1))·E, not an emitted energy — and the writer dispatches on
+    ``isinstance``, where a subclass would let one be written as the other.
+    """
+
+    value: float
+    domainMin: float
+    domainMax: float
+    axes: Optional[Axes] = None
+    finalState: Optional[str] = None
+
+
+@dataclass
+class NBodyPhaseSpace:
+    """§18.3's *energy* form for an N-body break-up — ``gnds.xsd:1770``.
+
+    **Not a `<distribution>` form**, which is the mistake worth not making: it
+    is one of the eleven choices inside ``uncorrelated/energy``, so it arrives
+    with :class:`Uncorrelated` and never on its own. See
+    :data:`kika.gnds.nodes.NOT_A_DISTRIBUTION_FORM`.
+
+    ``mass`` is the total mass of the N products, and it comes with its unit
+    stated (``amu`` in the library) — a :class:`PhysicalQuantity` rather than a
+    bare float, for the reason §4.1's scattering radius made expensive: a
+    number whose unit lives in a convention instead of beside it is a factor of
+    ten waiting to happen.
+    """
+
+    numberOfProducts: int
+    mass: Optional[PhysicalQuantity] = None
+
+
+@dataclass
+class Uncorrelated:
+    """§18.3. P(mu|E) and P(E'|E) stated independently — ``gnds.xsd:1676``.
+
+    The commonest distribution in the library by a wide margin: 126 501 of the
+    223 916 forms in ENDF/B-VIII.1-GNDS. On the ENDF side it is MF4 and MF5
+    read together, which is why the two halves are separate objects here rather
+    than one surface — they come from different sections and either can be the
+    one kika cannot read.
+
+    **Both halves are required by the schema** (the node is an ``xs:sequence``,
+    not a choice), so a half-filled one is invalid rather than merely partial.
+    The fields still default to ``None`` because the reader fills what it can
+    and reports the rest; refusing to write a half node is the *writer's*
+    judgement, made in one place, and it is the same judgement as the empty
+    ``<distribution/>``.
+    """
+
+    angular: Optional[Union[XYs2d, Isotropic2d]] = None
+    energy: Optional[Union[XYs2d, Regions2d, DiscreteGamma, PrimaryGamma,
+                           NBodyPhaseSpace]] = None
+    label: Optional[str] = None
+    productFrame: Frame = Frame.lab
+
+    def __post_init__(self) -> None:
+        self.productFrame = Frame(self.productFrame)
+
+    @property
+    def isComplete(self) -> bool:
+        """Both halves present, which is the only shape the schema admits."""
+        return self.angular is not None and self.energy is not None
 
 
 class EnergyAngular(_UnimplementedDistribution):
@@ -150,14 +240,6 @@ class AngularEnergy(_UnimplementedDistribution):
 
 class KalbachMann(_UnimplementedDistribution):
     gndsNodeName = "KalbachMann"
-
-
-class NBodyPhaseSpace(_UnimplementedDistribution):
-    """**Not a `<distribution>` form.** §18.3's *energy* choice
-    (``gnds.xsd:1703``), inside ``uncorrelated/energy`` — so it arrives with
-    :class:`Uncorrelated` and not on its own."""
-
-    gndsNodeName = "NBodyPhaseSpace"
 
 
 class Recoil(_UnimplementedDistribution):
@@ -179,8 +261,7 @@ class Recoil(_UnimplementedDistribution):
 #: choice point and a test holds the two lists against each other.
 NOT_IMPLEMENTED_DISTRIBUTIONS = {
     cls.gndsNodeName: cls
-    for cls in (Uncorrelated, EnergyAngular, AngularEnergy, KalbachMann,
-                NBodyPhaseSpace, Recoil)
+    for cls in (EnergyAngular, AngularEnergy, KalbachMann, Recoil)
 }
 
 

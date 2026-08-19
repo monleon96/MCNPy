@@ -18,11 +18,13 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from typing import Callable, Optional
 
-from kika.nuclear_data.model import (AngularTwoBody, ConversionReport, Frame,
-                                     Isotropic2d, Unspecified)
+from kika.nuclear_data.model import (AngularTwoBody, ConversionReport,
+                                     DiscreteGamma, Frame, Isotropic2d,
+                                     NBodyPhaseSpace, PhysicalQuantity,
+                                     PrimaryGamma, Uncorrelated, Unspecified)
 from kika.nuclear_data.model.distributions import Distribution
 
-from .nodes import reads
+from .nodes import NODES, Status, reads
 from .primitives import UnsupportedNode, readAxes, readFunction2d
 
 __all__ = ["readDistribution"]
@@ -31,6 +33,26 @@ __all__ = ["readDistribution"]
 #: same tuple :mod:`kika.gnds.decode` uses, kept here so this module does not
 #: import back into the one that imports it.
 IGNORED = ("documentation", "axes")
+
+
+def _declaredAndUnread(family: str) -> dict:
+    """``{tag: reason}`` for the members of one choice kika does not model.
+
+    Derived from :data:`kika.gnds.nodes.NODES` rather than listed again here,
+    so the report a reader emits and the table a test checks cannot drift
+    apart. Without it, an unmodelled §18.3 spectrum falls through to
+    ``readFunction2d`` and is reported as "not a two-dimensional node" — true,
+    and not what is wrong with it: an ``<evaporation>`` is a declared choice at
+    that point, and saying so is the difference between a gap and a surprise.
+    """
+    return {tag: spec.reason for (thisFamily, tag), spec in NODES.items()
+            if thisFamily == family and spec.status is Status.NEITHER}
+
+
+#: Built at import, because ``NODES`` is a static table and not filled in by
+#: the decorators — those register *against* it.
+UNREAD_ANGULAR_FORMS = _declaredAndUnread("uncorrelatedAngularForm")
+UNREAD_ENERGY_FORMS = _declaredAndUnread("uncorrelatedEnergyForm")
 
 
 def _quoted(label: str) -> str:
@@ -64,6 +86,8 @@ class _DistributionReader:
             label = child.attrib.get("label", "")
             if child.tag == "angularTwoBody":
                 form = self.angularTwoBody(child, here)
+            elif child.tag == "uncorrelated":
+                form = self.uncorrelated(child, here)
             elif child.tag == "unspecified":
                 form = Unspecified(
                     label=label,
@@ -107,6 +131,112 @@ class _DistributionReader:
                 except UnsupportedNode as exc:
                     self.unsupported(child.tag, here, exc.args[0])
         return twoBody
+
+    # -- §18.3, uncorrelated ------------------------------------------------
+
+    @reads("distributionForm", "uncorrelated")
+    def uncorrelated(self, element: ET.Element, path: str) -> Uncorrelated:
+        """§18.3's ``uncorrelated``, the library's commonest distribution.
+
+        The two halves are read independently and either can come back
+        ``None``: a form kika does not model is reported with its xPath and the
+        other half is kept, because losing the angular distribution as well
+        would throw away something that *was* read. What the schema forbids —
+        a node with one child — is refused by the **writer**, in one place.
+        """
+        label = element.attrib.get("label", "")
+        here = f"{path}/uncorrelated{_quoted(label)}"
+        form = Uncorrelated(
+            label=label,
+            productFrame=Frame(element.attrib.get("productFrame", "lab")),
+        )
+        angular = element.find("angular")
+        if angular is not None:
+            form.angular = self.uncorrelatedAngular(
+                angular, here, label, form.productFrame)
+        energy = element.find("energy")
+        if energy is not None:
+            form.energy = self.uncorrelatedEnergy(energy, here)
+        return form
+
+    @reads("uncorrelatedAngularForm", "isotropic2d")
+    def uncorrelatedAngular(self, element: ET.Element, path: str,
+                            label: str, productFrame: Frame):
+        """``uncorrelated/angular``: ``XYs2d``, ``isotropic2d`` or ``forward``.
+
+        A different choice from ``angularTwoBody``'s (``gnds.xsd:1686`` against
+        ``:1665``) — no ``regions2d``, no ``recoil``, and a ``forward`` that
+        appears nowhere else — which is why ``isotropic2d`` is declared twice
+        in the registry, once per family.
+        """
+        here = f"{path}/angular"
+        for child in element:
+            if child.tag in IGNORED:
+                continue
+            if child.tag == "isotropic2d":
+                # The node itself has no attributes (gnds.xsd:1693);
+                # the frame is the parent's, and copying it here keeps
+                # the object from defaulting to centerOfMass and saying
+                # something the file did not.
+                return Isotropic2d(label=label,
+                                   productFrame=productFrame)
+            if child.tag in UNREAD_ANGULAR_FORMS:
+                self.unsupported(child.tag, here,
+                                 UNREAD_ANGULAR_FORMS[child.tag])
+                return None
+            try:
+                return readFunction2d(child, readAxes(child, self.resolve))
+            except UnsupportedNode as exc:
+                self.unsupported(child.tag, here, exc.args[0])
+        return None
+
+    @reads("uncorrelatedEnergyForm", "discreteGamma", "primaryGamma",
+           "NBodyPhaseSpace")
+    def uncorrelatedEnergy(self, element: ET.Element, path: str):
+        """``uncorrelated/energy``: eleven choices, four of which kika models.
+
+        The seven it does not are the analytic spectra (``evaporation``,
+        ``Watt``, ``MadlandNix``, …). They are reported rather than guessed:
+        each is a formula with named parameters, and inventing a tabulation for
+        one would put numbers in the file that the evaluator never wrote.
+        """
+        here = f"{path}/energy"
+        for child in element:
+            if child.tag in IGNORED:
+                continue
+            if child.tag == "discreteGamma":
+                return DiscreteGamma(
+                    value=float(child.attrib["value"]),
+                    domainMin=float(child.attrib["domainMin"]),
+                    domainMax=float(child.attrib["domainMax"]),
+                    axes=readAxes(child, self.resolve),
+                )
+            if child.tag == "primaryGamma":
+                return PrimaryGamma(
+                    value=float(child.attrib["value"]),
+                    domainMin=float(child.attrib["domainMin"]),
+                    domainMax=float(child.attrib["domainMax"]),
+                    axes=readAxes(child, self.resolve),
+                    finalState=child.attrib.get("finalState"),
+                )
+            if child.tag in UNREAD_ENERGY_FORMS:
+                self.unsupported(child.tag, here,
+                                 UNREAD_ENERGY_FORMS[child.tag])
+                return None
+            if child.tag == "NBodyPhaseSpace":
+                mass = child.find("mass")
+                return NBodyPhaseSpace(
+                    numberOfProducts=int(child.attrib["numberOfProducts"]),
+                    mass=None if mass is None else PhysicalQuantity(
+                        value=float(mass.attrib["value"]),
+                        unit=mass.attrib.get("unit", ""),
+                    ),
+                )
+            try:
+                return readFunction2d(child, readAxes(child, self.resolve))
+            except UnsupportedNode as exc:
+                self.unsupported(child.tag, here, exc.args[0])
+        return None
 
 
 def readDistribution(element: ET.Element, path: str,
