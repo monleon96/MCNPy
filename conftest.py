@@ -317,7 +317,7 @@ _NJOY_FIXTURES = frozenset({"njoy_exe"})
 _GNDS_FIXTURES = frozenset({
     "fe56_gnds_tape", "fe56_gnds_cov_tape",
     "gnds_data_dir", "micro_fe56_gnds", "micro_ta182_gnds",
-    "h2_gnds", "h2_gnds_cov",
+    "h2_gnds", "h2_gnds_cov", "h3_gnds",
     "gnds_covariance_fixture",
 })
 
@@ -703,10 +703,9 @@ def h2_gnds() -> Path:
     SHA-1 in ``externalFiles`` are both real. 113 kB for 1013 nodes, which is
     what makes it the pair worth committing: ``regions1d`` and ``regions2d``,
     a ``reference`` form, ``crossSectionSum`` with resolvable ``summands``,
-    ``angularTwoBody``/``isotropic2d``/``unspecified`` — the three distributions
-    kika implements — *and* ``uncorrelated``/``NBodyPhaseSpace``, which it does
-    not, so the report's ``unsupported`` list is exercised by a real file rather
-    than by a hand-built one.
+    ``angularTwoBody``/``isotropic2d``/``unspecified`` and
+    ``uncorrelated``/``NBodyPhaseSpace`` — all of them laws kika reads, since
+    ``uncorrelated`` landed in phase 7b.
     """
     return _gnds_file("n-001_H_002.endf.gnds.xml")
 
@@ -715,6 +714,25 @@ def h2_gnds() -> Path:
 def h2_gnds_cov() -> Path:
     """The covariance sibling of :func:`h2_gnds`, unmodified. 11 kB, 4 sections."""
     return _gnds_file("Covariances/n-001_H_002.endf.gnds-covar.xml")
+
+
+@pytest.fixture(scope="session")
+def h3_gnds() -> Path:
+    """n + H3 from ENDF/B-VIII.1, **unmodified**, and here for one node.
+
+    ``uncorrelated/angular`` is an ``xs:choice`` of three (``gnds.xsd:1686``),
+    and the census measured its members across the 558 distributed neutron
+    evaluations: ``isotropic2d`` 126 095, ``XYs2d`` **406 in 144 files**,
+    ``forward`` 0. The three fixtures beside it carry **25 ``isotropic2d`` and
+    not one ``XYs2d``**, so that branch of the reader shipped with
+    ``uncorrelated`` without ever having seen a real one. This is the smallest
+    of the 144 files that fixes it — 59 kB — and it carries exactly one, with
+    fifteen sub-functions and axes of its own.
+
+    It also reads with an **empty** ``unsupported`` list, which no other
+    committed evaluation does: every law in it is one kika implements.
+    """
+    return _gnds_file("n-001_H_003.endf.gnds.xml")
 
 
 @pytest.fixture(scope="session")

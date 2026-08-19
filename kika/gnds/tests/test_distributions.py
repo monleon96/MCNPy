@@ -5,7 +5,7 @@ Beside ``test_resonances.py`` and for the same reason: the chapter has its own
 reader module now, and the assertions that belong to it are the shapes §18.3
 takes rather than anything about a ``reactionSuite``.
 
-**What the three committed fixtures cover between them**, counted from the XML
+**What the four committed fixtures cover between them**, counted from the XML
 rather than assumed:
 
 ===============  ==============  ==========================================
@@ -14,12 +14,20 @@ fixture          ``<angular>``   ``<energy>``
 ``h2``           isotropic2d ×3  NBodyPhaseSpace ×2, primaryGamma ×1
 ``micro_fe56``   isotropic2d ×1  XYs2d ×1 (``interpolationQualifier``)
 ``micro_ta182``  isotropic2d ×21 discreteGamma ×20, XYs2d ×1
+``h3``           **XYs2d ×1**    XYs2d ×1
 ===============  ==============  ==========================================
 
 So four of ``uncorrelated/energy``'s eleven choices have a witness here and
 seven do not — the six analytic spectra and ``regions2d``. Those are declared
 in :data:`kika.gnds.nodes.NODES` and reported, and the tests at the bottom are
 about the reporting rather than about the forms.
+
+**``h3`` is the fourth fixture and it was added for one cell of that table.**
+``uncorrelated/angular`` has three members (``gnds.xsd:1686``) and the first
+three fixtures are ``isotropic2d`` twenty-five times out of twenty-five, so the
+``XYs2d`` branch shipped with ``uncorrelated`` unwitnessed. The census puts it
+at 406 occurrences in 144 of the 558 distributed evaluations — not a rare
+shape, just one the committed set happened to miss.
 
 **``energyAngular`` has no witness among the three**, so its tests graft one in.
 The only registered tape that carries a real one is ``fe56_gnds`` — 18.8 MB, on
@@ -80,6 +88,11 @@ def fe56(micro_fe56_gnds):
     return readReactionSuite(Document.parse(micro_fe56_gnds))[0]
 
 
+@pytest.fixture(scope="module")
+def h3(h3_gnds):
+    return readReactionSuite(Document.parse(h3_gnds))
+
+
 # ---------------------------------------------------------------------------
 # 1. the four energy forms that have a witness
 # ---------------------------------------------------------------------------
@@ -136,6 +149,41 @@ def test_a_tabulated_energy_keeps_its_interpolation_qualifier(fe56):
     assert str(energies[0].interpolationQualifier) == "unitBase"
 
 
+def test_a_tabulated_angular_half_is_read_from_a_real_evaluation(h3):
+    """The ``XYs2d`` branch of ``uncorrelated/angular``, on a file that has one.
+
+    It shipped with ``uncorrelated`` and had **no witness**: the other three
+    fixtures are 25 ``isotropic2d`` out of 25, and the branch was reached only
+    by the isotropic sibling beside it. The census counted 406 real ones across
+    144 of the 558 distributed evaluations, so this is a branch the library
+    walks and not a defensive one — ``h3_gnds`` is the smallest file carrying
+    it.
+
+    The assertions are the three things an ``isotropic2d`` cannot check:
+    that the sub-functions arrive (an empty ``XYs2d`` reads as a present node
+    and writes an invalid one), that the node kept **its own** ``axes``
+    (``gnds.xsd:2195`` makes them required, and the angular ones are
+    ``mu``/``P(mu|energy_in)`` rather than the energy axes of the sibling), and
+    that the frame still comes from the parent, since ``xData_XYs2d_primary``
+    has no ``productFrame`` of its own.
+    """
+    suite, report = h3
+    forms = _uncorrelated(suite)
+    assert len(forms) == 1
+    angular = forms[0].angular
+    assert isinstance(angular, XYs2d)
+    assert len(angular.function1ds) == 15
+    assert angular.function1ds[0].outerDomainValue == pytest.approx(8.35e6)
+    assert angular.axes is not None
+    assert [axis.label for axis in angular.axes.axes] == [
+        "energy_in", "mu", "P(mu|energy_in)"]
+    assert forms[0].productFrame == "lab"
+    assert report.unsupported == [], (
+        "every law in this file is one kika reads, and that is half of why it "
+        "is the fixture: an entry here is a regression and not a known gap"
+    )
+
+
 def test_the_angular_half_takes_the_frame_from_its_parent(ta182):
     """``<isotropic2d/>`` inside ``<angular>`` has no attributes at all
     (``gnds.xsd:1693``), so a child left on the class default would claim
@@ -152,7 +200,7 @@ def test_the_angular_half_takes_the_frame_from_its_parent(ta182):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name", ["h2_gnds", "micro_fe56_gnds",
-                                  "micro_ta182_gnds"])
+                                  "micro_ta182_gnds", "h3_gnds"])
 def test_every_uncorrelated_survives_a_round_trip(name, request, tmp_path):
     """Read → write → read, comparing the energy halves member by member.
 
@@ -190,6 +238,15 @@ def test_every_uncorrelated_survives_a_round_trip(name, request, tmp_path):
             assert len(one.energy) == len(two.energy)
             assert one.energy.interpolationQualifier == \
                 two.energy.interpolationQualifier
+        if isinstance(one.angular, XYs2d):
+            # ``h3_gnds`` is the only fixture that reaches this branch, and it
+            # is the reason it was committed: comparing the *type* alone would
+            # pass on an angular half written empty.
+            assert len(one.angular) == len(two.angular)
+            assert [f.outerDomainValue for f in one.angular.function1ds] == \
+                [f.outerDomainValue for f in two.angular.function1ds]
+            assert [axis.label for axis in one.angular.axes.axes] == \
+                [axis.label for axis in two.angular.axes.axes]
 
 
 # ---------------------------------------------------------------------------
