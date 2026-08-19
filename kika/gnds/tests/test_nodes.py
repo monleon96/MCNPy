@@ -99,7 +99,7 @@ def _minimal(cls):
                                          Polynomial1d, Reference, Regions1d,
                                          Regions2d, ResonancesWithBackground,
                                          ShortRangeSelfScalingVariance, Sum,
-                                         Unspecified, XYs1d, XYs2d)
+                                         Unspecified, XYs1d, XYs2d, XYs3d)
     from kika.nuclear_data.model import (AverageParameterCovariance, DataLink,
                                          ParameterCovariance,
                                          ParameterCovarianceMatrix,
@@ -114,6 +114,7 @@ def _minimal(cls):
                                            domainMax_=2.0),
         XYs2d: XYs2d,
         Regions2d: Regions2d,
+        XYs3d: XYs3d,
         Reference: lambda: Reference(href="#somewhere"),
         ResonancesWithBackground: ResonancesWithBackground,
         AngularTwoBody: AngularTwoBody,
@@ -147,7 +148,7 @@ def _writeWith(family, form, parent, report):
     from kika.gnds.encode import (_covarianceForm, _function,
                                   _parameterCovariances)
 
-    if family in ("function1d", "function2d"):
+    if family in ("function1d", "function2d", "function3d"):
         _function(parent, form, report, "test")
     elif family == "covarianceForm":
         _covarianceForm(parent, form, report, "test")
@@ -166,7 +167,7 @@ def _writeWith(family, form, parent, report):
         raise AssertionError(f"no writer harness for {family}")
 
 
-@pytest.mark.parametrize("family", ["function1d", "function2d",
+@pytest.mark.parametrize("family", ["function1d", "function2d", "function3d",
                                     "covarianceForm",
                                     "parameterCovarianceForm"])
 def test_the_writer_emits_the_tag_the_key_claims(family):
@@ -308,13 +309,15 @@ def test_the_derived_dispatch_tables_are_the_registry():
     a second list beside it. If they drift back to literals this fails."""
     from kika.gnds.covariances import (COVARIANCE_FORMS,
                                        PARAMETER_COVARIANCE_FORMS)
-    from kika.gnds.primitives import FUNCTION_1D, FUNCTION_2D
+    from kika.gnds.primitives import FUNCTION_1D, FUNCTION_2D, FUNCTION_3D
 
-    assert set(FUNCTION_1D) == {
-        spec.tag for spec in NODES.values()
-        if spec.family == "function1d" and spec.status is not Status.NEITHER
-    }
-    assert set(FUNCTION_2D) == {"XYs2d", "regions2d"}
+    for table, family in ((FUNCTION_1D, "function1d"),
+                          (FUNCTION_2D, "function2d"),
+                          (FUNCTION_3D, "function3d")):
+        assert set(table) == {
+            spec.tag for spec in NODES.values()
+            if spec.family == family and spec.status is not Status.NEITHER
+        }, family
     assert set(COVARIANCE_FORMS) == {
         spec.tag for spec in NODES.values() if spec.family == "covarianceForm"
     }

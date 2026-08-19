@@ -191,12 +191,12 @@ NODES: Dict[Tuple[str, str], NodeSpec] = dict([
 
     _spec("XYs2d", "function2d", "§6.4.2", XYs2d, Status.PAIRED),
     _spec("regions2d", "function2d", "§6.4.3", Regions2d, Status.PAIRED),
-    _spec("XYs3d", "function3d", "§6.5", XYs3d, Status.NEITHER,
-          "kika/nuclear_data/model/functions/higher.py:307 — declared, "
-          "unimplemented, no phase scheduled"),
+    _spec("XYs3d", "function3d", "§6.5", XYs3d, Status.PAIRED),
     _spec("regions3d", "function3d", "§6.5", Regions3d, Status.NEITHER,
-          "kika/nuclear_data/model/functions/higher.py:311 — declared, "
-          "unimplemented, no phase scheduled"),
+          "unreachable, not unscheduled: gnds.xsd:2286 defines the type "
+          "xData_regions_3d_primary and no xs:element anywhere in the schema "
+          "is of it, so no valid GNDS-2.1 file can contain a regions3d. This "
+          "entry stays NEITHER permanently"),
 
     # -- §16.1.1 crossSection forms. gnds.xsd:1206, an xs:choice.
     #    XYs1d and regions1d are also legal here and are delegated to the

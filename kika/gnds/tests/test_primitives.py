@@ -16,14 +16,15 @@ import numpy as np
 import pytest
 
 from kika.gnds.primitives import (DECLARED_ELSEWHERE, FUNCTION_1D, FUNCTION_2D,
-                                  UnsupportedNode, readAxes, readForm,
-                                  readFunction1d, readValues)
+                                  FUNCTION_3D, UnsupportedNode, readAxes,
+                                  readForm, readFunction1d, readValues)
 from kika.gnds.xpath import Document, Resolver
 from kika.nuclear_data.model import (Axis, Constant1d, Grid, Interpolation,
                                      InterpolationQualifier, Legendre,
-                                     Regions1d, Regions2d, XYs1d, XYs2d)
+                                     Regions1d, Regions2d, XYs1d, XYs2d,
+                                     XYs3d)
 
-FUNCTIONALS = set(FUNCTION_1D) | set(FUNCTION_2D)
+FUNCTIONALS = set(FUNCTION_1D) | set(FUNCTION_2D) | set(FUNCTION_3D)
 
 
 def _parse(text: str) -> ET.Element:
@@ -356,7 +357,61 @@ def test_a_deliberately_unread_node_says_why(node):
 
 
 def test_a_node_the_model_declares_and_does_not_implement_says_so():
-    """``XYs3d`` is a slot phase 7b fills; the message must say that, not "unknown"."""
+    """``regions3d``, and the message must carry *its* reason, not a phase number.
+
+    This test used to parse ``<XYs3d/>`` and assert "phase 7b", which stopped
+    having a subject when ``XYs3d`` landed. Re-pointing it exposed that
+    ``_unsupported`` spelled "phase 7b" into the message for every entry of
+    ``NOT_IMPLEMENTED_NODES`` regardless — false for ``regions3d``, which no
+    phase can fill because ``gnds.xsd`` declares no element of its type. The
+    reason now comes from ``_UnimplementedNode.plannedFor``, which was defined
+    in phase 5 and had never been set by a subclass.
+    """
     with pytest.raises(UnsupportedNode) as raised:
-        readForm(_parse("<XYs3d/>"))
-    assert "phase 7b" in str(raised.value)
+        readForm(_parse("<regions3d/>"))
+    assert raised.value.node == "regions3d"
+    assert "no xs:element" in str(raised.value)
+    assert "phase" not in str(raised.value).replace("no phase can", "")
+
+
+def test_xys3d_is_xys2d_one_floor_up_and_shares_one_axes_object():
+    """§6.5, and the ``axes`` identity that the writer decides inheritance by.
+
+    ``_axesUnlessNested`` asks ``child.axes is parent.axes``. For a 3-d form
+    that has to hold across **two** levels, so the reader is checked here on
+    the property the writer depends on rather than only through a written file.
+    """
+    built = readForm(_parse(
+        '<XYs3d interpolationQualifier="unitbase">'
+        "<axes>"
+        '<axis index="3" label="energy_in" unit="eV"/>'
+        '<axis index="2" label="energy_out" unit="eV"/>'
+        '<axis index="1" label="mu" unit=""/>'
+        '<axis index="0" label="P" unit=""/>'
+        "</axes>"
+        "<function2ds>"
+        '<XYs2d outerDomainValue="1e6"><function1ds>'
+        '<XYs1d outerDomainValue="-1"><values>0 1 1 2</values></XYs1d>'
+        "</function1ds></XYs2d>"
+        '<XYs2d outerDomainValue="1e6"><function1ds>'
+        '<XYs1d outerDomainValue="1"><values>0 3 1 4</values></XYs1d>'
+        "</function1ds></XYs2d>"
+        "</function2ds></XYs3d>"
+    ))
+    assert isinstance(built, XYs3d)
+    # A repeated outermost value survives, for XYs2d's reason one floor up.
+    assert built.outerDomainValues == [1e6, 1e6]
+    assert built.interpolationQualifier is InterpolationQualifier.unitBase
+    assert built.domainMin == built.domainMax == 1e6
+
+    assert built.axes is not None
+    for child in built:
+        assert child.axes is built.axes, "a 2-d child inherits the object"
+        for grandchild in child:
+            assert grandchild.axes is built.axes, "and so does its 1-d child"
+
+
+def test_xys3d_refuses_to_evaluate():
+    """The 2-d refusal's argument, and there is more of it a floor up."""
+    with pytest.raises(NotImplementedError, match="interpolationQualifier"):
+        XYs3d().evaluate(1.0, 1.0, 1.0)

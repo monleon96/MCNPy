@@ -60,7 +60,7 @@ from kika.nuclear_data.model import (AngularTwoBody,
                                      ResonancesWithBackground, RMatrix,
                                      ShortRangeSelfScalingVariance, Sum,
                                      Uncorrelated, Unspecified, XYs1d,
-                                     XYs2d)
+                                     XYs2d, XYs3d)
 
 from .nodes import writes
 from .primitives import formatFraction
@@ -186,6 +186,7 @@ def _interpolation(element: ET.Element, form) -> None:
 @writes("function1d", "XYs1d", "regions1d", "constant1d", "Legendre",
         "polynomial1d")
 @writes("function2d", "XYs2d", "regions2d")
+@writes("function3d", "XYs3d")
 def _function(parent: ET.Element, form, report: ConversionReport,
               where: str, nested: bool = False,
               parentAxes=None, index: Optional[int] = None) -> Optional[ET.Element]:
@@ -286,6 +287,27 @@ def _function(parent: ET.Element, form, report: ConversionReport,
         _axesUnlessNested(element, form, report, where, nested, parentAxes)
         container = ET.SubElement(element, "function1ds")
         for child in form.function1ds:
+            _function(container, child, report, where, nested=True,
+                      parentAxes=form.axes)
+        return element
+    if isinstance(form, XYs3d):
+        element = ET.SubElement(parent, "XYs3d")
+        _writeCommon(element, form, nested, index)
+        _interpolation(element, form)
+        qualifier = getattr(form, "interpolationQualifier", None)
+        if qualifier is not None:
+            element.attrib["interpolationQualifier"] = (
+                "unitbase" if str(qualifier) == "unitBase" else str(qualifier)
+            )
+        _axesUnlessNested(element, form, report, where, nested, parentAxes)
+        container = ET.SubElement(element, "function2ds")
+        for child in form.function2ds:
+            # No `index`: `function2ds` (`gnds.xsd:2253`) is a choice of
+            # `xData_XYs2d`/`xData_regions_2d`, and both put `use="required"` on
+            # `outerDomainValue` and have no `index` attribute at all. That is
+            # the opposite of `function2ds_inRegions`, whose children are
+            # indexed and carry no outer value -- the same split `_writeCommon`
+            # already handles one floor down.
             _function(container, child, report, where, nested=True,
                       parentAxes=form.axes)
         return element

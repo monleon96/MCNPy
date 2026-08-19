@@ -639,6 +639,178 @@ def test_where_a_functional_sits_decides_which_attribute_it_declares(tmp_path):
         report.losses)
 
 
+def _xys3d():
+    """A hand-built ``XYs3d``, axes shared by identity all the way down.
+
+    Hand-built because **no file within reach carries one**: no committed
+    fixture has an ``XYs3d``, and the only registered tape that holds an
+    ``energyAngular`` is ``fe56_gnds``, which is 18.8 MB on the share and
+    marked ``tape``. So this pairs kika against kika's own emitter and against
+    the schema, and against no witness in distributed data.
+    """
+    from kika.nuclear_data.model import Axes, Axis, XYs1d, XYs2d, XYs3d
+
+    axes = Axes([
+        Axis(index=3, label="energy_in", unit="eV"),
+        Axis(index=2, label="energy_out", unit="eV"),
+        Axis(index=1, label="mu", unit=""),
+        Axis(index=0, label="P(mu,energy_out|energy_in)", unit=""),
+    ])
+
+    def spectrum(outer, first):
+        return XYs2d(axes=axes, outerDomainValue=outer, function1ds=[
+            XYs1d(xs=np.array([-1.0, 1.0]), ys=np.array([first, first + 1.0]),
+                  outerDomainValue=inner, axes=axes)
+            for inner in (1.0e4, 2.0e4)
+        ])
+
+    return XYs3d(
+        axes=axes,
+        interpolationQualifier="unitBase",
+        # 1 MeV twice: the outermost axis may repeat a value for the same
+        # reason the 2-d one may, and the list must survive the round trip.
+        function2ds=[spectrum(1.0e6, 0.0), spectrum(1.0e6, 2.0),
+                     spectrum(2.0e6, 4.0)],
+    )
+
+
+def test_an_xys3d_writes_the_shape_the_schema_asks_for():
+    """§6.5's container, and the ``axes`` identity decided over **two** levels.
+
+    ``_axesUnlessNested`` asks ``form.axes is parentAxes``. For a 3-d form the
+    same object has to reach the 1-d grandchildren, so a fresh ``Axes`` built
+    anywhere on the way down would put "carries axes of its own" in the report
+    for every nested node and write a file the schema rejects. This is the 3-d
+    twin of :func:`test_a_regions_container_indexes_its_children`.
+    """
+    from kika.nuclear_data.model import ConversionReport
+
+    root = ET.Element("root")
+    report = ConversionReport()
+    _function(root, _xys3d(), report, "test")
+
+    written = root.find("XYs3d")
+    assert written.find("axes") is not None, "the container head carries the axes"
+    assert written.attrib["interpolationQualifier"] == "unitbase", (
+        "FUDGE's spelling, as for XYs2d")
+
+    children = list(written.find("function2ds"))
+    assert [float(c.attrib["outerDomainValue"]) for c in children] == [1e6, 1e6, 2e6]
+    for child in children:
+        # `function2ds` (gnds.xsd:2253) is a choice of xData_XYs2d and
+        # xData_regions_2d; both require `outerDomainValue` and neither has an
+        # `index` attribute at all.
+        assert "index" not in child.attrib, child.attrib
+        assert child.find("axes") is None, "§5.1.1 has a child inherit its axes"
+        for grandchild in child.find("function1ds"):
+            assert "outerDomainValue" in grandchild.attrib, grandchild.attrib
+            assert grandchild.find("axes") is None
+
+    assert not [entry for entry in report.losses if "axes of its own" in entry], (
+        report.losses)
+
+
+def test_an_xys3d_survives_model_to_xml_to_model():
+    """The honest gate for this node: our reader against our writer.
+
+    What must survive is what a 3-d container is *for* — the outermost grid
+    including its repeat, the qualifier, and the one shared ``Axes`` object the
+    writer decides inheritance by.
+    """
+    from kika.gnds.primitives import readForm
+    from kika.nuclear_data.model import ConversionReport, InterpolationQualifier
+
+    before = _xys3d()
+    root = ET.Element("root")
+    _function(root, before, ConversionReport(), "test")
+    after = readForm(root.find("XYs3d"))
+
+    assert after.outerDomainValues == before.outerDomainValues == [1e6, 1e6, 2e6]
+    assert after.interpolationQualifier is InterpolationQualifier.unitBase
+    assert after.axes == before.axes
+    for child in after:
+        assert child.axes is after.axes
+        assert [f.outerDomainValue for f in child] == [1.0e4, 2.0e4]
+        for grandchild in child:
+            assert grandchild.axes is after.axes
+    np.testing.assert_array_equal(after[2][1].ys, before[2][1].ys)
+
+
+def test_an_xys3d_validates_against_the_schema(tmp_path):
+    """``xData_XYs3d_primary`` has no global element, so the root is declared here.
+
+    ``XYs3d`` occurs in ``gnds.xsd`` only inside ``DistributionAEType``
+    (``:1797``), which is ``energyAngular``/``angularEnergy`` — the *next*
+    increment. Validating the fragment needs a global declaration of its type,
+    and a two-line schema that ``xs:include``s FUDGE's is the least that
+    provides one. ``gnds.xsd`` carries no ``targetNamespace``, so the include
+    is a plain textual merge and the type is FUDGE's own, unmodified.
+    """
+    if not SCHEMA.exists():
+        pytest.skip(f"{SCHEMA} is not on this machine")
+    wrapper = tmp_path / "xys3d.xsd"
+    wrapper.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+        'elementFormDefault="qualified">\n'
+        f'  <xs:include schemaLocation="{SCHEMA}"/>\n'
+        '  <xs:element name="XYs3d" type="xData_XYs3d_primary"/>\n'
+        "</xs:schema>\n"
+    )
+
+    root = ET.Element("root")
+    from kika.nuclear_data.model import ConversionReport
+    _function(root, _xys3d(), ConversionReport(), "test")
+
+    fragment = tmp_path / "fragment.xml"
+    ET.ElementTree(root.find("XYs3d")).write(fragment)
+    assert _schemaErrors(fragment, wrapper) == []
+
+
+def test_a_non_linlin_xys3d_cannot_be_written_valid_and_that_is_the_schema(tmp_path):
+    """The one place ``XYs3d`` is *not* ``XYs2d`` a floor up, and it is a gap.
+
+    ``xData_XYs2d_primary`` (``gnds.xsd:2193``), ``xData_XYs2d`` (``:2219``) and
+    ``xData_XYs2d_inRegions`` (``:2210``) each declare an ``interpolation``
+    attribute. ``xData_XYs3d_primary`` (``:2260``) declares only ``label`` and
+    ``interpolationQualifier`` — it omits ``interpolation`` — so an ``XYs3d``
+    whose outermost axis is anything but §6.1.1's lin-lin default writes an
+    attribute the schema rejects.
+
+    kika keeps the field rather than dropping it: the outermost axis of a real
+    energy-angular distribution has an interpolation law, and losing it on the
+    way in would be worse than writing a file this schema refuses. The lin-lin
+    case — every one written so far — validates, which
+    :func:`test_an_xys3d_validates_against_the_schema` asserts. This test pins
+    the other case so it is a recorded gap and not a later surprise.
+    """
+    if not SCHEMA.exists():
+        pytest.skip(f"{SCHEMA} is not on this machine")
+    from kika.nuclear_data.model import ConversionReport
+
+    wrapper = tmp_path / "xys3d.xsd"
+    wrapper.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+        'elementFormDefault="qualified">\n'
+        f'  <xs:include schemaLocation="{SCHEMA}"/>\n'
+        '  <xs:element name="XYs3d" type="xData_XYs3d_primary"/>\n'
+        "</xs:schema>\n"
+    )
+
+    form = _xys3d()
+    form.interpolation = "log-log"
+    root = ET.Element("root")
+    _function(root, form, ConversionReport(), "test")
+    fragment = tmp_path / "loglog.xml"
+    ET.ElementTree(root.find("XYs3d")).write(fragment)
+
+    errors = _schemaErrors(fragment, wrapper)
+    assert len(errors) == 1, errors
+    assert "attribute 'interpolation': The attribute 'interpolation' is not " \
+           "allowed" in errors[0], errors[0]
+
+
 def test_every_committed_covariance_fixture_can_be_written(
         gnds_covariance_fixture, tmp_path):
     """The gate whose absence let two writer defects live in a shipped module.
