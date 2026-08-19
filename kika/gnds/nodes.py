@@ -58,6 +58,7 @@ from typing import Callable, Dict, Optional, Tuple
 
 from kika.nuclear_data.model import (AngularEnergy, AngularTwoBody,
                                      AngularDistributionReconstructed,
+                                     AverageParameterCovariance,
                                      Constant1d, CoulombPlusNuclearElastic,
                                      CovarianceMatrix,
                                      CrossSectionReconstructed,
@@ -65,7 +66,8 @@ from kika.nuclear_data.model import (AngularEnergy, AngularTwoBody,
                                      Evaluated, Gridded1d, GriddedCrossSection,
                                      Heated, HeatedMultiGroup, Isotropic2d,
                                      KalbachMann, Legendre, Mixed,
-                                     NBodyPhaseSpace, PrimaryGamma,
+                                     NBodyPhaseSpace, ParameterCovariance,
+                                     PrimaryGamma,
                                      Polynomial1d, Realization, Reference,
                                      Regions1d, Regions2d, Regions3d,
                                      ResonancesWithBackground,
@@ -292,6 +294,28 @@ NODES: Dict[Tuple[str, str], NodeSpec] = dict([
     _spec("sum", "covarianceForm", "§25.2", Sum, Status.PAIRED),
     _spec("shortRangeSelfScalingVariance", "covarianceForm", "§25.2",
           ShortRangeSelfScalingVariance, Status.PAIRED),
+
+    # -- §25.3's parameter covariances. covariances.xsd:29-32 is an
+    #    `xs:sequence` of two unbounded refs rather than an `xs:choice`, and it
+    #    is a dispatch point all the same: `<parameterCovariances>` holds both
+    #    kinds, the reader picks by tag, and a tag it does not know is exactly
+    #    the "reader lands on a form whose writer does not exist" this table
+    #    exists to make visible. The sequence is also why the writer emits all
+    #    the `parameterCovariance` nodes before all the average ones instead of
+    #    in model order.
+    #
+    #    `parameterCovarianceMatrix` is deliberately **not** an entry.
+    #    covariances.xsd:170 puts it inside `parameterCovariance`'s
+    #    `xs:sequence` as the mandatory, single-valued second child: there is
+    #    no alternative form to land on, so by the criterion in the module
+    #    docstring it is not a node at a choice point. Its coverage is its
+    #    parent's — a `parameterCovariance` cannot be read or written without
+    #    it, and the round trip in `test_encode.py` fails outright if either
+    #    half stops handling it.
+    _spec("parameterCovariance", "parameterCovarianceForm", "§25.3.1",
+          ParameterCovariance, Status.PAIRED),
+    _spec("averageParameterCovariance", "parameterCovarianceForm", "§25.3",
+          AverageParameterCovariance, Status.PAIRED),
 
     # -- §9 styles. Declaration only: `writeStyles` is already table-driven by
     #    `gndsNodeName`, so there is no dispatch here to convert -- what the

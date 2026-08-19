@@ -666,6 +666,228 @@ def test_every_committed_covariance_fixture_can_be_written(
     assert _schemaErrors(path, COVARIANCE_SCHEMA) == []
 
 
+#: The two committed covariance files whose whole content is §25.3. Si-32 has
+#: one ``parameterCovariance`` and **no ``covarianceSections`` at all**; Tm-171
+#: has one plus the ten ``averageParameterCovariance`` of its URR. They are the
+#: only witnesses either node has, and until §25.3's writer landed the gate
+#: above passed on both by writing files with the nodes silently missing.
+PARAMETER_COVARIANCE_FIXTURES = ("n-014_Si_032", "n-069_Tm_171")
+
+
+def _covarianceRoundTrip(name, tmp_path):
+    """One committed covariance fixture, out and back. Returns (before, after, root)."""
+    from kika.gnds.covariances import readCovarianceSuite
+    from kika.gnds.encode import writeCovarianceSuite
+
+    source = (Path(__file__).parent / "data" / "Covariances"
+              / f"{name}.endf.gnds-covar.xml")
+    before, _ = readCovarianceSuite(Document.parse(source))
+    tree, report = writeCovarianceSuite(before, "2.0")
+    path = tmp_path / "out.gnds-covar.xml"
+    path.write_bytes(serialise(tree))
+    after, _ = readCovarianceSuite(Document.parse(path))
+    return before, after, ET.parse(path).getroot(), path, report
+
+
+@pytest.mark.parametrize("name", PARAMETER_COVARIANCE_FIXTURES)
+def test_the_parameter_covariances_reach_the_written_file(name, tmp_path):
+    """The gate the schema test could not be: **the node is there**.
+
+    ``test_every_committed_covariance_fixture_can_be_written`` validated Si-32
+    and Tm-171 while the writer dropped every §25.3 node on the floor, because a
+    file with nothing in it is a valid file. So the first assertion is presence
+    and the count, not validity.
+    """
+    before, _after, root, _path, _report = _covarianceRoundTrip(name, tmp_path)
+
+    container = root.find("parameterCovariances")
+    assert container is not None, (
+        f"{name}'s whole content is §25.3 and the written file has no "
+        f"<parameterCovariances> at all")
+    assert len(container) == len(before.parameterCovariances)
+
+    # covariances.xsd:27-34 is an xs:sequence, not a bag: every
+    # `parameterCovariance` before every `averageParameterCovariance`.
+    tags = [child.tag for child in container]
+    assert tags == sorted(tags, key=lambda tag: tag != "parameterCovariance"), tags
+
+
+@pytest.mark.parametrize("name", PARAMETER_COVARIANCE_FIXTURES)
+def test_the_parameter_covariance_matrices_survive_the_round_trip(name, tmp_path):
+    """Matrices element for element, and every link attribute.
+
+    ``matrixStartIndex`` is in here on purpose. It is already zero-based —
+    Si-32's 1 + 18 = 19 is the arithmetic that says so, and
+    ``covariances.py:_readParameterCovarianceMatrix`` carries the note — so a
+    writer that "converted back to one-based" would shift every link by a row
+    and leave the counts still summing to the order, which is all the model
+    checks.
+    """
+    before, after, _root, _path, _report = _covarianceRoundTrip(name, tmp_path)
+
+    assert len(after.parameterCovariances) == len(before.parameterCovariances)
+    for first, second in zip(before.parameterCovariances,
+                             after.parameterCovariances):
+        assert type(first) is type(second)
+        assert first.label == second.label
+        np.testing.assert_array_equal(first.form.matrix, second.form.matrix)
+        assert first.form.isRelative == second.form.isRelative
+        assert (first.rowData is None) == (second.rowData is None)
+        if first.rowData is not None:
+            assert first.rowData.href == second.rowData.href
+
+        links = getattr(first.form, "parameters", None)
+        if links is None:
+            continue
+        assert [(link.label, link.href, link.nParameters, link.matrixStartIndex)
+                for link in links] == [
+            (link.label, link.href, link.nParameters, link.matrixStartIndex)
+            for link in second.form.parameters]
+
+
+def test_neither_parameter_covariance_fixture_loses_its_links(tmp_path):
+    """``_readParameterCovarianceMatrix`` drops the links when they do not
+    account for every row, and that would make the round trip above assert an
+    equality of two empty lists. Both fixtures cover all their rows — Si-32's
+    1 + 18 = 19, Tm-171's 1 + 1200 = 1201 — so the comparison has teeth."""
+    from kika.gnds.covariances import readCovarianceSuite
+
+    for name in PARAMETER_COVARIANCE_FIXTURES:
+        source = (Path(__file__).parent / "data" / "Covariances"
+                  / f"{name}.endf.gnds-covar.xml")
+        suite, report = readCovarianceSuite(Document.parse(source))
+        assert not [entry for entry in report.losses
+                    if "cannot be named" in entry], report.losses
+        for covariance in suite.parameterCovariances:
+            if hasattr(covariance.form, "parameters"):
+                assert covariance.form.parameters, covariance.label
+
+
+def test_si_32_is_still_written_with_no_covariance_sections(tmp_path):
+    """The fixture exists for the case "a suite that is nothing but §25.3", and
+    a writer that invented an empty ``<covarianceSections/>`` would say the
+    evaluation has cross-section covariances it does not have."""
+    _before, after, root, _path, _report = _covarianceRoundTrip("n-014_Si_032",
+                                                                tmp_path)
+    assert root.find("covarianceSections") is None
+    assert after.covarianceSections == []
+
+
+@pytest.mark.parametrize("name", PARAMETER_COVARIANCE_FIXTURES)
+def test_the_written_parameter_covariances_validate(name, tmp_path):
+    """Same schema gate as the fixture sweep, but on a file that has the nodes.
+
+    Skipped on any machine without FUDGE, **which includes every GitHub
+    runner** — the green tick upstream says nothing about this one.
+    """
+    _before, _after, _root, path, _report = _covarianceRoundTrip(name, tmp_path)
+    assert _schemaErrors(path, COVARIANCE_SCHEMA) == []
+
+
+def test_a_cross_term_parameter_covariance_is_reported_not_emitted(tmp_path):
+    """§25.3.1 has no ``columnData``, and the model has one.
+
+    ``covariances.xsd:160-168`` gives ``parameterCovariance`` exactly
+    ``rowData`` and ``parameterCovarianceMatrix``. The model carries a
+    ``columnData`` and an ``isCrossTerm`` built off it, and the reader fills it
+    from a file that has one — so this is a state the model reaches and the
+    format cannot express. Writing the attribute anyway would invalidate the
+    file; dropping it silently would lose the only statement that the two axes
+    are different parameters.
+    """
+    from kika.gnds.encode import writeCovarianceSuite
+    from kika.nuclear_data.model import (CovarianceSuite, DataLink,
+                                         ParameterCovariance,
+                                         ParameterCovarianceMatrix,
+                                         ParameterLink)
+
+    suite = CovarianceSuite(
+        evaluation="test", projectile="n", target="Si32",
+        parameterCovariances=[ParameterCovariance(
+            label="cross",
+            rowData=DataLink(href="#rows"),
+            columnData=DataLink(href="#columns"),
+            form=ParameterCovarianceMatrix(
+                matrix=np.eye(3), label="eval",
+                parameters=[ParameterLink(label="l", href="#p", nParameters=3)],
+            ),
+        )],
+    )
+    tree, report = writeCovarianceSuite(suite, "2.0")
+    written = tree.getroot().find("parameterCovariances/parameterCovariance")
+
+    assert written.find("columnData") is None
+    assert "crossTerm" not in written.attrib
+    assert any("#columns" in entry for entry in report.losses), report.losses
+
+
+def test_a_parameter_covariance_whose_rows_nothing_names_is_left_out(tmp_path):
+    """The other half of the dropped-link case, and it is a real one.
+
+    When ``_readParameterCovarianceMatrix`` drops links that do not cover every
+    row, what reaches the writer is a matrix with no ``parameters``. §25.3.2
+    makes ``<parameters>`` mandatory with at least one ``parameterLink``, so
+    there is no valid file to write: the choice is an invalid one or an absent
+    covariance, and the absent one is the only version that does not claim
+    something. Neither committed fixture reaches this — see
+    ``test_neither_parameter_covariance_fixture_loses_its_links``.
+    """
+    from kika.gnds.encode import writeCovarianceSuite
+    from kika.nuclear_data.model import (CovarianceSuite, DataLink,
+                                         ParameterCovariance,
+                                         ParameterCovarianceMatrix)
+
+    suite = CovarianceSuite(
+        evaluation="test", projectile="n", target="Si32",
+        parameterCovariances=[ParameterCovariance(
+            label="unnamed rows",
+            rowData=DataLink(href="#rows"),
+            form=ParameterCovarianceMatrix(matrix=np.eye(3), label="eval"),
+        )],
+    )
+    tree, report = writeCovarianceSuite(suite, "2.0")
+
+    # Not an empty container either: `<parameterCovariances/>` is valid and
+    # says the evaluation has none, which is not what happened.
+    assert tree.getroot().find("parameterCovariances") is None
+    assert any("unnamed rows" in entry for entry in report.losses), report.losses
+
+
+def test_an_endf_built_parameter_matrix_gets_the_label_the_schema_requires():
+    """§25.3.2 makes ``label`` required and MF32 has no such concept.
+
+    ``kika/endf/model_adapter/parameter_covariances.py`` builds every
+    ``ParameterCovarianceMatrix`` with ``label=None``, so the one attribute the
+    schema will not do without is exactly the one an ENDF-sourced suite never
+    has. It is filled with the style label the suite writer synthesises, and
+    reported — the source said nothing about which style the matrix belongs to.
+    """
+    from kika.gnds.encode import writeCovarianceSuite
+    from kika.nuclear_data.model import (CovarianceSuite, DataLink,
+                                         ParameterCovariance,
+                                         ParameterCovarianceMatrix,
+                                         ParameterLink)
+
+    suite = CovarianceSuite(
+        evaluation="test", projectile="n", target="Si32",
+        parameterCovariances=[ParameterCovariance(
+            label="MF32", rowData=DataLink(href="#rows"),
+            form=ParameterCovarianceMatrix(
+                matrix=np.eye(2), label=None,
+                parameters=[ParameterLink(label="l", href="#p", nParameters=2)],
+            ),
+        )],
+    )
+    tree, report = writeCovarianceSuite(suite, "2.0")
+    matrix = tree.getroot().find(
+        "parameterCovariances/parameterCovariance/parameterCovarianceMatrix")
+
+    assert matrix.attrib["label"] == "eval"
+    assert matrix.attrib["type"] == "absolute"
+    assert any("no label" in entry for entry in report.approximations), (
+        report.approximations)
+
+
 # ---------------------------------------------------------------------------
 # the version policy
 # ---------------------------------------------------------------------------

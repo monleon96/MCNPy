@@ -100,6 +100,10 @@ def _minimal(cls):
                                          Regions2d, ResonancesWithBackground,
                                          ShortRangeSelfScalingVariance, Sum,
                                          Unspecified, XYs1d, XYs2d)
+    from kika.nuclear_data.model import (AverageParameterCovariance, DataLink,
+                                         ParameterCovariance,
+                                         ParameterCovarianceMatrix,
+                                         ParameterLink)
     builders = {
         XYs1d: lambda: XYs1d(xs=[1.0, 2.0], ys=[3.0, 4.0]),
         Regions1d: Regions1d,
@@ -121,6 +125,18 @@ def _minimal(cls):
             matrix=CovarianceMatrix(matrix=np.eye(2)),
             dependenceOnProcessedGroupWidth="inverse",
         ),
+        ParameterCovariance: lambda: ParameterCovariance(
+            label="p", rowData=DataLink(href="#row"),
+            form=ParameterCovarianceMatrix(
+                matrix=np.eye(2), label="eval",
+                parameters=[ParameterLink(label="l", href="#p",
+                                          nParameters=2)],
+            ),
+        ),
+        AverageParameterCovariance: lambda: AverageParameterCovariance(
+            label="a", rowData=DataLink(href="#row"),
+            form=CovarianceMatrix(matrix=np.eye(2)),
+        ),
     }
     builder = builders.get(cls)
     return None if builder is None else builder()
@@ -128,17 +144,31 @@ def _minimal(cls):
 
 #: Which writer to call for a family, and how. Not the chain — the entry point.
 def _writeWith(family, form, parent, report):
-    from kika.gnds.encode import _covarianceForm, _function
+    from kika.gnds.encode import (_covarianceForm, _function,
+                                  _parameterCovariances)
 
     if family in ("function1d", "function2d"):
         _function(parent, form, report, "test")
     elif family == "covarianceForm":
         _covarianceForm(parent, form, report, "test")
+    elif family == "parameterCovarianceForm":
+        # §25.3's entry point takes the whole list and emits the container the
+        # sequence lives in, so the tag the key names is a *grandchild*. The
+        # container is unwrapped rather than the inner writers being called
+        # directly, so that what this exercises is still the registered
+        # function.
+        outer = ET.Element("outer")
+        _parameterCovariances(outer, [form], report)
+        container = outer.find("parameterCovariances")
+        for child in ([] if container is None else list(container)):
+            parent.append(child)
     else:
         raise AssertionError(f"no writer harness for {family}")
 
 
-@pytest.mark.parametrize("family", ["function1d", "function2d", "covarianceForm"])
+@pytest.mark.parametrize("family", ["function1d", "function2d",
+                                    "covarianceForm",
+                                    "parameterCovarianceForm"])
 def test_the_writer_emits_the_tag_the_key_claims(family):
     """The chain is exercised, not mirrored.
 
@@ -276,7 +306,8 @@ def test_registering_an_undeclared_node_fails_at_import_time():
 def test_the_derived_dispatch_tables_are_the_registry():
     """``FUNCTION_1D`` and ``COVARIANCE_FORMS`` are views of the table now, not
     a second list beside it. If they drift back to literals this fails."""
-    from kika.gnds.covariances import COVARIANCE_FORMS
+    from kika.gnds.covariances import (COVARIANCE_FORMS,
+                                       PARAMETER_COVARIANCE_FORMS)
     from kika.gnds.primitives import FUNCTION_1D, FUNCTION_2D
 
     assert set(FUNCTION_1D) == {
@@ -286,4 +317,8 @@ def test_the_derived_dispatch_tables_are_the_registry():
     assert set(FUNCTION_2D) == {"XYs2d", "regions2d"}
     assert set(COVARIANCE_FORMS) == {
         spec.tag for spec in NODES.values() if spec.family == "covarianceForm"
+    }
+    assert set(PARAMETER_COVARIANCE_FORMS) == {
+        spec.tag for spec in NODES.values()
+        if spec.family == "parameterCovarianceForm"
     }

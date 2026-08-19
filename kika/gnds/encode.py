@@ -46,13 +46,15 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from kika.nuclear_data.model import (AngularTwoBody, Background,
+from kika.nuclear_data.model import (AngularTwoBody,
+                                     AverageParameterCovariance, Background,
                                      BreitWigner, ConversionReport,
                                      Constant1d, CovarianceMatrix,
                                      CrossSectionSum, DiscreteGamma,
                                      Evaluated, Isotropic2d,
                                      Legendre, Mixed, NBodyPhaseSpace,
-                                     Nuclide, Polynomial1d, PrimaryGamma,
+                                     Nuclide, ParameterCovariance,
+                                     Polynomial1d, PrimaryGamma,
                                      GndsProvenance, Reference,
                                      Regions1d, Regions2d,
                                      ResonancesWithBackground, RMatrix,
@@ -930,6 +932,10 @@ def writeCovarianceSuite(covarianceSuite, format: str,
     a writer that chose a compression would have to decide when a matrix is
     "sparse enough", and getting that wrong costs file size and nothing else,
     while getting the *encoding* wrong costs correctness.
+
+    §25.3's ``parameterCovariances`` are written too, and the container is a
+    **sequence**: all the ``parameterCovariance`` nodes, then all the
+    ``averageParameterCovariance`` ones, whatever order the model list had.
     """
     report = report if report is not None else ConversionReport()
     root = ET.Element("covarianceSuite")
@@ -980,12 +986,8 @@ def writeCovarianceSuite(covarianceSuite, format: str,
         for section in covarianceSuite.covarianceSections:
             _covarianceSection(container, section, report)
     if covarianceSuite.parameterCovariances:
-        report.unsupportedNode(
-            f"{len(covarianceSuite.parameterCovariances)} parameterCovariances "
-            f"were read and are not written: §25.3's resonance-parameter "
-            f"covariances have no writer yet, and an empty "
-            f"<parameterCovariances/> would assert the file has none"
-        )
+        _parameterCovariances(root, covarianceSuite.parameterCovariances,
+                              report)
     return ET.ElementTree(root), report
 
 
@@ -1105,8 +1107,25 @@ def _covarianceMatrix(parent: ET.Element, tag: str, form, report,
         _set(grid, index=str(index), label=label, unit="eV", style="boundaries")
         _values(grid, values)
 
-    matrix = np.asarray(form.matrix)
-    array = ET.SubElement(gridded, "array")
+    _array(gridded, form.matrix)
+    return element
+
+
+def _array(parent: ET.Element, matrix) -> ET.Element:
+    """§25's ``array``, on its own — uncompressed, lower-triangular if symmetric.
+
+    Its own function because §25.3.2's ``parameterCovarianceMatrix`` holds an
+    ``array`` **directly** (``covariances.xsd:170-186``), where §25.2.2's
+    ``covarianceMatrix`` wraps one in a ``gridded2d``. Writing the parameter
+    matrix by calling :func:`_covarianceMatrix` and ignoring the grids would
+    emit that ``gridded2d`` and its ``axes`` as well, and the schema admits
+    neither there — the same shape of defect as D19, a node written into a file
+    that no reader of the standard takes back. A parameter covariance has no
+    grid to put in an ``axes`` either: row 47 is *a neutron width*, and what
+    says so is the ``parameterLink`` list, not an energy boundary.
+    """
+    matrix = np.asarray(matrix)
+    array = ET.SubElement(parent, "array")
     array.attrib["shape"] = f"{matrix.shape[0]},{matrix.shape[1]}"
     symmetric = (matrix.shape[0] == matrix.shape[1]
                  and np.array_equal(matrix, matrix.T))
@@ -1117,7 +1136,196 @@ def _covarianceMatrix(parent: ET.Element, tag: str, form, report,
         ))
     else:
         _values(array, matrix)
+    return array
+
+
+# ---------------------------------------------------------------------------
+# §25.3 parameter covariances
+# ---------------------------------------------------------------------------
+
+@writes("parameterCovarianceForm", "parameterCovariance",
+        "averageParameterCovariance")
+def _parameterCovariances(parent: ET.Element, covariances, report) -> None:
+    """§25.3's container — and it is an ``xs:sequence``, not a bag.
+
+    ``covariances.xsd:27-34`` gives ``<parameterCovariances>`` a sequence of two
+    unbounded refs: **every** ``parameterCovariance`` first, then every
+    ``averageParameterCovariance``. The model keeps both kinds in one list in
+    the order the file had them, which for Tm-171 happens to be that order
+    already — so writing them as they come would validate on the one fixture
+    that has both and fail on a file that interleaved them. The two passes below
+    are what makes that not depend on the input.
+
+    The container is dropped again when nothing could be written into it. An
+    empty ``<parameterCovariances/>`` is schema-valid, and that is the problem:
+    it says the evaluation has no parameter covariances, which is a different
+    statement from "kika could not write the ones it read".
+    """
+    container = ET.SubElement(parent, "parameterCovariances")
+    for covariance in covariances:
+        if isinstance(covariance, ParameterCovariance):
+            _parameterCovariance(container, covariance, report)
+    for covariance in covariances:
+        if isinstance(covariance, AverageParameterCovariance):
+            _averageParameterCovariance(container, covariance, report)
+    for covariance in covariances:
+        if not isinstance(covariance, (ParameterCovariance,
+                                       AverageParameterCovariance)):
+            report.unsupportedNode(
+                f"parameterCovariances holds a "
+                f"{type(covariance).__name__}, which is neither of §25.3's two "
+                f"nodes and is not written"
+            )
+    if len(container) == 0:
+        parent.remove(container)
+
+
+def _parameterCovariance(parent: ET.Element, covariance, report) -> None:
+    """§25.3.1. ``rowData`` then the matrix — and **no ``columnData``**.
+
+    The model carries a ``columnData`` and an ``isCrossTerm`` built off it, the
+    reader fills it if a file has one, and ``covariances.xsd:160-168`` does not
+    admit it: a ``parameterCovariance`` is ``rowData`` plus
+    ``parameterCovarianceMatrix``, full stop. So a cross-term parameter
+    covariance is a thing the model can hold and this format cannot say, and the
+    honest write is to report the link rather than emit an attribute that makes
+    the file invalid. ``averageParameterCovariance``, three functions down, is
+    the one of the two that *does* take a ``columnData``.
+    """
+    where = f"parameterCovariance {covariance.label!r}"
+    form = covariance.form
+    if form is None:
+        report.lost(
+            f"{where} holds no parameterCovarianceMatrix, which §25.3.1 makes "
+            f"mandatory, so the whole covariance is left out of the file"
+        )
+        return
+    if not getattr(form, "parameters", None):
+        # `_readParameterCovarianceMatrix` drops the links, deliberately, when
+        # they do not account for every row -- and `<parameters>` needs at least
+        # one `parameterLink` to be a valid element. A matrix written with its
+        # rows unnamed would be a block of numbers with no statement anywhere of
+        # what row 47 is, which is the very thing the reader refused to assert.
+        report.lost(
+            f"{where} has a matrix and no parameterLinks, so nothing in the "
+            f"file could say what its rows are; §25.3.2 requires at least one "
+            f"link and the covariance is left out rather than written unnamed"
+        )
+        return
+
+    element = ET.SubElement(parent, "parameterCovariance")
+    _set(element, label=covariance.label)
+    if covariance.rowData is None:
+        report.lost(
+            f"{where} has no rowData and §25.3.1 requires one; the covariance "
+            f"is written without it and **the file does not validate**"
+        )
+    _dataLink(element, "rowData", covariance.rowData)
+    if covariance.columnData is not None:
+        report.lost(
+            f"{where} is a cross term -- its columnData points at "
+            f"{covariance.columnData.href!r} -- and §25.3.1 has nowhere to put "
+            f"that. The matrix is written; the file no longer says the two "
+            f"axes are about different parameters"
+        )
+    _parameterCovarianceMatrix(element, form, report, where)
+
+
+def _parameterCovarianceMatrix(parent: ET.Element, form, report,
+                               where: str) -> ET.Element:
+    """§25.3.2. The links, then the bare array.
+
+    **``matrixStartIndex`` is written exactly as the model holds it.**
+    ``covariances/covariances.py:_readParameterCovarianceMatrix`` documents why
+    it is already zero-based — Si-32's ``scatteringRadius`` at 0 and its 18
+    ``resonanceParameters`` at 1 fill a 19x19 matrix only if row 1 is the
+    second row — and the reader records the number unchanged. Adding one here
+    to "convert back to one-based" would move every link by a row and no test
+    of counts would notice, because the counts would still sum to the order.
+    """
+    element = ET.SubElement(parent, "parameterCovarianceMatrix")
+    label = form.label
+    if label is None:
+        # §25.3.2 makes `label` required, and the ENDF adapter never sets one:
+        # `kika/endf/model_adapter/parameter_covariances.py` builds every
+        # `ParameterCovarianceMatrix` without it, because MF32 has no such
+        # concept. In GNDS the label names the style the form belongs to, and
+        # the suite writer has already synthesised an `evaluated` style called
+        # `eval` for exactly this case.
+        label = "eval"
+        report.approximated(
+            f"{where}: its matrix carried no label and §25.3.2 requires one, so "
+            f"it is written as 'eval' -- the style label the suite writer "
+            f"synthesises. The source said nothing about which style this "
+            f"matrix belongs to"
+        )
+    _set(element, label=label,
+         type="relative" if form.isRelative else "absolute")
+
+    container = ET.SubElement(element, "parameters")
+    named = 0
+    for link in form.parameters:
+        _set(ET.SubElement(container, "parameterLink"),
+             label=link.label, href=link.href,
+             nParameters=str(link.nParameters),
+             matrixStartIndex=str(link.matrixStartIndex))
+        named += len(link.parameterNames)
+    if named:
+        # `ParameterLink.parameterNames` is what makes `rowLabels()` able to say
+        # "the neutron width of resonance 12" rather than "row 47", and it comes
+        # from ENDF's MF32 slot order. §25.3.2's `parameterLink` has label, href,
+        # nParameters and matrixStartIndex and nothing else, so the names go
+        # nowhere: a GNDS reader recovers them by following the href into the
+        # reactionSuite's resonance table, which is where GNDS keeps them.
+        report.lost(
+            f"{where}: {named} parameter names are dropped -- §25.3.2's "
+            f"parameterLink has no attribute for them, and a reader of the "
+            f"written file gets them by following the href into the "
+            f"reactionSuite instead"
+        )
+
+    _array(element, form.matrix)
     return element
+
+
+def _averageParameterCovariance(parent: ET.Element, covariance, report) -> None:
+    """§25.3. A URR average parameter — an ordinary gridded matrix about it.
+
+    The one of §25.3's two nodes whose form is a §25.2.2 ``covarianceMatrix``,
+    ``gridded2d`` and all: its rows are energy bins of one unresolved-region
+    average, not individual resonance parameters. So this reuses
+    :func:`_covarianceMatrix` where :func:`_parameterCovariance` must not.
+
+    Only the GNDS reader ever builds one — ``parameter_covariances.py:449-454``
+    turns ENDF's LRU=2 into a relative :class:`ParameterCovariance` instead — so
+    Tm-171's ten are the only witnesses there are.
+    """
+    where = f"averageParameterCovariance {covariance.label!r}"
+    form = covariance.form
+    if form is None:
+        report.lost(
+            f"{where} holds no covarianceMatrix, which §25.3 makes mandatory, "
+            f"so the whole covariance is left out of the file"
+        )
+        return
+    if not isinstance(form, CovarianceMatrix):
+        report.unsupportedNode(
+            f"{where} holds a {type(form).__name__}; §25.3 admits only a "
+            f"covarianceMatrix there, and the covariance is not written"
+        )
+        return
+
+    element = ET.SubElement(parent, "averageParameterCovariance")
+    _set(element, label=covariance.label,
+         crossTerm=_boolean(covariance.crossTerm))
+    if covariance.rowData is None:
+        report.lost(
+            f"{where} has no rowData and §25.3 requires one; the covariance is "
+            f"written without it and **the file does not validate**"
+        )
+    _dataLink(element, "rowData", covariance.rowData)
+    _dataLink(element, "columnData", covariance.columnData)
+    _covarianceMatrix(element, "covarianceMatrix", form, report, where)
 
 
 # ---------------------------------------------------------------------------
