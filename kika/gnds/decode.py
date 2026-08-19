@@ -60,25 +60,25 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Tuple
 
-from kika.nuclear_data.model import (AngularTwoBody, Background,
+from kika.nuclear_data.model import (Background,
                                      ConversionReport, CrossSection,
                                      CrossSectionSum,
                                      ExternalFile, ExternalFiles,
                                      FissionComponents, Frame, GndsProvenance,
-                                     Isotropic2d,
                                      Multiplicity, Nuclide, OrphanProducts,
                                      OutputChannel, Particle, PhysicalQuantity,
                                      PoPs, Product, Productions, Q,
                                      RangeQuantity, Reaction, ReactionId,
                                      ReactionSuite, Reactions, Reference,
                                      ResonancesWithBackground, Style, Styles,
-                                     Sums, Unspecified)
+                                     Sums)
 from kika.nuclear_data.model.distributions import Distribution
 from kika.nuclear_data.model.reactions import IncompleteReactions
 from kika.nuclear_data.model.sums import Add, MultiplicitySum, Summands
 
-from .primitives import (UnsupportedNode, readAxes, readForm, readFraction,
-                         readFunction2d)
+from .distributions import readDistribution
+from .primitives import (UnsupportedNode, readAxes, readForm,
+                         readFraction)
 from .resonances import readResonances
 from .styles import readStyles
 from .nodes import reads
@@ -560,7 +560,8 @@ class _SuiteReader:
             product.multiplicity = self.readMultiplicity(multiplicity, here)
         distribution = element.find("distribution")
         if distribution is not None:
-            product.distribution = self.readDistribution(distribution, here)
+            product.distribution = readDistribution(
+                distribution, here, self.resolve, self.report)
         channel = element.find("outputChannel")
         if channel is not None:
             # §17.2.1's recursion: a product that breaks up or decays carries
@@ -595,62 +596,6 @@ class _SuiteReader:
             return Multiplicity(label=label)
         return Multiplicity(function=self.form(chosen, here, "multiplicity"),
                             label=label)
-
-    # -- distributions -----------------------------------------------------
-
-    @reads("distributionForm", "angularTwoBody", "unspecified")
-    def readDistribution(self, element: ET.Element, path: str) -> Distribution:
-        here = f"{path}/distribution"
-        distribution = Distribution()
-        for child in element:
-            if child.tag in IGNORED:
-                continue
-            label = child.attrib.get("label", "")
-            if child.tag == "angularTwoBody":
-                form = self.readAngularTwoBody(child, here)
-            elif child.tag == "unspecified":
-                form = Unspecified(
-                    label=label,
-                    productFrame=Frame(child.attrib.get("productFrame", "lab")),
-                )
-            else:
-                self.unsupported(
-                    child.tag, here,
-                    "a §18 law kika declares and does not implement (phase 7b); "
-                    "the product keeps its multiplicity and loses only this form"
-                )
-                continue
-            distribution[label] = form
-        return distribution
-
-    @reads("angularTwoBodyForm", "isotropic2d", "recoil")
-    def readAngularTwoBody(self, element: ET.Element,
-                           path: str) -> AngularTwoBody:
-        """§18's ``angularTwoBody``, in all four of the shapes it takes."""
-        label = element.attrib.get("label", "")
-        here = f"{path}/angularTwoBody{_quoted(label)}"
-        twoBody = AngularTwoBody(
-            label=label,
-            productFrame=Frame(element.attrib.get("productFrame",
-                                                  "centerOfMass")),
-        )
-        for child in element:
-            if child.tag in IGNORED:
-                continue
-            if child.tag == "recoil":
-                twoBody.recoilHref = child.attrib.get("href", "")
-            elif child.tag == "isotropic2d":
-                twoBody.angular = Isotropic2d(
-                    label=label, productFrame=twoBody.productFrame
-                )
-            else:
-                try:
-                    twoBody.angular = readFunction2d(
-                        child, readAxes(child, self.resolve)
-                    )
-                except UnsupportedNode as exc:
-                    self.unsupported(child.tag, here, exc.args[0])
-        return twoBody
 
     # -- sums --------------------------------------------------------------
 

@@ -399,6 +399,7 @@ def check() -> Tuple[str, ...]:
     """
     import kika.gnds.covariances  # noqa: F401  - registers the covariance forms
     import kika.gnds.decode       # noqa: F401  - registers the reader's side
+    import kika.gnds.distributions  # noqa: F401  - registers §18
     import kika.gnds.encode       # noqa: F401  - registers the writer's side
     import kika.gnds.primitives   # noqa: F401  - registers the functionals
     import kika.gnds.styles       # noqa: F401  - registers §9
