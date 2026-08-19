@@ -173,7 +173,7 @@ def _multiplicityFunction(section, report: ConversionReport,
         function = Regions1d.fromEndfRegions(
             energies, values, regions, axes=axes, label=EVAL_LABEL
         )
-        return Multiplicity(function=function, label=EVAL_LABEL), regions
+        return Multiplicity(form=function), regions
 
     if lnu == 1:
         coefficients = np.asarray(section.coefficients, dtype=float)
@@ -197,7 +197,7 @@ def _multiplicityFunction(section, report: ConversionReport,
             domainMin_=float(domain[0]), domainMax_=float(domain[1]),
             axes=axes, label=EVAL_LABEL,
         )
-        return Multiplicity(function=function, label=EVAL_LABEL), []
+        return Multiplicity(form=function), []
 
     report.lost(
         f"MF1/MT{mt}: LNU={lnu} is neither 1 (polynomial) nor 2 (tabulated), "
@@ -373,6 +373,16 @@ def nubarNode(suite, mt: int):
     The inverse of the placement :func:`attachNubar` performs, and written as
     one function so the encoders cannot disagree with the decoder about where
     to look.
+
+    **The product search asks for an evaluable multiplicity, not merely a
+    present one.** §17.3 has three members that state no number at all — a
+    ``reference``, a ``branching1d`` and an ``unspecified`` — and a fission
+    neutron carrying one of those would otherwise be returned as the nu-bar and
+    die four frames later in :func:`_tab1FromMultiplicity` with a message
+    naming ``NoneType``, which is not the object at fault. No distributed
+    evaluation is known to reach it — U-235's MT18 neutron carries an
+    ``XYs1d`` — but the guard costs a clause and the failure it prevents costs
+    a diagnosis.
     """
     if mt not in NUBAR_MT:
         raise ValueError(f"MT{mt} is not a fission multiplicity")
@@ -384,14 +394,15 @@ def nubarNode(suite, mt: int):
     reaction = suite.findReactionByENDF_MT(FISSION_MT)
     if reaction is not None and mt in (452, 456):
         for product in reaction.outputChannel.products:
-            if product.pid == "n" and product.multiplicity is not None:
+            if (product.pid == "n" and product.multiplicity is not None
+                    and product.multiplicity.isEvaluable):
                 return product.multiplicity
     return None
 
 
 def _tab1FromMultiplicity(multiplicity, mt: int):
     """``(interpolation, energies, values)`` out of a tabulated multiplicity."""
-    function = multiplicity.function
+    function = multiplicity.form
     if isinstance(function, Regions1d):
         xs, ys, pairs = function.toEndfRegions()
         return [(int(nbt), int(code)) for nbt, code in pairs], list(xs), list(ys)
@@ -408,7 +419,7 @@ def _fillNubarSection(section, multiplicity, mt: int, mat):
     header = (getattr(provenance, "headerFields", None)) or {}
     lnu = int(header.get("lnu") or 0)
     if not lnu:
-        lnu = 1 if isinstance(multiplicity.function, Polynomial1d) else 2
+        lnu = 1 if isinstance(multiplicity.form, Polynomial1d) else 2
 
     section._za = float(provenance.za) if provenance and provenance.za else None
     section._awr = float(provenance.awr) if provenance and provenance.awr else None
@@ -416,7 +427,7 @@ def _fillNubarSection(section, multiplicity, mt: int, mat):
     section._lnu = lnu
 
     if lnu == 1:
-        coefficients = list(np.asarray(multiplicity.function.coefficients, dtype=float))
+        coefficients = list(np.asarray(multiplicity.form.coefficients, dtype=float))
         section._nc = len(coefficients)
         section._coefficients = coefficients
     else:

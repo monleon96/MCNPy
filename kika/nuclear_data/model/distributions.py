@@ -21,7 +21,7 @@ from .quantities import PhysicalQuantity
 __all__ = [
     "Distribution", "AngularTwoBody", "Isotropic2d", "Unspecified",
     "Uncorrelated", "DiscreteGamma", "PrimaryGamma", "NBodyPhaseSpace",
-    "EnergyAngular", "AngularEnergy", "KalbachMann", "Recoil",
+    "EnergyAngular", "AngularEnergy", "KalbachMann", "Branching3d", "Recoil",
     "NOT_IMPLEMENTED_DISTRIBUTIONS",
 ]
 
@@ -355,6 +355,32 @@ class KalbachMann:
         ordinary case and the only one the distribution contains.
         """
         return self.f is not None and self.r is not None
+
+
+@dataclass
+class Branching3d:
+    """§18.1.1. ``gnds.xsd:1816-1819`` — the distribution half of a branching.
+
+    ``DistributionBranching3dType`` is two attributes and no content: the node
+    states that this photon's angle-energy distribution follows from the
+    isomeric transition rather than from a tabulated law. Like its multiplicity
+    half it is **format fidelity and not evaluation** — kika reads and writes it
+    back and does not resolve the transition against PoPs ``decayData``, which
+    is a §12 walk the model does not do.
+
+    See :class:`~kika.nuclear_data.model.output_channel.Branching1d`, which
+    accompanies every one of these: 14 032 of each across the distribution, in
+    the same 282 files, on the same products.
+    """
+
+    label: str
+    productFrame: Frame = Frame.lab
+
+    def __post_init__(self) -> None:
+        # Coerced for the reason `Unspecified.__post_init__` gives: `Frame`
+        # subclasses `str`, so a raw string compares equal and everything
+        # appears to work until a writer asks for `.value`.
+        self.productFrame = Frame(self.productFrame)
 
 
 class Recoil(_UnimplementedDistribution):

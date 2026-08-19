@@ -321,12 +321,21 @@ def test_the_misplaced_names_stay_misplaced_after_they_are_implemented():
 
 
 def test_registering_an_undeclared_node_fails_at_import_time():
-    """The other direction, and the one that makes phase 7b safe: a reader for
-    a §18 law that nobody declared cannot be added quietly."""
-    assert ("distributionForm", "branching3d") not in NODES
-    with pytest.raises(UndeclaredNode, match="branching3d"):
-        @nodes.reads("distributionForm", "branching3d")
-        def _readBranching3d(element, path):  # pragma: no cover - never runs
+    """The other direction, and the one that made phase 7b safe: a reader for
+    a §18 law that nobody declared cannot be added quietly.
+
+    The guinea pig was ``branching3d`` until phase 7b implemented it, which is
+    the good reason for a victim to expire. ``coherentPhotonScattering`` takes
+    over: it is a real §18.1.1 member (``gnds.xsd:1657``) and the census counted
+    it **zero times** in the 558 distributed neutron evaluations, along with the
+    four other unnamed members. A node with no occurrences is not going to
+    acquire a reader by accident, which is exactly what a victim needs to be.
+    """
+    victim = ("distributionForm", "coherentPhotonScattering")
+    assert victim not in NODES
+    with pytest.raises(UndeclaredNode, match="coherentPhotonScattering"):
+        @nodes.reads(*victim)
+        def _readCoherentPhotonScattering(element, path):  # pragma: no cover
             ...
 
 

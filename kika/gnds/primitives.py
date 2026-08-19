@@ -98,7 +98,13 @@ DECLARED_ELSEWHERE = {
     # through `kika.gnds.distributions`, at the `uncorrelated/energy` choice
     # point where the schema puts them (gnds.xsd:1697), and a functional reader
     # should not be the thing that has an opinion about them.
-    "branching1d": "no model node; §18 isomeric branching is phase 7b",
+    #
+    # `branching1d` left for the same reason when phase 7b modelled it: it is a
+    # §17.3 multiplicity form (gnds.xsd:1633) whose whole content is one
+    # attribute, read by `kika.gnds.decode.readMultiplicity`. Three entries have
+    # now been removed from this dict by being implemented and none by being
+    # abandoned, which is the pattern worth noticing — what is left is the two
+    # nodes no distributed evaluation contains.
 }
 
 

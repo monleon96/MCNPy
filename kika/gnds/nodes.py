@@ -59,6 +59,7 @@ from typing import Callable, Dict, Optional, Tuple
 from kika.nuclear_data.model import (AngularEnergy, AngularTwoBody,
                                      AngularDistributionReconstructed,
                                      AverageParameterCovariance,
+                                     Branching1d, Branching3d,
                                      Constant1d, CoulombPlusNuclearElastic,
                                      CovarianceMatrix,
                                      CrossSectionReconstructed,
@@ -75,7 +76,8 @@ from kika.nuclear_data.model import (AngularEnergy, AngularTwoBody,
                                      ThermalNeutronScatteringLaw1d,
                                      URR_probabilityTables,
                                      URR_probabilityTables1d, Uncorrelated,
-                                     Unspecified, XYs1d, XYs2d, XYs3d, Ys1d)
+                                     Unspecified, UnspecifiedMultiplicity,
+                                     XYs1d, XYs2d, XYs3d, Ys1d)
 from kika.nuclear_data.model.styles import (AverageProductData,
                                             CoulombPlusNuclearElasticMuCutoff,
                                             MonteCarlo_cdf, SnElasticUpScatter)
@@ -136,21 +138,21 @@ def _spec(*args, **kwargs) -> Tuple[Tuple[str, str], NodeSpec]:
 #: When their writers land they become ``PAIRED``, and :func:`check` is what
 #: notices that the declaration and the code agree again.
 #:
-#: **No §18 entry carries this any more, and four did before ``uncorrelated``.**
-#: ``gnds.xsd:1647-1662`` gives §18.1.1's choice twelve members; kika names six
-#: of them below and **every one of the six is now ``PAIRED``** —
-#: ``uncorrelated``, then ``energyAngular``, then ``angularEnergy`` and
-#: ``KalbachMann``, all in phase 7b. What still carries this reason are the
-#: three ``multiplicityForm`` entries, which is where the phase goes next.
-#: ``branching3d`` is deliberately absent,
-#: as the guinea pig of the import-time ratchet (see :func:`reads` and its
-#: test). The remaining five — ``reference``, ``CoulombPlusNuclearElastic``,
-#: ``coherentPhotonScattering``, ``incoherentPhotonScattering``,
-#: ``thermalNeutronScatteringLaw`` — occur **zero times** across the 558 neutron
-#: evaluations the census walked, which is why they are not entries.
-_PHASE_7B = ("a member of §17.3's multiplicity choice (gnds.xsd:1626) that the "
-             "reader names and reports and no writer emits — scheduled for "
-             "phase 7b")
+#: **Phase 7b's landing strip is empty, which is what finishing it means.**
+#: There was a ``_PHASE_7B`` reason here, carried by four §18 entries before
+#: ``uncorrelated`` and by three ``multiplicityForm`` entries after it. Every
+#: one of them is ``PAIRED`` now, so the constant had no users and is gone
+#: rather than kept as scaffolding for a phase that might want a different
+#: sentence anyway.
+#:
+#: ``gnds.xsd:1647-1662`` gives §18.1.1's choice twelve members and kika names
+#: **seven** below. The five it does not — ``reference``,
+#: ``CoulombPlusNuclearElastic``, ``coherentPhotonScattering``,
+#: ``incoherentPhotonScattering``, ``thermalNeutronScatteringLaw`` — occur
+#: **zero times** across the 558 neutron evaluations the census walked, which is
+#: why they are not entries and why one of them is now the import-time ratchet's
+#: guinea pig (see :func:`reads` and its test). ``branching3d`` held that job
+#: until §18.1.1 was finished and it became a real entry.
 
 #: The six analytic fission/evaporation spectra of §18.3. Each is a formula
 #: with named parameters, not a table, so kika reports one rather than
@@ -222,15 +224,15 @@ NODES: Dict[Tuple[str, str], NodeSpec] = dict([
 
     # -- §17.3 multiplicity forms. gnds.xsd:1626, an xs:choice.
     _spec("constant1d", "multiplicityForm", "§17.3", Constant1d, Status.PAIRED),
-    _spec("reference", "multiplicityForm", "§17.3", None, Status.READ_ONLY,
-          "kika/gnds/decode.py:576-597 names it and reports it; kika's Multiplicity "
-          "is a constant or a function of E, and a link needs a node the model "
-          "does not have. " + _PHASE_7B),
-    _spec("unspecified", "multiplicityForm", "§17.3", None, Status.READ_ONLY,
-          "kika/gnds/decode.py:576-597 names it and reports it. " + _PHASE_7B),
-    _spec("branching1d", "multiplicityForm", "§17.3", None, Status.READ_ONLY,
-          "kika/gnds/decode.py:576-597 names it and reports it; an isomeric "
-          "branching is not a multiplicity kika can evaluate. " + _PHASE_7B),
+    #    `reference` is the same class as §16.1.1's, and the key being
+    #    (family, tag) is what lets one class sit at two choice points — the
+    #    same arrangement `isotropic2d` has. XLinkType and §16.1.1's reference
+    #    are the same shape: an href and an optional label.
+    _spec("reference", "multiplicityForm", "§17.3", Reference, Status.PAIRED),
+    _spec("unspecified", "multiplicityForm", "§17.3", UnspecifiedMultiplicity,
+          Status.PAIRED),
+    _spec("branching1d", "multiplicityForm", "§17.3", Branching1d,
+          Status.PAIRED),
 
     # -- §18.1.1 distribution forms. gnds.xsd:1647, an xs:choice.
     _spec("angularTwoBody", "distributionForm", "§18.2", AngularTwoBody,
@@ -244,6 +246,8 @@ NODES: Dict[Tuple[str, str], NodeSpec] = dict([
     _spec("angularEnergy", "distributionForm", "§18.5", AngularEnergy,
           Status.PAIRED),
     _spec("KalbachMann", "distributionForm", "§18.6", KalbachMann,
+          Status.PAIRED),
+    _spec("branching3d", "distributionForm", "§18.1.1", Branching3d,
           Status.PAIRED),
 
     # -- §18.2's angularTwoBody forms. gnds.xsd:1665, an xs:choice.

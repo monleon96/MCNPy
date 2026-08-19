@@ -63,7 +63,7 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Tuple
 
-from kika.nuclear_data.model import (Background,
+from kika.nuclear_data.model import (Background, Branching1d,
                                      ConversionReport, CrossSection,
                                      CrossSectionSum,
                                      ExternalFile, ExternalFiles,
@@ -74,7 +74,7 @@ from kika.nuclear_data.model import (Background,
                                      RangeQuantity, Reaction, ReactionId,
                                      ReactionSuite, Reactions, Reference,
                                      ResonancesWithBackground, Style, Styles,
-                                     Sums)
+                                     Sums, UnspecifiedMultiplicity)
 from kika.nuclear_data.model.distributions import Distribution
 from kika.nuclear_data.model.reactions import IncompleteReactions
 from kika.nuclear_data.model.sums import Add, MultiplicitySum, Summands
@@ -527,6 +527,11 @@ class _SuiteReader:
             value=float(chosen.attrib["value"]),
             unit=unit,
             label=chosen.attrib.get("label"),
+            # The node's own domain, which for a threshold reaction is the
+            # threshold. Filling it from the evaluated style instead is what
+            # turned H-2's (n,2n) Q into a Q from 1e-5 eV; see `Q`'s docstring.
+            domainMin=float(chosen.attrib["domainMin"]),
+            domainMax=float(chosen.attrib["domainMax"]),
         )
 
     def pickOneForm(self, forms: List[ET.Element], path: str,
@@ -579,26 +584,42 @@ class _SuiteReader:
 
     @reads("multiplicityForm", "constant1d", "reference", "unspecified", "branching1d")
     def readMultiplicity(self, element: ET.Element, path: str) -> Multiplicity:
+        """§17.3's ``multiplicity``: one member of its choice, or nothing.
+
+        The four functionals all go through :meth:`form`, ``constant1d``
+        included — it is a ``function1d`` in the registry
+        (``nodes.py``'s ``multiplicityForm``/``constant1d`` entry names
+        :class:`Constant1d` as its class) and reading it as a bare float was
+        what lost its ``domainMin``.
+
+        The other three carry no numbers, and each becomes the node it is rather
+        than an absence: a ``reference`` is a link (3 539 in the library), a
+        ``branching1d`` an isomeric transition (14 032) and an ``unspecified``
+        the evaluator declining to say (178). They used to be reported and
+        dropped, which made a deliberately number-free multiplicity look exactly
+        like one kika had failed to read — and wrote an invalid empty
+        ``<multiplicity/>`` in 17 749 places. :attr:`Multiplicity.isEvaluable`
+        is what asks the question they are the answer to.
+        """
         here = f"{path}/multiplicity"
         forms = [c for c in element if c.tag not in IGNORED]
         chosen = self.pickOneForm(forms, here, "multiplicity")
         if chosen is None:
             return Multiplicity()
-        label = chosen.attrib.get("label")
 
-        if chosen.tag == "constant1d":
-            return Multiplicity(constant=float(chosen.attrib["value"]),
-                                label=label)
-        if chosen.tag in ("reference", "unspecified", "branching1d"):
-            self.unsupported(
-                chosen.tag, here,
-                "kika's multiplicity is a constant or a function of E; a link, "
-                "an absence and an isomeric branching each need a node the "
-                "model does not have (phase 7b)"
-            )
-            return Multiplicity(label=label)
-        return Multiplicity(function=self.form(chosen, here, "multiplicity"),
-                            label=label)
+        label = chosen.attrib.get("label", "")
+        if chosen.tag == "reference":
+            # The same class §16.1.1's `reference` uses; XLinkType and it are
+            # the same shape. The href is an xPath into this same document and
+            # is kept as the string it is — resolving it is not this reader's
+            # job, and §16.1.1 does not resolve its own either.
+            return Multiplicity(form=Reference(
+                href=chosen.attrib.get("href", ""), label=label))
+        if chosen.tag == "branching1d":
+            return Multiplicity(form=Branching1d(label=label))
+        if chosen.tag == "unspecified":
+            return Multiplicity(form=UnspecifiedMultiplicity(label=label))
+        return Multiplicity(form=self.form(chosen, here, "multiplicity"))
 
     # -- sums --------------------------------------------------------------
 

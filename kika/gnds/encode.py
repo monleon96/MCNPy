@@ -48,6 +48,7 @@ import numpy as np
 
 from kika.nuclear_data.model import (AngularEnergy, AngularTwoBody,
                                      AverageParameterCovariance, Background,
+                                     Branching1d, Branching3d,
                                      BreitWigner, ConversionReport,
                                      Constant1d, CovarianceMatrix,
                                      CrossSectionSum, DiscreteGamma,
@@ -60,7 +61,8 @@ from kika.nuclear_data.model import (AngularEnergy, AngularTwoBody,
                                      Regions1d, Regions2d,
                                      ResonancesWithBackground, RMatrix,
                                      ShortRangeSelfScalingVariance, Sum,
-                                     Uncorrelated, Unspecified, XYs1d,
+                                     Uncorrelated, Unspecified,
+                                     UnspecifiedMultiplicity, XYs1d,
                                      XYs2d, XYs3d)
 
 from .nodes import writes
@@ -653,7 +655,15 @@ class _SuiteWriter:
             )
             return
         constant = ET.SubElement(element, "constant1d")
+        # The Q's own domain when it has one. It has one whenever it was read
+        # from GNDS, and for a threshold reaction it *is* the threshold: H-2's
+        # (n,2n) Q is stated over 3.339e6..1.5e8 and used to come back out over
+        # the evaluation's whole range, which says something the file does not.
+        # The style's domain is the fallback for a Q assembled from ENDF, where
+        # there is no GNDS domain to preserve.
         domainMin, domainMax = self.domain
+        if q.domainMin is not None and q.domainMax is not None:
+            domainMin, domainMax = _number(q.domainMin), _number(q.domainMax)
         _set(constant, label=q.label or "eval", value=_number(q.value),
              domainMin=domainMin, domainMax=domainMax)
         axes = ET.SubElement(constant, "axes")
@@ -671,32 +681,53 @@ class _SuiteWriter:
             self.outputChannel(element, product.outputChannel,
                                f"{where} product {product.pid!r}")
 
-    @writes("multiplicityForm", "constant1d")
+    @writes("multiplicityForm", "constant1d", "reference", "branching1d",
+            "unspecified")
     def multiplicity(self, parent: ET.Element, multiplicity, where: str) -> None:
+        """§17.3, and **one form or an empty node**.
+
+        The four functionals go out through :func:`_function` — ``constant1d``
+        included. It used to have a branch of its own that rebuilt the node from
+        a float and filled ``domainMin``/``domainMax`` from :attr:`domain`, the
+        ``evaluated`` style's ``projectileEnergyDomain``. That is what widened
+        every threshold multiplicity, and deleting the branch is the fix: a
+        :class:`Constant1d` carries its own domain and ``_function`` writes it.
+
+        The other three are attributes and nothing else, so they are written
+        here rather than delegated. Until phase 7b they were not written at all
+        and the node came out empty — invalid, in 17 749 places across the
+        distribution, for a reason that was never a decision.
+
+        An empty ``<multiplicity/>`` still does not validate — ``gnds.xsd:1626``
+        requires a child — and that is the same judgement the empty
+        ``<distribution/>`` gets: the file announces its own incompleteness
+        rather than asserting a 1 on the evaluator's behalf. What is left in
+        that state is a multiplicity kika genuinely could not read.
+        """
         element = ET.SubElement(parent, "multiplicity")
         if multiplicity is None:
             self.report.lost(f"{where}: no multiplicity, so <multiplicity> is empty")
             return
-        if multiplicity.function is not None:
-            _function(element, multiplicity.function, self.report, where)
-            return
-        if multiplicity.constant is None:
+        form = multiplicity.form
+        if form is None:
             self.report.lost(
-                f"{where}: the multiplicity was read from a node kika does not "
-                f"model — a reference, a branching1d or an unspecified — so "
+                f"{where}: the multiplicity held no form kika could read, so "
                 f"<multiplicity> is empty rather than filled with a 1"
             )
             return
-        constant = ET.SubElement(element, "constant1d")
-        domainMin, domainMax = self.domain
-        _set(constant, label=multiplicity.label or "eval",
-             value=_number(multiplicity.constant),
-             domainMin=domainMin, domainMax=domainMax)
-        axes = ET.SubElement(constant, "axes")
-        _set(ET.SubElement(axes, "axis"), index="1", label="energy_in", unit="eV")
-        _set(ET.SubElement(axes, "axis"), index="0", label="multiplicity", unit="")
+        if isinstance(form, Reference):
+            _set(ET.SubElement(element, "reference"), label=form.label,
+                 href=form.href)
+            return
+        if isinstance(form, Branching1d):
+            _set(ET.SubElement(element, "branching1d"), label=form.label)
+            return
+        if isinstance(form, UnspecifiedMultiplicity):
+            _set(ET.SubElement(element, "unspecified"), label=form.label)
+            return
+        _function(element, form, self.report, where)
 
-    @writes("distributionForm", "angularTwoBody", "unspecified")
+    @writes("distributionForm", "angularTwoBody", "unspecified", "branching3d")
     def distribution(self, parent: ET.Element, distribution, where: str) -> None:
         """§18. **An empty ``<distribution/>`` is deliberate and is reported.**
 
@@ -739,6 +770,12 @@ class _SuiteWriter:
                 twoBody = ET.SubElement(element, "angularTwoBody")
                 _set(twoBody, label=label, productFrame=str(form.productFrame))
                 ET.SubElement(twoBody, "isotropic2d")
+            elif isinstance(form, Branching3d):
+                # Before Unspecified, because both are attribute-only nodes and
+                # a reader that saw them in the other order would be relying on
+                # the two classes being unrelated rather than on the order.
+                _set(ET.SubElement(element, "branching3d"), label=label,
+                     productFrame=str(form.productFrame))
             elif isinstance(form, Unspecified):
                 _set(ET.SubElement(element, "unspecified"), label=label,
                      productFrame=str(form.productFrame))

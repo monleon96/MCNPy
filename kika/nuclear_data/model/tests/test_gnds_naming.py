@@ -62,7 +62,12 @@ GNDS_NODES: dict[str, tuple[str, ...]] = {
     "Channel": ("label", "resonanceReaction", "L", "channelSpin", "columnIndex",
                 "scatteringRadius"),
     # §17.3 multiplicity / §18.4 delayedNeutron / §21.3 multiplicitySum
-    "Multiplicity": ("constant", "function", "label"),
+    # `form` and `label`, and neither `constant` nor `function`. Those two were
+    # never GNDS spellings: `MultiplicityType` (gnds.xsd:1626-1636) has no
+    # attributes at all, and its seven members are *children* — so the node
+    # holds one form and the form holds the label. The old entry claimed
+    # §-defined names for a shape the § does not have.
+    "Multiplicity": ("form", "label"),
     "DelayedNeutron": ("label", "rate", "product"),
     "DelayedNeutrons": ("delayedNeutrons",),
     "FissionFragmentData": ("delayedNeutrons", "fissionEnergyReleases",

@@ -24,11 +24,12 @@ import pytest
 from kika.gnds.decode import readReactionSuite
 from kika.gnds.xpath import Document
 from kika.nuclear_data import model as m
-from kika.nuclear_data.model import (AngularTwoBody, Background, Constant1d,
-                                     CrossSectionSum, Evaluated, Isotropic2d,
-                                     Nuclide, Reference, Regions1d, Regions2d,
+from kika.nuclear_data.model import (AngularTwoBody, Background, Branching1d,
+                                     Constant1d, CrossSectionSum, Evaluated,
+                                     Isotropic2d, Nuclide, Reference,
+                                     Regions1d, Regions2d,
                                      ResonancesWithBackground, Unspecified,
-                                     XYs1d)
+                                     UnspecifiedMultiplicity, XYs1d)
 
 
 @pytest.fixture(scope="module")
@@ -249,10 +250,151 @@ def test_q_takes_its_unit_from_the_axis_and_not_from_a_guess(fe56):
 
 
 def test_a_products_multiplicity_reads_as_a_constant(fe56):
+    """A ``constant1d`` multiplicity, kept as the node and not as a float.
+
+    ``.form`` and not ``.constant``: §17.3 is a choice and the model holds one
+    member of it, which for this product is a
+    :class:`~kika.nuclear_data.model.functions.simple.Constant1d` carrying its
+    own ``domainMin``/``domainMax``. Asserting the domain is the point — a bare
+    float had none, so the writer filled it from the evaluated style and
+    widened every threshold multiplicity in the library.
+    """
     suite, _ = fe56
     product = suite.reactions[2].outputChannel.products.byPid("n")[0]
-    assert product.multiplicity.constant == 1.0
+    assert isinstance(product.multiplicity.form, Constant1d)
+    assert product.multiplicity.form.constant == 1.0
+    assert product.multiplicity.label == "eval"
+    assert product.multiplicity.isEvaluable
     assert product.multiplicity.evaluate(1.0e6) == 1.0
+    assert (product.multiplicity.form.domainMin,
+            product.multiplicity.form.domainMax) == (1e-5, 1.5e8)
+
+
+def _multiplicities(suite):
+    """Every product's multiplicity in a suite, recursing into decay channels."""
+    found = []
+
+    def walk(channel):
+        for product in channel.products:
+            if product.multiplicity is not None:
+                found.append(product.multiplicity)
+            if product.outputChannel is not None:
+                walk(product.outputChannel)
+
+    for container in (suite.reactions, suite.orphanProducts, suite.sums,
+                      suite.productions, suite.fissionComponents):
+        for reaction in container:
+            channel = getattr(reaction, "outputChannel", None)
+            if channel is not None:
+                walk(channel)
+    return found
+
+
+def test_a_branching_multiplicity_reads_as_a_branching_and_not_as_nothing(
+        s36_gnds):
+    """§17.3's ``branching1d``: five of them, and none of them empty.
+
+    Until phase 7b this and its two siblings were reported and **dropped**, so
+    the model could not tell "the evaluator said the multiplicity is a branching
+    ratio" from "kika failed to read this" — both were an empty
+    :class:`Multiplicity`. 14 032 branchings across the distribution took that
+    path, and every one of them wrote an invalid empty ``<multiplicity/>``.
+
+    :attr:`Multiplicity.isEvaluable` is the question the distinction exists to
+    answer, and ``evaluate`` refuses by **naming the form** rather than saying
+    there is nothing there.
+    """
+    suite, report = readReactionSuite(Document.parse(s36_gnds))
+
+    branchings = [mult for mult in _multiplicities(suite)
+                  if isinstance(mult.form, Branching1d)]
+    assert len(branchings) == 5
+    for multiplicity in branchings:
+        assert multiplicity.form.label == "eval"
+        assert multiplicity.label == "eval"
+        assert not multiplicity.isEvaluable
+        with pytest.raises(ValueError, match="Branching1d"):
+            multiplicity.evaluate(1.0e6)
+    assert report.unsupported == [], report.unsupported
+
+
+def test_a_reference_multiplicity_keeps_its_href_and_states_no_number(h2_gnds,
+                                                                      tmp_path):
+    """§17.3's ``reference``: a link, and the class §16.1.1 already had.
+
+    ``XLinkType`` and §16.1.1's ``reference`` are the same shape — an ``href``
+    and an optional ``label`` — so this reuses
+    :class:`~kika.nuclear_data.model.cross_section_forms.Reference` rather than
+    adding a class. The registry keys on ``(family, tag)`` precisely so one
+    class can sit at two choice points.
+
+    The ``href`` is an xPath **into the same document**, and it is kept as the
+    string it is: resolving it is not the reader's job, and §16.1.1 does not
+    resolve its own either. Grafted because the smallest distributed evaluation
+    carrying one of these is 3.2 MB.
+    """
+    href = ("/reactionSuite/reactions/reaction[@label='n + H2']"
+            "/outputChannel/products/product[@label='n']/multiplicity")
+    source = _graftMultiplicityForm(
+        h2_gnds, tmp_path, f'<reference label="eval" href="{href}"/>')
+    suite, report = readReactionSuite(Document.parse(source))
+
+    references = [mult for mult in _multiplicities(suite)
+                  if isinstance(mult.form, Reference)]
+    assert len(references) == 1
+    assert references[0].form.href == href
+    assert references[0].label == "eval"
+    assert not references[0].isEvaluable
+    with pytest.raises(ValueError, match="Reference"):
+        references[0].evaluate(1.0e6)
+    assert report.unsupported == [], report.unsupported
+
+
+def test_an_unspecified_multiplicity_is_not_the_distribution_one(h2_gnds,
+                                                                 tmp_path):
+    """§17.3's ``unspecified`` carries a label; §18.1.1's carries a frame too.
+
+    Two nodes, two complexTypes, two classes — ``UnspecifiedMultiplicityType``
+    (``gnds.xsd:1642``) against ``DistributionUnspecifiedType`` (``:1841``).
+    Sharing :class:`Unspecified` would give every multiplicity a
+    ``productFrame`` the node has no attribute for, and the writer would then
+    have to emit an attribute the schema rejects or drop one the model claims.
+
+    The assertion that says so is the negative one: this must **not** be an
+    :class:`Unspecified`, even though the tag is spelled the same.
+    """
+    source = _graftMultiplicityForm(h2_gnds, tmp_path,
+                                    '<unspecified label="eval"/>')
+    suite, report = readReactionSuite(Document.parse(source))
+
+    forms = [mult.form for mult in _multiplicities(suite)
+             if isinstance(mult.form, UnspecifiedMultiplicity)]
+    assert len(forms) == 1
+    assert forms[0].label == "eval"
+    assert not isinstance(forms[0], Unspecified), (
+        "§17.3's unspecified must not be §18.1.1's; the schema gives them "
+        "different attributes"
+    )
+    assert not hasattr(forms[0], "productFrame")
+    assert report.unsupported == [], report.unsupported
+
+
+def _graftMultiplicityForm(source, tmp_path, xml: str):
+    """Replace the first ``<multiplicity>``'s form with ``xml``.
+
+    A replacement and not an append: ``MultiplicityType`` is a choice, and the
+    three forms under test carry no numbers, so a second one beside a
+    ``constant1d`` would only exercise ``pickOneForm``.
+    """
+    tree = ET.parse(source)
+    multiplicity = tree.getroot().find(".//multiplicity")
+    assert multiplicity is not None, source
+    for child in list(multiplicity):
+        multiplicity.remove(child)
+    multiplicity.append(ET.fromstring(xml))
+    path = tmp_path / "grafted.gnds.xml"
+    tree.write(path)
+    return path
 
 
 def test_an_angular_distribution_lands_under_its_style_label(fe56):
@@ -378,7 +520,7 @@ def test_a_product_that_loses_its_distribution_keeps_everything_else(h2):
     form = product.distribution["eval"]
     assert isinstance(form, m.Uncorrelated)
     assert isinstance(form.energy, m.PrimaryGamma)
-    assert product.multiplicity.constant == 1.0
+    assert product.multiplicity.form.constant == 1.0
 
 
 # ---------------------------------------------------------------------------

@@ -49,7 +49,7 @@ import pytest
 import kika
 from kika.gnds.decode import readReactionSuite
 from kika.gnds.xpath import Document
-from kika.nuclear_data.model import (AngularEnergy, DiscreteGamma,
+from kika.nuclear_data.model import (AngularEnergy, Branching3d, DiscreteGamma,
                                      EnergyAngular, Isotropic2d, KalbachMann,
                                      NBodyPhaseSpace, PrimaryGamma,
                                      Uncorrelated, XYs2d, XYs3d)
@@ -547,6 +547,39 @@ def _kalbachManns(suite):
     return _formsOfType(suite, KalbachMann)
 
 
+def test_a_branching3d_reads_and_writes_back_its_two_attributes(s36_gnds,
+                                                                tmp_path):
+    """§18.1.1's ``branching3d``: the node is its attributes, and both survive.
+
+    ``DistributionBranching3dType`` (``gnds.xsd:1816-1819``) has no content at
+    all, so there is no data shape to get wrong — what there is to get wrong is
+    dropping it, which is what happened until phase 7b: 14 032 of them across
+    the distribution came out as an empty ``<distribution/>`` that does not
+    validate.
+
+    **It is read for format fidelity and not resolved.** The isomeric branching
+    ratio lives in the nuclide's PoPs ``decayData``; walking that is evaluating,
+    which this model does not do. So the assertion is that the node goes out
+    exactly as it came in, and no more than that.
+    """
+    first, report = readReactionSuite(Document.parse(s36_gnds))
+    assert report.unsupported == [], report.unsupported
+
+    branchings = _formsOfType(first, Branching3d)
+    assert len(branchings) == 5
+    assert all(form.label == "eval" and form.productFrame == "lab"
+               for form in branchings)
+
+    path = tmp_path / "s36-branching.gnds.xml"
+    kika.write(first, path)
+    written = ET.parse(path).getroot()
+    assert [dict(node.attrib) for node in written.iter("branching3d")] == \
+        [{"label": "eval", "productFrame": "lab"}] * 5
+
+    second, _ = readReactionSuite(Document.parse(path))
+    assert len(_formsOfType(second, Branching3d)) == 5
+
+
 def test_the_kalbach_mann_witness_reads_f_and_r_and_no_a(s36_gnds):
     """§18.6 on the smallest evaluation that has one, and it has six.
 
@@ -581,11 +614,12 @@ def test_the_kalbach_mann_witness_reads_f_and_r_and_no_a(s36_gnds):
             "energy_in", "energy_out", "r"]
         assert form.f.function1ds and form.r.function1ds
 
-    # Nothing else in this file is unread yet, and the two that are go together
-    # in the next increment. Pinning them here is what makes that visible.
-    unread = {entry.rsplit("/", 1)[-1].split(":")[0]
-              for entry in report.unsupported}
-    assert unread == {"branching1d", "branching3d"}
+    # Nothing in this file is unread. It was `{branching1d, branching3d}` when
+    # the fixture was committed for KalbachMann — five of each, and it is the
+    # smallest file in the distribution carrying them — and those two landing is
+    # what emptied it. Same shape as the Fe-56 oracle's set, on a file small
+    # enough to run in the fast lane.
+    assert report.unsupported == [], report.unsupported
 
 
 def test_a_kalbach_mann_survives_a_round_trip(s36_gnds, tmp_path):

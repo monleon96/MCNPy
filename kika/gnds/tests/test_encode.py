@@ -60,10 +60,13 @@ FIXTURES = ("h2_gnds", "micro_fe56_gnds", "micro_ta182_gnds", "h3_gnds",
 #: notices; the invariant test below runs on all of them and the *fact* test
 #: skips exactly these.
 #:
-#: ``s36`` carries five ``branching3d``, the last unread §18 node. When it
-#: lands this becomes empty and both tests run on everything — which is the
-#: acceptance gate phase 7b was written around.
-INCOMPLETE_FIXTURES = {"s36_gnds": "branching3d"}
+#: **Empty since ``branching3d`` landed, and that is phase 7b closing.** It held
+#: ``s36`` and its five of them, which was the last §18 node kika could not
+#: read. Both tests now run on every committed fixture. The dict is kept rather
+#: than deleted for the reason it was introduced: the next phase that ships a
+#: fixture ahead of its reader should declare it here instead of quietly leaving
+#: the file out of the parametrisation.
+INCOMPLETE_FIXTURES: dict = {}
 
 
 @pytest.fixture(params=FIXTURES)
@@ -355,9 +358,7 @@ def test_the_only_schema_errors_are_the_nodes_phase_7b_will_fill(
     )
     withoutMultiplicity = sum(
         1 for product in products
-        if product.multiplicity is not None
-        and product.multiplicity.constant is None
-        and product.multiplicity.function is None
+        if product.multiplicity is not None and product.multiplicity.form is None
     )
     assert len(errors) == withoutDistribution + withoutMultiplicity, errors
 
@@ -378,6 +379,84 @@ def _everyProduct(channel):
         yield product
         if product.outputChannel is not None:
             yield from _everyProduct(product.outputChannel)
+
+
+@pytest.mark.parametrize("form", [
+    '<reference label="eval" href="/reactionSuite/reactions/reaction'
+    "[@label='n + H2']/outputChannel/products/product[@label='n']"
+    '/multiplicity"/>',
+    '<branching1d label="eval"/>',
+    '<unspecified label="eval"/>',
+])
+def test_a_number_free_multiplicity_is_written_back_and_validates(form, h2_gnds,
+                                                                  tmp_path):
+    """§17.3's three number-free forms, through the whole pipeline.
+
+    **This is the multiplicity twin of the empty ``<distribution/>``, and it was
+    not deliberate.** ``MultiplicityType`` (``gnds.xsd:1626``) requires a child,
+    so a ``<multiplicity/>`` with none does not validate — and that is exactly
+    what kika wrote for every ``reference``, ``branching1d`` and ``unspecified``
+    it met: **17 749 nodes** across the distribution, invalid for want of three
+    classes that are one attribute each. No committed fixture carried one, which
+    is why no test said so until ``s36`` arrived.
+
+    Each is grafted rather than taken from a fixture because the smallest
+    distributed file with a multiplicity ``reference`` is 3.2 MB, and these
+    nodes have no data shape to misread — they *are* their attributes, so a
+    graft covers them as well as a witness would.
+    """
+    from kika.gnds.tests.test_decode import _graftMultiplicityForm
+
+    source = _graftMultiplicityForm(h2_gnds, tmp_path, form)
+    written, report = _write(kika.read(source, covariances=False), tmp_path)
+    root = ET.parse(written).getroot()
+
+    tag = ET.fromstring(form).tag
+    grafted = [node for node in root.iter("multiplicity")
+               if any(child.tag == tag for child in node)]
+    assert len(grafted) == 1, f"the <{tag}> did not survive to the output"
+    assert dict(grafted[0][0].attrib) == dict(ET.fromstring(form).attrib)
+    assert not [entry for entry in report.losses if "<multiplicity> is empty"
+                in entry]
+    assert _schemaErrors(written) == []
+
+
+def test_a_threshold_keeps_its_domain_through_a_round_trip(evaluation,
+                                                           tmp_path):
+    """Every ``constant1d`` comes back over the domain the file gave it.
+
+    **This is the gate the fixed point could not be.** The writer used to fill
+    a multiplicity's and a Q's ``domainMin``/``domainMax`` from the ``evaluated``
+    style's ``projectileEnergyDomain``, because the model held a bare float with
+    no domain of its own. ``test_a_written_file_is_a_fixed_point`` compares two
+    *written* files and both writes agreed on the wrong number, so nothing
+    failed while H-2's (n,2n) multiplicity of 2 and its Q of −2 225 002 eV,
+    stated over ``3.339e6 … 1.5e8``, came back out over ``1e-5 … 1.5e8``. A
+    threshold reaction that starts at 1e-5 eV is a claim the evaluation does not
+    make.
+
+    Comparing against the **source file** rather than against a second write is
+    the whole difference, and it is why this is a separate test rather than an
+    assertion inside that one.
+    """
+    written, _ = _write(kika.read(evaluation, covariances=False), tmp_path)
+
+    def domains(path):
+        root = ET.parse(path).getroot()
+        return {parent: [(float(child.attrib["domainMin"]),
+                          float(child.attrib["domainMax"]))
+                         for node in root.iter(parent) for child in node
+                         if child.tag == "constant1d"]
+                for parent in ("multiplicity", "Q")}
+
+    before, after = domains(evaluation), domains(written)
+    assert before == after, (
+        "a constant1d came back over a domain the file did not state"
+    )
+    assert any(before[parent] for parent in before), (
+        f"{evaluation} has no constant1d under a <multiplicity> or a <Q>, so "
+        f"this test measured nothing on it"
+    )
 
 
 def test_every_committed_gnds_fixture_now_validates_completely(

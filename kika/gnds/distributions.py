@@ -19,6 +19,7 @@ import xml.etree.ElementTree as ET
 from typing import Callable, Optional
 
 from kika.nuclear_data.model import (AngularEnergy, AngularTwoBody,
+                                     Branching3d,
                                      ConversionReport, DiscreteGamma,
                                      EnergyAngular, Frame, Isotropic2d,
                                      KalbachMann, NBodyPhaseSpace,
@@ -84,7 +85,7 @@ class _DistributionReader:
     def unsupported(self, tag: str, path: str, reason: str) -> None:
         self.report.unsupportedNode(f"{path}/{tag}: {reason}")
 
-    @reads("distributionForm", "angularTwoBody", "unspecified")
+    @reads("distributionForm", "angularTwoBody", "unspecified", "branching3d")
     def read(self, element: ET.Element, path: str) -> Distribution:
         here = f"{path}/distribution"
         distribution = Distribution()
@@ -107,10 +108,20 @@ class _DistributionReader:
                     label=label,
                     productFrame=Frame(child.attrib.get("productFrame", "lab")),
                 )
+            elif child.tag == "branching3d":
+                # Two attributes and no content (gnds.xsd:1816-1819). Read so
+                # the node survives a round trip; **not** resolved against the
+                # nuclide's PoPs decayData, which is what evaluating an isomeric
+                # branching would mean and is a §12 walk the model does not do.
+                form = Branching3d(
+                    label=label,
+                    productFrame=Frame(child.attrib.get("productFrame", "lab")),
+                )
             else:
-                # `branching3d` and anything else with no entry falls to the
-                # generic sentence: the table deliberately omits it as the
-                # import-time ratchet's guinea pig (see `nodes.reads`).
+                # Anything with no entry falls to the generic sentence. The five
+                # §18.1.1 members kika does not name occur zero times across the
+                # 558 evaluations the census walked, so nothing distributed
+                # reaches this branch.
                 self.unsupported(
                     child.tag, here,
                     UNREAD_DISTRIBUTION_FORMS.get(
