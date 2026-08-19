@@ -629,17 +629,17 @@ def test_a_mesh_that_merges_an_absent_group_into_a_live_one_isolates_it(tmp_path
 def test_isolating_dead_groups_is_inert_when_none_are_dead():
     """The byte-identity gate depends on this: no dead group, no refinement."""
     import numpy as np
-    from scripts.build_group_cross import _isolate_dead_groups
+    from scripts.build_group_cross import _fixed_cut_points
     coarse = SHAPE_EV[::2]
-    got = _isolate_dead_groups(coarse, SHAPE_EV, np.zeros(N_GS, bool))
+    got = _fixed_cut_points(coarse, SHAPE_EV, np.ones(N_GS))
     np.testing.assert_array_equal(got, coarse)
 
 
 def test_every_dead_base_group_ends_up_alone_in_its_coarse_group():
     import numpy as np
-    from scripts.build_group_cross import _isolate_dead_groups, fine_to_group
+    from scripts.build_group_cross import _fixed_cut_points, fine_to_group
     dead = np.array([False, True, False, False])
-    got = _isolate_dead_groups(SHAPE_EV[::4], SHAPE_EV, dead)   # 1 grupo -> ?
+    got = _fixed_cut_points(SHAPE_EV[::4], SHAPE_EV, np.where(dead, 0.0, 1.0))
     g_of = fine_to_group(SHAPE_EV, got)
     n_dead = np.bincount(g_of, weights=dead.astype(float), minlength=len(got) - 1)
     n_tot = np.bincount(g_of, minlength=len(got) - 1)
@@ -649,9 +649,9 @@ def test_every_dead_base_group_ends_up_alone_in_its_coarse_group():
 def test_refining_may_not_drop_a_boundary_the_mesh_asked_for():
     import numpy as np
     import pytest
-    from scripts.build_group_cross import _isolate_dead_groups
+    from scripts.build_group_cross import _fixed_cut_points
     with pytest.raises(SystemExit, match="not on the base grid"):
-        _isolate_dead_groups(SHAPE_EV, SHAPE_EV, np.zeros(N_GS + 3, bool))
+        _fixed_cut_points(SHAPE_EV, SHAPE_EV, np.ones(N_GS + 3))
 
 
 def test_null_fill_ship_is_refused_with_a_mesh_per_order(tmp_path):
@@ -786,3 +786,35 @@ def test_two_mesh_boundaries_may_not_snap_onto_the_same_base_boundary(tmp_path):
     mesh = np.array([1.0e6, 2.0e6, 2.0e6 + 1.0, 3.0e6])   # 5e-7 relative apart
     with pytest.raises(SystemExit, match="zero-width"):
         _snap_to_base(mesh, base, "a_1")
+
+
+def test_a_sign_change_of_a_l_is_a_boundary():
+    """rel_S = 1/SNR_S^2, so merging across a zero crossing divides by a
+    difference. Run 98 did it and max|rel| went 0.9945 -> 260.4."""
+    import numpy as np
+    from scripts.build_group_cross import _fixed_cut_points
+    u = np.array([1.0, 1.0, -1.0, -1.0])
+    got = _fixed_cut_points(SHAPE_EV[::4], SHAPE_EV, u)     # pedia 1 solo grupo
+    np.testing.assert_array_equal(got, SHAPE_EV[[0, 2, 4]])
+
+
+def test_same_sign_neighbours_are_left_merged():
+    import numpy as np
+    from scripts.build_group_cross import _fixed_cut_points
+    u = np.array([1.0, 2.0, 3.0, 4.0])
+    got = _fixed_cut_points(SHAPE_EV[::4], SHAPE_EV, u)
+    np.testing.assert_array_equal(got, SHAPE_EV[::4])
+
+
+def test_one_sign_per_coarse_group_makes_the_collapse_a_contraction():
+    """The theorem the rule buys: sum|u| == |sum u| => |rel_S| <= max|rel|."""
+    import numpy as np
+    from scripts.build_group_cross import (_fixed_cut_points, fine_to_group,
+                                           order_emission_weights)
+    rng = np.random.default_rng(0)
+    u = rng.normal(size=N_GS)                       # signos mezclados a proposito
+    grid = _fixed_cut_points(SHAPE_EV[[0, N_GS]], SHAPE_EV, u)
+    U = order_emission_weights(SHAPE_EV, grid, np.ones(N_GS), u)
+    R = rng.normal(size=(N_GS, N_GS)); R = (R + R.T) / 2
+    R /= np.abs(R).max()
+    assert np.abs(U @ R @ U.T).max() <= 1.0 + 1e-12

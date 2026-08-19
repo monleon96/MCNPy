@@ -179,16 +179,47 @@ def solve_order(B: np.ndarray, a_g: np.ndarray, w: np.ndarray):
 # --------------------------------------------------------------------------- #
 # window, live runs, and the resulting edge set
 # --------------------------------------------------------------------------- #
-def _live_runs(live: np.ndarray, lo: int, hi: int) -> List[Tuple[int, int]]:
-    """Maximal runs of consecutive live groups inside ``[lo, hi)``."""
+def _live_runs(live: np.ndarray, lo: int, hi: int,
+               sign: Optional[np.ndarray] = None) -> List[Tuple[int, int]]:
+    """Maximal runs of consecutive live groups inside ``[lo, hi)``.
+
+    ⚑ A SIGN CHANGE OF ``a_l`` ENDS A RUN, and that is not a refinement -- it is
+    the half of the no-cancellation condition that was missing.  The relative
+    variance of a merged segment is
+
+        rel_S = Var_S / mean_S^2 = 1 / SNR_S^2 ,
+
+    so what the relative form does under merging is decided by BOTH the variance
+    and the mean.  The DP constrains the variance (``Var(mean) >=`` independent
+    averaging).  Nothing constrained the mean, and the mean of a segment
+    straddling a zero crossing of ``a_l`` is a DIFFERENCE, not an average: it
+    can be arbitrarily small while the terms are not, and ``rel`` diverges.
+
+    Measured on run 98, where the mesh merged across crossings:
+    ``(sum|w a| / |sum w a|)^2`` reached 4.4 at a_1, 62.8 at a_4 and 2.6e5 at
+    a_5, and the emission blew ``max|rel|`` from 0.9945 to 260.4.  a_2 has no
+    crossing at all, its ratio is exactly 1, and it is the one order the DP left
+    alone.
+
+    With every run of one sign, ``sum|u| == |sum u|`` for every segment, so
+    ``|rel_S| <= max|rel|`` termwise: the collapse becomes a CONTRACTION of the
+    relative form rather than something a guard has to catch afterwards.
+
+    It costs almost nothing.  On run 98's multigroup mesh the crossings are
+    26/0/40/128/198/245 of 660 groups, so the rule still permits meshes down to
+    644 parameters of 3960.
+    """
     runs, start = [], None
     for g in range(lo, hi):
-        if live[g]:
-            if start is None:
-                start = g
-        elif start is not None:
+        if not live[g]:
+            if start is not None:
+                runs.append((start, g))
+                start = None
+        elif start is None:
+            start = g
+        elif sign is not None and sign[g] != sign[start]:
             runs.append((start, g))
-            start = None
+            start = g
     if start is not None:
         runs.append((start, hi))
     return runs
@@ -217,7 +248,8 @@ def order_cut_indices(B: np.ndarray, a_g: np.ndarray, w: np.ndarray,
     for g in range(lo, hi):              # dead groups keep both their edges
         if not live[g]:
             keep[g] = keep[g + 1] = True
-    for i0, i1 in _live_runs(live, lo, hi):
+    # w > 0, so the sign of the emission weight u = w * a is the sign of a.
+    for i0, i1 in _live_runs(live, lo, hi, np.sign(np.asarray(a_g, float))):
         sl = slice(i0, i1)
         cuts, _ = solve_order(B[sl, sl], a_g[sl], w[sl])
         keep[i0 + cuts] = True

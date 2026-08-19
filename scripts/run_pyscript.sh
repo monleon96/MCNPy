@@ -19,39 +19,49 @@ export KIKA_UNCERTAINTY_MANIFEST_PATH=/share_snc/snc/JuanMonleon/EXFOR/uncertain
 # Trabajos anteriores y por que se tomo cada decision: run_pyscript.archive.sh
 
 # ===========================================================================
-# CURRENT JOB: RUN 98 -- la malla se elige ANTES de que la capen
+# CURRENT JOB: RUN 99 -- un cambio de signo de a_l es una frontera
 # ===========================================================================
-# La run 97 corrio y no fallo por la malla: fallo por una comparacion de floats
-# en el cruzado (el npz guarda 847499.9999999999 y la cinta devuelve 8.475000+5),
-# y ademas la malla no comprimio -- 660/660/660/651/648/648, MF34 -1.7 %.
+# La run 98 aplico el criterio donde toca (decision 154 casillas con SNR < 1,
+# emision 0) y la malla comprimio de verdad: 648/660/620/554/588/637, -12.4 %.
+# Pero murio al emitir el cruzado, con max|rel| 0.9945 -> 260.4.
 #
-# La causa: el DP solo fusiona para reparar SNR < 1, y
-# `regularize_near_zero_relative_covariance` corre justo antes y capa toda sigma
-# marcada exactamente en SNR = 1. Medido en la 97:
+# La causa, y es la mitad que le faltaba al criterio:
 #
-#   tras convertir    max sigma_rel:  2116 %  90 %  4128 %  5749 %  5208 %  744 %
-#   tras regularizar  max sigma_rel:    94 %  90 %    99 %    99 %   100 %   98 %
+#     rel_S = Var_S / mean_S^2 = 1 / SNR_S^2
 #
-# El criterio llegaba cuando ya no quedaba nada que lo cumpliera.
+# El DP restringia la VARIANZA (Var(media) >= promediado independiente) y nada
+# restringia la MEDIA. La media de un segmento que cruza un cero de a_l es una
+# DIFERENCIA, no un promedio: puede salir arbitrariamente pequena sin que sus
+# terminos lo sean, y rel diverge. Medido sobre la run 98, (sum|u|/|sum u|)^2:
 #
-# Cambios frente a la 97, los dos desplegados hoy:
-#   KIKA_MF34_MESH_FROM_RAW=1  la malla se DECIDE sobre la covarianza previa al
-#                              capado; lo que se COLAPSA y escribe sigue siendo
-#                              el objeto post-procesado, igual que en la 97.
-#   _snap_to_base              los bordes del npz se pegan a los de la cinta, que
-#                              es el mismo borde con seis cifras significativas.
+#     a_1 4.4   a_2 1.0   a_3 11.3   a_4 62.8   a_5 2.6e5   a_6 6835
 #
-# ⚠ NO se sabe cuanto va a comprimir. Los 105 grupos de a_6 se midieron sobre el
-#   ensamblado de la ruta chi2 (max|rel| 3.9e7), mas crudo que el multigrupo de
-#   la pipeline. El gate NO falla por el numero de grupos: lo REPORTA. Solo falla
-#   si el cambio no ha llegado, es decir si la malla sale identica a la de la 97.
-# ⚠ ~4.5 h (en el nodo de la 97 fueron 5 h), ~7.7 GB. Nada escribe en 92/93/94/96/97.
+# a_2 no tiene ningun cruce, su factor es exactamente 1, y es el unico orden que
+# el DP no toco. La correlacion es perfecta.
+#
+# Cambio de la 99: un cambio de signo de a_l es un punto de corte fijo, igual
+# que un grupo ausente. Con cada grupo grueso de un solo signo, sum|u| = |sum u|
+# y por tanto |rel_S| <= max|rel| termino a termino: el colapso pasa a ser una
+# CONTRACCION de la forma relativa, no algo que un guard tenga que cazar.
+# Se aplica en los dos sitios -- en el DP y en la emision -- porque ven valores
+# distintos (el DP la mezcla sobre 660 grupos, la emision el soporte del MC
+# sobre 703), y el teorema hay que cumplirlo con el u con el que se colapsa.
+#
+# Cuesta poco: los cruces son 26/0/40/128/198/245 de 660 grupos, asi que la
+# regla todavia permite bajar a 644 parametros de 3960.
+#
+# Esperado: entre -8 % y -12 % en entradas MF34, y amp = 1 en los seis ordenes.
+# ⚠ ~5 h, ~7.7 GB. Nada escribe en 92/93/94/96/97/98.
+# ⚠ La run 98 se puede terminar en 90 s con run_chi.sh, que repara su malla en la
+#   emision (-7.9 %). Esta run existe para que lo que se envie sea la malla que
+#   el criterio ELIGIO, no una reparada a posteriori.
 # Por que cada cosa: docs/handoff_per_order_mesh.md en kika-workspace.
 
+R99=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_99_signcut
 R98=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_98_meshraw
 R97=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_97_perordermesh
 R96=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_96_wheel029
-mkdir -p $R98
+mkdir -p $R99
 
 # --- PRE-FLIGHT: que los scripts desplegados HOY estan ahi -------------------
 # Ejercita el codigo, no lee una etiqueta: el fallo que esto atrapa es enviar el
@@ -59,7 +69,7 @@ mkdir -p $R98
 grep -q "MF34_MESH_FROM_RAW" exfor_to_endf_research.py || {
     echo "[preflight] exfor_to_endf_research.py no tiene MF34_MESH_FROM_RAW. No envies."
     exit 1; }
-python - <<'PREFLIGHT98' || exit 1
+python - <<'PREFLIGHT99' || exit 1
 import sys, numpy as np
 try:
     from scripts.per_order_mesh import order_cut_indices, per_order_meshes
@@ -97,12 +107,20 @@ ok_raw = n_crudo < 12 and n_capado == 12
 print(f"[preflight] crudo {n_crudo} vs capado {n_capado} grupos : "
       f"{'OK' if ok_raw else 'NO'}")
 
-if not (ok_dp and ok_u and ok_snap and ok_raw):
+# El cambio de la 99: no se fusiona a traves de un cero de a_l.
+edges = np.linspace(1e6, 4e6, 13)
+means = np.r_[np.full(6, 0.2), np.full(6, -0.2)]        # un solo cruce, en el 6
+crudo = np.outer(np.ones(12), np.ones(12)) * 0.995 + 0.005 * np.eye(12)
+m = per_order_meshes(edges, crudo, means, 1)[1]
+ok_sgn = float(edges[6]) in set(map(float, m))
+print(f"[preflight] frontera en el cambio de signo : {'OK' if ok_sgn else 'NO'}")
+
+if not (ok_dp and ok_u and ok_snap and ok_raw and ok_sgn):
     print("[preflight] los scripts de hoy NO llegaron al share. No envies.")
     sys.exit(1)
-PREFLIGHT98
+PREFLIGHT99
 
-KIKA_OUTPUT_DIR=$R98/ \
+KIKA_OUTPUT_DIR=$R99/ \
 KIKA_MF34_PER_ORDER_MESH=1 \
 KIKA_MF34_MESH_FROM_RAW=1 \
 KIKA_STOP_AFTER_NOMINAL_FITS=0 \
@@ -115,7 +133,7 @@ KIKA_SAVE_PERBIN_PARQUET=1 \
 # --- EL GATE ---------------------------------------------------------------
 # Falla por lo que TIENE que ser cierto; reporta lo que estamos midiendo. El
 # numero de grupos es la incognita de esta run, asi que no es un pass/fail.
-python - "$R98" "$R97" "$R96" <<'GATE98' || exit 1
+python - "$R99" "$R98" "$R96" <<'GATE99' || exit 1
 import sys, filecmp, re
 from pathlib import Path
 import numpy as np
@@ -161,12 +179,12 @@ if not z.exists():
     print("   ⛔ no hay mf34_per_order_mesh.npz: el flag no llego"); bad += 1
 else:
     n = [len(np.load(z)[f"e_{l}"]) - 1 for l in range(1, 7)]
-    r97n = [660, 660, 660, 651, 648, 648]
+    r98n = [648, 660, 620, 554, 588, 637]
     print(f"   grupos por orden: {'/'.join(map(str, n))}")
-    print(f"   la run 97 dio   : {'/'.join(map(str, r97n))}")
-    print(f"   entradas MF34   : {sum(n)**2:,} vs {sum(r97n)**2:,} "
-          f"({100*(sum(n)**2/sum(r97n)**2 - 1):+.1f} %)")
-    if n == r97n:
+    print(f"   la run 98 dio   : {'/'.join(map(str, r98n))}")
+    print(f"   entradas MF34   : {sum(n)**2:,} vs {sum(r98n)**2:,} "
+          f"({100*(sum(n)**2/sum(r98n)**2 - 1):+.1f} %)")
+    if n == r98n:
         print("   ⛔ malla IDENTICA a la de la 97: el cambio no ha tenido efecto")
         bad += 1
 
@@ -179,15 +197,15 @@ for f in ["26-Fe-56g_nominal_mg.endf", "26-Fe-56g_nominal_a0cross_mg.endf"]:
           f"({100*(a.stat().st_size/b.stat().st_size - 1):+.1f} % vs run 96)")
 
 if bad:
-    print(f"\n❌ RUN 98 FALLA en {bad} comprobacion(es). NO se puntua.")
+    print(f"\n❌ RUN 99 FALLA en {bad} comprobacion(es). NO se puntua.")
     sys.exit(1)
-print("\n✅ RUN 98 PASA. Leer los grupos del punto 3 antes de decidir si se puntua:")
+print("\n✅ RUN 99 PASA. Leer los grupos del punto 3 antes de decidir si se puntua:")
 print("   si la compresion es marginal, la conclusion es que la resolucion")
 print("   enviada SI esta soportada, y eso cierra §10.8 como negativo medido.")
-GATE98
+GATE99
 
 echo "--- criterios de lectura, no pass/fail ---"
-grep -E "\[mesh\]|per-order mesh|max \|c34_rel\||MF34 entries|Fine bins:|Compression:|Near-zero regular" $R98/exfor_to_endf_*.log | tail -40
+grep -E "\[mesh\]|per-order mesh|max \|c34_rel\||MF34 entries|Fine bins:|Compression:|Near-zero regular" $R99/exfor_to_endf_*.log | tail -40
 df -h /share_snc | tail -1
 
 # --- SIGUIENTE: la puntuacion va en run_chi.sh, no aqui --------------------

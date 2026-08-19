@@ -472,8 +472,30 @@ def per_order_shape_grids(blocks: dict, base_ev: np.ndarray, run_dir=None,
     return grids
 
 
-def _isolate_dead_groups(order_ev, base_ev, dead):
-    """``order_ev`` refined so no coarse group mixes a dead base group with a live one.
+def _fixed_cut_points(order_ev, base_ev, u):
+    """``order_ev`` refined with the boundaries the CENTRAL VALUES force.
+
+    Two of them, and both are properties of ``u = w * a`` alone -- no covariance
+    is involved, so the rule reads the same here as it does inside the DP.
+
+    ⚑ A SIGN CHANGE OF ``a_l`` IS A BOUNDARY. ``rel_S = Var_S / mean_S^2``, and
+    the mean of a segment straddling a zero crossing is a DIFFERENCE, not an
+    average: it can be arbitrarily small while its terms are not. Run 98 merged
+    across crossings and the emission blew ``max|rel|`` from 0.9945 to 260.4,
+    with ``(sum|u| / |sum u|)^2`` reaching 2.6e5 at a_5. With every coarse group
+    of one sign, ``sum|u| == |sum u|``, so ``|rel_S| <= max|rel|`` termwise and
+    the collapse is a CONTRACTION rather than something the guard below has to
+    catch. a_2 has no crossing, ratio exactly 1, and it is the one order the DP
+    never touched.
+
+    ⚑ ENFORCED HERE AS WELL AS IN THE DP because the two see different values.
+    The DP works on the pipeline's multigroup mesh with the mixture's means; this
+    works on the tape's base grid with the means the MC replicas actually
+    support (a_1 1738 fine bins, a_4 727, a_6 106). The theorem holds for
+    whichever ``u`` the collapse is done with, so it has to be checked with THIS
+    one.
+
+    ⚑ A dead base group keeps both edges.
 
     ⚑ THE BASE GRID HAS GROUPS THE MESH NEVER SAW. The DP chooses the mesh on
     the pipeline's 660-group multigroup mesh, but what comes back off the tape
@@ -498,15 +520,20 @@ def _isolate_dead_groups(order_ev, base_ev, dead):
     """
     base_ev = np.asarray(base_ev, float)
     order_ev = np.asarray(order_ev, float)
-    dead = np.asarray(dead, bool)
-    if dead.size != base_ev.size - 1:
+    u = np.asarray(u, float)
+    if u.size != base_ev.size - 1:
         raise SystemExit(
-            f"the dead mask has {dead.size} entries for {base_ev.size - 1} base "
+            f"the weight vector has {u.size} entries for {base_ev.size - 1} base "
             f"groups; it is not on the base grid.")
     keep = np.isin(base_ev, order_ev)
-    idx = np.flatnonzero(dead)
+    idx = np.flatnonzero(u == 0.0)
     keep[idx] = True
     keep[idx + 1] = True
+    # Between two adjacent LIVE groups of opposite sign. Dead groups already
+    # separate what lies either side of them, so they need no second rule.
+    sgn = np.sign(u)
+    both = (sgn[:-1] != 0) & (sgn[1:] != 0)
+    keep[1:-1] |= both & (sgn[:-1] != sgn[1:])
     out = base_ev[keep]
     if not np.isin(order_ev, out).all():
         raise SystemExit("refining the mesh dropped one of its own boundaries.")
@@ -837,21 +864,23 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
                 f"order: it writes the file's own relative values where a_l is "
                 f"exactly zero, and those slots are not what U was built to "
                 f"average. Use --null-fill zero.")
-        # The tape's base grid carries groups the DP never saw -- see
-        # `_isolate_dead_groups`. Refine here, before anything is built from the
-        # grids, so U, the blocks and what gets written all use the same one.
+        # The base grid carries groups the DP never saw, and the DP's means are
+        # not these means -- see `_fixed_cut_points`. Refine here, before
+        # anything is built from the grids, so U, the blocks and what gets
+        # written all use the same one.
         _n_before = {l: len(np.asarray(order_grids_ev[l], float)) - 1
                      for l in range(1, L_MAX + 1)}
         order_grids_ev = {
-            l: _isolate_dead_groups(
+            l: _fixed_cut_points(
                 order_grids_ev[l], shape_ev,
-                np.abs(a_nom_group[:, l - 1]) < np.finfo(float).tiny)
+                np.asarray(base_valid_width[:, l - 1], float)
+                * np.asarray(a_nom_group[:, l - 1], float))
             for l in range(1, L_MAX + 1)}
         n_ord = {l: len(np.asarray(order_grids_ev[l], float)) - 1
                  for l in range(1, L_MAX + 1)}
         _added = {l: n_ord[l] - _n_before[l] for l in n_ord}
         if any(_added.values()):
-            print("    grupos muertos aislados (cortes anadidos): "
+            print("    cortes que fuerzan los centrales (muertos + signo): "
                   + "  ".join(f"a_{l} +{_added[l]}" for l in range(1, L_MAX + 1)))
         U = {}
         for l in range(1, L_MAX + 1):
@@ -859,7 +888,7 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
                                           base_valid_width[:, l - 1],
                                           a_nom_group[:, l - 1])
             # A coarse group must be entirely live or entirely dead.
-            # `_isolate_dead_groups` above makes that true by construction, so
+            # `_fixed_cut_points` above makes that true by construction, so
             # this is now an assertion on that refinement rather than a check on
             # the mesh. It is kept because the failure it describes is silent:
             # the merged entry would carry a central value the file does not
@@ -877,6 +906,39 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
                     f"live one; the mesh was not built with absent groups as cut "
                     f"points, so the merged entry would carry a fabricated "
                     f"central value.")
+        # ── how much room the mesh leaves the relative form to explode ────────
+        #
+        # rel_S = u^T R u / (sum u)^2 with u = w * a, so
+        #
+        #     |rel_S| <= max|R| * (sum|u| / |sum u|)^2
+        #
+        # and the whole budget is the SIGN CANCELLATION of u inside each coarse
+        # group. It depends on the mesh and the central values only -- not on the
+        # covariance -- so it can be read off here, before a single block is
+        # built, and it says which merge is responsible rather than leaving the
+        # guard below to guess.
+        amp = {}
+        for l in range(1, L_MAX + 1):
+            u = (np.asarray(base_valid_width[:, l - 1], float)
+                 * np.asarray(a_nom_group[:, l - 1], float))
+            g_of = fine_to_group(np.asarray(shape_ev, float),
+                                 np.asarray(order_grids_ev[l], float))
+            s_abs = np.bincount(g_of, weights=np.abs(u), minlength=n_ord[l])
+            s_net = np.abs(np.bincount(g_of, weights=u, minlength=n_ord[l]))
+            live = s_abs > 0
+            r = np.ones(n_ord[l])
+            r[live] = (s_abs[live] / np.maximum(s_net[live],
+                                                np.finfo(float).tiny)) ** 2
+            amp[l] = r
+        _worst_l = max(amp, key=lambda l: amp[l].max())
+        _worst_g = int(np.argmax(amp[_worst_l]))
+        print("    cancelacion en u = w*a, (sum|u|/|sum u|)^2 por orden: "
+              + "  ".join(f"a_{l} {amp[l].max():.3g}" for l in range(1, L_MAX + 1)))
+        _ge = np.asarray(order_grids_ev[_worst_l], float)
+        print(f"    peor: a_{_worst_l} grupo {_worst_g} "
+              f"[{_ge[_worst_g] / 1e6:.4f}, {_ge[_worst_g + 1] / 1e6:.4f}] MeV, "
+              f"factor {amp[_worst_l].max():.4g} sobre max|rel| base")
+
         a_ord = {l: U[l] @ a_nom_group[:, l - 1] for l in range(1, L_MAX + 1)}
 
         rows_of = {l: np.arange(n_gs) * L_MAX + (l - 1) for l in range(1, L_MAX + 1)}
@@ -910,11 +972,17 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
                 "the per-order collapse produced non-finite relative entries: a "
                 "merged group's central value cancelled to exactly zero.")
         if worst > 10.0 * max(before, np.finfo(float).tiny):
+            _pred = before * amp[_worst_l].max()
             raise SystemExit(
                 f"the per-order collapse made the relative form {worst / before:.1f}x "
-                f"WORSE (max |rel| {before:.4g} -> {worst:.4g}). Merging is "
-                f"supposed to raise SNR, so this means the mesh was not built "
-                f"from this covariance.")
+                f"WORSE (max |rel| {before:.4g} -> {worst:.4g}).\n"
+                f"    La cota de cancelacion predice {_pred:.4g} "
+                f"(= {before:.4g} x {amp[_worst_l].max():.4g}), asi que "
+                f"{'ES' if worst <= 1.5 * _pred else 'NO ES'} eso: "
+                f"{'algun grupo grueso fusiona valores centrales que se cancelan' if worst <= 1.5 * _pred else 'la explosion viene de la covarianza, no de la malla'}.\n"
+                f"    rel_S = 1/SNR_S^2 exactamente, asi que un grupo con rel > 1 "
+                f"es un grupo que el DP habria rechazado si lo hubiera evaluado "
+                f"sobre ESTA rejilla y ESTAS medias.")
         for l in range(1, L_MAX + 1):
             live_b = np.abs(a_nom_group[:, l - 1]) >= np.finfo(float).tiny
             live_c = np.abs(a_ord[l]) >= np.finfo(float).tiny
