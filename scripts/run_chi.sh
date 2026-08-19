@@ -41,14 +41,14 @@ export KIKA_UNCERTAINTY_MANIFEST_PATH=/share_snc/snc/JuanMonleon/EXFOR/uncertain
 
 # ---------------------------------------------------------------------------
 
-XDIR=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_88_fullcross
-DIR86=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_86_mgfix
-SHIPPED_ENDF=26-Fe-56g_nominal_mg.endf
-NULL_MASK=/share_snc/snc/JuanMonleon/chi2/mf34_null_mask.npz
+# XDIR=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_88_fullcross
+# DIR86=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_86_mgfix
+# SHIPPED_ENDF=26-Fe-56g_nominal_mg.endf
+# NULL_MASK=/share_snc/snc/JuanMonleon/chi2/mf34_null_mask.npz
 
 # ---------------------------------------------------------------------------
 
-GROUPED_ENDF=26-Fe-56g_nominal_mg_mf33grouped.endf
+# GROUPED_ENDF=26-Fe-56g_nominal_mg_mf33grouped.endf
 
 # ⚑⚑ TWO JOBS, IN THIS ORDER, AND THE ORDER IS THE WHOLE POINT (§10.7-6).
 #
@@ -76,10 +76,10 @@ GROUPED_ENDF=26-Fe-56g_nominal_mg_mf33grouped.endf
 # ⚠ The parse cache goes HERE, not in $XDIR. `build_group_cross`'s default is
 # the run directory, and the deploy rules keep run outputs read-only. Costs
 # two ENDF parses (~10 min) in a 40-minute step; buys not writing into run 88.
-A0DIR=/share_snc/snc/JuanMonleon/ENDF_samples/86_a0cross
-A0ENDF=26-Fe-56g_nominal_a0cross_mg.endf
+# A0DIR=/share_snc/snc/JuanMonleon/ENDF_samples/86_a0cross
+# A0ENDF=26-Fe-56g_nominal_a0cross_mg.endf
 
-mkdir -p $A0DIR
+# mkdir -p $A0DIR
 
 # ===========================================================================
 # CURRENT JOB (2026-08-12): P1.3 — price the split-combine MF33.
@@ -110,13 +110,13 @@ mkdir -p $A0DIR
 # to continue unless PR >= 4 and coh <= 0.60, i.e. unless the redistribution
 # survived the near-zero guard and the ENDF writer. It saves the hour below.
 
-P13RUN=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_92_integrated
-P13SPLIT=/share_snc/snc/JuanMonleon/chi2/p12_split
-P13OUT=/share_snc/snc/JuanMonleon/chi2/p13_split
-P13TAG=92split
+# P13RUN=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_92_integrated
+# P13SPLIT=/share_snc/snc/JuanMonleon/chi2/p12_split
+# P13OUT=/share_snc/snc/JuanMonleon/chi2/p13_split
+# P13TAG=92split
 # For the rank UPPER BOUND instead, set:
 #   P13VARIANT=mf33_absolute_covariance_splitdiag.npy
-P13VARIANT=mf33_absolute_covariance.npy
+# P13VARIANT=mf33_absolute_covariance.npy
 
 # ⚠⚠ RESUME 2026-08-12 after job 8480897 — steps 1 and 2 ALREADY SUCCEEDED and
 # are deliberately not repeated. The gate passed on the written tape (diagonal
@@ -220,14 +220,14 @@ P13VARIANT=mf33_absolute_covariance.npy
 # COST: two ENDF parses, ~15-20 min. Writes nothing, scores nothing, and the
 # disk does not move.
 
-P17RUN=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_92_integrated
-P17SRC=/share_snc/snc/JuanMonleon/chi2/p13_split/26-Fe-56g_nominal_mg.endf
-P17OUT=/share_snc/snc/JuanMonleon/chi2/p17_mf33split_cross
-P17ENDF=$P17OUT/26-Fe-56g_nominal_a0cross_mg.endf
-P17TAG=92split_cross
+# P17RUN=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_92_integrated
+# P17SRC=/share_snc/snc/JuanMonleon/chi2/p13_split/26-Fe-56g_nominal_mg.endf
+# P17OUT=/share_snc/snc/JuanMonleon/chi2/p17_mf33split_cross
+# P17ENDF=$P17OUT/26-Fe-56g_nominal_a0cross_mg.endf
+# P17TAG=92split_cross
 
-mkdir -p $P17OUT
-ls -la $P17SRC || exit 1
+# mkdir -p $P17OUT
+# ls -la $P17SRC || exit 1
 
 # ===========================================================================
 # 2026-08-14 (c): F' FAILED, AND THIS RUN IS THE CONTROL THAT ATTRIBUTES IT.
@@ -282,8 +282,8 @@ ls -la $P17SRC || exit 1
 #
 # COST: four ENDF parses, ~35-40 min. Writes nothing, scores nothing.
 
-P17CTRL=$P17RUN/26-Fe-56g_nominal_mg.endf
-ls -la $P17CTRL || exit 1
+# P17CTRL=$P17RUN/26-Fe-56g_nominal_mg.endf
+# ls -la $P17CTRL || exit 1
 
 # ⚠ SEPARATE PARSE CACHES, AND IT IS NOT COSMETIC. build_group_cross.py keys the
 # cache on `{basename}__{st_size}` (lines 88 and 159), and the two tapes are BOTH
@@ -294,6 +294,29 @@ ls -la $P17CTRL || exit 1
 # edges and the MF33 energy grid, and the split changes neither -- the covariance
 # itself is read fresh by load_library_lib_c0 every time. Job 8488793 was
 # therefore not contaminated. But the collision is real, so do not merge these.
+
+# ===========================================================================
+# SIGUIENTE: PUNTUAR LA RUN 97 (la malla por orden). Descomentar CUANDO PASE.
+# ===========================================================================
+# La run 97 SI se puntua: no es una reproduccion. Descomentar solo despues de
+# ver "✅ RUN 97 PASA" en el log de run_pyscript.sh -- si su gate falla, el
+# numero no significa nada.
+#
+# R97=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_97_perordermesh
+# ls -la $R97/26-Fe-56g_nominal_a0cross_mg.endf || exit 1
+#
+# KIKA_THIS_WORK_DIR=$R97 \
+# KIKA_THIS_WORK_ENDF=26-Fe-56g_nominal_a0cross_mg.endf \
+# KIKA_MF33_MF34_CROSS_FROM_FILE=1 \
+# KIKA_RUN_TAG=97mesh \
+#     python precompute_chi2_predictive.py || exit 1
+#
+# KIKA_CHI2_METHODOLOGIES=predictive_97mesh \
+# KIKA_CHI2_RUN_ID=97mesh \
+#     python chi2_analysis_cluster.py || exit 1
+#
+# ⚠ El baseline es la run 96 = la run 94. Su chi2 ya esta; no se re-puntua.
+# ⚠ ~1.5 h y un sidecar de ~11 GB, que se borra en cuanto se lea el parquet.
 
 # ===========================================================================
 # CURRENT JOB (2026-08-17): THE READ-BACK GATE ON THE ANALYTIC DELIVERABLE.
@@ -343,6 +366,12 @@ ls -la $R2ENDF || exit 1
 # Registry entry ALREADY ADDED (that is what killed 8497757, and 85 and 89
 # before it). ~1.5 h + an 11 GB sidecar; 711 GB free, and the two existing
 # sidecars can go once their parquets are read.
+# ⛔ LEE ESTO ANTES DE ENVIAR (2026-08-19). Esto puntua la cinta ANALITICA R2,
+# que `r2_group_joint.py` construyo con las cargas del estimador GANADOR. Hoy se
+# ha medido que ese no es el estimador que la cinta lleva: a_6 tiene central en
+# 74 de 703 grupos por esa ruta y en 694 por la mezcla. Son ~1.5 h y un sidecar
+# de 11 GB para un numero construido sobre la covarianza equivocada.
+# Antes: rehacer la cadena R2 con `r2_group_joint.py --estimator mixture`.
 KIKA_MF34_NULL_MASK=/share_snc/snc/JuanMonleon/chi2/mf34_p1p2_mask_r2analytic.npz \
 KIKA_THIS_WORK_DIR=$R2TAPEDIR \
 KIKA_THIS_WORK_ENDF=26-Fe-56g_nominal_a0cross_mg.endf \
