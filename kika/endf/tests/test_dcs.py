@@ -567,3 +567,104 @@ def test_bin_edges_for_width_clamps_below_zero():
     lo, hi = dcs.bin_edges_for_width(1.0, mode="relative", relative_width=10.0)
     assert lo == 0.0
     assert hi > 1.0
+
+
+# --- readings of a_l(E) -----------------------------------------------------
+
+
+def _smooth_coefficients(n=600):
+    """A two-order set of coefficients that varies smoothly with energy."""
+    energies = np.logspace(0.0, 7.0, n)
+    a1 = 0.30 + 0.05 * np.log10(energies)
+    a2 = 0.10 - 0.01 * np.log10(energies)
+    return energies, np.vstack([a1, a2])
+
+
+def test_coefficients_folded_is_exact_on_a_linear_coefficient():
+    """Folding a linear function returns its value at the kernel centroid."""
+    energies = np.linspace(1e5, 1e7, 400)
+    coefficients = np.vstack([2.0 + 3e-7 * energies])
+    got = dcs.coefficients_folded(
+        energies, coefficients, np.array([5e6]), dcs.TofResolution()
+    )
+    assert got[0, 0] == pytest.approx(2.0 + 3e-7 * 5e6, rel=1e-9)
+
+
+def test_coefficients_folded_returns_a_constant_unchanged():
+    energies = np.logspace(0.0, 7.0, 300)
+    coefficients = np.vstack([np.full_like(energies, 0.42)])
+    got = dcs.coefficients_folded(
+        energies, coefficients, np.array([1e4, 1e6]), dcs.TofResolution()
+    )
+    assert got == pytest.approx(0.42)
+
+
+def test_coefficients_bin_averaged_matches_sigma_bin_averaged_row_by_row():
+    """The angular average is the same quadrature, applied per order."""
+    energies, coefficients = _smooth_coefficients()
+    edges = [(9.0e5, 1.1e6), (4.0e6, 6.0e6)]
+    got = dcs.coefficients_bin_averaged(energies, coefficients, edges)
+    for i, row in enumerate(coefficients):
+        for j, (lo, hi) in enumerate(edges):
+            assert got[i, j] == pytest.approx(
+                dcs.sigma_bin_averaged(energies, row, lo, hi)
+            )
+
+
+def test_resolve_coefficients_dispatches_like_resolve_sigma():
+    energies, coefficients = _smooth_coefficients()
+    query = np.array([1e6])
+    tof = dcs.TofResolution()
+    edges = [(9.0e5, 1.1e6)]
+
+    nominal = dcs.resolve_coefficients(energies, coefficients, query)
+    assert nominal == pytest.approx(
+        dcs.coefficients_at_energies(energies, coefficients, query)
+    )
+    assert dcs.resolve_coefficients(
+        energies, coefficients, query, mode="folded", tof=tof
+    ) == pytest.approx(dcs.coefficients_folded(energies, coefficients, query, tof))
+    assert dcs.resolve_coefficients(
+        energies, coefficients, query, mode="binavg", bin_edges=edges
+    ) == pytest.approx(dcs.coefficients_bin_averaged(energies, coefficients, edges))
+
+
+def test_resolve_coefficients_falls_back_rather_than_raising():
+    """A mode with its inputs missing must not put a hole in the curve."""
+    energies, coefficients = _smooth_coefficients()
+    query = np.array([1e6])
+    nominal = dcs.resolve_coefficients(energies, coefficients, query)
+    assert dcs.resolve_coefficients(
+        energies, coefficients, query, mode="folded", tof=None
+    ) == pytest.approx(nominal)
+    assert dcs.resolve_coefficients(
+        energies, coefficients, query, mode="binavg", bin_edges=None
+    ) == pytest.approx(nominal)
+
+
+def test_the_four_readings_are_independent():
+    """sigma and a_l are chosen separately, giving the four documented cases."""
+    energies, coefficients = _smooth_coefficients()
+    xs = 3.0 + 2e-7 * energies
+    query = np.array([2e6])
+    tof = dcs.TofResolution()
+
+    sig_nom = float(np.atleast_1d(dcs.resolve_sigma(energies, xs, query))[0])
+    sig_fold = float(np.atleast_1d(
+        dcs.resolve_sigma(energies, xs, query, mode="folded", tof=tof))[0])
+    a_nom = dcs.resolve_coefficients(energies, coefficients, query)[:, 0]
+    a_fold = dcs.resolve_coefficients(
+        energies, coefficients, query, mode="folded", tof=tof)[:, 0]
+
+    mu = np.array([-0.5, 0.0, 0.5])
+    cases = {
+        "nominal": dcs.angular_pdf(mu, a_nom) * sig_nom,
+        "sigma_only": dcs.angular_pdf(mu, a_nom) * sig_fold,
+        "shape_only": dcs.angular_pdf(mu, a_fold) * sig_nom,
+        "both": dcs.angular_pdf(mu, a_fold) * sig_fold,
+    }
+    # The factor average is the product of the two folds, by construction —
+    # this is the property that makes the modes composable.
+    assert cases["both"] == pytest.approx(
+        cases["sigma_only"] * cases["shape_only"] / cases["nominal"]
+    )

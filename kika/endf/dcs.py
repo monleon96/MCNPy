@@ -56,6 +56,9 @@ __all__ = [
     "resolve_sigma",
     "max_legendre_order",
     "coefficients_at_energies",
+    "coefficients_bin_averaged",
+    "coefficients_folded",
+    "resolve_coefficients",
     "differential_xs_factor",
     "differential_xs_vs_angle",
     "differential_xs_vs_energy",
@@ -614,6 +617,127 @@ def coefficients_at_energies(
 # =============================================================================
 # Plot products
 # =============================================================================
+
+def coefficients_folded(
+    energies_ev,
+    coefficients,
+    query_ev,
+    tof: TofResolution,
+    *,
+    nbt_int_pairs=None,
+    max_order: Optional[int] = None,
+) -> np.ndarray:
+    r"""TOF-resolution-folded :math:`a_\ell(E)`.
+
+    The angular counterpart of :func:`sigma_folded`: each coefficient is
+    averaged over the same Gaussian energy-resolution kernel, on the same
+    Gauss-Hermite quadrature.
+
+    Why this exists.  Folding only :math:`\sigma` gives
+    :math:`\langle\sigma\rangle\,f(\mu, E)` — the measured normalization with
+    the evaluated *shape*.  A detector integrating over its own resolution sees
+    the shape smeared too, and where the angular distribution changes quickly
+    with energy the difference is not small.
+
+    ``a_0 = 1`` identically, so it is neither stored nor folded; ``coefficients``
+    is :math:`a_1 \ldots a_L` per energy, exactly as
+    :func:`coefficients_at_energies` returns them.
+
+    Returns an ``(L, nq)`` array.
+    """
+    grid = np.asarray(energies_ev, dtype=float)
+    matrix = np.atleast_2d(np.asarray(coefficients, dtype=float))
+    q = np.atleast_1d(np.asarray(query_ev, dtype=float))
+    if max_order is not None:
+        matrix = matrix[:max_order]
+
+    sigma_e_ev = np.asarray(tof.sigma_e_mev(q / 1e6), dtype=float) * 1e6
+    out = np.empty((matrix.shape[0], q.size), dtype=float)
+    for i, row in enumerate(matrix):
+        out[i] = np.atleast_1d(fold_tabulated(grid, row, q, sigma_e_ev))
+    return out
+
+
+def coefficients_bin_averaged(
+    energies_ev,
+    coefficients,
+    bin_edges: Sequence[Tuple[float, float]],
+    *,
+    weighting: Weighting = "lethargy",
+    max_order: Optional[int] = None,
+) -> np.ndarray:
+    r"""Flux-averaged :math:`a_\ell` over one window per query point.
+
+    The angular counterpart of :func:`sigma_bin_averaged`, and averaged the same
+    way — trapezoidal over the window edges plus every grid point strictly
+    inside, under the same flux weight.
+
+    ``bin_edges`` is one ``(lo, hi)`` per output point.  Returns an
+    ``(L, len(bin_edges))`` array.
+    """
+    grid = np.asarray(energies_ev, dtype=float)
+    matrix = np.atleast_2d(np.asarray(coefficients, dtype=float))
+    if max_order is not None:
+        matrix = matrix[:max_order]
+
+    edges = list(bin_edges)
+    out = np.empty((matrix.shape[0], len(edges)), dtype=float)
+    for i, row in enumerate(matrix):
+        for j, (lo, hi) in enumerate(edges):
+            out[i, j] = sigma_bin_averaged(grid, row, lo, hi, weighting)
+    return out
+
+
+def resolve_coefficients(
+    energies_ev,
+    coefficients,
+    query_ev,
+    *,
+    mode: XsMode = "nominal",
+    bin_edges: Optional[Sequence[Tuple[float, float]]] = None,
+    tof: Optional[TofResolution] = None,
+    weighting: Weighting = "lethargy",
+    nbt_int_pairs=None,
+    max_order: Optional[int] = None,
+) -> np.ndarray:
+    r"""Dispatch to the requested reading of :math:`a_\ell(E)`.
+
+    Deliberately the same three modes, the same argument names and the same
+    fallback behaviour as :func:`resolve_sigma`, because the two are meant to
+    be chosen independently:
+
+    ======================  ======================  ==================================
+    :math:`\sigma` mode     :math:`a_\ell` mode     result
+    ======================  ======================  ==================================
+    ``nominal``             ``nominal``             the evaluation as written
+    ``folded``              ``nominal``             measured normalization, evaluated shape
+    ``nominal``             ``folded``              evaluated normalization, smeared shape
+    ``folded``              ``folded``              both, the *factor average*
+    ======================  ======================  ==================================
+
+    The last row is :math:`\langle\sigma\rangle\,F(\langle a_\ell\rangle)`, not
+    :math:`\langle\sigma\,F(a_\ell)\rangle`.  The two differ by the
+    :math:`\mathrm{Cov}(\sigma, a_\ell)` term across the window, and this module
+    follows the factor average because MF3 :math:`\sigma` and MF4
+    :math:`a_\ell` come from different underlying data — a product fold would
+    impose a point-by-point energy correlation the evaluation does not carry.
+    That is the same choice ``scripts/precompute_chi2_folded_al_c0.py`` makes,
+    and the two must not disagree.
+    """
+    if mode == "binavg" and bin_edges is not None:
+        return coefficients_bin_averaged(
+            energies_ev, coefficients, bin_edges, weighting=weighting, max_order=max_order
+        )
+    if mode == "folded" and tof is not None:
+        return coefficients_folded(
+            energies_ev, coefficients, query_ev, tof,
+            nbt_int_pairs=nbt_int_pairs, max_order=max_order,
+        )
+    return coefficients_at_energies(
+        energies_ev, coefficients, query_ev,
+        nbt_int_pairs=nbt_int_pairs, max_order=max_order,
+    )
+
 
 def differential_xs_factor(sigma, per_steradian: bool):
     r"""Scale turning :math:`f(\mu)` into a differential cross section.
