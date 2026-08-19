@@ -302,19 +302,34 @@ export KIKA_UNCERTAINTY_MANIFEST_PATH=/share_snc/snc/JuanMonleon/EXFOR/uncertain
 # ver "✅ RUN 97 PASA" en el log de run_pyscript.sh -- si su gate falla, el
 # numero no significa nada.
 #
-# R97=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_97_perordermesh
-# ls -la $R97/26-Fe-56g_nominal_a0cross_mg.endf || exit 1
-#
-# KIKA_THIS_WORK_DIR=$R97 \
-# KIKA_THIS_WORK_ENDF=26-Fe-56g_nominal_a0cross_mg.endf \
-# KIKA_MF33_MF34_CROSS_FROM_FILE=1 \
-# KIKA_RUN_TAG=97mesh \
-#     python precompute_chi2_predictive.py || exit 1
-#
-# KIKA_CHI2_METHODOLOGIES=predictive_97mesh \
-# KIKA_CHI2_RUN_ID=97mesh \
-#     python chi2_analysis_cluster.py || exit 1
-#
+R97=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_97_perordermesh
+
+# La 97 solo se puntua si su gate paso. El gate sale con codigo 1 si falla, pero
+# las cintas quedan escritas igual, asi que existir no basta.
+grep -q "RUN 97 PASA" $R97/../../EXFOR/scripts/slurm-*.out 2>/dev/null \
+  || grep -q "RUN 97 PASA" $R97/*.log 2>/dev/null \
+  || { echo "⛔ no encuentro '✅ RUN 97 PASA'. Comprueba el log de run_pyscript"; \
+       echo "   antes de puntuar. Si el gate fallo, este numero no significa nada."; \
+       exit 1; }
+ls -la $R97/26-Fe-56g_nominal_a0cross_mg.endf || exit 1
+
+# ⚠ KIKA_THIS_WORK_ENDF explicito: por defecto es `_nominal_mg.endf` y puntuaria
+#   la cinta SIN cruzado en vez del entregable.
+# ⚠ ..._CROSS_FROM_FILE=1, NUNCA ..._CROSS_DIR: la ruta del sidecar declara
+#   is_relative=False contra una familia MF34 relativa y es la que mato las runs
+#   87-90. La base `predictive_91_cross` se puntuo por los bloques a_0.
+# ⚠ Sin KIKA_MF34_NULL_MASK, a proposito: la mascara vive en la malla de 703 de
+#   la run 86 y el MF34 de la 97 esta en seis mallas distintas.
+KIKA_THIS_WORK_DIR=$R97 \
+KIKA_THIS_WORK_ENDF=26-Fe-56g_nominal_a0cross_mg.endf \
+KIKA_MF33_MF34_CROSS_FROM_FILE=1 \
+KIKA_RUN_TAG=97mesh \
+    python precompute_chi2_predictive.py || exit 1
+
+KIKA_CHI2_METHODOLOGIES=predictive_97mesh \
+KIKA_CHI2_RUN_ID=97mesh \
+    python chi2_analysis_cluster.py || exit 1
+
 # ⚠ El baseline es la run 96 = la run 94. Su chi2 ya esta; no se re-puntua.
 # ⚠ ~1.5 h y un sidecar de ~11 GB, que se borra en cuanto se lea el parquet.
 
@@ -344,11 +359,12 @@ export KIKA_UNCERTAINTY_MANIFEST_PATH=/share_snc/snc/JuanMonleon/EXFOR/uncertain
 # the reference run's -- they are different arrays.
 # ⚠ If it is OOM-killed, uncomment #SBATCH --mem=300G at the top: the a0 blocks
 # are 6 x 2317 x 703 and the reader retains them.
-R2STAGE=/share_snc/snc/JuanMonleon/chi2/r2_analytic
-R2TAPEDIR=/share_snc/snc/JuanMonleon/chi2/r2_analytic_tape
-R2ENDF=$R2TAPEDIR/26-Fe-56g_nominal_a0cross_mg.endf
+# ⛔ APAGADO 2026-08-19: ver el aviso de arriba. Una linea de descomentar.
+# R2STAGE=/share_snc/snc/JuanMonleon/chi2/r2_analytic
+# R2TAPEDIR=/share_snc/snc/JuanMonleon/chi2/r2_analytic_tape
+# R2ENDF=$R2TAPEDIR/26-Fe-56g_nominal_a0cross_mg.endf
 
-ls -la $R2ENDF || exit 1
+# ls -la $R2ENDF || exit 1
 
 # STEP 1 -- DONE, job 8494554 (2026-08-17), PASSED:
 #   FILE  sigma_max(K) 0.999488   lam_min +1.38454e-07   leak_null34 0
@@ -372,16 +388,16 @@ ls -la $R2ENDF || exit 1
 # 74 de 703 grupos por esa ruta y en 694 por la mezcla. Son ~1.5 h y un sidecar
 # de 11 GB para un numero construido sobre la covarianza equivocada.
 # Antes: rehacer la cadena R2 con `r2_group_joint.py --estimator mixture`.
-KIKA_MF34_NULL_MASK=/share_snc/snc/JuanMonleon/chi2/mf34_p1p2_mask_r2analytic.npz \
-KIKA_THIS_WORK_DIR=$R2TAPEDIR \
-KIKA_THIS_WORK_ENDF=26-Fe-56g_nominal_a0cross_mg.endf \
-KIKA_MF33_MF34_CROSS_FROM_FILE=1 \
-KIKA_RUN_TAG=r2analytic_nodegp2 \
-    python precompute_chi2_predictive.py || exit 1
+# KIKA_MF34_NULL_MASK=/share_snc/snc/JuanMonleon/chi2/mf34_p1p2_mask_r2analytic.npz \
+# KIKA_THIS_WORK_DIR=$R2TAPEDIR \
+# KIKA_THIS_WORK_ENDF=26-Fe-56g_nominal_a0cross_mg.endf \
+# KIKA_MF33_MF34_CROSS_FROM_FILE=1 \
+# KIKA_RUN_TAG=r2analytic_nodegp2 \
+#     python precompute_chi2_predictive.py || exit 1
 
-KIKA_CHI2_METHODOLOGIES=predictive_r2analytic_nodegp2 \
-KIKA_CHI2_RUN_ID=r2analytic_nodegp2 \
-    python chi2_analysis_cluster.py || exit 1
+# KIKA_CHI2_METHODOLOGIES=predictive_r2analytic_nodegp2 \
+# KIKA_CHI2_RUN_ID=r2analytic_nodegp2 \
+#     python chi2_analysis_cluster.py || exit 1
 #
 # Follow-up if step 2 moves anything: the same with
 # mf34_p1p2_mask_r2analytic.npz (504 slots, 46.3 % of the variance), which adds

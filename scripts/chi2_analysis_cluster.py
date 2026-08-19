@@ -595,6 +595,31 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
     # ❌ DISQUALIFYING (§6e): if Kinney improves while n_absorbed FALLS elsewhere
     # in the corpus, that is redistribution dressed as information.
     # `corpus_absorbed.py` runs in the same chain and is not optional.
+    # ── RUN 97: una malla por orden Legendre (roadmap §10.8) ────────────────
+    #
+    # Candidata frente a `predictive_91_cross`, la misma base contra la que se
+    # leyo `predictive_95`, y por la MISMA ruta: los bloques a_0 del fichero
+    # (`KIKA_MF33_MF34_CROSS_FROM_FILE=1`), nunca el sidecar.
+    #
+    # ⚠ SIN `KIKA_MF34_NULL_MASK`, y por la razon que dejo escrita la run 95,
+    # solo que aqui es mas fuerte: la mascara vive en la malla de 703 grupos de
+    # la run 86 y el MF34 de la 97 esta en 679/703/637/472/299/105 -- SEIS
+    # mallas, ninguna de ellas esa. `eval_covariance` coloca la mascara POR
+    # ENERGIA y precompute solo valida el npz contra si mismo, asi que una
+    # mascara caduca se aplicaria en silencio en vez de fallar. La cinta ya
+    # lleva la retirada por `CROSS_NULL_FILL='zero'` mas el complemento de
+    # `live` en write_consistent_mf34.
+    #
+    # ⚑ MEMORIA: riesgo MENOR que el de la run 95, no mayor. Aquel job temia la
+    # OOM porque su MF34 era mas FINO que nada puntuado hasta entonces (896
+    # grupos, 485 MB); el de la 97 es mas GRUESO en cinco de los seis ordenes.
+    # Si aun asi la mata la OOM, descomentar `--mem` en la cabecera de run_chi.sh.
+    "predictive_97mesh": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_97mesh.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "\u03c7\u00b2 analysis \u2014 una malla por orden Legendre: MF34 a 679/703/637/472/299/105 grupos, cruzado colapsado con la misma U",
+        "systematic_block_col": None,
+    },
     "predictive_95": {
         "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_95.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
