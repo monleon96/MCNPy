@@ -472,6 +472,47 @@ def per_order_shape_grids(blocks: dict, base_ev: np.ndarray, run_dir=None,
     return grids
 
 
+def _isolate_dead_groups(order_ev, base_ev, dead):
+    """``order_ev`` refined so no coarse group mixes a dead base group with a live one.
+
+    ⚑ THE BASE GRID HAS GROUPS THE MESH NEVER SAW. The DP chooses the mesh on
+    the pipeline's 660-group multigroup mesh, but what comes back off the tape
+    has been through `merge_mf34` with the host, which splits our groups at the
+    host's own boundaries -- 14 of them inside the analysis window. A sliver
+    between a host boundary and ours can contain no fine bin at all, and then
+    its ``a_l`` is exactly zero. The DP could not make those cut points because
+    on its own grid they do not exist: run 98 died with 10 of them at a_1
+    absorbed into live coarse groups.
+
+    Keeping BOTH edges of every dead base group is the conservative repair. Each
+    one then stays exactly one coarse group and is written zero -- which is what
+    the shared-mesh emission declared for it -- and the merging happens only
+    among live groups, which is what the mesh is for. It costs at most one cut
+    point per dead group, against meshes of 550-660.
+
+    ⚠ Not the same thing as letting them merge. The aggregator weights are
+    ``w * a``, so a dead member would contribute zero weight and nothing would
+    be *fabricated* -- but the coarse group would then declare the neighbour's
+    relative covariance over an interval where we fitted nothing, which is the
+    same objection that keeps the out-of-window groups untouched.
+    """
+    base_ev = np.asarray(base_ev, float)
+    order_ev = np.asarray(order_ev, float)
+    dead = np.asarray(dead, bool)
+    if dead.size != base_ev.size - 1:
+        raise SystemExit(
+            f"the dead mask has {dead.size} entries for {base_ev.size - 1} base "
+            f"groups; it is not on the base grid.")
+    keep = np.isin(base_ev, order_ev)
+    idx = np.flatnonzero(dead)
+    keep[idx] = True
+    keep[idx + 1] = True
+    out = base_ev[keep]
+    if not np.isin(order_ev, out).all():
+        raise SystemExit("refining the mesh dropped one of its own boundaries.")
+    return out
+
+
 def order_emission_weights(base_ev, order_ev, base_valid_width, a_base):
     """``U[coarse, base]``: the map that collapses RELATIVE MF34 entries exactly.
 
@@ -796,18 +837,33 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
                 f"order: it writes the file's own relative values where a_l is "
                 f"exactly zero, and those slots are not what U was built to "
                 f"average. Use --null-fill zero.")
+        # The tape's base grid carries groups the DP never saw -- see
+        # `_isolate_dead_groups`. Refine here, before anything is built from the
+        # grids, so U, the blocks and what gets written all use the same one.
+        _n_before = {l: len(np.asarray(order_grids_ev[l], float)) - 1
+                     for l in range(1, L_MAX + 1)}
+        order_grids_ev = {
+            l: _isolate_dead_groups(
+                order_grids_ev[l], shape_ev,
+                np.abs(a_nom_group[:, l - 1]) < np.finfo(float).tiny)
+            for l in range(1, L_MAX + 1)}
         n_ord = {l: len(np.asarray(order_grids_ev[l], float)) - 1
                  for l in range(1, L_MAX + 1)}
+        _added = {l: n_ord[l] - _n_before[l] for l in n_ord}
+        if any(_added.values()):
+            print("    grupos muertos aislados (cortes anadidos): "
+                  + "  ".join(f"a_{l} +{_added[l]}" for l in range(1, L_MAX + 1)))
         U = {}
         for l in range(1, L_MAX + 1):
             U[l] = order_emission_weights(shape_ev, order_grids_ev[l],
                                           base_valid_width[:, l - 1],
                                           a_nom_group[:, l - 1])
-            # A coarse group must be entirely live or entirely dead. The DP makes
-            # absent groups fixed cut points precisely so this holds; a mesh that
-            # merged a dead group into a live one would hand it a fabricated
-            # central value, and the relative entry it then carries is not the
-            # one the file declares.
+            # A coarse group must be entirely live or entirely dead.
+            # `_isolate_dead_groups` above makes that true by construction, so
+            # this is now an assertion on that refinement rather than a check on
+            # the mesh. It is kept because the failure it describes is silent:
+            # the merged entry would carry a central value the file does not
+            # declare, and every downstream gate would still pass.
             dead = np.abs(a_nom_group[:, l - 1]) < np.finfo(float).tiny
             g_of = fine_to_group(np.asarray(shape_ev, float),
                                  np.asarray(order_grids_ev[l], float))

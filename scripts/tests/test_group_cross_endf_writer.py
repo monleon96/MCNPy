@@ -596,9 +596,16 @@ def test_a_coarser_mesh_moves_the_block_and_the_cross_together(tmp_path):
     assert cross.shape[1] == len(np.unique(np.concatenate([MAG_EV, coarse]))) - 1
 
 
-def test_a_mesh_that_merges_an_absent_group_into_a_live_one_is_refused(tmp_path):
+def test_a_mesh_that_merges_an_absent_group_into_a_live_one_isolates_it(tmp_path):
+    """Run 98: the mesh cannot make cut points for groups it never saw.
+
+    The DP chooses on the pipeline's multigroup mesh; the base grid that comes
+    back off the tape has been split further by `merge_mf34` with the host, and
+    a sliver with no fine bin in it is dead. Refusing the run was the old
+    behaviour and it stopped run 98 with everything else written; the dead group
+    is isolated instead, so it stays one coarse group written zero.
+    """
     import numpy as np
-    import pytest
     a_nom_group, _f, c34_post, cx_post = _inputs()
     a_nom_group[1, 0] = 0.0                     # a_1 absent in base group 1
     c34_post[1 * L_MAX + 0, :] = 0.0            # keep the null block consistent
@@ -607,13 +614,44 @@ def test_a_mesh_that_merges_an_absent_group_into_a_live_one_is_refused(tmp_path)
     grids = {l: SHAPE_EV for l in range(1, L_MAX + 1)}
     grids[1] = SHAPE_EV[::2]                    # merges groups 0+1 and 2+3
     from scripts.build_group_cross import write_consistent_mf34
-    with pytest.raises(SystemExit, match="absent group with a live one"):
-        write_consistent_mf34(
-            out_path=tmp_path / "bad.endf", source_endf=_source_endf(tmp_path),
-            c34_post=c34_post, cx_post=cx_post, a_nom_group=a_nom_group,
-            shape_ev=SHAPE_EV, mag_ev=MAG_EV, c34_rel_ship=_rel_ship(),
-            order_grids_ev=grids, base_valid_width=_valid_width(),
-        )
+    out = tmp_path / "isolated.endf"
+    write_consistent_mf34(
+        out_path=out, source_endf=_source_endf(tmp_path),
+        c34_post=c34_post, cx_post=cx_post, a_nom_group=a_nom_group,
+        shape_ev=SHAPE_EV, mag_ev=MAG_EV, c34_rel_ship=_rel_ship(),
+        order_grids_ev=grids, base_valid_width=_valid_width(),
+    )
+    # a_1's mesh asked for 2 groups; the dead one is split back out, so the
+    # emitted block carries 3 -- [g0], [g1] dead, [g2+g3].
+    assert _read_blocks(out)[(1, 1)][0].shape == (3, 3)
+
+
+def test_isolating_dead_groups_is_inert_when_none_are_dead():
+    """The byte-identity gate depends on this: no dead group, no refinement."""
+    import numpy as np
+    from scripts.build_group_cross import _isolate_dead_groups
+    coarse = SHAPE_EV[::2]
+    got = _isolate_dead_groups(coarse, SHAPE_EV, np.zeros(N_GS, bool))
+    np.testing.assert_array_equal(got, coarse)
+
+
+def test_every_dead_base_group_ends_up_alone_in_its_coarse_group():
+    import numpy as np
+    from scripts.build_group_cross import _isolate_dead_groups, fine_to_group
+    dead = np.array([False, True, False, False])
+    got = _isolate_dead_groups(SHAPE_EV[::4], SHAPE_EV, dead)   # 1 grupo -> ?
+    g_of = fine_to_group(SHAPE_EV, got)
+    n_dead = np.bincount(g_of, weights=dead.astype(float), minlength=len(got) - 1)
+    n_tot = np.bincount(g_of, minlength=len(got) - 1)
+    assert not ((n_dead > 0) & (n_dead < n_tot)).any()
+
+
+def test_refining_may_not_drop_a_boundary_the_mesh_asked_for():
+    import numpy as np
+    import pytest
+    from scripts.build_group_cross import _isolate_dead_groups
+    with pytest.raises(SystemExit, match="not on the base grid"):
+        _isolate_dead_groups(SHAPE_EV, SHAPE_EV, np.zeros(N_GS + 3, bool))
 
 
 def test_null_fill_ship_is_refused_with_a_mesh_per_order(tmp_path):
