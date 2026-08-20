@@ -628,6 +628,25 @@ MF34_PER_ORDER_MESH = _env_flag("KIKA_MF34_PER_ORDER_MESH", False)
 # Set to 0 to reproduce run 97's mesh exactly.
 MF34_MESH_FROM_RAW = _env_flag("KIKA_MF34_MESH_FROM_RAW", True)
 
+# ⚑ LO MISMO QUE `mf34_mg_mesh_inputs.npz`, PERO EN LA REJILLA FINA.
+#
+# El agrupamiento deja de decidirse sobre los 660 multigrupos y pasa a decidirse
+# sobre los 1738 bins finos: un agrupado elegido encima de otro agrupado, con un
+# criterio distinto, no puede contestar "¿cuál es el agrupado correcto?" porque
+# el primero ya tiró la resolución que el segundo necesitaría.
+#
+#   cov_decision  la relativa fina ANTES del capado near-zero -- donde el
+#                 criterio SNR todavia tiene disparador (§ MF34_MESH_FROM_RAW)
+#   cov_emission  la que de verdad se escribe en 26-Fe-56g_nominal.endf
+#   means         `nominal_params`, el denominador de las dos: decide donde a_l
+#                 existe y donde cambia de signo ([[sign-change-of-a-l-is-a-boundary]])
+#
+# Cuesta 2 x 10428^2 x 8 = 1.74 GB. Se paga una vez y ahorra repetir el
+# pipeline por cada criterio nuevo. Misma leccion que
+# [[save-covariance-objects-not-just-samples]]; ponerlo a 0 solo para runs de
+# humo donde el disco importe mas que poder reanalizar.
+SAVE_FINE_MESH_INPUTS = _env_flag("KIKA_SAVE_FINE_MESH_INPUTS", True)
+
 # =============================================================================
 # MF33 ELASTIC MAGNITUDE CHANNEL
 # =============================================================================
@@ -5086,6 +5105,11 @@ def run_exfor_to_endf_sampling_v2(
             if verbose_diagnostics:
                 log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-convert", _logger, verbose=True)
 
+            # La copia SIN capar, antes de que la regularizacion near-zero pise
+            # toda sigma marcada en SNR = 1. Ver SAVE_FINE_MESH_INPUTS.
+            _fg_cov_for_mesh = (cov_matrix_nominal.copy()
+                                if SAVE_FINE_MESH_INPUTS else None)
+
             if regularize_near_zero:
                 cov_matrix_nominal, _nz_nom_diag = regularize_near_zero_relative_covariance(
                     cov_rel=cov_matrix_nominal,
@@ -5191,6 +5215,46 @@ def run_exfor_to_endf_sampling_v2(
                     log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-ffill", _logger, verbose=True)
             else:
                 _logger.info("  Post-processing DISABLED (APPLY_COV_POSTPROCESSING=False)")
+
+            # ⚑ LAS ENTRADAS DEL AGRUPAMIENTO, EN LA REJILLA FINA.
+            #
+            # ⚠ EN try/except A PROPOSITO. Esto es un diagnostico al final de una
+            # run de dias; si falla, se pierde el npz, no la run.
+            if SAVE_FINE_MESH_INPUTS and cov_matrix_nominal is not None:
+                try:
+                    _fg_edges = None
+                    _fg_edges_path = output_path / "mf33_energy_grid_ev.npy"
+                    if _fg_edges_path.exists():
+                        _fg_edges = np.load(_fg_edges_path)
+                    np.savez(
+                        output_path / "mf34_fine_mesh_inputs.npz",
+                        cov_decision=(_fg_cov_for_mesh
+                                      if _fg_cov_for_mesh is not None
+                                      else cov_matrix_nominal),
+                        cov_emission=cov_matrix_nominal,
+                        means=np.asarray(nominal_params, dtype=float),
+                        mc_means=np.asarray(mc_mean_params, dtype=float),
+                        energy_indices=np.asarray(energy_indices, dtype=np.int64),
+                        edges_ev=(np.asarray(_fg_edges, dtype=float)
+                                  if _fg_edges is not None
+                                  else np.zeros(0, dtype=float)),
+                        decision_is_raw=np.array(_fg_cov_for_mesh is not None),
+                        max_order=np.array(max_degree),
+                    )
+                    _logger.info(
+                        f"  entradas del agrupamiento FINO -> "
+                        f"mf34_fine_mesh_inputs.npz (decision "
+                        f"{'SIN capar' if _fg_cov_for_mesh is not None else 'capada'}, "
+                        f"emision, medias, {cov_matrix_nominal.shape[0]} parametros"
+                        f"{'' if _fg_edges is None else f', {_fg_edges.size} bordes'})"
+                        f": el agrupamiento se prueba desde aqui, sin pipeline")
+                except Exception as _e_fgmi:
+                    _logger.error(
+                        f"[ERROR] no se pudo escribir mf34_fine_mesh_inputs.npz: "
+                        f"{_e_fgmi}. La run SIGUE; el reanalisis del agrupamiento "
+                        f"tendra que releer 26-Fe-56g_nominal.endf (11 min).",
+                        console=True,
+                    )
 
             mf34_ref = mf34_source_file if mf34_source_file else endf_file
             original_mf34_mt = None
