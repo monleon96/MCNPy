@@ -79,6 +79,16 @@ MF33 = DATA / "micro_fe56_mf33.endf"
 MF6_FIXTURES = {"be9": "be9_b81", "li6": "li6_b81", "c12": "c12_b81",
                 "u235": "u235_b81"}
 
+#: The charged-particle MF6 fixtures, copied **whole** rather than cut. Each is
+#: a complete ENDF/B-VIII.0 evaluation of 7-56 kB; all five together are 138 kB,
+#: an ninth of ``micro_be9_mf6.endf`` alone. Cutting them would cost the
+#: property that makes an MF6 fixture worth having -- that the law bodies are
+#: the evaluator's bytes -- and save nothing. Same reason ``tsl-s-CH4.endf`` is
+#: copied whole by :func:`build_tsl`.
+MF6_CP_FIXTURES = {"p_he3": "p_he3_b80", "d_h2": "d_h2_b80",
+                   "h3_he4": "h3_he4_b80", "a_he4": "a_he4_b80",
+                   "t_li7": "t_li7_b80"}
+
 
 def mf6_fixture_path(key: str) -> Path:
     """Committed MF6 micro-tape cut from the *key* evaluation."""
@@ -248,9 +258,11 @@ def section_inventory(text: str) -> dict[int, dict[int, int]]:
 #: Be-9 MT16**; LAW=6 occurs five times, three of them Li-6 MT41; LAW=0 and the
 #: negative LAWs live in the actinide fission sections, of which U-235's MT18 is
 #: by far the smallest at 591 records; and C-12 MT5 is the readiest LCT=3.
-#: Between them the four fixtures carry every LAW that exists on a tape on this
-#: machine. **LAW=5 is on none of them, because it is on no tape here at all** --
-#: ``docs/mf6_notes.md``.
+#: Between them the four fixtures carry every LAW that occurs in a *neutron*
+#: sublibrary. LAW=5 is on none of them because it cannot be: charged-particle
+#: elastic scattering needs a charged projectile. Its witnesses are the five
+#: whole tapes in ``MF6_CP_FIXTURES``, cut from ENDF/B-VIII.0's charged-particle
+#: sublibraries -- ``docs/mf6_witness_hunt.md``.
 KEEP_MF6 = {
     # LAW=7 (both occurrences in the library) and LCT=1, plus LAW=1/2/4.
     "be9": {1: {451}, 6: {16, 600, 650, 700, 701, 800}},
@@ -597,6 +609,7 @@ def test_regenerate_micro_tapes(fe56_host_tape, cf252_b81_tape, u235_b81_tape, r
     assert all(mf32_fixture_path(k).stat().st_size > 0 for k in MF32_FIXTURES)
     assert all(tsl_fixture_path(k).stat().st_size > 0 for k in TSL_FIXTURES)
     assert all(mf6_fixture_path(k).stat().st_size > 0 for k in MF6_FIXTURES)
+    assert all(mf6_fixture_path(k).stat().st_size > 0 for k in MF6_CP_FIXTURES)
 
 
 @pytest.mark.skipif(not REGEN, reason="set REGEN_MICRO_TAPES=1 to rebuild the fixtures")
@@ -616,6 +629,23 @@ def test_regenerate_mf6_micro_tapes(be9_b81_tape, li6_b81_tape, c12_b81_tape,
         source = request.getfixturevalue(f"{tape}_tape")
         build_mf6(Path(source), mf6_fixture_path(key), KEEP_MF6[key])
     assert all(mf6_fixture_path(k).stat().st_size > 0 for k in MF6_FIXTURES)
+
+
+@pytest.mark.skipif(not REGEN, reason="set REGEN_MICRO_TAPES=1 to rebuild the fixtures")
+def test_regenerate_mf6_charged_particle_micro_tapes(
+        p_he3_b80_tape, d_h2_b80_tape, h3_he4_b80_tape, a_he4_b80_tape,
+        t_li7_b80_tape, request):
+    """Copy the five charged-particle tapes verbatim.
+
+    No builder and no ``KEEP`` dict: these are whole evaluations, and the copy
+    goes through ``read_text``/``write_text`` only so a CRLF source would land
+    as LF like every other fixture. See ``MF6_CP_FIXTURES`` for why whole.
+    """
+    DATA.mkdir(parents=True, exist_ok=True)
+    for key, tape in MF6_CP_FIXTURES.items():
+        source = Path(request.getfixturevalue(f"{tape}_tape"))
+        mf6_fixture_path(key).write_text(source.read_text())
+    assert all(mf6_fixture_path(k).stat().st_size > 0 for k in MF6_CP_FIXTURES)
 
 
 # ---------------------------------------------------------------------------
@@ -842,6 +872,19 @@ def test_tsl_micro_tapes_stay_small(micro_tsl_tape):
     four together are ~880 kB; the bound is per-tape and close.
     """
     assert micro_tsl_tape.stat().st_size < 400_000
+
+
+def test_charged_particle_micro_tapes_stay_small():
+    """These five are copied whole, so the ceiling is what keeps that honest.
+
+    Whole-copy is defensible only while the tapes are small. The largest
+    charged-particle evaluation in ENDF/B-VIII.0 is 3.6 MB; if a fixture is ever
+    re-pointed at one of those, whole-copy stops being free and the cut has to
+    come back. 64 kB is just above ``t_li7`` at 56 kB.
+    """
+    for key in MF6_CP_FIXTURES:
+        size = mf6_fixture_path(key).stat().st_size
+        assert size < 64_000, f"{key} is {size} bytes -- copy it whole no longer"
 
 
 @pytest.mark.parametrize("key,expected", [
