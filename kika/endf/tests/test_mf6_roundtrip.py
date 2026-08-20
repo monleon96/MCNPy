@@ -44,6 +44,7 @@ its name and must keep saying.
 """
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -811,6 +812,85 @@ def test_full_tape_roundtrip(tape, mts, request):
     path = request.getfixturevalue(f"{tape}_tape")
     for mt in mts:
         assert not roundtrip(path, mt), f"{tape} MT{mt}"
+
+
+#: The five charged-particle sublibraries of ENDF/B-VIII.0, and how many tapes
+#: each holds. Named so the sweep below fails loudly if a sublibrary goes
+#: missing, rather than quietly sweeping four of five and reporting a census.
+CP_SUBLIBRARIES = {"protons": 49, "deuterons": 5, "tritons": 5,
+                   "helium3s": 3, "alphas": 1}
+
+
+@pytest.mark.slow
+def test_the_whole_charged_particle_census_holds(request):
+    """The numbers the committed fixtures are chosen from, re-measured.
+
+    Four fixtures gate four cells. This gates the claim those four were picked
+    *out of* — that the cells are the only cells, that the identity has no
+    exception in 4 710 nodes, and that ``LTP=2/14/15`` and ``LANG=11-15`` are
+    empty rather than merely unlooked-at. Without it those numbers live only in
+    ``docs/mf6_witness_hunt.md``, where nothing re-checks them.
+
+    ~21 s over the share, which is why it is ``slow``-marked and skips when the
+    share is not there, like :func:`test_endfb81_o16_roundtrip`.
+    """
+    root = Path("/share_snc/lib/endf/endfb8")
+    if not root.is_dir():
+        pytest.skip("ENDF/B-VIII.0 charged-particle sublibraries not reachable")
+
+    tapes = []
+    for sub, expected in CP_SUBLIBRARIES.items():
+        found = sorted((root / sub).glob("*.endf"))
+        assert len(found) == expected, (
+            f"{sub}: {len(found)} tapes, census says {expected} — the sweep "
+            f"below would report a different library's numbers"
+        )
+        tapes.extend(found)
+    assert len(tapes) == 63
+
+    law5_mts, lidp, ltp_nodes = [], Counter(), Counter()
+    law_products, law1_lang, law2_lang = Counter(), Counter(), Counter()
+    for path in tapes:
+        n_law5 = 0
+        for mt, section in all_sections(path).items():
+            for product in section.products:
+                law_products[product.law] += 1
+                body = product.law_data
+                if product.law == 1 and hasattr(body, "lang"):
+                    law1_lang[body.lang] += 1
+                if product.law == 2 and hasattr(body, "lang"):
+                    law2_lang.update(body.lang)
+                if product.law != 5:
+                    continue
+                n_law5 += 1
+                law5_mts.append(mt)
+                lidp[body.lidp] += 1
+                ltp_nodes.update(body.ltp)
+                for k in range(len(body.ltp)):
+                    nl = body.nl(k)
+                    if body.ltp[k] <= 2:
+                        want = 4 * nl + 3 if body.lidp == 0 else 3 * nl + 3
+                    else:
+                        want = 2 * nl
+                    assert len(body.values[k]) == want, (
+                        f"{path.name} MT{mt} node {k}: LTP={body.ltp[k]} "
+                        f"LIDP={body.lidp} NL={nl} wants {want}, "
+                        f"got {len(body.values[k])}"
+                    )
+        assert n_law5 == 1, f"{path.name}: {n_law5} LAW=5 products, expected 1"
+
+    assert set(law5_mts) == {2}, f"LAW=5 outside MT2: {sorted(set(law5_mts))}"
+    assert dict(lidp) == {0: 58, 1: 5}
+    assert dict(ltp_nodes) == {1: 931, 12: 3779}
+    assert sum(ltp_nodes.values()) == 4710
+    assert dict(law_products) == {1: 2400, 2: 29, 4: 41, 5: 63, 6: 6}
+
+    # LAW=2/LANG=12 has a witness here and nowhere in the neutron sublibrary.
+    assert dict(law2_lang) == {0: 1201, 12: 503}
+    # LAW=1/LANG=11-15 has none here either. The wide sweep over every library
+    # on the share is in ``myworkspace/mf6_witness/`` in kika-workspace; until
+    # it logs "=== DONE", zero hits there means "not looked at yet".
+    assert dict(law1_lang) == {1: 2204, 2: 196}
 
 
 @pytest.mark.slow
