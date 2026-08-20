@@ -99,7 +99,11 @@ def _minimal(cls):
                                          Polynomial1d, Reference, Regions1d,
                                          Regions2d, ResonancesWithBackground,
                                          ShortRangeSelfScalingVariance, Sum,
-                                         Unspecified, XYs1d, XYs2d)
+                                         Unspecified, XYs1d, XYs2d, XYs3d)
+    from kika.nuclear_data.model import (AverageParameterCovariance, DataLink,
+                                         ParameterCovariance,
+                                         ParameterCovarianceMatrix,
+                                         ParameterLink)
     builders = {
         XYs1d: lambda: XYs1d(xs=[1.0, 2.0], ys=[3.0, 4.0]),
         Regions1d: Regions1d,
@@ -110,6 +114,7 @@ def _minimal(cls):
                                            domainMax_=2.0),
         XYs2d: XYs2d,
         Regions2d: Regions2d,
+        XYs3d: XYs3d,
         Reference: lambda: Reference(href="#somewhere"),
         ResonancesWithBackground: ResonancesWithBackground,
         AngularTwoBody: AngularTwoBody,
@@ -121,6 +126,18 @@ def _minimal(cls):
             matrix=CovarianceMatrix(matrix=np.eye(2)),
             dependenceOnProcessedGroupWidth="inverse",
         ),
+        ParameterCovariance: lambda: ParameterCovariance(
+            label="p", rowData=DataLink(href="#row"),
+            form=ParameterCovarianceMatrix(
+                matrix=np.eye(2), label="eval",
+                parameters=[ParameterLink(label="l", href="#p",
+                                          nParameters=2)],
+            ),
+        ),
+        AverageParameterCovariance: lambda: AverageParameterCovariance(
+            label="a", rowData=DataLink(href="#row"),
+            form=CovarianceMatrix(matrix=np.eye(2)),
+        ),
     }
     builder = builders.get(cls)
     return None if builder is None else builder()
@@ -128,17 +145,31 @@ def _minimal(cls):
 
 #: Which writer to call for a family, and how. Not the chain — the entry point.
 def _writeWith(family, form, parent, report):
-    from kika.gnds.encode import _covarianceForm, _function
+    from kika.gnds.encode import (_covarianceForm, _function,
+                                  _parameterCovariances)
 
-    if family in ("function1d", "function2d"):
+    if family in ("function1d", "function2d", "function3d"):
         _function(parent, form, report, "test")
     elif family == "covarianceForm":
         _covarianceForm(parent, form, report, "test")
+    elif family == "parameterCovarianceForm":
+        # §25.3's entry point takes the whole list and emits the container the
+        # sequence lives in, so the tag the key names is a *grandchild*. The
+        # container is unwrapped rather than the inner writers being called
+        # directly, so that what this exercises is still the registered
+        # function.
+        outer = ET.Element("outer")
+        _parameterCovariances(outer, [form], report)
+        container = outer.find("parameterCovariances")
+        for child in ([] if container is None else list(container)):
+            parent.append(child)
     else:
         raise AssertionError(f"no writer harness for {family}")
 
 
-@pytest.mark.parametrize("family", ["function1d", "function2d", "covarianceForm"])
+@pytest.mark.parametrize("family", ["function1d", "function2d", "function3d",
+                                    "covarianceForm",
+                                    "parameterCovarianceForm"])
 def test_the_writer_emits_the_tag_the_key_claims(family):
     """The chain is exercised, not mirrored.
 
@@ -195,17 +226,36 @@ def test_the_known_defects_are_pinned_by_count():
 
 def test_a_paired_entry_with_no_writer_fails_the_check():
     """Plant one and watch it fail. Without this the checker could be a no-op
-    returning ``()`` and every test above would still pass."""
+    returning ``()`` and every test above would still pass.
+
+    **The victim has to be an entry that will never be implemented**, or this
+    test goes quietly vacuous the day it is: planting ``PAIRED`` on something
+    already ``PAIRED`` changes nothing and the assert below stops testing the
+    checker. It used to be ``("distributionForm", "KalbachMann")`` and moved
+    when §18.6 landed.
+
+    ``("function3d", "regions3d")`` is immune, and not merely unimplemented.
+    ``gnds.xsd`` gives ``regions3d`` **no element declaration anywhere**, and
+    the two complexTypes that would reach one — ``function3ds_inRegions`` and
+    ``xData_regions_3d_primary`` — are referenced only by each other, so the
+    branch is unreachable from any document. The census agrees from the other
+    end: **0 occurrences in 2 950 ``XYs3d`` across 558 evaluations**. A schema
+    argument and a measurement, which is what makes it safe to build a test on.
+    """
     from kika.gnds.nodes import NodeSpec
 
-    key = ("distributionForm", "KalbachMann")
+    key = ("function3d", "regions3d")
     original = NODES[key]
+    assert original.status is Status.NEITHER, (
+        f"{key} was chosen as the victim because it can never be implemented; "
+        f"it is now {original.status.value}, so this test is measuring nothing"
+    )
     NODES[key] = NodeSpec(tag=original.tag, family=original.family,
                           section=original.section, cls=original.cls,
                           status=Status.PAIRED)
     try:
         problems = nodes.check()
-        assert any("KalbachMann" in problem for problem in problems), problems
+        assert any("regions3d" in problem for problem in problems), problems
     finally:
         NODES[key] = original
     assert nodes.check() == (), "the table was not restored"
@@ -214,13 +264,17 @@ def test_a_paired_entry_with_no_writer_fails_the_check():
 def test_every_unimplemented_distribution_is_placed_at_a_choice_point():
     """The model's list of unimplemented distributions is not a list of §18 laws.
 
-    Two of its six names are not members of §18.1.1's choice at all —
+    **Its one remaining name is not a member of §18.1.1's choice at all.**
     ``recoil`` belongs to ``angularTwoBody`` (``gnds.xsd:1670``), where it is
-    already read and written, and ``NBodyPhaseSpace`` is an §18.3 *energy* form
-    (``gnds.xsd:1703``). Both read like laws phase 7b owes, and treating them as
-    such would mean adding a ``distributionForm`` entry the schema does not
-    admit — the same class of mistake as the ``isotropic2d`` the writer used to
-    emit under ``distribution``.
+    already read and written; so does ``NBodyPhaseSpace``, which
+    :data:`nodes.NOT_A_DISTRIBUTION_FORM` also places at its real home, an §18.3
+    *energy* form (``gnds.xsd:1703``). Both read like laws phase 7b owed, and
+    treating them as such would have meant adding a ``distributionForm`` entry
+    the schema does not admit — the same class of mistake as the ``isotropic2d``
+    the writer used to emit under ``distribution``.
+
+    That the dict is down to a misplaced name and holds **no unimplemented §18
+    law at all** is what phase 7b finishing looks like from this side.
 
     So each name is either an entry here or explicitly placed elsewhere, and
     this is what stops a third state — named in the model, absent from both.
@@ -228,6 +282,12 @@ def test_every_unimplemented_distribution_is_placed_at_a_choice_point():
     from kika.nuclear_data.model.distributions import \
         NOT_IMPLEMENTED_DISTRIBUTIONS
 
+    # Down to one: `uncorrelated`, `energyAngular`, `angularEnergy` and
+    # `KalbachMann` have all landed, and what is left is the misplaced `recoil`.
+    # The assert is what stops this loop from passing on an empty dict the day
+    # the list finally empties, which would read as "all placed" and mean "none
+    # checked".
+    assert NOT_IMPLEMENTED_DISTRIBUTIONS
     for name in NOT_IMPLEMENTED_DISTRIBUTIONS:
         elsewhere = nodes.NOT_A_DISTRIBUTION_FORM.get(name)
         if elsewhere is not None:
@@ -246,27 +306,60 @@ def test_every_unimplemented_distribution_is_placed_at_a_choice_point():
         )
 
 
+def test_the_misplaced_names_stay_misplaced_after_they_are_implemented():
+    """The loop above visits only names still in the model's unimplemented list,
+    so a placement stops being checked the moment its node lands — which is
+    exactly when the mistake becomes tempting again. ``NBodyPhaseSpace`` is
+    PAIRED now, under ``uncorrelatedEnergyForm``; the one thing that must never
+    happen is it acquiring a ``distributionForm`` entry as well."""
+    assert nodes.NOT_A_DISTRIBUTION_FORM
+    for name, elsewhere in nodes.NOT_A_DISTRIBUTION_FORM.items():
+        assert ("distributionForm", name) not in NODES, (
+            f"{name} is declared not to be a distribution form and has an "
+            f"entry as one"
+        )
+        assert "gnds.xsd:" in elsewhere, (
+            f"{name}'s placement cites no schema line, so it is an opinion"
+        )
+
+
 def test_registering_an_undeclared_node_fails_at_import_time():
-    """The other direction, and the one that makes phase 7b safe: a reader for
-    a §18 law that nobody declared cannot be added quietly."""
-    assert ("distributionForm", "branching3d") not in NODES
-    with pytest.raises(UndeclaredNode, match="branching3d"):
-        @nodes.reads("distributionForm", "branching3d")
-        def _readBranching3d(element, path):  # pragma: no cover - never runs
+    """The other direction, and the one that made phase 7b safe: a reader for
+    a §18 law that nobody declared cannot be added quietly.
+
+    The guinea pig was ``branching3d`` until phase 7b implemented it, which is
+    the good reason for a victim to expire. ``coherentPhotonScattering`` takes
+    over: it is a real §18.1.1 member (``gnds.xsd:1657``) and the census counted
+    it **zero times** in the 558 distributed neutron evaluations, along with the
+    four other unnamed members. A node with no occurrences is not going to
+    acquire a reader by accident, which is exactly what a victim needs to be.
+    """
+    victim = ("distributionForm", "coherentPhotonScattering")
+    assert victim not in NODES
+    with pytest.raises(UndeclaredNode, match="coherentPhotonScattering"):
+        @nodes.reads(*victim)
+        def _readCoherentPhotonScattering(element, path):  # pragma: no cover
             ...
 
 
 def test_the_derived_dispatch_tables_are_the_registry():
     """``FUNCTION_1D`` and ``COVARIANCE_FORMS`` are views of the table now, not
     a second list beside it. If they drift back to literals this fails."""
-    from kika.gnds.covariances import COVARIANCE_FORMS
-    from kika.gnds.primitives import FUNCTION_1D, FUNCTION_2D
+    from kika.gnds.covariances import (COVARIANCE_FORMS,
+                                       PARAMETER_COVARIANCE_FORMS)
+    from kika.gnds.primitives import FUNCTION_1D, FUNCTION_2D, FUNCTION_3D
 
-    assert set(FUNCTION_1D) == {
-        spec.tag for spec in NODES.values()
-        if spec.family == "function1d" and spec.status is not Status.NEITHER
-    }
-    assert set(FUNCTION_2D) == {"XYs2d", "regions2d"}
+    for table, family in ((FUNCTION_1D, "function1d"),
+                          (FUNCTION_2D, "function2d"),
+                          (FUNCTION_3D, "function3d")):
+        assert set(table) == {
+            spec.tag for spec in NODES.values()
+            if spec.family == family and spec.status is not Status.NEITHER
+        }, family
     assert set(COVARIANCE_FORMS) == {
         spec.tag for spec in NODES.values() if spec.family == "covarianceForm"
+    }
+    assert set(PARAMETER_COVARIANCE_FORMS) == {
+        spec.tag for spec in NODES.values()
+        if spec.family == "parameterCovarianceForm"
     }

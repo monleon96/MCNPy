@@ -16,16 +16,20 @@ ENDF/B-VIII.1-GNDS, and nothing else:
 ``polynomial1d``     81 files, in ``fissionEnergyRelease``
 ``XYs2d``            everywhere, the outer axis of an angular distribution
 ``regions2d``        ENDF LTT=3, and any multi-region TAB2
+``XYs3d``            the whole of ``energyAngular``/``angularEnergy`` (§6.5)
 ===================  =========================================================
 
 ``Ys1d`` and ``gridded1d`` are **implemented in the model and deliberately not
 read here**: neither occurs in a single distributed neutron evaluation, so a
 reader for them would be code no fixture exercises and no test defends. They are
 in :data:`DECLARED_ELSEWHERE` so that meeting one produces a message naming the
-node and this decision, rather than "unknown node". ``XYs3d``/``regions3d`` are
-declared-and-empty in the model itself (phase 7b), and the §18 distribution laws
-the same; the model's own ``NOT_IMPLEMENTED_NODES`` and
-``NOT_IMPLEMENTED_DISTRIBUTIONS`` are consulted rather than duplicated.
+node and this decision, rather than "unknown node". ``regions3d`` is
+declared-and-empty in the model itself and stays that way permanently —
+``gnds.xsd:2286`` defines its type and no ``xs:element`` is of it, so no valid
+file can hold one — and the §18 distribution laws are declared-and-empty
+pending their phase; the model's own ``NOT_IMPLEMENTED_NODES`` and
+``NOT_IMPLEMENTED_DISTRIBUTIONS`` are consulted rather than duplicated, down to
+the *reason*, which each class now spells in ``plannedFor``.
 
 **Uncertainty on a functional is a known loss.** §7 lets any functional carry an
 ``uncertainty`` child, and real files do — a ``crossSection`` form pointing at
@@ -47,11 +51,13 @@ from kika.gnds.nodes import reads, readersOf
 from kika.nuclear_data.model import (Axes, Axis, Constant1d, Grid, GridStyle,
                                      Interpolation, InterpolationQualifier,
                                      Legendre, Polynomial1d, Regions1d,
-                                     Regions2d, ValueType, XYs1d, XYs2d)
+                                     Regions2d, ValueType, XYs1d, XYs2d,
+                                     XYs3d)
 
 __all__ = [
     "UnsupportedNode", "readValues", "readAxes", "readForm",
-    "readFunction1d", "readFunction2d", "isFunction1d", "isFunction2d",
+    "readFunction1d", "readFunction2d", "readFunction3d",
+    "isFunction1d", "isFunction2d", "isFunction3d",
     "readFraction", "formatFraction",
     "FUNCTION_1D", "FUNCTION_2D", "DECLARED_ELSEWHERE",
 ]
@@ -87,9 +93,18 @@ DECLARED_ELSEWHERE = {
         "the model implements it, but no neutron evaluation in "
         "ENDF/B-VIII.1-GNDS contains one, so reading it would be untested code"
     ),
-    "discreteGamma": "no model node; §18 photon energies are phase 7b",
-    "primaryGamma": "no model node; §18 photon energies are phase 7b",
-    "branching1d": "no model node; §18 isomeric branching is phase 7b",
+    # `discreteGamma` and `primaryGamma` were here until phase 7b modelled
+    # them. They are not functionals and never were — they reach the model
+    # through `kika.gnds.distributions`, at the `uncorrelated/energy` choice
+    # point where the schema puts them (gnds.xsd:1697), and a functional reader
+    # should not be the thing that has an opinion about them.
+    #
+    # `branching1d` left for the same reason when phase 7b modelled it: it is a
+    # §17.3 multiplicity form (gnds.xsd:1633) whose whole content is one
+    # attribute, read by `kika.gnds.decode.readMultiplicity`. Three entries have
+    # now been removed from this dict by being implemented and none by being
+    # abandoned, which is the pattern worth noticing — what is left is the two
+    # nodes no distributed evaluation contains.
 }
 
 
@@ -441,13 +456,42 @@ def _readRegions2d(element: ET.Element, axes: Optional[Axes]) -> Regions2d:
     )
 
 
+# ---------------------------------------------------------------------------
+# §6.5 three-dimensional functionals
+# ---------------------------------------------------------------------------
+
+@reads("function3d", "XYs3d")
+def _readXYs3d(element: ET.Element, axes: Optional[Axes]) -> XYs3d:
+    """§6.5. An ordered list of 2-d functions, one per outermost-axis value.
+
+    ``_readXYs2d`` one floor up, and the ``axes`` line is the load-bearing one:
+    ``own`` goes to :func:`readFunction2d`, which hands the same object on to
+    :func:`readFunction1d`. §5.1.1 has a child inherit its container's axes and
+    the schema gives it no slot to repeat them, so the writer decides "mine" vs
+    "inherited" by ``form.axes is parentAxes`` — over two levels here, not one.
+    Building a fresh :class:`Axes` on the way down would make every nested
+    ``XYs2d`` report axes of its own and write an invalid file.
+    """
+    own = readAxes(element) or axes
+    return XYs3d(
+        function2ds=[readFunction2d(child, own) for child in _children(element)],
+        interpolation=_interpolation(element),
+        interpolationQualifier=_qualifier(element),
+        axes=own,
+        label=element.attrib.get("label"),
+        outerDomainValue=_optionalFloat(element, "outerDomainValue"),
+        index=_optionalInt(element, "index"),
+    )
+
+
 def _children(element: ET.Element) -> List[ET.Element]:
     """The functional children of a container, ``axes`` and metadata skipped.
 
-    ``regions1d``/``XYs2d``/``regions2d`` wrap their children in a
+    ``regions1d``/``XYs2d``/``regions2d``/``XYs3d`` wrap their children in a
     ``function1ds`` or ``function2ds`` container in every file examined, but the
     schema does not require the wrapper on every node, so both shapes are
-    accepted rather than one being assumed.
+    accepted rather than one being assumed. ``XYs3d`` needs no new case: its
+    container is ``function2ds``, the same tag ``regions2d`` uses.
     """
     wrapped = [c for c in element if c.tag in ("function1ds", "function2ds")]
     source = wrapped[0] if wrapped else element
@@ -471,6 +515,11 @@ FUNCTION_1D: Dict[str, Callable] = readersOf("function1d")
 #: §6's two-dimensional functionals. Derived, as above.
 FUNCTION_2D: Dict[str, Callable] = readersOf("function2d")
 
+#: §6.5's three-dimensional functionals. Derived, as above, and a family of one
+#: on purpose: ``regions3d`` is the other node the model declares and the schema
+#: has no element of its type, so nothing can ever join ``XYs3d`` here.
+FUNCTION_3D: Dict[str, Callable] = readersOf("function3d")
+
 
 def isFunction1d(tag: str) -> bool:
     return tag in FUNCTION_1D
@@ -478,6 +527,10 @@ def isFunction1d(tag: str) -> bool:
 
 def isFunction2d(tag: str) -> bool:
     return tag in FUNCTION_2D
+
+
+def isFunction3d(tag: str) -> bool:
+    return tag in FUNCTION_3D
 
 
 def readFunction1d(element: ET.Element, axes: Optional[Axes] = None):
@@ -496,12 +549,22 @@ def readFunction2d(element: ET.Element, axes: Optional[Axes] = None):
     return builder(element, axes)
 
 
+def readFunction3d(element: ET.Element, axes: Optional[Axes] = None):
+    """One 3-d functional node → its model object. Raises :class:`UnsupportedNode`."""
+    builder = FUNCTION_3D.get(element.tag)
+    if builder is None:
+        raise _unsupported(element.tag, "three-dimensional")
+    return builder(element, axes)
+
+
 def readForm(element: ET.Element, axes: Optional[Axes] = None):
-    """Either dimension, whichever this node is."""
+    """Whichever dimension this node is."""
     if isFunction1d(element.tag):
         return readFunction1d(element, axes)
     if isFunction2d(element.tag):
         return readFunction2d(element, axes)
+    if isFunction3d(element.tag):
+        return readFunction3d(element, axes)
     raise _unsupported(element.tag, "functional")
 
 
@@ -513,10 +576,13 @@ def _unsupported(tag: str, kind: str) -> UnsupportedNode:
     from kika.nuclear_data.model.functions.higher import NOT_IMPLEMENTED_NODES
 
     if tag in NOT_IMPLEMENTED_NODES:
+        # `plannedFor` and not a phase named here: it used to say "phase 7b"
+        # for every entry, which was true while XYs3d was the entry and is
+        # false for regions3d, whose reason is that no phase can fill it.
         return UnsupportedNode(
             tag,
-            "declared in kika's model and not implemented (phase 7b); it is "
-            "present rather than absent so a reader meeting one is told what "
-            "is missing",
+            f"declared in kika's model and not implemented "
+            f"({NOT_IMPLEMENTED_NODES[tag].plannedFor}); it is present rather "
+            f"than absent so a reader meeting one is told what is missing",
         )
     return UnsupportedNode(tag, f"not a {kind} node kika reads")

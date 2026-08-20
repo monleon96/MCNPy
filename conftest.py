@@ -316,8 +316,8 @@ _NJOY_FIXTURES = frozenset({"njoy_exe"})
 #: docstring above claimed it was applied automatically. It is applied now.
 _GNDS_FIXTURES = frozenset({
     "fe56_gnds_tape", "fe56_gnds_cov_tape",
-    "gnds_data_dir", "micro_fe56_gnds", "micro_ta182_gnds",
-    "h2_gnds", "h2_gnds_cov",
+    "gnds_data_dir", "micro_fe56_gnds", "micro_ta182_gnds", "micro_be9_gnds",
+    "h2_gnds", "h2_gnds_cov", "h3_gnds", "s36_gnds",
     "gnds_covariance_fixture",
 })
 
@@ -703,10 +703,9 @@ def h2_gnds() -> Path:
     SHA-1 in ``externalFiles`` are both real. 113 kB for 1013 nodes, which is
     what makes it the pair worth committing: ``regions1d`` and ``regions2d``,
     a ``reference`` form, ``crossSectionSum`` with resolvable ``summands``,
-    ``angularTwoBody``/``isotropic2d``/``unspecified`` — the three distributions
-    kika implements — *and* ``uncorrelated``/``NBodyPhaseSpace``, which it does
-    not, so the report's ``unsupported`` list is exercised by a real file rather
-    than by a hand-built one.
+    ``angularTwoBody``/``isotropic2d``/``unspecified`` and
+    ``uncorrelated``/``NBodyPhaseSpace`` — all of them laws kika reads, since
+    ``uncorrelated`` landed in phase 7b.
     """
     return _gnds_file("n-001_H_002.endf.gnds.xml")
 
@@ -715,6 +714,25 @@ def h2_gnds() -> Path:
 def h2_gnds_cov() -> Path:
     """The covariance sibling of :func:`h2_gnds`, unmodified. 11 kB, 4 sections."""
     return _gnds_file("Covariances/n-001_H_002.endf.gnds-covar.xml")
+
+
+@pytest.fixture(scope="session")
+def h3_gnds() -> Path:
+    """n + H3 from ENDF/B-VIII.1, **unmodified**, and here for one node.
+
+    ``uncorrelated/angular`` is an ``xs:choice`` of three (``gnds.xsd:1686``),
+    and the census measured its members across the 558 distributed neutron
+    evaluations: ``isotropic2d`` 126 095, ``XYs2d`` **406 in 144 files**,
+    ``forward`` 0. The three fixtures beside it carry **25 ``isotropic2d`` and
+    not one ``XYs2d``**, so that branch of the reader shipped with
+    ``uncorrelated`` without ever having seen a real one. This is the smallest
+    of the 144 files that fixes it — 59 kB — and it carries exactly one, with
+    fifteen sub-functions and axes of its own.
+
+    It also reads with an **empty** ``unsupported`` list, which no other
+    committed evaluation does: every law in it is one kika implements.
+    """
+    return _gnds_file("n-001_H_003.endf.gnds.xml")
 
 
 @pytest.fixture(scope="session")
@@ -750,6 +768,46 @@ def micro_ta182_gnds() -> Path:
     it is abridged and is not physics. Built by the same script.
     """
     return _gnds_file("micro_ta182.gnds.xml")
+
+
+@pytest.fixture(scope="session")
+def s36_gnds() -> Path:
+    """n + S36 from ENDF/B-VIII.1, **unmodified**, and the witness of three nodes.
+
+    Committed for ``KalbachMann`` — it is the smallest of the 272 evaluations
+    carrying one and holds **six** — and it turned out to be the smallest file
+    carrying ``branching1d`` and ``branching3d`` as well, five of each. 226 kB
+    for three of the four nodes phase 7b had left, which is why it is copied
+    whole rather than trimmed: the trim would have had to keep most of it.
+
+    All six ``KalbachMann`` are ``f`` + ``r`` with no ``a``, which is not this
+    file being unusual — the census counted **0 ``a`` in 3 730** across the
+    distribution.
+    """
+    return _gnds_file("n-016_S_036.endf.gnds.xml")
+
+
+@pytest.fixture(scope="session")
+def micro_be9_gnds() -> Path:
+    """Be-9's ``2n + 2He4`` reaction, trimmed. The **only** §18.5 witness there is.
+
+    ``angularEnergy`` occurs **twice in the whole ENDF/B-VIII.1 GNDS
+    distribution**, and both are in ``n-004_Be_009`` — in this one reaction, one
+    per product. There is no second file to choose instead, so the alternative
+    to trimming was committing 0.92 MB for two nodes.
+
+    It is trimmed rather than copied for the reason the other two are: the
+    construct exists only in a file too big to commit. Its ``resonances`` is a
+    lone ``scatteringRadius`` with no ``resonanceReactions``, so unlike Fe-56
+    and Ta-182 the kept reaction is chosen by what it *carries*, not by what the
+    resonance block links to.
+
+    Same warning as the other trims: **the numbers are abridged and are not
+    physics.** What is faithful is the shape — including the axis order, which
+    is the one thing that distinguishes §18.5 from §18.4 and which no schema
+    checks.
+    """
+    return _gnds_file("micro_be9.gnds.xml")
 
 
 #: Covariance fixture -> the construct it is here for. Each is the *smallest*

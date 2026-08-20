@@ -47,14 +47,45 @@ SCHEMA = Path("/soft_snc/FUDGE/6.10.0/fudge/fudge/gnds.xsd")
 COVARIANCE_SCHEMA = Path(
     "/soft_snc/FUDGE/6.10.0/fudge/fudge/covariances/covariances.xsd")
 
-#: The three committed evaluations, by conftest fixture name. Between them they
-#: carry every node the writer emits.
-FIXTURES = ("h2_gnds", "micro_fe56_gnds", "micro_ta182_gnds")
+#: The committed evaluations, by conftest fixture name. Between them they carry
+#: every node the writer emits. It was three until phase 7b needed witnesses:
+#: ``h3`` for ``uncorrelated/angular``'s ``XYs2d``, ``micro_be9`` for
+#: ``angularEnergy``, ``s36`` for ``KalbachMann``.
+FIXTURES = ("h2_gnds", "micro_fe56_gnds", "micro_ta182_gnds", "h3_gnds",
+            "micro_be9_gnds", "s36_gnds")
+
+#: The ones that still write an empty ``<distribution/>``, and the law that
+#: makes them. **Named rather than left out of** :data:`FIXTURES`, so that "not
+#: yet complete" is a statement in the file instead of an absence nobody
+#: notices; the invariant test below runs on all of them and the *fact* test
+#: skips exactly these.
+#:
+#: **Empty since ``branching3d`` landed, and that is phase 7b closing.** It held
+#: ``s36`` and its five of them, which was the last §18 node kika could not
+#: read. Both tests now run on every committed fixture. The dict is kept rather
+#: than deleted for the reason it was introduced: the next phase that ships a
+#: fixture ahead of its reader should declare it here instead of quietly leaving
+#: the file out of the parametrisation.
+INCOMPLETE_FIXTURES: dict = {}
 
 
 @pytest.fixture(params=FIXTURES)
 def evaluation(request):
     """Each committed reactionSuite in turn, as a path."""
+    return request.getfixturevalue(request.param)
+
+
+@pytest.fixture(params=FIXTURES)
+def completeEvaluation(request):
+    """The same, minus the ones :data:`INCOMPLETE_FIXTURES` names.
+
+    A skip and not a filtered list: the skip says *which* file and *which* law
+    on the run, so an entry that outlives its reason is visible rather than
+    quietly absent from the parametrisation.
+    """
+    law = INCOMPLETE_FIXTURES.get(request.param)
+    if law is not None:
+        pytest.skip(f"{request.param} still carries an unread {law}")
     return request.getfixturevalue(request.param)
 
 
@@ -292,29 +323,46 @@ def _schemaErrors(path: Path, schema: Path = SCHEMA):
             if "Schemas validity error : " in line]
 
 
-def test_the_only_schema_errors_are_the_distributions_phase_7b_will_fill(
+def test_the_only_schema_errors_are_the_nodes_phase_7b_will_fill(
         evaluation, tmp_path):
     """Every node the writer emits validates, except the ones it leaves empty.
 
     A product whose §18 law kika does not read gets an empty
-    ``<distribution/>``. That is deliberate and it is the *only* thing wrong
-    with the file — this test says so by counting, so the day §18 lands the
-    number goes to zero and this test is what notices.
+    ``<distribution/>``, and one whose §17.3 multiplicity form it does not
+    model gets an empty ``<multiplicity/>``. Both are deliberate and both are
+    invalid, which is the point: the file announces its own incompleteness to
+    any validator rather than asserting, on the evaluator's behalf, that
+    nothing was given. This test says those are the *only* things wrong with
+    the file, so the day the last one lands the count goes to zero and this is
+    what notices.
+
+    **The multiplicity half was not here until ``s36`` was committed**, and its
+    absence was not a decision — no committed fixture carried a ``branching1d``,
+    ``reference`` or ``unspecified`` multiplicity, so a whole second family of
+    deliberate invalidity had never been written by a test. 14 032 + 3 539 + 178
+    occurrences across the distribution say it is not the rare half.
     """
     suite = kika.read(evaluation, covariances=False)
     path, report = _write(suite, tmp_path)
 
     errors = _schemaErrors(path)
     assert all("Element 'distribution': Missing child element" in error
+               or "Element 'multiplicity': Missing child element" in error
                for error in errors), errors
 
+    products = [product for reaction in _everyReaction(suite)
+                for product in _everyProduct(reaction.outputChannel)]
     withoutDistribution = sum(
-        1 for reaction in _everyReaction(suite)
-        for product in _everyProduct(reaction.outputChannel)
+        1 for product in products
         if product.distribution is None or len(product.distribution) == 0
     )
-    assert len(errors) == withoutDistribution
-    if errors:
+    withoutMultiplicity = sum(
+        1 for product in products
+        if product.multiplicity is not None and product.multiplicity.form is None
+    )
+    assert len(errors) == withoutDistribution + withoutMultiplicity, errors
+
+    if withoutDistribution:
         assert any(str(withoutDistribution) in entry
                    for entry in report.unsupported), report.unsupported
 
@@ -333,6 +381,104 @@ def _everyProduct(channel):
             yield from _everyProduct(product.outputChannel)
 
 
+@pytest.mark.parametrize("form", [
+    '<reference label="eval" href="/reactionSuite/reactions/reaction'
+    "[@label='n + H2']/outputChannel/products/product[@label='n']"
+    '/multiplicity"/>',
+    '<branching1d label="eval"/>',
+    '<unspecified label="eval"/>',
+])
+def test_a_number_free_multiplicity_is_written_back_and_validates(form, h2_gnds,
+                                                                  tmp_path):
+    """§17.3's three number-free forms, through the whole pipeline.
+
+    **This is the multiplicity twin of the empty ``<distribution/>``, and it was
+    not deliberate.** ``MultiplicityType`` (``gnds.xsd:1626``) requires a child,
+    so a ``<multiplicity/>`` with none does not validate — and that is exactly
+    what kika wrote for every ``reference``, ``branching1d`` and ``unspecified``
+    it met: **17 749 nodes** across the distribution, invalid for want of three
+    classes that are one attribute each. No committed fixture carried one, which
+    is why no test said so until ``s36`` arrived.
+
+    Each is grafted rather than taken from a fixture because the smallest
+    distributed file with a multiplicity ``reference`` is 3.2 MB, and these
+    nodes have no data shape to misread — they *are* their attributes, so a
+    graft covers them as well as a witness would.
+    """
+    from kika.gnds.tests.test_decode import _graftMultiplicityForm
+
+    source = _graftMultiplicityForm(h2_gnds, tmp_path, form)
+    written, report = _write(kika.read(source, covariances=False), tmp_path)
+    root = ET.parse(written).getroot()
+
+    tag = ET.fromstring(form).tag
+    grafted = [node for node in root.iter("multiplicity")
+               if any(child.tag == tag for child in node)]
+    assert len(grafted) == 1, f"the <{tag}> did not survive to the output"
+    assert dict(grafted[0][0].attrib) == dict(ET.fromstring(form).attrib)
+    assert not [entry for entry in report.losses if "<multiplicity> is empty"
+                in entry]
+    assert _schemaErrors(written) == []
+
+
+def test_a_threshold_keeps_its_domain_through_a_round_trip(evaluation,
+                                                           tmp_path):
+    """Every ``constant1d`` comes back over the domain the file gave it.
+
+    **This is the gate the fixed point could not be.** The writer used to fill
+    a multiplicity's and a Q's ``domainMin``/``domainMax`` from the ``evaluated``
+    style's ``projectileEnergyDomain``, because the model held a bare float with
+    no domain of its own. ``test_a_written_file_is_a_fixed_point`` compares two
+    *written* files and both writes agreed on the wrong number, so nothing
+    failed while H-2's (n,2n) multiplicity of 2 and its Q of −2 225 002 eV,
+    stated over ``3.339e6 … 1.5e8``, came back out over ``1e-5 … 1.5e8``. A
+    threshold reaction that starts at 1e-5 eV is a claim the evaluation does not
+    make.
+
+    Comparing against the **source file** rather than against a second write is
+    the whole difference, and it is why this is a separate test rather than an
+    assertion inside that one.
+    """
+    written, _ = _write(kika.read(evaluation, covariances=False), tmp_path)
+
+    def domains(path):
+        root = ET.parse(path).getroot()
+        return {parent: [(float(child.attrib["domainMin"]),
+                          float(child.attrib["domainMax"]))
+                         for node in root.iter(parent) for child in node
+                         if child.tag == "constant1d"]
+                for parent in ("multiplicity", "Q")}
+
+    before, after = domains(evaluation), domains(written)
+    assert before == after, (
+        "a constant1d came back over a domain the file did not state"
+    )
+    assert any(before[parent] for parent in before), (
+        f"{evaluation} has no constant1d under a <multiplicity> or a <Q>, so "
+        f"this test measured nothing on it"
+    )
+
+
+def test_every_committed_gnds_fixture_now_validates_completely(
+        completeEvaluation, tmp_path):
+    """Phase 7b's acceptance gate, and the number it moves.
+
+    Before ``uncorrelated`` landed the first three fixtures wrote 3, 1 and 21
+    empty ``<distribution/>`` elements — 25 schema errors that were deliberate,
+    one per product whose law kika could not read. All 25 were the same law. The
+    sibling test above still holds the *invariant* (whatever errors there are,
+    they are only that kind, and their count matches the model); this one holds
+    the **fact**, so that a law regressing into unread shows up as a failure
+    here rather than as a silently-true invariant.
+
+    It runs on every fixture except those :data:`INCOMPLETE_FIXTURES` names,
+    which is one: ``s36`` and its five ``branching3d``.
+    """
+    suite = kika.read(completeEvaluation, covariances=False)
+    path, _ = _write(suite, tmp_path)
+    assert _schemaErrors(path) == []
+
+
 def test_an_unreadable_distribution_is_left_empty_and_never_called_unspecified(
         h2_gnds, tmp_path):
     """The one substitution that would make the file valid, and is a forgery.
@@ -340,17 +486,72 @@ def test_an_unreadable_distribution_is_left_empty_and_never_called_unspecified(
     ``<unspecified/>`` is the **evaluator** stating that no distribution is
     given. Writing it where kika merely cannot read the law yet would put that
     statement in their mouth, and nothing downstream could tell the difference.
+
+    **The subject moved when phase 7b landed ``uncorrelated``.** H-2's three
+    empty ``<distribution/>`` elements were its three ``uncorrelated`` laws;
+    they are read now, so the doctrine needs a law that is still unread. One is
+    planted here — an ``<evaporation>``, one of the six analytic §18.3 spectra
+    (``gnds.xsd:1697-1709``) — and it exercises a second rule at the same time:
+    the reader keeps the angular half it *could* read, and the writer refuses
+    to emit a one-child ``<uncorrelated>`` because ``gnds.xsd:1677-1680`` is an
+    ``xs:sequence``. A half node would validate against nothing and read as a
+    complete statement; the empty element does not, and says so.
     """
-    suite = kika.read(h2_gnds, covariances=False)
+    tree = ET.parse(h2_gnds)
+    energy = tree.getroot().find(".//uncorrelated/energy")
+    for child in list(energy):
+        energy.remove(child)
+    ET.SubElement(energy, "evaporation")
+    planted = tmp_path / "evaporation.gnds.xml"
+    tree.write(planted)
+
+    suite = kika.read(planted, covariances=False)
     path, report = _write(suite, tmp_path)
 
     root = ET.parse(path).getroot()
     empty = [d for d in root.iter("distribution") if len(d) == 0]
-    assert len(empty) == 3
+    assert len(empty) == 1
+    assert list(root.iter("uncorrelated")) != [], (
+        "the other two uncorrelated laws must still be written; this test is "
+        "about the one that could not be read, not about the law"
+    )
     # H-2 *does* have a genuine `unspecified`, on its production channel, and
     # it survives — so the absence above is not the writer dropping the node.
     assert len(list(root.iter("unspecified"))) == 2
     assert any("does not validate" in entry for entry in report.unsupported)
+    assert any("requires both children" in entry
+               for entry in report.unsupported)
+    errors = _schemaErrors(path)
+    assert len(errors) == 1
+    assert "Element 'distribution': Missing child element" in errors[0]
+
+
+def test_a_form_the_writer_cannot_serialise_is_counted_as_incomplete(
+        micro_fe56_gnds, tmp_path):
+    """The half of the doctrine that was not being announced.
+
+    ``declareWhatIsMissing`` puts the file's own "this does not validate" line
+    in the report, and it fires off ``incompleteProducts``. That list was built
+    from ``len(distribution) == 0`` — the *model* dict — so a product whose one
+    form the writer has no serialisation for produced a childless
+    ``<distribution/>`` and **no announcement**: an invalid file that claimed
+    to be complete. Counting the written element instead is what closes it.
+    """
+    class _UnknownLaw:
+        productFrame = "lab"
+
+    suite = kika.read(micro_fe56_gnds, covariances=False)
+    product = next(p for reaction in _everyReaction(suite)
+                   for p in _everyProduct(reaction.outputChannel)
+                   if p.distribution is not None and len(p.distribution))
+    product.distribution.forms = {"eval": _UnknownLaw()}
+
+    path, report = _write(suite, tmp_path)
+    assert any("no serialisation for a _UnknownLaw" in entry
+               for entry in report.unsupported)
+    assert any("does not validate" in entry for entry in report.unsupported)
+    root = ET.parse(path).getroot()
+    assert [d for d in root.iter("distribution") if len(d) == 0]
 
 
 def test_the_covariance_sibling_validates_too(h2_gnds, tmp_path):
@@ -446,6 +647,179 @@ def test_the_endf_decoded_suites_schema_errors_are_pinned(micro_tape, tmp_path):
                if not any(kind in e for kind in ENDF_SCHEMA_GAPS)]
     assert unknown == [], unknown
     assert len(errors) == 7
+
+
+#: D25. What is wrong with a ``covarianceSuite`` **written from an ENDF decode**,
+#: by kind. **Empty, and it was two.** Both were the same shape of hole — an
+#: attribute §25 makes required that the ENDF side has no concept of and
+#: therefore never set — and both are closed:
+#:
+#: ``covarianceMatrix/@label``, 4 on Fe-56 and 2 on the PFNS tape, was the hole
+#: §25.3 had already patched one level down for ``parameterCovarianceMatrix``.
+#: ``covariances.xsd`` requires the attribute on **all four** forms, so
+#: ``encode._formLabel`` now fills it from the style ``writeCovarianceSuite``
+#: synthesises, for all four rather than for the one that was measured.
+#: ``covarianceSuite/@target``, 1 on each, was not a matrix attribute at all:
+#: the root saying what nuclide the file is about. It comes from the
+#: ``reactionSuite`` through ``decodeCovarianceSuite(target=…)``, the same route
+#: ``evaluation`` already took, because ENDF has no such string and the two
+#: documents of one pair must not derive it twice.
+#:
+#: The tuple stays rather than being deleted with the last entry: it is what a
+#: newly-introduced gap would be measured against, and an empty tuple asserts
+#: something an absent one does not.
+ENDF_COVARIANCE_SCHEMA_GAPS = ()
+
+#: ``(fixture name, error count)``. Two tapes rather than one because MF35 is a
+#: different route into the same writer — ``micro_pfns_cov`` reaches
+#: ``_covarianceMatrix`` through ``decodeMF35MT`` where ``micro_fe56_cov``
+#: reaches it through MF33 and MF34 — and a gap that only one of them shows is
+#: worth telling apart from one both do. Today they show the same two kinds.
+ENDF_COVARIANCE_TAPES = (("micro_cov_tape", 0), ("micro_pfns_cov_tape", 0))
+
+
+def _endfCovarianceSchemaErrors(tape, tmp_path):
+    """Write the pair and validate **the sibling**, which is the whole point.
+
+    ``kika.write`` emits two documents (``_write.py:_writeLinkedPair``): the
+    evaluation, and ``Covariances/<name>-covar.xml`` beside it. Everything that
+    validated an ENDF-decoded file so far validated the first one — and read it
+    with ``covariances=False``, so the second was never even built.
+    """
+    suite = kika.read(tape)
+    path = tmp_path / "out.gnds.xml"
+    kika.write(suite, path)
+    sibling = path.parent / "Covariances" / "out.gnds-covar.xml"
+    assert sibling.is_file(), f"kika.write emitted no covariance sibling at {sibling}"
+    return sibling, _schemaErrors(sibling, COVARIANCE_SCHEMA)
+
+
+@pytest.mark.parametrize("fixture,expected", ENDF_COVARIANCE_TAPES)
+def test_the_endf_decoded_covariance_sibling_is_pinned(fixture, expected,
+                                                       request, tmp_path):
+    """D25. The gate that was missing one level below the gate that was missing.
+
+    ``test_the_endf_decoded_suites_schema_errors_are_pinned`` closed D20 — "no
+    test validates a suite decoded from ENDF" — and it closed it for the
+    ``reactionSuite`` only: it reads with ``covariances=False`` and validates
+    against ``gnds.xsd``. A ``covarianceSuite`` is a **root in its own right**
+    (§25.1.1) with **its own schema**, so the sibling ``kika.write`` puts beside
+    every evaluation that has covariances was never looked at by anything. The
+    same hole, one level further out, surviving the fix for itself.
+
+    This test landed **declaring the damage rather than repairing it**, which is
+    the opposite order from D20 and is why it went first: a number that is
+    pinned can be lowered by anyone, and a number nobody measures is what let
+    D19 live for a phase. It was pinned at 5 and 3 for exactly one commit; both
+    kinds are described in :data:`ENDF_COVARIANCE_SCHEMA_GAPS`, which is now
+    empty.
+
+    **The count is not monotone downwards.** An absent required *child* makes
+    its whole subtree unreachable to the validator, so repairing one can raise
+    the count by exposing what it was standing in front of — the MF4 angular
+    ``axes`` hid 3 999 errors behind one. Both gaps here were *attributes*, which
+    do not hide a subtree, and they did fall cleanly — 5 → 0 and 3 → 0. That was
+    a property of those two and is not a rule: the next entry here may well go
+    up before it goes down.
+    """
+    tape = request.getfixturevalue(fixture)
+    _sibling, errors = _endfCovarianceSchemaErrors(tape, tmp_path)
+
+    unknown = [e for e in errors
+               if not any(kind in e for kind in ENDF_COVARIANCE_SCHEMA_GAPS)]
+    assert unknown == [], unknown
+    assert len(errors) == expected
+
+
+def test_the_covariance_sibling_says_the_same_target_as_the_evaluation(
+        micro_cov_tape, tmp_path):
+    """D25, half one. The pair must not disagree about what it is about.
+
+    ENDF has no target *string* anywhere: the nuclide name is derived from
+    MF1/451's ZA through PoPs, and ``decodeReactionSuite`` has already done that
+    work. So the covariance suite is handed the answer instead of re-deriving
+    it — a second derivation is a second chance for the two documents of one
+    pair to name different nuclides, and a reader following the ``externalFile``
+    from one to the other would have no way to tell which was right.
+
+    Asserted **against the evaluation's own value**, not against a literal:
+    ``target`` is ``'unknown'`` on this micro-tape, which is what
+    ``decode.py:235`` says when PoPs comes back empty. Mirroring that is
+    correct; inventing a nuclide name to make the file look finished would not
+    be.
+    """
+    suite = kika.read(micro_cov_tape)
+    path = tmp_path / "out.gnds.xml"
+    kika.write(suite, path)
+
+    evaluation = ET.parse(path).getroot()
+    sibling = ET.parse(path.parent / "Covariances" / "out.gnds-covar.xml").getroot()
+
+    assert sibling.attrib["target"] == evaluation.attrib["target"]
+    assert sibling.attrib["target"] == suite.target
+    assert sibling.attrib["projectile"] == evaluation.attrib["projectile"]
+
+
+def test_a_covariance_suite_decoded_without_a_target_says_so(micro_cov_tape):
+    """The consequence is announced where the absence is, not where it bites.
+
+    ``decodeCovarianceSuite`` is reachable without a ``reactionSuite`` — the
+    samplers at ``sampling/endf_perturbation.py:663`` and
+    ``sampling/mf35_sampling.py:177`` call it that way, and they are right to:
+    they want the matrices, not a document. But the suite they get back cannot
+    be written as valid GNDS, and without this line the next caller learns that
+    from ``xmllint``, three steps later and in another session.
+
+    The signature keeps its default rather than making ``target`` required: the
+    samplers have no reaction suite to take one from, and breaking them to
+    protect a writer they never call would be the wrong trade.
+    """
+    from kika.endf.model_adapter.covariances import decodeCovarianceSuite
+    from kika.endf.read_endf import read_endf
+
+    endf = read_endf(str(micro_cov_tape))
+
+    _suite, report = decodeCovarianceSuite(endf)
+    assert any("cannot be written as valid GNDS" in entry
+               for entry in report.warnings), report.warnings
+
+    _suite, report = decodeCovarianceSuite(endf, target="Fe56")
+    assert not [entry for entry in report.warnings
+                if "cannot be written as valid GNDS" in entry], report.warnings
+
+
+def test_every_endf_built_covariance_form_gets_the_label_the_schema_requires(
+        micro_cov_tape, tmp_path):
+    """D25, half two — and the fix is for four forms, not for the one measured.
+
+    ``covariances.xsd`` marks ``label`` required on ``covarianceMatrix``
+    (:118), ``shortRangeSelfScalingVariance`` (:126), ``mixed`` (:135) and
+    ``sum`` (:143). Only the first occurs in an ENDF decode today, so only the
+    first was in the error count — patching just that one would leave three
+    forms one MF away from reintroducing D25 with nothing to notice.
+
+    The approximation is **reported**, which is the part that matters more than
+    the attribute: a reader of the written file cannot tell a style label kika
+    invented from one an evaluator chose, and the report is the only place that
+    difference exists.
+    """
+    from kika.gnds.encode import SYNTHESISED_STYLE_LABEL
+
+    suite = kika.read(micro_cov_tape)
+    path = tmp_path / "out.gnds.xml"
+    report = kika.write(suite, path)
+
+    sibling = ET.parse(path.parent / "Covariances" / "out.gnds-covar.xml").getroot()
+    forms = [element for element in sibling.iter()
+             if element.tag in ("covarianceMatrix", "mixed", "sum",
+                                "shortRangeSelfScalingVariance")]
+    assert forms, "the tape has covariances and none of them reached the file"
+    for form in forms:
+        assert form.attrib.get("label") == SYNTHESISED_STYLE_LABEL, form.attrib
+
+    assert sum("carried no label" in entry
+               for entry in report.approximations) == len(forms), (
+        report.approximations)
 
 
 def test_a_bare_isotropic2d_goes_where_the_schema_admits_it(micro_tape, tmp_path):
@@ -567,6 +941,231 @@ def test_where_a_functional_sits_decides_which_attribute_it_declares(tmp_path):
         report.losses)
 
 
+def _xys3d():
+    """A hand-built ``XYs3d``, axes shared by identity all the way down.
+
+    Hand-built because **no file within reach carries one**: no committed
+    fixture has an ``XYs3d``, and the only registered tape that holds an
+    ``energyAngular`` is ``fe56_gnds``, which is 18.8 MB on the share and
+    marked ``tape``. So this pairs kika against kika's own emitter and against
+    the schema, and against no witness in distributed data.
+    """
+    from kika.nuclear_data.model import Axes, Axis, XYs1d, XYs2d, XYs3d
+
+    axes = Axes([
+        Axis(index=3, label="energy_in", unit="eV"),
+        Axis(index=2, label="energy_out", unit="eV"),
+        Axis(index=1, label="mu", unit=""),
+        Axis(index=0, label="P(mu,energy_out|energy_in)", unit=""),
+    ])
+
+    def spectrum(outer, first):
+        return XYs2d(axes=axes, outerDomainValue=outer, function1ds=[
+            XYs1d(xs=np.array([-1.0, 1.0]), ys=np.array([first, first + 1.0]),
+                  outerDomainValue=inner, axes=axes)
+            for inner in (1.0e4, 2.0e4)
+        ])
+
+    return XYs3d(
+        axes=axes,
+        interpolationQualifier="unitBase",
+        # 1 MeV twice: the outermost axis may repeat a value for the same
+        # reason the 2-d one may, and the list must survive the round trip.
+        function2ds=[spectrum(1.0e6, 0.0), spectrum(1.0e6, 2.0),
+                     spectrum(2.0e6, 4.0)],
+    )
+
+
+def test_an_xys3d_writes_the_shape_the_schema_asks_for():
+    """§6.5's container, and the ``axes`` identity decided over **two** levels.
+
+    ``_axesUnlessNested`` asks ``form.axes is parentAxes``. For a 3-d form the
+    same object has to reach the 1-d grandchildren, so a fresh ``Axes`` built
+    anywhere on the way down would put "carries axes of its own" in the report
+    for every nested node and write a file the schema rejects. This is the 3-d
+    twin of :func:`test_a_regions_container_indexes_its_children`.
+    """
+    from kika.nuclear_data.model import ConversionReport
+
+    root = ET.Element("root")
+    report = ConversionReport()
+    _function(root, _xys3d(), report, "test")
+
+    written = root.find("XYs3d")
+    assert written.find("axes") is not None, "the container head carries the axes"
+    assert written.attrib["interpolationQualifier"] == "unitbase", (
+        "FUDGE's spelling, as for XYs2d")
+
+    children = list(written.find("function2ds"))
+    assert [float(c.attrib["outerDomainValue"]) for c in children] == [1e6, 1e6, 2e6]
+    for child in children:
+        # `function2ds` (gnds.xsd:2253) is a choice of xData_XYs2d and
+        # xData_regions_2d; both require `outerDomainValue` and neither has an
+        # `index` attribute at all.
+        assert "index" not in child.attrib, child.attrib
+        assert child.find("axes") is None, "§5.1.1 has a child inherit its axes"
+        for grandchild in child.find("function1ds"):
+            assert "outerDomainValue" in grandchild.attrib, grandchild.attrib
+            assert grandchild.find("axes") is None
+
+    assert not [entry for entry in report.losses if "axes of its own" in entry], (
+        report.losses)
+
+
+def test_an_xys3d_survives_model_to_xml_to_model():
+    """The honest gate for this node: our reader against our writer.
+
+    What must survive is what a 3-d container is *for* — the outermost grid
+    including its repeat, the qualifier, and the one shared ``Axes`` object the
+    writer decides inheritance by.
+    """
+    from kika.gnds.primitives import readForm
+    from kika.nuclear_data.model import ConversionReport, InterpolationQualifier
+
+    before = _xys3d()
+    root = ET.Element("root")
+    _function(root, before, ConversionReport(), "test")
+    after = readForm(root.find("XYs3d"))
+
+    assert after.outerDomainValues == before.outerDomainValues == [1e6, 1e6, 2e6]
+    assert after.interpolationQualifier is InterpolationQualifier.unitBase
+    assert after.axes == before.axes
+    for child in after:
+        assert child.axes is after.axes
+        assert [f.outerDomainValue for f in child] == [1.0e4, 2.0e4]
+        for grandchild in child:
+            assert grandchild.axes is after.axes
+    np.testing.assert_array_equal(after[2][1].ys, before[2][1].ys)
+
+
+def test_an_xys3d_validates_against_the_schema(tmp_path):
+    """``xData_XYs3d_primary`` has no global element, so the root is declared here.
+
+    ``XYs3d`` occurs in ``gnds.xsd`` only inside ``DistributionAEType``
+    (``:1797``), which is ``energyAngular``/``angularEnergy``, and neither has a
+    global declaration either. Validating the fragment needs one of its type,
+    and a two-line schema that ``xs:include``s FUDGE's is the least that
+    provides one. ``gnds.xsd`` carries no ``targetNamespace``, so the include
+    is a plain textual merge and the type is FUDGE's own, unmodified.
+    """
+    if not SCHEMA.exists():
+        pytest.skip(f"{SCHEMA} is not on this machine")
+    wrapper = tmp_path / "xys3d.xsd"
+    wrapper.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+        'elementFormDefault="qualified">\n'
+        f'  <xs:include schemaLocation="{SCHEMA}"/>\n'
+        '  <xs:element name="XYs3d" type="xData_XYs3d_primary"/>\n'
+        "</xs:schema>\n"
+    )
+
+    root = ET.Element("root")
+    from kika.nuclear_data.model import ConversionReport
+    _function(root, _xys3d(), ConversionReport(), "test")
+
+    fragment = tmp_path / "fragment.xml"
+    ET.ElementTree(root.find("XYs3d")).write(fragment)
+    assert _schemaErrors(fragment, wrapper) == []
+
+
+def test_a_non_linlin_xys3d_cannot_be_written_valid_and_that_is_the_schema(tmp_path):
+    """The one place ``XYs3d`` is *not* ``XYs2d`` a floor up, and it is a gap.
+
+    ``xData_XYs2d_primary`` (``gnds.xsd:2193``), ``xData_XYs2d`` (``:2219``) and
+    ``xData_XYs2d_inRegions`` (``:2210``) each declare an ``interpolation``
+    attribute. ``xData_XYs3d_primary`` (``:2260``) declares only ``label`` and
+    ``interpolationQualifier`` — it omits ``interpolation`` — so an ``XYs3d``
+    whose outermost axis is anything but §6.1.1's lin-lin default writes an
+    attribute the schema rejects.
+
+    kika keeps the field rather than dropping it: the outermost axis of a real
+    energy-angular distribution has an interpolation law, and losing it on the
+    way in would be worse than writing a file this schema refuses. The lin-lin
+    case — every one written so far — validates, which
+    :func:`test_an_xys3d_validates_against_the_schema` asserts. This test pins
+    the other case so it is a recorded gap and not a later surprise.
+    """
+    if not SCHEMA.exists():
+        pytest.skip(f"{SCHEMA} is not on this machine")
+    from kika.nuclear_data.model import ConversionReport
+
+    wrapper = tmp_path / "xys3d.xsd"
+    wrapper.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+        'elementFormDefault="qualified">\n'
+        f'  <xs:include schemaLocation="{SCHEMA}"/>\n'
+        '  <xs:element name="XYs3d" type="xData_XYs3d_primary"/>\n'
+        "</xs:schema>\n"
+    )
+
+    form = _xys3d()
+    form.interpolation = "log-log"
+    root = ET.Element("root")
+    _function(root, form, ConversionReport(), "test")
+    fragment = tmp_path / "loglog.xml"
+    ET.ElementTree(root.find("XYs3d")).write(fragment)
+
+    errors = _schemaErrors(fragment, wrapper)
+    assert len(errors) == 1, errors
+    assert "attribute 'interpolation': The attribute 'interpolation' is not " \
+           "allowed" in errors[0], errors[0]
+
+
+def test_a_grafted_energy_angular_validates_inside_a_whole_file(
+        h2_gnds, tmp_path):
+    """§18.4 written back into a file that validates end to end.
+
+    The fragment tests above pin the ``XYs3d`` against a declaration this test
+    file makes up. This one is the real shape: an ``<energyAngular>`` inside a
+    ``<distribution>`` inside a product of a committed evaluation, validated as
+    a whole document against FUDGE's schema with nothing declared by us.
+
+    ``h2_gnds`` is the fixture that round-trips clean today, so any error here
+    is the grafted node's. Grafted because **no committed fixture carries an
+    ``energyAngular``** — the witness is ``fe56_gnds`` on the share, and the
+    gate that uses it is ``test_cross_section_oracle``'s report set.
+    """
+    from kika.gnds.tests.test_distributions import (ENERGY_ANGULAR_XML,
+                                                    graftDistributionForm)
+
+    source = graftDistributionForm(h2_gnds, tmp_path / "grafted.gnds.xml",
+                                   ENERGY_ANGULAR_XML)
+    written, report = _write(kika.read(source, covariances=False), tmp_path)
+
+    assert list(ET.parse(written).getroot().iter("energyAngular")), (
+        "the graft has to survive to the output for this to be a gate")
+    assert _schemaErrors(written) == []
+    assert not [entry for entry in report.losses if "axes of its own" in entry]
+
+
+def test_the_angular_energy_witness_is_written_back_valid(micro_be9_gnds,
+                                                          tmp_path):
+    """§18.5 through the whole pipeline on the file that actually has one.
+
+    Not a graft: ``micro_be9`` is trimmed from ``n-004_Be_009``, the only
+    evaluation in the distribution carrying an ``angularEnergy``, and it holds
+    both of the two that exist. Writing it back and validating the whole
+    document is the strongest gate §18.5 can have, because there is no tape to
+    put behind it the way ``fe56_gnds`` stands behind §18.4.
+
+    The tag assertion is not decoration. ``DistributionAEType`` is shared, so a
+    writer that emitted ``<energyAngular>`` here would produce a file that
+    **validates** — ``_schemaErrors == []`` would pass on it — and states the
+    wrong physics. The two asserts together are what close that.
+    """
+    written, _report = _write(kika.read(micro_be9_gnds, covariances=False),
+                              tmp_path)
+    root = ET.parse(written).getroot()
+
+    assert len(list(root.iter("angularEnergy"))) == 2
+    assert not list(root.iter("energyAngular")), (
+        "an <angularEnergy> was written as its mirror; the file would validate"
+    )
+    assert _schemaErrors(written) == []
+
+
 def test_every_committed_covariance_fixture_can_be_written(
         gnds_covariance_fixture, tmp_path):
     """The gate whose absence let two writer defects live in a shipped module.
@@ -592,6 +1191,228 @@ def test_every_committed_covariance_fixture_can_be_written(
     path.write_bytes(serialise(tree))
 
     assert _schemaErrors(path, COVARIANCE_SCHEMA) == []
+
+
+#: The two committed covariance files whose whole content is §25.3. Si-32 has
+#: one ``parameterCovariance`` and **no ``covarianceSections`` at all**; Tm-171
+#: has one plus the ten ``averageParameterCovariance`` of its URR. They are the
+#: only witnesses either node has, and until §25.3's writer landed the gate
+#: above passed on both by writing files with the nodes silently missing.
+PARAMETER_COVARIANCE_FIXTURES = ("n-014_Si_032", "n-069_Tm_171")
+
+
+def _covarianceRoundTrip(name, tmp_path):
+    """One committed covariance fixture, out and back. Returns (before, after, root)."""
+    from kika.gnds.covariances import readCovarianceSuite
+    from kika.gnds.encode import writeCovarianceSuite
+
+    source = (Path(__file__).parent / "data" / "Covariances"
+              / f"{name}.endf.gnds-covar.xml")
+    before, _ = readCovarianceSuite(Document.parse(source))
+    tree, report = writeCovarianceSuite(before, "2.0")
+    path = tmp_path / "out.gnds-covar.xml"
+    path.write_bytes(serialise(tree))
+    after, _ = readCovarianceSuite(Document.parse(path))
+    return before, after, ET.parse(path).getroot(), path, report
+
+
+@pytest.mark.parametrize("name", PARAMETER_COVARIANCE_FIXTURES)
+def test_the_parameter_covariances_reach_the_written_file(name, tmp_path):
+    """The gate the schema test could not be: **the node is there**.
+
+    ``test_every_committed_covariance_fixture_can_be_written`` validated Si-32
+    and Tm-171 while the writer dropped every §25.3 node on the floor, because a
+    file with nothing in it is a valid file. So the first assertion is presence
+    and the count, not validity.
+    """
+    before, _after, root, _path, _report = _covarianceRoundTrip(name, tmp_path)
+
+    container = root.find("parameterCovariances")
+    assert container is not None, (
+        f"{name}'s whole content is §25.3 and the written file has no "
+        f"<parameterCovariances> at all")
+    assert len(container) == len(before.parameterCovariances)
+
+    # covariances.xsd:27-34 is an xs:sequence, not a bag: every
+    # `parameterCovariance` before every `averageParameterCovariance`.
+    tags = [child.tag for child in container]
+    assert tags == sorted(tags, key=lambda tag: tag != "parameterCovariance"), tags
+
+
+@pytest.mark.parametrize("name", PARAMETER_COVARIANCE_FIXTURES)
+def test_the_parameter_covariance_matrices_survive_the_round_trip(name, tmp_path):
+    """Matrices element for element, and every link attribute.
+
+    ``matrixStartIndex`` is in here on purpose. It is already zero-based —
+    Si-32's 1 + 18 = 19 is the arithmetic that says so, and
+    ``covariances.py:_readParameterCovarianceMatrix`` carries the note — so a
+    writer that "converted back to one-based" would shift every link by a row
+    and leave the counts still summing to the order, which is all the model
+    checks.
+    """
+    before, after, _root, _path, _report = _covarianceRoundTrip(name, tmp_path)
+
+    assert len(after.parameterCovariances) == len(before.parameterCovariances)
+    for first, second in zip(before.parameterCovariances,
+                             after.parameterCovariances):
+        assert type(first) is type(second)
+        assert first.label == second.label
+        np.testing.assert_array_equal(first.form.matrix, second.form.matrix)
+        assert first.form.isRelative == second.form.isRelative
+        assert (first.rowData is None) == (second.rowData is None)
+        if first.rowData is not None:
+            assert first.rowData.href == second.rowData.href
+
+        links = getattr(first.form, "parameters", None)
+        if links is None:
+            continue
+        assert [(link.label, link.href, link.nParameters, link.matrixStartIndex)
+                for link in links] == [
+            (link.label, link.href, link.nParameters, link.matrixStartIndex)
+            for link in second.form.parameters]
+
+
+def test_neither_parameter_covariance_fixture_loses_its_links(tmp_path):
+    """``_readParameterCovarianceMatrix`` drops the links when they do not
+    account for every row, and that would make the round trip above assert an
+    equality of two empty lists. Both fixtures cover all their rows — Si-32's
+    1 + 18 = 19, Tm-171's 1 + 1200 = 1201 — so the comparison has teeth."""
+    from kika.gnds.covariances import readCovarianceSuite
+
+    for name in PARAMETER_COVARIANCE_FIXTURES:
+        source = (Path(__file__).parent / "data" / "Covariances"
+                  / f"{name}.endf.gnds-covar.xml")
+        suite, report = readCovarianceSuite(Document.parse(source))
+        assert not [entry for entry in report.losses
+                    if "cannot be named" in entry], report.losses
+        for covariance in suite.parameterCovariances:
+            if hasattr(covariance.form, "parameters"):
+                assert covariance.form.parameters, covariance.label
+
+
+def test_si_32_is_still_written_with_no_covariance_sections(tmp_path):
+    """The fixture exists for the case "a suite that is nothing but §25.3", and
+    a writer that invented an empty ``<covarianceSections/>`` would say the
+    evaluation has cross-section covariances it does not have."""
+    _before, after, root, _path, _report = _covarianceRoundTrip("n-014_Si_032",
+                                                                tmp_path)
+    assert root.find("covarianceSections") is None
+    assert after.covarianceSections == []
+
+
+@pytest.mark.parametrize("name", PARAMETER_COVARIANCE_FIXTURES)
+def test_the_written_parameter_covariances_validate(name, tmp_path):
+    """Same schema gate as the fixture sweep, but on a file that has the nodes.
+
+    Skipped on any machine without FUDGE, **which includes every GitHub
+    runner** — the green tick upstream says nothing about this one.
+    """
+    _before, _after, _root, path, _report = _covarianceRoundTrip(name, tmp_path)
+    assert _schemaErrors(path, COVARIANCE_SCHEMA) == []
+
+
+def test_a_cross_term_parameter_covariance_is_reported_not_emitted(tmp_path):
+    """§25.3.1 has no ``columnData``, and the model has one.
+
+    ``covariances.xsd:160-168`` gives ``parameterCovariance`` exactly
+    ``rowData`` and ``parameterCovarianceMatrix``. The model carries a
+    ``columnData`` and an ``isCrossTerm`` built off it, and the reader fills it
+    from a file that has one — so this is a state the model reaches and the
+    format cannot express. Writing the attribute anyway would invalidate the
+    file; dropping it silently would lose the only statement that the two axes
+    are different parameters.
+    """
+    from kika.gnds.encode import writeCovarianceSuite
+    from kika.nuclear_data.model import (CovarianceSuite, DataLink,
+                                         ParameterCovariance,
+                                         ParameterCovarianceMatrix,
+                                         ParameterLink)
+
+    suite = CovarianceSuite(
+        evaluation="test", projectile="n", target="Si32",
+        parameterCovariances=[ParameterCovariance(
+            label="cross",
+            rowData=DataLink(href="#rows"),
+            columnData=DataLink(href="#columns"),
+            form=ParameterCovarianceMatrix(
+                matrix=np.eye(3), label="eval",
+                parameters=[ParameterLink(label="l", href="#p", nParameters=3)],
+            ),
+        )],
+    )
+    tree, report = writeCovarianceSuite(suite, "2.0")
+    written = tree.getroot().find("parameterCovariances/parameterCovariance")
+
+    assert written.find("columnData") is None
+    assert "crossTerm" not in written.attrib
+    assert any("#columns" in entry for entry in report.losses), report.losses
+
+
+def test_a_parameter_covariance_whose_rows_nothing_names_is_left_out(tmp_path):
+    """The other half of the dropped-link case, and it is a real one.
+
+    When ``_readParameterCovarianceMatrix`` drops links that do not cover every
+    row, what reaches the writer is a matrix with no ``parameters``. §25.3.2
+    makes ``<parameters>`` mandatory with at least one ``parameterLink``, so
+    there is no valid file to write: the choice is an invalid one or an absent
+    covariance, and the absent one is the only version that does not claim
+    something. Neither committed fixture reaches this — see
+    ``test_neither_parameter_covariance_fixture_loses_its_links``.
+    """
+    from kika.gnds.encode import writeCovarianceSuite
+    from kika.nuclear_data.model import (CovarianceSuite, DataLink,
+                                         ParameterCovariance,
+                                         ParameterCovarianceMatrix)
+
+    suite = CovarianceSuite(
+        evaluation="test", projectile="n", target="Si32",
+        parameterCovariances=[ParameterCovariance(
+            label="unnamed rows",
+            rowData=DataLink(href="#rows"),
+            form=ParameterCovarianceMatrix(matrix=np.eye(3), label="eval"),
+        )],
+    )
+    tree, report = writeCovarianceSuite(suite, "2.0")
+
+    # Not an empty container either: `<parameterCovariances/>` is valid and
+    # says the evaluation has none, which is not what happened.
+    assert tree.getroot().find("parameterCovariances") is None
+    assert any("unnamed rows" in entry for entry in report.losses), report.losses
+
+
+def test_an_endf_built_parameter_matrix_gets_the_label_the_schema_requires():
+    """§25.3.2 makes ``label`` required and MF32 has no such concept.
+
+    ``kika/endf/model_adapter/parameter_covariances.py`` builds every
+    ``ParameterCovarianceMatrix`` with ``label=None``, so the one attribute the
+    schema will not do without is exactly the one an ENDF-sourced suite never
+    has. It is filled with the style label the suite writer synthesises, and
+    reported — the source said nothing about which style the matrix belongs to.
+    """
+    from kika.gnds.encode import writeCovarianceSuite
+    from kika.nuclear_data.model import (CovarianceSuite, DataLink,
+                                         ParameterCovariance,
+                                         ParameterCovarianceMatrix,
+                                         ParameterLink)
+
+    suite = CovarianceSuite(
+        evaluation="test", projectile="n", target="Si32",
+        parameterCovariances=[ParameterCovariance(
+            label="MF32", rowData=DataLink(href="#rows"),
+            form=ParameterCovarianceMatrix(
+                matrix=np.eye(2), label=None,
+                parameters=[ParameterLink(label="l", href="#p", nParameters=2)],
+            ),
+        )],
+    )
+    tree, report = writeCovarianceSuite(suite, "2.0")
+    matrix = tree.getroot().find(
+        "parameterCovariances/parameterCovariance/parameterCovarianceMatrix")
+
+    assert matrix.attrib["label"] == "eval"
+    assert matrix.attrib["type"] == "absolute"
+    assert any("no label" in entry for entry in report.approximations), (
+        report.approximations)
 
 
 # ---------------------------------------------------------------------------

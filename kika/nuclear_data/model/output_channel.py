@@ -20,8 +20,59 @@ from typing import List, Optional
 from .functions import Function1d
 from .quantities import PhysicalQuantity
 
-__all__ = ["Q", "Product", "Products", "Multiplicity", "OutputChannel",
+__all__ = ["Q", "Product", "Products", "Multiplicity", "Branching1d",
+           "UnspecifiedMultiplicity", "OutputChannel",
            "DelayedNeutron", "DelayedNeutrons", "FissionFragmentData"]
+
+
+@dataclass
+class Branching1d:
+    """§17.3. ``gnds.xsd:1638-1640`` — and **a branching is not a number**.
+
+    ``Branching1dMultiplicityType`` has one attribute and no content at all. The
+    node says *"this photon's multiplicity is the isomeric branching ratio
+    recorded in PoPs ``decayData`` for the level this channel decays from"*, and
+    resolving it means walking §12's decay chains. kika does not do that and
+    this class does not pretend to: it exists so the node reads and writes back
+    identically, and so :attr:`Multiplicity.isEvaluable` can say ``False`` out
+    loud instead of the multiplicity merely looking empty.
+
+    It always arrives with a
+    :class:`~kika.nuclear_data.model.distributions.Branching3d` on the same
+    product's ``distribution`` — the two counts across the library are equal at
+    **14 032**, in the same 282 files, because they are the two halves of one
+    statement about one product. They are declared in separate modules all the
+    same, because §17.3 and §18.1.1 are separate choice points with separate
+    complexTypes and this package is laid out by chapter.
+    """
+
+    label: str
+
+
+@dataclass
+class UnspecifiedMultiplicity:
+    """§17.3. ``gnds.xsd:1642-1644`` — the evaluator declining to say how many.
+
+    **Not** :class:`~kika.nuclear_data.model.distributions.Unspecified`, though
+    both nodes are spelled ``unspecified``. ``UnspecifiedMultiplicityType``
+    carries a label and nothing else; ``DistributionUnspecifiedType``
+    (``gnds.xsd:1841``) carries a label **and a required ``productFrame``**.
+    Sharing the class would hand every multiplicity a frame the node cannot
+    hold, and the writer would then have to choose between emitting an attribute
+    the schema rejects and dropping one the model claims to have.
+
+    The two say different things anyway: ``unspecified`` under a
+    ``distribution`` is the evaluator declining to give P(E′,mu\\|E) *in a stated
+    frame*; here it is declining to say how many come out, and there is no frame
+    in which that could be said.
+
+    The name breaks the package's class-is-the-node-name-capitalised rule, and
+    has to: two nodes in two chapters share a spelling. ``kika/gnds/nodes.py``
+    already names this exact collision as one of the reasons its key is
+    ``(family, tag)``, so the registry carries both without ambiguity.
+    """
+
+    label: str
 
 
 @dataclass
@@ -30,11 +81,28 @@ class Q:
 
     ``None`` means *not known*, which is a different statement from ``0.0`` and
     the distinction the flat classes could not make.
+
+    **The domain is the file's and not the evaluation's.** §17.1.1 writes a Q as
+    a ``constant1d``, and ``xData_constant1d`` (``gnds.xsd:2099``) makes
+    ``domainMin`` and ``domainMax`` required — for a threshold reaction they are
+    the threshold, not the evaluation's full range. Until these two fields
+    existed the writer filled them from the ``evaluated`` style's
+    ``projectileEnergyDomain``, which turned H-2's (n,2n) Q of −2 225 002 eV
+    over ``3.339e6 … 1.5e8`` into the same Q over ``1e-5 … 1.5e8`` — a statement
+    the evaluation does not make, and one the read → write fixed point cannot
+    see because both writes agree on it.
+
+    They stay ``Optional``: a Q assembled from ENDF has no GNDS domain to carry,
+    and inventing one is what this exists to stop. The writer falls back to the
+    style's domain only when they are absent, and says so.
     """
 
     value: Optional[float] = None
     unit: str = "eV"
     label: Optional[str] = None
+    #: The ``constant1d``'s own domain, when the Q was read from GNDS.
+    domainMin: Optional[float] = None
+    domainMax: Optional[float] = None
 
     @property
     def isKnown(self) -> bool:
@@ -43,11 +111,43 @@ class Q:
 
 @dataclass
 class Multiplicity:
-    """§17.3. How many of a product come out, as a constant or a function of E."""
+    """§17.3. How many of a product come out.
 
-    constant: Optional[float] = None
-    function: Optional[Function1d] = None
-    label: Optional[str] = None
+    **§17.3 is an ``xs:choice``, so this holds one form and not a field per
+    member.** ``gnds.xsd:1626-1636`` gives a multiplicity seven alternatives,
+    and a class with one optional slot per alternative can represent states GNDS
+    cannot — a constant *and* a branching, say. One field says what the schema
+    says: exactly one of them, or none because the node was empty.
+
+    The choice is ``maxOccurs="unbounded"``, so a dict keyed by style label
+    would be defensible the way :class:`~kika.nuclear_data.model.\
+cross_section_forms.CrossSection` and
+    :class:`~kika.nuclear_data.model.distributions.Distribution` are dicts. It
+    is not one, and the reason is measured rather than argued: across the 558
+    distributed neutron evaluations **all 230 562 ``<multiplicity>`` nodes carry
+    exactly one form and all 230 562 are labelled ``eval``**, while
+    ``crossSection`` really does carry a second ``recon`` form. The dict pays
+    for itself there and for nothing here. If a library ever ships a
+    second-labelled multiplicity, ``form`` becomes ``forms['eval']`` and nothing
+    else moves.
+
+    **The form is an object and not a number, and that is what makes the round
+    trip faithful.** ``xData_constant1d`` (``gnds.xsd:2099``) makes
+    ``domainMin`` and ``domainMax`` required; a bare float could not hold them,
+    so the writer took them from the ``evaluated`` style's
+    ``projectileEnergyDomain`` instead. That silently widened every threshold
+    multiplicity — ``n-001_H_002.endf.gnds.xml:757`` states ``value="2"`` over
+    ``3.339e6 … 1.5e8`` and came back over ``1e-5 … 1.5e8``, which the read →
+    write fixed point cannot see because both writes agree. A
+    :class:`~kika.nuclear_data.model.functions.simple.Constant1d` carries its
+    own domain.
+    """
+
+    #: One member of §17.3's choice, or ``None`` for an empty node. The
+    #: functionals (``constant1d``, ``XYs1d``, ``regions1d``, ``polynomial1d``)
+    #: are :class:`Function1d` subclasses and answer :attr:`isEvaluable`; the
+    #: rest carry no numbers by design.
+    form: Optional[object] = None
     #: Not a GNDS node. ENDF states a multiplicity in a section of its own
     #: (MF1/452, /455, /456) with its own ZA/AWR/MAT header and its own LNU,
     #: and none of the four has a GNDS counterpart -- the same argument
@@ -56,12 +156,54 @@ class Multiplicity:
     #: `product` for the prompt nu-bar and a `multiplicitySum` for the total.
     provenance: Optional[object] = None
 
+    @property
+    def label(self) -> Optional[str]:
+        """The form's label, because §17.3 puts it there and not on the node.
+
+        ``MultiplicityType`` has no attributes at all: every one of its seven
+        members carries its own ``label``. Reading it off the form is what stops
+        the two spellings the writer used to have — ``multiplicity.label`` on
+        the ``constant1d`` path and ``form.label`` on the functional one — from
+        disagreeing, which nothing would have caught because the census says
+        both always hold ``eval``.
+        """
+        return getattr(self.form, "label", None)
+
+    @property
+    def isEvaluable(self) -> bool:
+        """This multiplicity is a number kika can compute at an energy.
+
+        Until phase 7b a multiplicity held a number or a curve, so "no constant
+        and no function" could be read as "kika did not decode this". §17.3 has
+        three members that carry no numbers **by design** — a ``reference`` to
+        another product's multiplicity (3 539 in the library), an isomeric
+        ``branching1d`` (14 032) and an ``unspecified`` (178) — and once those
+        are represented rather than dropped, an empty multiplicity and a
+        deliberately number-free one look alike to ``form is None``. This is the
+        question worth asking before evaluating.
+        """
+        return isinstance(self.form, Function1d)
+
     def evaluate(self, energy):
-        if self.function is not None:
-            return self.function.evaluate(energy)
-        if self.constant is not None:
-            return self.constant
-        raise ValueError("this multiplicity has neither a constant nor a function")
+        """The multiplicity at an energy, or a refusal that names the form.
+
+        **Below a threshold this now returns 0, where it used to return the
+        constant.** A :class:`Constant1d` evaluates to zero outside its own
+        domain (``outOfRange="zero"``), and the domain is the file's: H-2's
+        (n,2n) multiplicity of 2 is 2 above 3.339 MeV and 0 below it. It used to
+        answer 2 at 1 eV because the model held a bare float with no domain to
+        compare against.
+        """
+        if self.isEvaluable:
+            return self.form.evaluate(energy)
+        if self.form is None:
+            raise ValueError("this multiplicity is empty; the <multiplicity> "
+                             "node held no form kika could read")
+        raise ValueError(
+            f"this multiplicity is a {type(self.form).__name__}, which states "
+            f"no number: §17.3's reference, branching1d and unspecified are the "
+            f"evaluator declining to give one, not kika failing to read it"
+        )
 
 
 @dataclass

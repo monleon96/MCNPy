@@ -74,11 +74,16 @@ def test_resonances_is_the_one_child_allowed_to_be_none(suite):
 
 def test_the_declared_but_unimplemented_nodes_name_themselves():
     """A reader meeting one is told which GNDS node is missing."""
+    assert m.NOT_IMPLEMENTED_DISTRIBUTIONS
     for name, cls in m.NOT_IMPLEMENTED_DISTRIBUTIONS.items():
         with pytest.raises(NotImplementedError, match=name):
             cls()
     from kika.nuclear_data.model.functions.higher import NOT_IMPLEMENTED_NODES
 
+    # Down to one entry since XYs3d landed, and the assert is what keeps this
+    # loop from passing on an empty dict when the last one goes -- except that
+    # the last one cannot go: regions3d has no element in gnds.xsd to read.
+    assert NOT_IMPLEMENTED_NODES
     for name, cls in NOT_IMPLEMENTED_NODES.items():
         with pytest.raises(NotImplementedError, match=name):
             cls()

@@ -24,9 +24,14 @@ data. What the census settled:
 ``distribution``           ``uncorrelated`` 126 501, ``angularTwoBody`` 45 080,
                            ``unspecified`` 31 623, ``branching3d`` 14 032,
                            ``KalbachMann`` 3 730, ``energyAngular`` 2 948,
-                           ``angularEnergy`` 2. Two of the seven are read; the
-                           rest are §18 laws phase 7b fills, and each one met
-                           is named in the report with its xPath.
+                           ``angularEnergy`` 2. **All seven are read**:
+                           ``uncorrelated``, ``energyAngular``,
+                           ``angularEnergy``, ``KalbachMann`` and
+                           ``branching3d`` joined ``angularTwoBody`` and
+                           ``unspecified`` over phase 7b. The report's
+                           ``unsupported`` list is empty on every distributed
+                           evaluation, and ``test_cross_section_oracle`` pins
+                           that on the 18.8 MB Fe-56 file.
 ``angularTwoBody``         ``recoil`` 22 540, ``XYs2d`` 21 649,
                            ``isotropic2d`` 780, ``regions2d`` 111.
 ``styles``                 ``evaluated`` 558, ``crossSectionReconstructed``
@@ -60,25 +65,25 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Tuple
 
-from kika.nuclear_data.model import (AngularTwoBody, Background,
+from kika.nuclear_data.model import (Background, Branching1d,
                                      ConversionReport, CrossSection,
                                      CrossSectionSum,
                                      ExternalFile, ExternalFiles,
                                      FissionComponents, Frame, GndsProvenance,
-                                     Isotropic2d,
                                      Multiplicity, Nuclide, OrphanProducts,
                                      OutputChannel, Particle, PhysicalQuantity,
                                      PoPs, Product, Productions, Q,
                                      RangeQuantity, Reaction, ReactionId,
                                      ReactionSuite, Reactions, Reference,
                                      ResonancesWithBackground, Style, Styles,
-                                     Sums, Unspecified)
+                                     Sums, UnspecifiedMultiplicity)
 from kika.nuclear_data.model.distributions import Distribution
 from kika.nuclear_data.model.reactions import IncompleteReactions
 from kika.nuclear_data.model.sums import Add, MultiplicitySum, Summands
 
-from .primitives import (UnsupportedNode, readAxes, readForm, readFraction,
-                         readFunction2d)
+from .distributions import readDistribution
+from .primitives import (UnsupportedNode, readAxes, readForm,
+                         readFraction)
 from .resonances import readResonances
 from .styles import readStyles
 from .nodes import reads
@@ -376,7 +381,9 @@ class _SuiteReader:
         if element.find("doubleDifferentialCrossSection") is not None:
             self.unsupported(
                 "doubleDifferentialCrossSection", here,
-                "the model declares the slot and phase 7b fills it"
+                "the model declares the slot and nothing fills it; §14's "
+                "double-differential data is not a §18 law and was never in "
+                "phase 7b's scope, so no phase is scheduled for it"
             )
         return Reaction(
             id=ReactionId(
@@ -492,7 +499,9 @@ class _SuiteReader:
             self.unsupported(
                 "fissionFragmentData", here,
                 "delayed neutrons and fission energy release are read from ENDF "
-                "MF1/455 and MF1/458 today; the GNDS side is phase 7b"
+                "MF1/455 and MF1/458 today; the GNDS side has no phase "
+                "scheduled — §18.4 fission fragment data is not a §18.1.1 "
+                "distribution law and was not in phase 7b's scope"
             )
         return channel
 
@@ -524,6 +533,11 @@ class _SuiteReader:
             value=float(chosen.attrib["value"]),
             unit=unit,
             label=chosen.attrib.get("label"),
+            # The node's own domain, which for a threshold reaction is the
+            # threshold. Filling it from the evaluated style instead is what
+            # turned H-2's (n,2n) Q into a Q from 1e-5 eV; see `Q`'s docstring.
+            domainMin=float(chosen.attrib["domainMin"]),
+            domainMax=float(chosen.attrib["domainMax"]),
         )
 
     def pickOneForm(self, forms: List[ET.Element], path: str,
@@ -560,7 +574,8 @@ class _SuiteReader:
             product.multiplicity = self.readMultiplicity(multiplicity, here)
         distribution = element.find("distribution")
         if distribution is not None:
-            product.distribution = self.readDistribution(distribution, here)
+            product.distribution = readDistribution(
+                distribution, here, self.resolve, self.report)
         channel = element.find("outputChannel")
         if channel is not None:
             # §17.2.1's recursion: a product that breaks up or decays carries
@@ -575,82 +590,42 @@ class _SuiteReader:
 
     @reads("multiplicityForm", "constant1d", "reference", "unspecified", "branching1d")
     def readMultiplicity(self, element: ET.Element, path: str) -> Multiplicity:
+        """§17.3's ``multiplicity``: one member of its choice, or nothing.
+
+        The four functionals all go through :meth:`form`, ``constant1d``
+        included — it is a ``function1d`` in the registry
+        (``nodes.py``'s ``multiplicityForm``/``constant1d`` entry names
+        :class:`Constant1d` as its class) and reading it as a bare float was
+        what lost its ``domainMin``.
+
+        The other three carry no numbers, and each becomes the node it is rather
+        than an absence: a ``reference`` is a link (3 539 in the library), a
+        ``branching1d`` an isomeric transition (14 032) and an ``unspecified``
+        the evaluator declining to say (178). They used to be reported and
+        dropped, which made a deliberately number-free multiplicity look exactly
+        like one kika had failed to read — and wrote an invalid empty
+        ``<multiplicity/>`` in 17 749 places. :attr:`Multiplicity.isEvaluable`
+        is what asks the question they are the answer to.
+        """
         here = f"{path}/multiplicity"
         forms = [c for c in element if c.tag not in IGNORED]
         chosen = self.pickOneForm(forms, here, "multiplicity")
         if chosen is None:
             return Multiplicity()
-        label = chosen.attrib.get("label")
 
-        if chosen.tag == "constant1d":
-            return Multiplicity(constant=float(chosen.attrib["value"]),
-                                label=label)
-        if chosen.tag in ("reference", "unspecified", "branching1d"):
-            self.unsupported(
-                chosen.tag, here,
-                "kika's multiplicity is a constant or a function of E; a link, "
-                "an absence and an isomeric branching each need a node the "
-                "model does not have (phase 7b)"
-            )
-            return Multiplicity(label=label)
-        return Multiplicity(function=self.form(chosen, here, "multiplicity"),
-                            label=label)
-
-    # -- distributions -----------------------------------------------------
-
-    @reads("distributionForm", "angularTwoBody", "unspecified")
-    def readDistribution(self, element: ET.Element, path: str) -> Distribution:
-        here = f"{path}/distribution"
-        distribution = Distribution()
-        for child in element:
-            if child.tag in IGNORED:
-                continue
-            label = child.attrib.get("label", "")
-            if child.tag == "angularTwoBody":
-                form = self.readAngularTwoBody(child, here)
-            elif child.tag == "unspecified":
-                form = Unspecified(
-                    label=label,
-                    productFrame=Frame(child.attrib.get("productFrame", "lab")),
-                )
-            else:
-                self.unsupported(
-                    child.tag, here,
-                    "a §18 law kika declares and does not implement (phase 7b); "
-                    "the product keeps its multiplicity and loses only this form"
-                )
-                continue
-            distribution[label] = form
-        return distribution
-
-    @reads("angularTwoBodyForm", "isotropic2d", "recoil")
-    def readAngularTwoBody(self, element: ET.Element,
-                           path: str) -> AngularTwoBody:
-        """§18's ``angularTwoBody``, in all four of the shapes it takes."""
-        label = element.attrib.get("label", "")
-        here = f"{path}/angularTwoBody{_quoted(label)}"
-        twoBody = AngularTwoBody(
-            label=label,
-            productFrame=Frame(element.attrib.get("productFrame",
-                                                  "centerOfMass")),
-        )
-        for child in element:
-            if child.tag in IGNORED:
-                continue
-            if child.tag == "recoil":
-                twoBody.recoilHref = child.attrib.get("href", "")
-            elif child.tag == "isotropic2d":
-                twoBody.angular = Isotropic2d(
-                    label=label, productFrame=twoBody.productFrame
-                )
-            else:
-                try:
-                    twoBody.angular = readFunction2d(
-                        child, readAxes(child, self.resolve)
-                    )
-                except UnsupportedNode as exc:
-                    self.unsupported(child.tag, here, exc.args[0])
-        return twoBody
+        label = chosen.attrib.get("label", "")
+        if chosen.tag == "reference":
+            # The same class §16.1.1's `reference` uses; XLinkType and it are
+            # the same shape. The href is an xPath into this same document and
+            # is kept as the string it is — resolving it is not this reader's
+            # job, and §16.1.1 does not resolve its own either.
+            return Multiplicity(form=Reference(
+                href=chosen.attrib.get("href", ""), label=label))
+        if chosen.tag == "branching1d":
+            return Multiplicity(form=Branching1d(label=label))
+        if chosen.tag == "unspecified":
+            return Multiplicity(form=UnspecifiedMultiplicity(label=label))
+        return Multiplicity(form=self.form(chosen, here, "multiplicity"))
 
     # -- sums --------------------------------------------------------------
 

@@ -246,7 +246,8 @@ def _readEndf(path, covariances: bool):
         present = tuple(mf for mf in COVARIANCE_MF if mf in getattr(endf, "mf", {}))
         if present:
             suite.covarianceSuite, report = decodeCovarianceSuite(
-                endf, report, evaluation=suite.evaluation
+                endf, report, evaluation=suite.evaluation,
+                target=suite.target,
             )
             decoded = present
 

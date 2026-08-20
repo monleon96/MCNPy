@@ -289,10 +289,12 @@ def decodeReactionSuite(endf, report: Optional[ConversionReport] = None):
     if mf5 is not None:
         report.unsupportedNode(
             "MF5 (energy distributions) is present and parsed by kika, but "
-            "decoding it into this reactionSuite is GNDS phase 7b; the "
-            "distributions are absent from the products below. The parsed "
-            "sections are reachable as endf.mf[5] and are what the PFNS "
-            "perturbation pipeline reads."
+            "nothing decodes it into this reactionSuite; the distributions "
+            "are absent from the products below. **The model slots exist** "
+            "since GNDS phase 7b — what is missing is this adapter, the "
+            "ENDF -> model direction, which that phase did not cover and no "
+            "phase is scheduled for. The parsed sections are reachable as "
+            "endf.mf[5] and are what the PFNS perturbation pipeline reads."
         )
         for mt in sorted(getattr(mf5, "mt", {})):
             for gap in getattr(mf5.mt[mt], "report_gaps", list)():
@@ -307,9 +309,12 @@ def decodeReactionSuite(endf, report: Optional[ConversionReport] = None):
     if mf6 is not None:
         report.unsupportedNode(
             "MF6 (product energy-angle distributions) is present and parsed by "
-            "kika, but decoding it into this reactionSuite is GNDS phase 7b; "
-            "the distributions are absent from the products below. The parsed "
-            "sections are reachable as endf.mf[6]."
+            "kika, but nothing decodes it into this reactionSuite; the "
+            "distributions are absent from the products below. **The model "
+            "slots exist** since GNDS phase 7b — energyAngular, angularEnergy "
+            "and KalbachMann are exactly MF6's LAW=1/LANG=1, LAW=7 and "
+            "LAW=1/LANG=2 — so what is missing is this adapter and not a "
+            "model node. The parsed sections are reachable as endf.mf[6]."
         )
         for mt in sorted(getattr(mf6, "mt", {})):
             for gap in getattr(mf6.mt[mt], "report_gaps", list)():

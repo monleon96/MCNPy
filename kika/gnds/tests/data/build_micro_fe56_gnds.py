@@ -93,10 +93,19 @@ NEUTRONS = TAPES / "ENDF-B-VIII.1-GNDS/ENDF-B-VIII.1-GNDS/neutrons"
 #: validation step is skipped and says so.
 SCHEMA = Path("/soft_snc/FUDGE/6.10.0/fudge/fudge/gnds.xsd")
 
-#: ``output name -> (source file, the reactions to keep)``. The kept reactions
-#: are exactly the ones the file's own ``resonanceReactions`` link to; keeping
-#: those and no others is what makes the resonance block's links resolve in the
-#: trim, and the build refuses rather than produce a dangling one.
+#: ``output name -> (source file, the reactions to keep)``. For the two §19
+#: fixtures the kept reactions are exactly the ones the file's own
+#: ``resonanceReactions`` link to; keeping those and no others is what makes the
+#: resonance block's links resolve in the trim, and the build refuses rather
+#: than produce a dangling one.
+#:
+#: ``micro_be9`` is here for a different reason and keeps a different reaction.
+#: Be-9's ``resonances`` is a lone ``scatteringRadius`` — 295 bytes, no
+#: ``resonanceReactions``, nothing to link — so the reaction it keeps is chosen
+#: by what it carries instead: ``2n + 2He4`` holds **both** ``angularEnergy``
+#: nodes in the file, and that file is the whole population of §18.5 across the
+#: 558 distributed neutron evaluations. Two occurrences, one file, 0.92 MB —
+#: which is exactly the condition this script exists for.
 TARGETS = {
     "micro_fe56.gnds.xml": (
         "n-026_Fe_056.endf.gnds.xml",
@@ -105,6 +114,10 @@ TARGETS = {
     "micro_ta182.gnds.xml": (
         "n-073_Ta_182.endf.gnds.xml",
         ("n + Ta182", "Ta183 + photon [inclusive]"),
+    ),
+    "micro_be9.gnds.xml": (
+        "n-004_Be_009.endf.gnds.xml",
+        ("2n + 2He4",),
     ),
 }
 

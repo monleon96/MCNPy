@@ -1,25 +1,36 @@
-"""GNDS-2.1 §18 ``distribution``, with the laws declared and unimplemented.
+"""GNDS-2.1 §18 ``distribution`` — every law the library uses, implemented.
 
-The roadmap's rule: **empty slots exist, they are not absent.** Filling these is
-phase 7b. Until then each law is declared, so a reader meeting one can say which
-GNDS node it cannot handle instead of failing somewhere unrelated, and so that
-adding the implementation later restructures nothing.
+The roadmap's rule was **empty slots exist, they are not absent**: each law was
+declared before it was filled, so a reader meeting one could say which GNDS node
+it could not handle instead of failing somewhere unrelated, and so that adding
+the implementation later restructured nothing. Phase 7b filled them, and the
+rule is what made that a series of small commits rather than one large one.
 
-``angularTwoBody`` and ``isotropic2d`` are the exceptions: MF4 is inside kika's
-current parser coverage, so phase 3c fills them and they are real containers.
+**All seven §18.1.1 members the library contains are here** —
+``angularTwoBody``, ``unspecified``, ``uncorrelated``, ``energyAngular``,
+``angularEnergy``, ``KalbachMann`` and ``branching3d``. The other five members
+of that choice occur **zero times** across the 558 distributed neutron
+evaluations, so they are not modelled and ``kika/gnds/nodes.py`` says so with
+the count.
+
+What remains declared-and-empty is :class:`Recoil`, which is not a
+``<distribution>`` form at all and whose docstring explains where it really
+lives.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Union
 
+from .axes import Axes
 from .enums import Frame
-from .functions import Function1d, Function2d, Regions2d, XYs2d
+from .functions import Function1d, Function2d, Regions2d, XYs2d, XYs3d
+from .quantities import PhysicalQuantity
 
 __all__ = [
     "Distribution", "AngularTwoBody", "Isotropic2d", "Unspecified",
-    "Uncorrelated", "EnergyAngular", "AngularEnergy",
-    "KalbachMann", "NBodyPhaseSpace", "Recoil",
+    "Uncorrelated", "DiscreteGamma", "PrimaryGamma", "NBodyPhaseSpace",
+    "EnergyAngular", "AngularEnergy", "KalbachMann", "Branching3d", "Recoil",
     "NOT_IMPLEMENTED_DISTRIBUTIONS",
 ]
 
@@ -127,37 +138,263 @@ class Unspecified:
 
 class _UnimplementedDistribution:
     gndsNodeName = "?"
+    #: Why this one is empty. A phase number was the *usual* answer and never
+    #: the only one — ``angularEnergy``'s emptiness was a decision, and the
+    #: census settled it — so the sentence belongs to the class rather than
+    #: being spelled once for everybody. The 2-d/3-d functionals learned the
+    #: same lesson; see
+    #: :attr:`~kika.nuclear_data.model.functions.higher._UnimplementedNode.plannedFor`.
+    #:
+    #: The default is no longer a phase, because :class:`Recoil` is the only
+    #: subclass left and it is not waiting for one — it is a node that belongs
+    #: somewhere else entirely.
+    plannedFor = "no phase scheduled"
 
     def __init__(self, *args, **kwargs):
         raise NotImplementedError(
             f"GNDS distribution {self.gndsNodeName!r} is declared but not "
-            f"implemented (phase 7b). It is present rather than absent so that a "
-            f"reader meeting one is told what is missing."
+            f"implemented ({self.plannedFor}). It is present rather than absent "
+            f"so that a reader meeting one is told what is missing."
         )
 
 
-class Uncorrelated(_UnimplementedDistribution):
-    gndsNodeName = "uncorrelated"
+@dataclass
+class DiscreteGamma:
+    """§18.3. A gamma line at one fixed energy — ``gnds.xsd:1777``.
+
+    Not a functional: there is no table, no interpolation and nothing to
+    evaluate between points. The whole content is the line's energy and the
+    incident-energy range over which the reaction emits it, which is why this
+    is three numbers and an ``axes`` rather than an :class:`XYs2d` of one point.
+
+    ``axes`` is a **required** child of the node (the schema says so, and the
+    three distributed fixtures all carry ``energy_in`` / ``energy_out`` /
+    ``P(energy_out|energy_in)``), so it is kept and written back rather than
+    reconstructed from a convention.
+    """
+
+    value: float
+    domainMin: float
+    domainMax: float
+    axes: Optional[Axes] = None
 
 
-class EnergyAngular(_UnimplementedDistribution):
-    gndsNodeName = "energyAngular"
+@dataclass
+class PrimaryGamma:
+    """§18.3. A gamma whose energy tracks the incident one — ``gnds.xsd:1786``.
+
+    The same four members as :class:`DiscreteGamma` plus the residual level the
+    transition lands on, and **not a subclass of it**: ``value`` means a
+    different thing here — the binding-energy term of E_gamma = value +
+    (A/(A+1))·E, not an emitted energy — and the writer dispatches on
+    ``isinstance``, where a subclass would let one be written as the other.
+    """
+
+    value: float
+    domainMin: float
+    domainMax: float
+    axes: Optional[Axes] = None
+    finalState: Optional[str] = None
 
 
-class AngularEnergy(_UnimplementedDistribution):
-    gndsNodeName = "angularEnergy"
+@dataclass
+class NBodyPhaseSpace:
+    """§18.3's *energy* form for an N-body break-up — ``gnds.xsd:1703``.
+
+    **Not a `<distribution>` form**, which is the mistake worth not making: it
+    is one of the eleven choices inside ``uncorrelated/energy``, so it arrives
+    with :class:`Uncorrelated` and never on its own. See
+    :data:`kika.gnds.nodes.NOT_A_DISTRIBUTION_FORM`.
+
+    ``mass`` is the total mass of the N products, and it comes with its unit
+    stated (``amu`` in the library) — a :class:`PhysicalQuantity` rather than a
+    bare float, for the reason §4.1's scattering radius made expensive: a
+    number whose unit lives in a convention instead of beside it is a factor of
+    ten waiting to happen.
+    """
+
+    numberOfProducts: int
+    mass: Optional[PhysicalQuantity] = None
 
 
-class KalbachMann(_UnimplementedDistribution):
-    gndsNodeName = "KalbachMann"
+@dataclass
+class Uncorrelated:
+    """§18.3. P(mu|E) and P(E'|E) stated independently — ``gnds.xsd:1676``.
+
+    The commonest distribution in the library by a wide margin: 126 501 of the
+    223 916 forms in ENDF/B-VIII.1-GNDS. On the ENDF side it is MF4 and MF5
+    read together, which is why the two halves are separate objects here rather
+    than one surface — they come from different sections and either can be the
+    one kika cannot read.
+
+    **Both halves are required by the schema** (the node is an ``xs:sequence``,
+    not a choice), so a half-filled one is invalid rather than merely partial.
+    The fields still default to ``None`` because the reader fills what it can
+    and reports the rest; refusing to write a half node is the *writer's*
+    judgement, made in one place, and it is the same judgement as the empty
+    ``<distribution/>``.
+    """
+
+    angular: Optional[Union[XYs2d, Isotropic2d]] = None
+    energy: Optional[Union[XYs2d, Regions2d, DiscreteGamma, PrimaryGamma,
+                           NBodyPhaseSpace]] = None
+    label: Optional[str] = None
+    productFrame: Frame = Frame.lab
+
+    def __post_init__(self) -> None:
+        self.productFrame = Frame(self.productFrame)
+
+    @property
+    def isComplete(self) -> bool:
+        """Both halves present, which is the only shape the schema admits."""
+        return self.angular is not None and self.energy is not None
 
 
-class NBodyPhaseSpace(_UnimplementedDistribution):
-    """**Not a `<distribution>` form.** §18.3's *energy* choice
-    (``gnds.xsd:1703``), inside ``uncorrelated/energy`` — so it arrives with
-    :class:`Uncorrelated` and not on its own."""
+@dataclass
+class EnergyAngular:
+    """§18.4. P(E′,mu|E) as one node — ``gnds.xsd:1797``, ``DistributionAEType``.
 
-    gndsNodeName = "NBodyPhaseSpace"
+    The correlated counterpart of :class:`Uncorrelated`: where that one states
+    P(mu|E) and P(E′|E) separately because the evaluation did, this one states
+    the joint distribution, which is what ENDF MF6 carries.
+
+    **The field is named after its type because the schema admits exactly one.**
+    ``DistributionAEType`` is an ``xs:sequence`` of a single ``XYs3d`` — no
+    choice, no ``regions3d`` (which cannot occur anywhere; see
+    :class:`~kika.nuclear_data.model.functions.higher.Regions3d`), no isotropic
+    shorthand. ``AngularTwoBody.angular`` is spelled neutrally because four
+    shapes can land there; here a neutral name would suggest an abstraction that
+    does not exist.
+
+    **Why this is not :class:`AngularEnergy` with a flag**, though the two share
+    a complexType exactly. The nesting order is the physics: ``energyAngular``
+    is P(E′|E) outermost with P(mu|E,E′) inside it, and ``angularEnergy`` is the
+    same two variables the other way round. Writing one as the other produces a
+    file that **validates and states the wrong physics** — no schema can catch
+    it, and the axes labels are the only thing that would disagree. The writer
+    dispatches on ``isinstance``, so two classes make that failure impossible
+    rather than merely unlikely. A shared class with a boolean makes it one
+    wrong default away.
+    """
+
+    xys3d: Optional[XYs3d] = None
+    label: Optional[str] = None
+    productFrame: Frame = Frame.lab
+
+    def __post_init__(self) -> None:
+        self.productFrame = Frame(self.productFrame)
+
+    @property
+    def isComplete(self) -> bool:
+        """The one child present, which is the only shape the schema admits."""
+        return self.xys3d is not None
+
+
+@dataclass
+class AngularEnergy:
+    """§18.5. P(mu,E′|E) — ``gnds.xsd:1797``, the *same* ``DistributionAEType``.
+
+    :class:`EnergyAngular`'s mirror, and everything that class's docstring says
+    about why the two are separate classes applies here from the other side. The
+    complexType is shared exactly; the element name is the **only** thing in the
+    file that says which variable is outermost, so a reader that decoded one
+    into the other would produce a model that is wrong in a way no schema can
+    see. Hence two dataclasses and an ``isinstance`` dispatch, not one class
+    with a flag.
+
+    **It exists because the census counted, and the count was not zero.** It was
+    left unwritten while the answer was unknown — the standing recommendation
+    was to retire the declaration if it turned out to occur nowhere, as
+    ``forward``, ``regions3d``, ``Ys1d``, ``gridded1d``, ``gridded3d``, ``Watt``
+    and ``MadlandNix`` all do. It occurs **twice**, both in
+    ``n-004_Be_009.endf.gnds.xml``, which is the entire population across the
+    558 distributed neutron evaluations. Two is not zero: the sentence "no
+    distributed evaluation carries one" would have been **false**, and with a
+    witness in hand and the complexType already implemented for its mirror,
+    writing it costs less than documenting why it is absent.
+    """
+
+    xys3d: Optional[XYs3d] = None
+    label: Optional[str] = None
+    productFrame: Frame = Frame.lab
+
+    def __post_init__(self) -> None:
+        self.productFrame = Frame(self.productFrame)
+
+    @property
+    def isComplete(self) -> bool:
+        """The one child present, which is the only shape the schema admits."""
+        return self.xys3d is not None
+
+
+@dataclass
+class KalbachMann:
+    """§18.6. The Kalbach-Mann systematics — ``gnds.xsd:1805-1814``.
+
+    A pre-equilibrium emission spectrum stated as **shape and asymmetry rather
+    than as a table of P(mu,E′|E)**: ``f`` is the energy spectrum and ``r`` the
+    pre-equilibrium fraction, and the angular distribution is reconstructed from
+    them by the systematics. That is why this is a law of its own and not an
+    ``energyAngular`` — the file gives the parameters, not the joint function.
+
+    **An ``xs:sequence``, so the order is the schema's and not a preference**:
+    ``f``, then ``r``, then ``a``. Each of the three is an ``XYs2dWrapperType``
+    (``:2204-2208``) — a bare wrapper element with **no attributes of its own**
+    holding exactly one primary ``XYs2d``, which carries its own ``axes``.
+
+    **``f`` and ``r`` are required and ``a`` is not**, which is the schema's
+    statement (``minOccurs="0"`` on ``a`` alone) and also the library's: the
+    census counted **3 730 KalbachMann nodes across 272 evaluations and every
+    one of them is ``f`` + ``r``**. ``a`` appears zero times. It is modelled
+    because the schema admits it and the data could exist tomorrow, and the
+    writer emits it only when it is there — a *reading* branch for a node nobody
+    has ever seen is the ``Ys1d`` case, and this stops short of it.
+    """
+
+    f: Optional[XYs2d] = None
+    r: Optional[XYs2d] = None
+    #: Zero occurrences in 3 730. Present so a file that has one round trips.
+    a: Optional[XYs2d] = None
+    label: Optional[str] = None
+    productFrame: Frame = Frame.centerOfMass
+
+    def __post_init__(self) -> None:
+        self.productFrame = Frame(self.productFrame)
+
+    @property
+    def isComplete(self) -> bool:
+        """``f`` and ``r``, which is what ``:1808-1809`` makes mandatory.
+
+        ``a`` is deliberately not in this test: a node without it is the
+        ordinary case and the only one the distribution contains.
+        """
+        return self.f is not None and self.r is not None
+
+
+@dataclass
+class Branching3d:
+    """§18.1.1. ``gnds.xsd:1816-1819`` — the distribution half of a branching.
+
+    ``DistributionBranching3dType`` is two attributes and no content: the node
+    states that this photon's angle-energy distribution follows from the
+    isomeric transition rather than from a tabulated law. Like its multiplicity
+    half it is **format fidelity and not evaluation** — kika reads and writes it
+    back and does not resolve the transition against PoPs ``decayData``, which
+    is a §12 walk the model does not do.
+
+    See :class:`~kika.nuclear_data.model.output_channel.Branching1d`, which
+    accompanies every one of these: 14 032 of each across the distribution, in
+    the same 282 files, on the same products.
+    """
+
+    label: str
+    productFrame: Frame = Frame.lab
+
+    def __post_init__(self) -> None:
+        # Coerced for the reason `Unspecified.__post_init__` gives: `Frame`
+        # subclasses `str`, so a raw string compares equal and everything
+        # appears to work until a writer asks for `.value`.
+        self.productFrame = Frame(self.productFrame)
 
 
 class Recoil(_UnimplementedDistribution):
@@ -173,14 +410,19 @@ class Recoil(_UnimplementedDistribution):
     gndsNodeName = "recoil"
 
 
-#: What a reader meeting one of these can be told is missing. **Two of the six
-#: are not members of §18.1.1's choice at all** — see the two docstrings above —
-#: which is why :data:`kika.gnds.nodes.NOT_A_DISTRIBUTION_FORM` names their real
-#: choice point and a test holds the two lists against each other.
+#: What a reader meeting one of these can be told is missing. **The one name
+#: left is not a member of §18.1.1's choice at all** — see :class:`Recoil` above
+#: — which is why :data:`kika.gnds.nodes.NOT_A_DISTRIBUTION_FORM` names its real
+#: choice point and a test holds the two lists against each other. It was three
+#: until §18.5 and §18.6 landed and :class:`AngularEnergy` and
+#: :class:`KalbachMann` became dataclasses.
+#:
+#: **It is down to a dict that no longer contains an unimplemented §18 law**,
+#: which is what phase 7b set out to do. The entry that remains is a misplaced
+#: name and not a gap; the test above is what keeps the distinction.
 NOT_IMPLEMENTED_DISTRIBUTIONS = {
     cls.gndsNodeName: cls
-    for cls in (Uncorrelated, EnergyAngular, AngularEnergy, KalbachMann,
-                NBodyPhaseSpace, Recoil)
+    for cls in (Recoil,)
 }
 
 

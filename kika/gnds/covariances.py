@@ -49,6 +49,11 @@ __all__ = ["readArray", "readCovarianceSuite"]
 #: Filled at the bottom of the module, once the readers exist.
 COVARIANCE_FORMS: Dict[str, Callable] = {}
 
+#: §25.3. The two kinds of node ``<parameterCovariances>`` holds. Same
+#: arrangement and same reason: derived from ``nodes.py`` rather than written
+#: out a second time here.
+PARAMETER_COVARIANCE_FORMS: Dict[str, Callable] = {}
+
 
 # ---------------------------------------------------------------------------
 # array
@@ -397,6 +402,7 @@ def _readSection(element: ET.Element, resolve, resolver, report) -> CovarianceSe
     return section
 
 
+@reads("parameterCovarianceForm", "parameterCovariance")
 def _readParameterCovariance(element: ET.Element, resolve, resolver, report):
     label = element.attrib.get("label", "")
     rowData = element.find("rowData")
@@ -472,6 +478,7 @@ def _readParameterCovarianceMatrix(element: ET.Element,
     )
 
 
+@reads("parameterCovarianceForm", "averageParameterCovariance")
 def _readAverageParameterCovariance(element: ET.Element, resolve, resolver, report):
     label = element.attrib.get("label", "")
     rowData = element.find("rowData")
@@ -496,6 +503,9 @@ def _readAverageParameterCovariance(element: ET.Element, resolve, resolver, repo
     _noteUnfollowableLink(covariance.rowData, resolver,
                           f"averageParameterCovariance {label!r} rowData", report)
     return covariance
+
+
+PARAMETER_COVARIANCE_FORMS.update(readersOf("parameterCovarianceForm"))
 
 
 # ---------------------------------------------------------------------------
@@ -560,19 +570,16 @@ def readCovarianceSuite(
 
     parameters = root.find("parameterCovariances")
     for child in (parameters if parameters is not None else []):
-        if child.tag == "parameterCovariance":
-            suite.parameterCovariances.append(
-                _readParameterCovariance(child, resolve, resolver, report)
-            )
-        elif child.tag == "averageParameterCovariance":
-            suite.parameterCovariances.append(
-                _readAverageParameterCovariance(child, resolve, resolver, report)
-            )
-        else:
+        reader = PARAMETER_COVARIANCE_FORMS.get(child.tag)
+        if reader is None:
             report.unsupportedNode(
                 f"<parameterCovariances> holds a <{child.tag}>, which kika does "
                 f"not read"
             )
+            continue
+        suite.parameterCovariances.append(
+            reader(child, resolve, resolver, report)
+        )
 
     # Both ways to the same object: the tuple is unchanged, and the
     # attribute is the one that survives `suite, _ = ...`. §11.4.
