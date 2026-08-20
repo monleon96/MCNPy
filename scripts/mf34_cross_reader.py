@@ -203,12 +203,14 @@ def read_mf34_split(
     All four exist to buy back the guarantee that reading the cross term
     separately from the marginals would otherwise cost:
 
-    * every a₀ block's COLUMN grid equals every L≥1 block's energy grid. If it
-      does not, the fold applies `PointMap.nearest(col_grid)` to the cross and
-      `PointMap.nearest(block_grid)` to the self blocks, and Σ_eval stops being
-      a congruence. This is the live risk once anything routes through
-      `merge_mf34`, whose per-pair union produces four different grids
-      (roadmap §L18, §10.7-4 step 4).
+    * every a₀ block's COLUMN grid equals **its own order's** self-block grid,
+      and every off-diagonal (L, L1) sits on exactly union(mesh_L, mesh_L1).
+      If either fails, the fold applies `PointMap.nearest(col_grid)` to the
+      cross and `PointMap.nearest(block_grid)` to the self blocks, and Σ_eval
+      stops being a congruence. Orders need NOT share one grid — a mesh per
+      order is legal ENDF-6 and folds correctly, because the union projection
+      `to_ang_covmat` applies to a rectangular record is exact refinement and
+      leaves `mat[bin_L, bin_L1]` recoverable (roadmap §10.8, §L18).
     * every a₀ block's ROW grid equals ``mf33_grid_ev``, so the magnitude leg is
       literally `_mf33_magnitude_map`'s output with no regridding.
     * every a₀ block is relative, matching the family (§L13).
@@ -268,23 +270,86 @@ def read_mf34_split(
         info["n_orders"] = 0
         return MF34WithCross(covmat, [], info)
 
-    # ---- the shape grid every leg must share -------------------------------
-    shape_grids = [np.asarray(g, dtype=float) for g in covmat.energy_grids]
-    if not shape_grids:
+    # ---- the grid each ORDER's axis lives on --------------------------------
+    #
+    # ⚑ ONE GRID PER ORDER, NOT ONE GRID FOR ALL OF THEM (roadmap §10.8).
+    #
+    # This used to demand a single shape grid across every block, and that was
+    # too strong. The congruence needs the SHAPE LEG OF ORDER L to reach the
+    # points through one map wherever order L appears — in its self block, in
+    # its off-diagonal blocks, and in its a_0 cross block. It does not need
+    # order 1 and order 5 to share a grid, and ENDF-6 states the grids inside
+    # each (L, L1) sub-subsection precisely so that they need not.
+    #
+    # With a mesh per order the file writes (L, L1) as a RECTANGULAR LB=6
+    # record on ``mesh_L x mesh_L1``, and `to_ang_covmat` squares it onto
+    # ``union(mesh_L, mesh_L1)``. That projection is exact refinement, so
+    # ``mat_U[i, j] = mat[bin_L(i), bin_L1(j)]`` and the fold's single
+    # `PointMap.nearest(U)` returns, for a point at E,
+    # ``mat[bin_L(E_j), bin_L1(E_k)]`` — precisely the two-map answer. The
+    # parameter identity survives the union; that is why the union is allowed
+    # here and the mismatch below is not.
+    #
+    # What still has to hold, and is checked:
+    #   * every order that an a_0 block names has a self block, which is where
+    #     its mesh is defined;
+    #   * every off-diagonal (L, L1) sits on exactly union(mesh_L, mesh_L1) —
+    #     anything else means the record was not written on the two meshes and
+    #     `bin_L` is not recoverable from it;
+    #   * every mesh spans the same interval, so `PointMap.nearest`'s off-grid
+    #     masking removes the same points on every axis. Different spans would
+    #     drop a point from one leg of Sigma_eval and keep it in another.
+    #
+    # Orders above `l_max` are not checked: `build_mf34_block` skips them and
+    # their a_0 blocks are dropped, so their grids reach no fold.
+    if not list(covmat.energy_grids):
         raise ValueError(f"{path} carries a_0 blocks but no L>=1 blocks to "
                          f"correlate them with")
-    ref_shape = shape_grids[0]
-    for i, g in enumerate(shape_grids[1:], start=1):
-        if not _grids_equal(g, ref_shape, grid_rtol):
+
+    order_grid: Dict[int, np.ndarray] = {}
+    for i in range(len(covmat.energy_grids)):
+        l_r, l_c = int(covmat.l_rows[i]), int(covmat.l_cols[i])
+        if l_r == l_c and l_r <= l_max:
+            order_grid[l_r] = np.asarray(covmat.energy_grids[i], dtype=float)
+
+    for i in range(len(covmat.energy_grids)):
+        l_r, l_c = int(covmat.l_rows[i]), int(covmat.l_cols[i])
+        if l_r == l_c or max(l_r, l_c) > l_max:
+            continue
+        g = np.asarray(covmat.energy_grids[i], dtype=float)
+        missing = [l for l in (l_r, l_c) if l not in order_grid]
+        if missing:
             raise ValueError(
-                f"{path} MF34 block {i} (L={covmat.l_rows[i]},"
-                f"{covmat.l_cols[i]}) sits on a grid of {g.size} edges while "
-                f"block 0 has {ref_shape.size}. A cross term written against "
-                f"one shape grid cannot be folded next to self blocks on "
-                f"several — that is §L18's four-grid problem, and it silently "
-                f"breaks the congruence. Force one grid in `merge_mf34` "
-                f"(§10.7-4 step 4) before shipping a_0 blocks."
+                f"{path} MF34 has an off-diagonal block (L={l_r},{l_c}) but no "
+                f"self block for order(s) {missing}. A mesh per order is "
+                f"defined by the (L, L) blocks; without one there is no "
+                f"`bin_L` for this order and no way to tell which parameter "
+                f"the off-diagonal names."
             )
+        want = np.union1d(order_grid[l_r], order_grid[l_c])
+        if not _grids_equal(g, want, grid_rtol):
+            raise ValueError(
+                f"{path} MF34 block {i} (L={l_r},{l_c}) sits on a grid of "
+                f"{g.size} edges, but its two orders' self blocks are on "
+                f"{order_grid[l_r].size} and {order_grid[l_c].size} edges, "
+                f"whose union is {want.size}. An off-diagonal written on any "
+                f"other grid was not written on the two meshes, so "
+                f"`mat[bin_L, bin_L1]` cannot be read back out of it — that is "
+                f"§L18's four-grid problem, and it silently breaks the "
+                f"congruence. Emit (L, L1) as an LB=6 record on "
+                f"mesh_L x mesh_L1."
+            )
+
+    spans = {l: (float(g[0]), float(g[-1])) for l, g in order_grid.items()}
+    if len(set(spans.values())) > 1:
+        raise ValueError(
+            f"{path} MF34's per-order meshes do not span the same interval "
+            f"({spans}). `PointMap.nearest` zeroes a point that falls outside "
+            f"a block's grid, so different spans drop a point from one leg of "
+            f"Sigma_eval while keeping it in another and no single M "
+            f"reproduces the sum."
+        )
+    ref_shape = order_grid[min(order_grid)]
 
     mf33_grid = (None if mf33_grid_ev is None
                  else np.asarray(mf33_grid_ev, dtype=float))
@@ -313,13 +378,24 @@ def read_mf34_split(
 
         row, col, mat = _a0_block_from(ss, l1)
 
-        if not _grids_equal(col, ref_shape, grid_rtol):
+        if l1 not in order_grid:
+            raise ValueError(
+                f"{path} carries an a_0 block (0, {l1}) but no ({l1}, {l1}) "
+                f"self block. The cross term's shape leg is order {l1}'s "
+                f"parameter, and without its self block the file declares a "
+                f"covariance for a parameter whose own variance it never "
+                f"states — [[0, Cx], [Cx.T, 0]] has a negative eigenvalue for "
+                f"every nonzero Cx."
+            )
+        if not _grids_equal(col, order_grid[l1], grid_rtol):
             raise ValueError(
                 f"{path} a_0 block (0, {l1}) has a column grid of {col.size} "
-                f"edges, but the L>=1 blocks are on {ref_shape.size}. The "
-                f"shape leg of the cross term must reach the points through "
-                f"the SAME map as the self blocks or Sigma_eval is not "
-                f"M J M^T (roadmap §10.7-2(a))."
+                f"edges, but order {l1}'s self block is on "
+                f"{order_grid[l1].size}. The shape leg of the cross term must "
+                f"reach the points through the SAME map as the self block of "
+                f"ITS OWN order, or Sigma_eval is not M J M^T (roadmap "
+                f"§10.7-2(a)). Collapse the cross with the same weights the "
+                f"mesh collapses the marginals with."
             )
         if mf33_grid is not None and not _grids_equal(row, mf33_grid, grid_rtol):
             if row.shape != mf33_grid.shape:
@@ -370,7 +446,14 @@ def read_mf34_split(
         n_orders=len(cross),
         orders=[b["l"] for b in cross],
         n_mag_bins=(0 if row_ref is None else int(row_ref.size - 1)),
-        n_shape_bins=int(ref_shape.size - 1),
+        # The widest mesh, kept under the old name because callers print it.
+        # `shape_bins_by_order` is the honest description once the meshes
+        # differ, and it equals {l: n_shape_bins} for every tape written
+        # before roadmap §10.8.
+        n_shape_bins=int(max(g.size for g in order_grid.values()) - 1),
+        shape_bins_by_order={l: int(g.size - 1)
+                             for l, g in sorted(order_grid.items())},
+        per_order_mesh=(len({g.size for g in order_grid.values()}) > 1),
         mag_range_ev=(None if row_ref is None
                       else (float(row_ref[0]), float(row_ref[-1]))),
         max_abs=float(max((np.abs(b["matrix"]).max() for b in cross), default=0.0)),
