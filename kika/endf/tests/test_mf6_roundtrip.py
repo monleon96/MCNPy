@@ -563,12 +563,51 @@ def test_law5_accessors_reshape_the_body_its_ltp_says(key, ltp, lidp, nodes):
             with pytest.raises(ValueError, match="LTP=1"):
                 body.tabulated(k)
         else:
-            mu, prob = body.tabulated(k)
-            assert len(mu) == len(prob) == body.nl(k)
+            mu, sigma = body.tabulated(k)
+            assert len(mu) == len(sigma) == body.nl(k)
             assert np.all(np.diff(mu) > 0), "cosines must ascend"
             assert mu[0] >= -1.0 and mu[-1] <= 1.0
+            # Deliberately no positivity check — see the next test.
             with pytest.raises(ValueError, match="LTP="):
                 body.amplitudes(k)
+
+
+def test_law5_tabulated_is_normalised_but_not_a_density():
+    """Both halves of the warning on the accessor, gated on committed bytes.
+
+    The ``LTP>2`` table integrates to 1 and still takes negative values. Over
+    the 3 779 nodes on the share, 3 777 integrate to 1 ± 1 % — the two that do
+    not are ``p-080_Hg_199`` and ``p-080_Hg_204`` near 83 MeV, where the table
+    spans six orders of magnitude and the trapezoid is just inaccurate — and
+    3 280 go negative, down to -5.4e+05.
+
+    Worth its own test because the shape is a trap: it looks exactly like
+    ``MF6LawTwoBody.tabulated``'s ``f(mu)``, which *is* an ordinary density. The
+    normalisation half is what a reader checks and finds reassuring; the
+    signedness half is what makes clipping, renormalising or sampling it wrong.
+    Asserting both here stops either from being "fixed" into the other.
+    """
+    # Normalised: both committed LTP>2 fixtures, every node.
+    for key in ("h3_he4", "a_he4"):
+        body = law5_body(CP_FIXTURES[key])
+        for k in range(len(body.ltp)):
+            mu, values = body.tabulated(k)
+            assert np.trapezoid(values, mu) == pytest.approx(1.0, abs=0.01), (
+                f"{key} node {k} is not normalised"
+            )
+
+    # Not a density: the committed fixtures happen to be non-negative, so the
+    # signedness is gated on the share instead of quietly going unasserted.
+    # 45 kB of p-001_H_002 would buy only this one fact.
+    tape = Path("/share_snc/lib/endf/endfb8/protons/p-001_H_002.endf")
+    if not tape.exists():
+        pytest.skip("ENDF/B-VIII.0 protons not reachable")
+    body = law5_body(tape)
+    minima = [body.tabulated(k)[1].min() for k in range(len(body.ltp))]
+    assert min(minima) < 0, (
+        "p-001_H_002 MT2 has no negative value — either the reshape changed or "
+        "this is not the nuclear-plus-interference remainder after all"
+    )
 
 
 def test_law5_accessors_refuse_a_body_endf6_does_not_admit():

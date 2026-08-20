@@ -416,7 +416,28 @@ class MF6LawChargedElastic(MF6Law):
         return flat[:split], pairs[:, 0] + 1j * pairs[:, 1]
 
     def tabulated(self, k: int) -> Tuple[np.ndarray, np.ndarray]:
-        """``(mu, P)`` at node *k*. ``LTP>2`` only — 12 lin-lin, 14/15 log."""
+        """``(mu, p)`` at node *k*. ``LTP>2`` only — 12 lin-lin, 14/15 log.
+
+        **Normalised, but not non-negative — do not treat it as a density.**
+        Measured over the 3 779 ``LTP>2`` nodes of ENDF/B-VIII.0's
+        charged-particle sublibraries:
+
+        * **3 777 integrate to 1 ± 1 %.** The two that do not are
+          ``p-080_Hg_199`` and ``p-080_Hg_204`` MT2 near 83 MeV, where the table
+          spans six orders of magnitude and a trapezoid over 150 points is
+          simply inaccurate — not a different normalisation.
+        * **3 280 take negative values somewhere**, reaching -5.4e+05.
+
+        Those two facts together are the whole warning. Per ENDF-6 §6.2.5 the
+        Rutherford term is excluded from this table because it is analytic and
+        diverges as μ → 1, so what is tabulated is the signed remainder; that
+        mechanism is the manual's account, while the two counts above are
+        measured here. Either way a caller must not clip it at zero, renormalise
+        it, or sample it as a probability.
+
+        Contrast :meth:`MF6LawTwoBody.tabulated`, which returns an ``f(mu)``
+        that *is* an ordinary density. The two share a name and not a meaning.
+        """
         if self.ltp[k] <= 2:
             raise ValueError(
                 f"LAW=5 node {k} is LTP={self.ltp[k]}, a nuclear-amplitude "
