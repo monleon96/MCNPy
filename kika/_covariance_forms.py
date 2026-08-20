@@ -10,7 +10,7 @@ the merged shape and only meets the un-merged one on the GNDS path.
 
 **What that costs, measured rather than feared.** Fe-56's MT1, MT2 and MT102
 are each a ``mixed`` of a 3×3 and a 628×628 on the GNDS path and one 630×630 on
-the ENDF path (``docs/gnds_endf_conflicts.md`` §2.2, §7.4). Code that reaches
+the ENDF path (``docs/library/gnds_endf_conflicts.md`` §2.2, §7.4). Code that reaches
 for ``form.matrix`` on the first of those gets an ``AttributeError``, which is
 loud and fine. Code that reached for ``form.components[0]`` would get a 3×3
 where it wanted a 628×628 — a plausible-looking wrong answer — and code that
@@ -21,7 +21,7 @@ have existed here.
 operation kika will need and a decision nobody has taken: one component may be
 a ``shortRangeSelfScalingVariance``, whose magnitude depends on the processing
 group width and which therefore cannot be added onto a fixed grid at all
-(``docs/gnds_endf_conflicts.md`` §2.2, still open). Until that is decided, the
+(``docs/library/gnds_endf_conflicts.md`` §2.2, still open). Until that is decided, the
 honest answer to "give me this section's matrix" is that the section does not
 state one.
 
@@ -39,7 +39,7 @@ __all__ = ["require_single_matrix", "explain_missing_matrix"]
 
 #: Where the deferred decision is written down, quoted in every message below
 #: so that a caller who meets one has somewhere to go.
-_REFERENCE = "docs/gnds_endf_conflicts.md §2.2"
+_REFERENCE = "docs/library/gnds_endf_conflicts.md §2.2"
 
 
 def _node_name(form: object) -> str:

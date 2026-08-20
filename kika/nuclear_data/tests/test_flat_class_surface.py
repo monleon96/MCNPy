@@ -170,7 +170,7 @@ EXPECTED_METHODS: dict[str, dict[str, str]] = {
     "NuclideInfo": {
         "from_endf": '(cls, mt451: "\'MF1MT451\'") -> "\'NuclideInfo\'"',
         "from_ace": '(cls, ace: "\'Ace\'") -> "\'NuclideInfo\'"',
-        # `docs/library-gaps.md` M2. A new method needs no entry here, but its
+        # `docs/library/library-gaps.md` M2. A new method needs no entry here, but its
         # three siblings' `to_endf` are pinned, and a signature that may drift
         # while theirs may not is the odd one out rather than the free one.
         "to_endf": '(self, mat: \'Optional[int]\' = None) -> "\'MF1MT451\'"',

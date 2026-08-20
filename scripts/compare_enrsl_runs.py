@@ -284,7 +284,7 @@ def main() -> None:
   Block A is not a result about our evaluation — it is the size of the
   correction to the measuring instrument. It also tells you how much of the
   thesis chi2 table would move if the declared resolutions were adopted for
-  scoring, which is a manuscript decision (docs/thesis_chi2_review.md S12),
+  scoring, which is a manuscript decision (docs/thesis/thesis_chi2_review.md S12),
   not a research one.
 
   Block B is the run-83 result. Because run 83 left the central values

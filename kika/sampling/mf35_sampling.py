@@ -180,7 +180,7 @@ def build_pfns_covariance(
     # match — but §25.2.3 spells the attribute with a comma and every
     # distributed GNDS file agrees, so an equality against one spelling is a
     # filter that silently selects nothing the day the suite arrives the other
-    # way. The properties read both. See `docs/gnds_endf_conflicts.md` §3.1.
+    # way. The properties read both. See `docs/library/gnds_endf_conflicts.md` §3.1.
     sections = [s for s in suite if s.rowData is not None
                 and (s.rowData.ENDF_MF, s.rowData.ENDF_MT) == (35, mt)]
     bands = [s.rowData.incidentEnergyBand for s in sections]

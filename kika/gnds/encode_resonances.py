@@ -189,7 +189,7 @@ def _nestedPoPs(formalism, report: ConversionReport, where: str) -> None:
     report.lost(
         f"{where}: the nested <PoPs> was read and is not written. §19 admits a "
         f"local particle database inside the formalism and writing it is §12 "
-        f"work, blocked on the docs/gnds_endf_conflicts.md §3.3 decision; the "
+        f"work, blocked on the docs/library/gnds_endf_conflicts.md §3.3 decision; the "
         f"channels below refer to particles this file no longer defines"
     )
 

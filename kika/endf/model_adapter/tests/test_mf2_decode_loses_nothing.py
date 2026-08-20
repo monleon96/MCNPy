@@ -23,7 +23,7 @@ because both sides agree and the agreement reads as proof. ``from_endf`` drops
 LRF=7 outright, so half of what is checked here has no flat counterpart at all.
 
 **Where each field is allowed to live.** Physics on the model, ENDF bookkeeping
-in ``provenance.headerFields`` — decision 1(a) of ``docs/mf2-encoder-notes.md``.
+in ``provenance.headerFields`` — decision 1(a) of ``docs/library/mf2-encoder-notes.md``.
 The test asserts the *value* survives and says which side it read it from, so a
 future move between the two is a one-line edit here rather than a silent
 regression.

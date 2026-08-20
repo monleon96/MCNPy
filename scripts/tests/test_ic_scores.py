@@ -1,4 +1,4 @@
-"""Gate 1b of docs/mf4_research_roadmap.md — is the IC score a valid likelihood?
+"""Gate 1b of docs/chi2-mf4/mf4_research_roadmap.md — is the IC score a valid likelihood?
 
 The order-treatment work in §4 rests entirely on the Akaike weights
 ``w_L = exp(-Δ_L/2) / Σ exp(-Δ_K/2)``. Those weights are only meaningful if the

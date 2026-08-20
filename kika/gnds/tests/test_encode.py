@@ -605,7 +605,7 @@ def test_a_suite_holding_a_mixed_can_be_written_at_all(gnds_data_dir, tmp_path):
 
 
 #: The schema errors an **ENDF-decoded** suite still has, by kind. Measured
-#: 2026-08-17 at twelve and written down in `docs/library-gaps.md` D20; seven
+#: 2026-08-17 at twelve and written down in `docs/library/library-gaps.md` D20; seven
 #: since the MF4 angular `axes`, the single-region containers and the evaluated
 #: style's domain landed. None of them is the deliberate empty
 #: `<distribution/>` the GNDS fixtures produce -- these are gaps in the

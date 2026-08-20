@@ -186,7 +186,7 @@ class LCOMP1RMLBody(_Body):
     own number of channels, so a block opens with a CONT giving NJSX and then a
     LIST per spin group, and closes with the covariance triangle. No long-range
     blocks are allowed. Nothing on this machine uses it — see the coverage note
-    in ``docs/mf32-notes.md``.
+    in ``docs/library/mf32-notes.md``.
     """
 
     counts: Optional[Record] = None

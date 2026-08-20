@@ -1,7 +1,7 @@
 """``read → suite → write → read`` returns the same model. The §2.8 gate.
 
 **This is the gate the whole-file writer was built against, and it is not byte
-identity** (decided 2026-08-13, owner Juan; ``docs/gnds_endf_conflicts.md``
+identity** (decided 2026-08-13, owner Juan; ``docs/library/gnds_endf_conflicts.md``
 §2.8). Byte identity against the source tape would fail on choices that carry no
 information — where a field is padded, whether ``1e-5`` is written ``1.0-5``,
 how many LB=5 records one covariance block is split into — and chasing those is

@@ -11,7 +11,7 @@ energy without anything noticing.
 **What this module had to measure rather than read.** ENDF-102 §32 leaves three
 things ambiguous enough that implementing from the text alone gives a decoder
 that is wrong on real tapes, and each was settled against the evaluations on
-this machine (the commands are in ``docs/mf32-notes.md``):
+this machine (the commands are in ``docs/library/mf32-notes.md``):
 
 1. **The vector is resonance-major.** Every parameter of resonance 1, then every
    parameter of resonance 2. Read parameter-major, Mn-55's block gives resonance

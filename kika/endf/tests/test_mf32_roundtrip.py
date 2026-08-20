@@ -18,7 +18,7 @@ the eleven evaluations reachable here:
 
 None of those is repaired on the way through. That is the point of the gate: a
 parser that "fixed" any of them would pass a numerical test and silently hand
-back a different file. See ``docs/mf32-notes.md`` in kika-workspace for the
+back a different file. See ``docs/library/mf32-notes.md`` in kika-workspace for the
 survey these came from.
 """
 from __future__ import annotations

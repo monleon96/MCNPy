@@ -255,7 +255,7 @@ class MF6LawContinuum(MF6Law):
             "changes from node to node, so this is unit-base interpolation (a "
             "processing convention) and not a reading of the record. Use "
             "spectrum(k) at an incident node, or go through NJOY. See this "
-            "method's docstring and docs/mf6_notes.md."
+            "method's docstring and docs/library/mf6_notes.md."
         )
 
     def report_gaps(self, mt: int, index: int) -> List[str]:
@@ -360,7 +360,7 @@ class MF6LawChargedElastic(MF6Law):
     ``LTP=2``, ``LTP=14`` and ``LTP=15`` occur zero times in those 63 tapes, so
     the ``LTP=2`` branch of :meth:`amplitudes` and the log-interpolated tables
     are reshaped by the same identity but witnessed by nothing. See
-    ``docs/mf6_witness_hunt.md`` in kika-workspace.
+    ``docs/library/mf6_witness_hunt.md`` in kika-workspace.
     """
 
     law: int = 5

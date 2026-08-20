@@ -1,7 +1,7 @@
 """MF33 sections → the one covariance they are partitions of.
 
 The cross-*reaction* half of what `test_legendre_blocks.py` does for Legendre
-orders, and P3 of `docs/sampling_migration_roadmap.md`. The property held is the
+orders, and P3 of `docs/library/sampling_migration_roadmap.md`. The property held is the
 same one, for the same reason: the samples the MF33 pipelines have already drawn
 were drawn in `CrossSectionCovariance`'s layout, so an assembly that quietly
 changes it changes results without failing.

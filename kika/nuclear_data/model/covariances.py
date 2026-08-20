@@ -309,7 +309,7 @@ class CovarianceSection:
     #: ``href`` into a ``reactionSuite``, not by a material header. Without
     #: this the encoder would have to default AWR and MAT, which is the third
     #: time in this package that what the *read* path discarded turned out to
-    #: be the whole cost of the write path (see ``docs/library-gaps.md`` D2
+    #: be the whole cost of the write path (see ``docs/library/library-gaps.md`` D2
     #: and M2).
     provenance: Optional[object] = None
 
@@ -377,7 +377,7 @@ class ParameterCovarianceMatrix:
     uncertainty in the same record, which is the whole reason that format
     exists. Dropping the copy would mean a caller that wants to sample has to
     go back to File 2 and re-derive the correspondence row by row, which is
-    exactly the "parsed and then dropped" mistake ``docs/library-gaps.md`` M4
+    exactly the "parsed and then dropped" mistake ``docs/library/library-gaps.md`` M4
     records for nu-bar.
 
     The two copies can disagree, and that is a property of the evaluation

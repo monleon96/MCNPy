@@ -117,7 +117,7 @@ class CrossSection:
         and its documented fallback is exactly this: keep the fast constructor,
         and expose the model lazily through :attr:`model`.
 
-        One thing did change, and it is the ``docs/library-gaps.md`` D1 fix: ZA
+        One thing did change, and it is the ``docs/library/library-gaps.md`` D1 fix: ZA
         is **rounded** rather than truncated. ENDF's fixed-format floats do not
         round-trip, so Th-232's ``9.023200+4`` reads back as
         ``90231.99999999999`` and ``int()`` on that named Ac-231 — on all 57 of
@@ -225,7 +225,7 @@ class CrossSection:
             # The old wording here said "ACE stores no reaction Q values",
             # which is false — it stores QI, in the LQR block, and `from_ace`
             # now reads it. QM and LR are the ones ACE has no counterpart for.
-            # `docs/library-gaps.md` D4.
+            # `docs/library/library-gaps.md` D4.
             raise ValueError(
                 f"CrossSection for MT{self.reaction} (source_format={source!r}) "
                 f"carries no {'/'.join(missing)}, so an ENDF MF3 header cannot "
@@ -364,7 +364,7 @@ class CrossSection:
         **ACE does carry a reaction Q value, and this reads it.** The LQR block
         holds one QI per reaction, in MeV, positionally aligned with MTR; a
         section whose MT has an entry there gets ``metadata["qi"]`` in eV. The
-        record said otherwise for a long time — see ``docs/library-gaps.md`` D4
+        record said otherwise for a long time — see ``docs/library/library-gaps.md`` D4
         — and callers were supplying by hand a number that was in the file.
 
         What ACE genuinely has no counterpart for is **QM**, the mass-difference

@@ -1,6 +1,6 @@
 """``psd_method="clip_rescale"`` — the congruence rescale, and its one cost.
 
-Written for the loose end ``docs/pfns_mf5_mf35_roadmap.md`` records as L1: the
+Written for the loose end ``docs/pfns/pfns_mf5_mf35_roadmap.md`` records as L1: the
 ``clip`` projection preserves eigenvectors but not the diagonal, so groups the
 file gives almost no variance come out of it with some, and
 ``generate_pfns_samples`` clamps at 5 stated σ to bound the damage. The

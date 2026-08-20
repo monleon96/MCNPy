@@ -134,7 +134,7 @@ _TAPES: Dict[str, Sequence[str]] = {
     "u238": ("jeff40-endf/92-U-238g.txt", "U238_jeff4.0_n.endf"),
     # MF32, the resonance-parameter covariances. No Fe-56 evaluation in any
     # library carries one, so this work is gated on other nuclides entirely,
-    # chosen to cover one sub-format each — see ``docs/mf32-notes.md`` in
+    # chosen to cover one sub-format each — see ``docs/library/mf32-notes.md`` in
     # kika-workspace for the survey these came from. The second candidate of
     # each pair is the ``kika.endf.remote`` cache layout, which is where they
     # actually are on this machine.
@@ -178,7 +178,7 @@ _TAPES: Dict[str, Sequence[str]] = {
     # occurs twice in the whole library and both are in Be-9's MT16 (which is
     # also one of only 29 LCT=1 sections); LAW=6 occurs five times and three of
     # them are Li-6's MT41; and C-12's MT5 is the readiest LCT=3. See
-    # ``docs/mf6_notes.md`` in kika-workspace for the census.
+    # ``docs/library/mf6_notes.md`` in kika-workspace for the census.
     "be9_b81": ("endfb81/n-004_Be_009.endf", "n-004_Be_009.endf"),
     "li6_b81": ("endfb81/n-003_Li_006.endf", "n-003_Li_006.endf"),
     "c12_b81": ("endfb81/n-006_C_012.endf", "n-006_C_012.endf"),
@@ -189,7 +189,7 @@ _TAPES: Dict[str, Sequence[str]] = {
     # occupied -- LTP=1 (nuclear-amplitude expansion) vs LTP=12 (a table),
     # crossed with LIDP=0 (distinguishable) vs LIDP=1 (identical particles,
     # which is p+p, d+d, t+t, 3He+3He and alpha+alpha and nothing else). These
-    # are the smallest carriers of each cell; see ``docs/mf6_witness_hunt.md``
+    # are the smallest carriers of each cell; see ``docs/library/mf6_witness_hunt.md``
     # in kika-workspace for the census over all 63 charged-particle tapes.
     "p_he3_b80": ("endfb8/protons/p-002_He_003.endf",
                   "endfb80/protons/p-002_He_003.endf"),
@@ -471,7 +471,7 @@ fe56_gnds_cov_tape = _tape_fixture("fe56_gnds_cov")
 fe56_b81_tape = _tape_fixture("fe56_b81")
 
 #: The MF6 law carriers. Named one at a time rather than looped, to match the
-#: block above; the census that picked them is in ``docs/mf6_notes.md``.
+#: block above; the census that picked them is in ``docs/library/mf6_notes.md``.
 be9_b81_tape = _tape_fixture("be9_b81")
 li6_b81_tape = _tape_fixture("li6_b81")
 c12_b81_tape = _tape_fixture("c12_b81")
@@ -845,7 +845,7 @@ def micro_be9_gnds() -> Path:
 #: file in the 270-file ENDF/B-VIII.1 covariance distribution carrying it, and
 #: each is committed unmodified. Between them they cover every covariance
 #: construct the library uses; the survey that picked them is in the phase 5
-#: section of ``docs/gnds_roadmap.md``.
+#: section of ``docs/library/gnds_roadmap.md``.
 GNDS_COVARIANCE_FIXTURES = {
     "n-014_Si_032": "parameterCovariances alone — a suite with no covarianceSections at all",
     "n-069_Tm_171": "averageParameterCovariance (URR), and array compression='flattened'",

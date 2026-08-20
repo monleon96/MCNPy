@@ -563,7 +563,7 @@ class CrossSectionCovariance:
             # and every distributed covariance file writes one; kika's ENDF
             # adapter writes a slash. Requiring the slash made this raise "has
             # no ENDF_MFMT" at a section that had a perfectly good one, which
-            # is the misleading half of `docs/gnds_endf_conflicts.md` §3.1.
+            # is the misleading half of `docs/library/gnds_endf_conflicts.md` §3.1.
             mfmt = getattr(getattr(section, 'rowData', None), 'ENDF_MFMT', None)
             parts = str(mfmt).replace('/', ',').split(',') if mfmt else []
             if len(parts) != 2 or not parts[1].strip().isdigit():

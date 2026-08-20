@@ -520,7 +520,7 @@ def parse_data_values(lines, start, n_values):
 #: NDIGIT=6 is the only one with no ``1X`` after JJ, which is why the five cases
 #: are a table and not an arithmetic expression. Getting that wrong shifts every
 #: field of an NDIGIT=6 record by one column, and no tape on this machine uses
-#: NDIGIT=6 to catch it — see ``docs/mf32-notes.md``.
+#: NDIGIT=6 to catch it — see ``docs/library/mf32-notes.md``.
 _INTG_LAYOUT: Dict[int, Tuple[int, int, int]] = {
     2: (18, 3, 1),
     3: (13, 4, 1),
@@ -598,7 +598,7 @@ def format_intg(entries: Sequence[Tuple[int, int, Sequence[int]]], ndigit: int,
     Write INTG records. Counterpart of :func:`parse_intg`.
 
     Zeros are written as blank fields, which is what every evaluation measured
-    for ``docs/mf32-notes.md`` does; §32.2.3 permits an explicit ``0`` too, so a
+    for ``docs/library/mf32-notes.md`` does; §32.2.3 permits an explicit ``0`` too, so a
     tape written this way may differ from its source in whitespace alone. That
     is why the round-trip path re-emits stored text instead of calling this —
     this function is for covariance matrices kika *builds*, not ones it read.

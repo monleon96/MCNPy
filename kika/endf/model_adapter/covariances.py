@@ -393,7 +393,7 @@ def decodeMF35MT(mf35mt, report: Optional[ConversionReport] = None):
 # the diagonal and LB=6 off it, `create_mf33_from_covariance` its equivalent.
 # Reimplementing that choice here would make it two policies that agree until
 # they don't -- which is exactly how "ACE stores no reaction Q values" came to
-# be written in three places while the values sat parsed (`docs/library-gaps.md`
+# be written in three places while the values sat parsed (`docs/library/library-gaps.md`
 # D4).
 #
 # The consequence for testing is stated where it matters, in
@@ -406,7 +406,7 @@ def _endfMT(link) -> int:
     Goes through :attr:`DataLink.ENDF_MT` rather than splitting the string, so
     a suite that arrived through the **GNDS** reader — where §25.2.3's comma is
     the only spelling — encodes to ENDF as readily as one this adapter built
-    itself. ``docs/gnds_endf_conflicts.md`` §3.1.
+    itself. ``docs/library/gnds_endf_conflicts.md`` §3.1.
     """
     mt = None if link is None else link.ENDF_MT
     if mt is None:
@@ -435,7 +435,7 @@ def _covarianceSections(source, mf: int, mt: int):
     Selects on the ``(MF, MT)`` pair rather than on a ``"33/"`` string prefix.
     The prefix version silently selected **nothing** from a GNDS-decoded suite,
     whose ``ENDF_MFMT`` is ``"33,2"`` — and returning an empty list is the one
-    failure mode a caller does not notice. ``docs/gnds_endf_conflicts.md`` §7.1.
+    failure mode a caller does not notice. ``docs/library/gnds_endf_conflicts.md`` §7.1.
     """
     sections = getattr(source, "covarianceSections", source)
     selected = [

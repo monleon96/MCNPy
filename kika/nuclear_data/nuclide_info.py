@@ -57,7 +57,7 @@ class NuclideInfo:
         One thing does change, and it is a fix: ZA is **rounded** rather than
         truncated. ENDF's fixed-format floats do not round-trip exactly, so
         Th-232's ``9.023200+4`` reads back as ``90231.99999999999`` and the old
-        ``int()`` named Ac-231. See ``docs/library-gaps.md`` D1.
+        ``int()`` named Ac-231. See ``docs/library/library-gaps.md`` D1.
 
         Parameters
         ----------
@@ -77,7 +77,7 @@ class NuclideInfo:
     def to_endf(self, mat: Optional[int] = None) -> "MF1MT451":
         """Convert back to an ENDF ``MF1MT451`` object.
 
-        ``docs/library-gaps.md`` M2. MF1/451 was read-only: half the canonical
+        ``docs/library/library-gaps.md`` M2. MF1/451 was read-only: half the canonical
         layer could be parsed and not written, so the only way to change an
         evaluation's header was to mutate the ``MF1MT451`` dataclass in place —
         bypassing the format-agnostic layer for exactly the case it exists for.

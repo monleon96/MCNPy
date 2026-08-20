@@ -3,7 +3,7 @@
 The method had no test. It is the only way a cross-section covariance becomes
 an uncertainty band, it is what ``kika.endf.plotting`` calls for the MF3 half
 of its job, and on every ENDF-derived covariance it has never once returned a
-band — which is D13 in ``docs/library-gaps.md``.
+band — which is D13 in ``docs/library/library-gaps.md``.
 
 The file went in first as the freeze, with the pointwise tests asserting the
 refusal; the fix in the commit on top flipped them. It is organised by the two

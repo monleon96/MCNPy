@@ -98,7 +98,7 @@ def flatNuclideInfo(provenance) -> Dict[str, Any]:
             # block and the directory. NWD and NXC are deliberately not stored
             # -- they are the lengths of these two lists, and a stored count
             # that can disagree with what it counts is a defect waiting to be
-            # written. See `docs/library-gaps.md` M2.
+            # written. See `docs/library/library-gaps.md` M2.
             "text": list(provenance.descriptiveText),
             "directory": [tuple(entry) for entry in provenance.directory],
         },
@@ -206,7 +206,7 @@ def flatAngularDistribution(distribution, provenance, mt: int) -> Dict[str, Any]
         angular[0] if (ltt == 3 and isinstance(angular, Regions2d)) else angular
     )
     # The two things a dense {order: array} cannot carry, and whose absence is
-    # `docs/library-gaps.md` D2. NM is the evaluation's declared highest order;
+    # `docs/library/library-gaps.md` D2. NM is the evaluation's declared highest order;
     # `legendre_orders` is each energy's own NL, so a trailing zero coefficient
     # the evaluator wrote survives instead of being trimmed on the way out.
     common["metadata"]["nm"] = header.get("nm")
@@ -315,7 +315,7 @@ def flatResonanceParameters(region, fields: Dict[str, Any], provenance
     of this projection: ``ResonanceRecord`` has four width columns and an
     R-Matrix-Limited spin group has one width *per channel* — five of them for
     Fe-57 in JEFF-4.0 — so there is nothing to project into. The caller warns;
-    see ``docs/library-gaps.md`` D3.
+    see ``docs/library/library-gaps.md`` D3.
 
     ``l_groups`` comes back as plain dicts rather than ``LGroup`` objects,
     because this module must not import the flat classes. The façade builds them.

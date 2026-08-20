@@ -7,7 +7,7 @@ for a while — ``encodeMF1MT451``, ``encodeMF2MT151``, ``encodeMF3MT``,
 came from. What was missing was never the rendering; it was the **assembly**:
 the order sections go in, the SEND/FEND/MEND/TEND bookkeeping, the tape
 identification record and the MF1/451 directory. That is what this module is.
-``docs/gnds_endf_conflicts.md`` §2.8, and §10 for why the sampling pipeline
+``docs/library/gnds_endf_conflicts.md`` §2.8, and §10 for why the sampling pipeline
 cares.
 
 **The gate is a fixed point inside the model, not byte identity against the

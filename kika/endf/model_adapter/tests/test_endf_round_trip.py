@@ -86,7 +86,7 @@ def test_the_flat_path_now_round_trips_a_tape_whose_za_does_not_parse_exactly(th
 
     ``CrossSection.nuclide_id`` truncated ZA, so all 57 Th-232 MF3 sections came
     back naming ZA 90231 — Ac-231. The façade rounds. See
-    ``docs/library-gaps.md`` D1.
+    ``docs/library/library-gaps.md`` D1.
     """
     endf = read_endf(str(th232_tape))
     assert int(float(endf.mf[3].mt[2].zaid)) != round(float(endf.mf[3].mt[2].zaid)), (

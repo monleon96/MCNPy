@@ -42,7 +42,7 @@ did not use, because ``sqrt(diag)`` of a relative covariance already is the
 fractional uncertainty. So the MF3 branch below raised internally, was caught,
 and returned ``None``, on every tape for eight months, and the symptom was
 again indistinguishable from a file that carries no covariance. Recorded as
-D13 in ``docs/library-gaps.md``.
+D13 in ``docs/library/library-gaps.md``.
 """
 from __future__ import annotations
 

@@ -2102,7 +2102,7 @@ def _run_one_kw_sample(args_tuple):
             # resulting a_l = c_l/c0 correlation is manufactured from fit
             # residuals, not measured. A genuine sigma↔a_l cross block must be
             # estimated from a joint fit (roadmap Phase 3), never from this
-            # convenience factor. See kika-workspace/docs/mf3_mf33_roadmap.md.
+            # convenience factor. See kika-workspace/docs/chi2-mf4/mf3_mf33_roadmap.md.
             mf33_dsigma_per_sample = sh.get('mf33_dsigma_per_sample') if isinstance(args_tuple, int) else None
             if mf33_dsigma_per_sample is not None:
                 home_map = sh['mf33_home_bin_by_e_key']

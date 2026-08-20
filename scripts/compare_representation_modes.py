@@ -72,7 +72,7 @@ BLOCK_EVAL: List[Tuple[str, str]] = [
 ]
 
 # The evaluation grid, for the analytic size table. 1738 fine bins is the
-# run-82 number (docs/mf3_mf33_roadmap.md); 598 is the l=1 collapse.
+# run-82 number (docs/chi2-mf4/mf3_mf33_roadmap.md); 598 is the l=1 collapse.
 N_BINS = {"fine": 1738, "mg": 598}
 
 
