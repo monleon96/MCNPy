@@ -1497,12 +1497,36 @@ def test_the_pair_reads_back_through_the_door_with_its_links_intact(h2_gnds,
                 if "The covariance itself is read" in loss]
 
 
-def test_writing_endf_says_why_it_cannot(h2_gnds, tmp_path):
-    """Not "not implemented": kika's ENDF writer patches a tape it already read,
-    and a whole-file model → ENDF writer is a project, not a missing function."""
+def test_writing_a_gnds_sourced_suite_to_endf_is_refused_for_the_right_reason(
+        h2_gnds, tmp_path):
+    """``format="endf"`` exists now (§2.8) — and this suite still cannot use it.
+
+    The door stopped raising ``NotImplementedError`` when
+    ``kika/endf/writers/assemble.py`` landed. What replaces it is not "it works
+    for everything": a suite decoded from **GNDS** carries no ENDF provenance,
+    so it has no MAT to stamp on every record — and MAT is not a field the
+    writer may invent, because two materials on one tape are told apart by
+    nothing else. The refusal moved from the format to the *suite*, which is
+    where it belongs.
+    """
     suite = kika.read(h2_gnds, covariances=False)
-    with pytest.raises(NotImplementedError, match="patches sections into a tape"):
+    with pytest.raises(ValueError, match="no MAT number"):
         kika.write(suite, tmp_path / "out.endf", format="endf")
+
+
+def test_a_gnds_sourced_suite_with_a_mat_is_still_refused_by_the_header(h2_gnds,
+                                                                       tmp_path):
+    """And giving it a MAT is not enough, which is the honest half.
+
+    MF1/451 carries nineteen fields — NLIB, NMOD, LDRV, LREL, the NWD comment
+    block — that GNDS states nowhere, so ``encodeMF1MT451`` refuses rather than
+    inventing a header. Writing ENDF from a GNDS file needs those fields
+    supplied, not guessed; ``gnds_endf_conflicts.md`` §2.8 counts that as part
+    of the conversion problem rather than a gap in the assembler.
+    """
+    suite = kika.read(h2_gnds, covariances=False)
+    with pytest.raises(ValueError, match="ENDF MF1/451 section cannot be written"):
+        kika.write(suite, tmp_path / "out.endf", format="endf", mat=125)
 
 
 def test_an_unknown_format_is_refused_by_name(h2_gnds, tmp_path):

@@ -261,7 +261,13 @@ def decodeReactionSuite(endf, report: Optional[ConversionReport] = None):
 
     mf2 = endf.mf.get(2) if hasattr(endf, "mf") else None
     if mf2 is not None and 151 in getattr(mf2, "mt", {}):
-        suite.resonances, _, report = decodeMF2MT151(mf2.mt[151], report)
+        # The provenance is **kept**, not discarded. `encodeMF2MT151` needs it —
+        # QX, LRX, LAD and the particle-pair columns have no model node — and
+        # dropping it here left a suite whose resonances could be read and not
+        # written. See `Resonances.provenance`.
+        resonances, resonanceProvenance, report = decodeMF2MT151(mf2.mt[151], report)
+        resonances.provenance = resonanceProvenance
+        suite.resonances = resonances
 
     mf4 = endf.mf.get(4) if hasattr(endf, "mf") else None
     if mf4 is not None:

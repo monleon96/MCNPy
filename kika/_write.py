@@ -8,13 +8,19 @@ one object type going through. What comes back is not the file — it is the
 :class:`~kika.nuclear_data.model.conversion.ConversionReport`, because the file
 cannot tell you what is missing from it and the report can.
 
-**Only GNDS.** ``format="endf"`` raises, and the message says why rather than
-"not implemented": kika's ENDF writer is a *patch-in-place* editor
-(``kika/endf/write_endf.py`` rewrites the sections it was given inside the tape
-it read) and there is no whole-file model → ENDF-6 writer anywhere in the
-library. Producing one is not a missing function, it is MF1/451 headers,
-sequence numbering, TAB1 pagination and the union grids ENDF requires — a
-project, and one nobody has asked for while the ENDF tapes are the *input*.
+**GNDS and ENDF-6.** ``format="endf"`` assembles a whole tape from the model
+(``kika/endf/writers/assemble.py``, ``gnds_endf_conflicts.md`` §2.8) and is a
+different thing from ``kika/endf/write_endf.py``, which is a *patch-in-place*
+editor: that one rewrites the sections it is given inside a tape it already
+read, and cannot produce a tape it was not handed. This door can, which is what
+makes a GNDS file convertible to ENDF at all.
+
+**What it cannot carry, it says.** MF5, MF6, MF7, MF12-15 and MF32 have no
+ENDF → model adapter or no encoder, so a model that never held them writes a
+tape without them, and the returned report names each one. The gate the writer
+was built against is a fixed point *inside the model* — read, write, read again,
+compare — and not byte identity against the tape it came from; §2.8 says why,
+and says what that gate cannot see.
 
 **Two files, not one.** §25.1.1 makes ``covarianceSuite`` a root node in its own
 right. A suite with covariances is therefore written as a pair — the evaluation,
@@ -36,8 +42,8 @@ from typing import Optional
 
 __all__ = ["write"]
 
-#: Formats the door can write. ENDF is refused by name; see :func:`write`.
-WRITE_FORMATS = ("gnds",)
+#: Formats the door can write.
+WRITE_FORMATS = ("gnds", "endf")
 
 #: Where a covariance sibling goes, relative to the evaluation. The layout the
 #: ENDF/B-VIII.1 GNDS distribution uses, so a pair kika writes sits where a
@@ -45,7 +51,8 @@ WRITE_FORMATS = ("gnds",)
 COVARIANCE_SUBDIRECTORY = "Covariances"
 
 
-def write(suite, path, format: str = "gnds", gnds: Optional[str] = None):
+def write(suite, path, format: str = "gnds", gnds: Optional[str] = None,
+          mat: Optional[int] = None, tapeId: Optional[str] = None):
     """Write a :class:`ReactionSuite` out, and say what did not go with it.
 
     Parameters
@@ -57,11 +64,23 @@ def write(suite, path, format: str = "gnds", gnds: Optional[str] = None):
         Where the ``reactionSuite`` goes. The covariance sibling is derived from
         it — same stem, under ``Covariances/``.
     format
-        ``'gnds'``. ``'endf'`` raises with the reason.
+        ``'gnds'`` or ``'endf'``. ENDF writes **one** file: §25.1.1's split into
+        two documents is GNDS's, and an ENDF tape states the covariances in the
+        same material.
     gnds
         ``'2.0'`` or ``'2.1'``, forcing the declared version. The default
         mirrors what the suite was read from, and is ``'2.0'`` for a suite with
-        no GNDS origin — see :func:`kika.gnds.encode.chooseFormat`.
+        no GNDS origin — see :func:`kika.gnds.encode.chooseFormat`. Ignored by
+        the ENDF path.
+    mat
+        ENDF only. The material number every record is stamped with. The
+        default is the one the suite's provenance recorded; a suite that never
+        came from an ENDF tape has none, and is **refused** rather than stamped
+        with a guess.
+    tapeId
+        ENDF only. The 66 text columns of the tape identification record.
+        ``read_endf`` does not keep a tape's first line, so a round trip cannot
+        reproduce the original and the default label says as much in the report.
 
     Returns
     -------
@@ -74,19 +93,19 @@ def write(suite, path, format: str = "gnds", gnds: Optional[str] = None):
         behalf that no distribution was given.
     """
     format = format.lower()
-    if format == "endf":
-        raise NotImplementedError(
-            "kika cannot write a model out as an ENDF-6 tape. Its ENDF writer "
-            "(kika/endf/write_endf.py) patches sections into a tape it already "
-            "read; there is no whole-file model -> ENDF writer, and building one "
-            "means MF1/451 headers, sequence numbering, TAB1 pagination and "
-            "ENDF's union-grid rules, not a missing function. To modify a tape, "
-            "read it with read_endf and write it back through that path."
-        )
     if format not in WRITE_FORMATS:
         raise ValueError(
             f"format must be one of {WRITE_FORMATS}, got {format!r}"
         )
+    if format == "endf":
+        # Imported here, not at module scope, for the reason `_writeGnds` gives
+        # and one more: the assembler reaches `kika.endf.model_adapter`, and
+        # `test_nothing_imports_the_adapter` is the rule that keeps the model
+        # off `read_endf`'s critical path.
+        from kika.endf.writers.assemble import writeEndfTape
+
+        return writeEndfTape(suite, Path(os.fspath(path)), mat=mat,
+                             tapeId=tapeId)
     return _writeGnds(suite, Path(os.fspath(path)), gnds)
 
 

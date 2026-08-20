@@ -128,11 +128,29 @@ FACADE_IMPORTERS = {
 #: ``kika-api.spec``'s ``hiddenimports`` since phase 3d (spec lines 143-146),
 #: and no path in kika-app reaches this function — the app reconstructs with
 #: NJOY, through ``kika.processing.njoy_reconstruct``.
+#: **§2.8 (2026-08-20) added the fifth.** ``kika/endf/writers/assemble.py`` is
+#: the whole-file model → ENDF-6 writer: a ``ReactionSuite`` in, a tape out. It
+#: is the mirror of ``kika/_read.py``'s ENDF half and importing the adapter is
+#: its entire job, so it belongs in this half of the list rather than the
+#: façade half. Every import is inside a function, so
+#: ``import kika.endf.writers`` — which kika-app does, for ``section_ops`` and
+#: ``update_directory`` — still does not wake the model.
+#:
+#: **The frozen build was checked and needs nothing, and the reason is not the
+#: one the entries above give.** kika-app reaches no path in this module (grep
+#: for ``kika.endf.writers.assemble``, ``writeEndfTape`` and ``kika.write``:
+#: zero hits, 2026-08-20), which is what makes it safe — *not* the adapter
+#: being in ``kika-api.spec``'s ``hiddenimports``, because as of 2026-08-20 it
+#: is **not**: the four model/adapter entries are commented out and parked
+#: there deliberately, since the commit the app pins predates them. If the app
+#: ever calls this writer, restoring those four is a precondition, and the
+#: comment block at ``kika-api.spec:128-153`` is where that is written down.
 PERMANENT_IMPORTERS = {
     "kika/_read.py",
     "kika/sampling/mf35_sampling.py",
     "kika/sampling/endf_perturbation.py",
     "kika/endf/processing/reconstruct.py",
+    "kika/endf/writers/assemble.py",
 }
 
 ALLOWED_IMPORTERS = FACADE_IMPORTERS | PERMANENT_IMPORTERS

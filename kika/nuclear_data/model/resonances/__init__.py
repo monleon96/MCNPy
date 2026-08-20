@@ -96,6 +96,15 @@ class Resonances:
     scatteringRadius: Optional[ScatteringRadius] = None
     resolved: List[ResolvedRegion] = field(default_factory=list)
     unresolved: Optional[UnresolvedRegion] = None
+    #: Not a GNDS node — the same escape hatch ``Reaction.provenance`` is, and
+    #: here for a sharper reason. ``encodeMF2MT151`` takes ``(resonances,
+    #: provenance)`` because QX, LRX, LAD and the twelve particle-pair columns
+    #: have no model node; ``decodeReactionSuite`` used to **discard** that
+    #: second return value, so a suite decoded from a tape carried resonances
+    #: nobody could write back. Nothing noticed while the only caller was a test
+    #: that held both halves itself; the whole-file writer (§2.8) is the first
+    #: caller that has only the suite.
+    provenance: Optional[object] = None
 
     @property
     def domain(self) -> Optional[Tuple[float, float]]:
