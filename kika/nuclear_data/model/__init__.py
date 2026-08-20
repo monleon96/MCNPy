@@ -140,6 +140,11 @@ from .resonances import (
     UnresolvedChannel,
     UnresolvedRegion,
     UnresolvedSpinGroup,
+    MODEL_RADIUS_UNIT,
+    FM_PER_ENDF_RADIUS,
+    radiusFromEndf,
+    radiusToEndf,
+    radiusFromStatedUnit,
 )
 from .sums import Add, MultiplicitySum, MultiplicitySums, Summands
 from .styles import (
@@ -211,6 +216,8 @@ __all__ = [
     "RMatrix", "RMatrixSpinGroup", "Channel", "TabulatedWidths",
     "ResonanceParameters", "ResonanceReaction", "UnresolvedChannel",
     "UnresolvedSpinGroup",
+    "MODEL_RADIUS_UNIT", "FM_PER_ENDF_RADIUS", "radiusFromEndf", "radiusToEndf",
+    "radiusFromStatedUnit",
     # conversion bookkeeping (not GNDS nodes)
     "ConversionReport", "Provenance", "EndfProvenance", "AceProvenance",
     "GndsProvenance",

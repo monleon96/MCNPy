@@ -30,14 +30,39 @@ regression.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
 from kika.endf.model_adapter import decodeMF2MT151
 from kika.endf.read_endf import read_endf
+from kika.nuclear_data.model import radiusToEndf
 
 REAL_TAPES = ["fe56_host_tape", "fe57_host_tape", "fe56_jendl_tape",
               "u235_tape", "th232_tape", "pu241_tape"]
+
+#: The leaves that cross a **unit** boundary and therefore cannot be compared
+#: bit for bit, and only those.
+#:
+#: Every other field in this file is copied, so the comparison below is exact on
+#: purpose. These three are multiplied by ten on the way in and divided by ten
+#: on the way back out — the model states radii in fm (``MODEL_RADIUS_UNIT``) —
+#: and ``x * 10 / 10`` is not the identity in binary floating point. JENDL's
+#: Fe-56 is the tape that shows it: APL is ``0.48960000000000004`` in the file
+#: and ``0.4896000000000001`` after the round trip, one ULP apart.
+#:
+#: **The tolerance hides nothing, because a tighter gate runs next door.**
+#: ENDF writes six significant figures, so a one-ULP difference cannot reach the
+#: file — and ``test_mf2_writes_back_what_it_read`` compares the *written bytes*
+#: on all six of these tapes. If a radius were genuinely rebuilt rather than
+#: kept, 1e-12 would not absorb it and the byte gate would fail as well.
+#:
+#: ``apl_or_qx`` is in the set although under LRF=1/2 the same field is QX, a Q
+#: value that is copied and not converted. Naming the field twice by LRF would
+#: be more precise and less readable; 1e-12 on a Q value in eV is far below any
+#: difference a rebuild could produce.
+RESCALED_LEAVES = frozenset({"apl_or_qx", "apt", "ape"})
 
 
 def _load(request, tape):
@@ -236,7 +261,8 @@ def _decodedRange(fields, resolved, resonances) -> dict:
                     "channels": [
                         {"ipp": index + 1, "l": c.L, "sch": c.channelSpin,
                          "bnd": c.boundaryConditionValue,
-                         "ape": c.hardSphereRadius, "apt": c.scatteringRadius}
+                         "ape": radiusToEndf(c.hardSphereRadius),
+                         "apt": radiusToEndf(c.scatteringRadius)}
                         for index, c in _pairIndices(group, formalism)
                     ],
                     "energies": list(group.energies),
@@ -291,9 +317,17 @@ def _blockL(group):
 
 
 def _blockRadius(group):
+    """The block's APL **back in the file's units**, which is what is compared.
+
+    The model states radii in fm (``MODEL_RADIUS_UNIT``) and the file states
+    them in ENDF's 10^-12 cm, so a bare comparison reports a loss where there is
+    a *rescale*. Converting here rather than relaxing the assertion keeps what
+    this file is for: that the value survives, exactly, and that the one thing
+    the decoder is allowed to change is the scale it is stated on.
+    """
     if getattr(group, "channels", None):
-        return group.channels[0].scatteringRadius
-    return group.scatteringRadius
+        return radiusToEndf(group.channels[0].scatteringRadius)
+    return radiusToEndf(group.scatteringRadius)
 
 
 def _blockResonances(group):
@@ -394,8 +428,14 @@ def _diff(expected, actual, path="") -> list:
             f"{path}: {expected!r} in the file, {actual!r} decoded"]
 
     if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
-        # Exact. Nothing here is computed — every value is copied — so a
+        # Exact, because nothing here is computed — every value is copied, so a
         # tolerance would only hide a field being rebuilt instead of kept.
+        # The three exceptions are the radii, which are *converted*: see
+        # RESCALED_LEAVES.
+        if path.rsplit(".", 1)[-1] in RESCALED_LEAVES:
+            return [] if math.isclose(float(expected), float(actual),
+                                      rel_tol=1e-12, abs_tol=0.0) else [
+                f"{path}: {expected!r} in the file, {actual!r} decoded"]
         return [] if float(expected) == float(actual) else [
             f"{path}: {expected!r} in the file, {actual!r} decoded"]
 

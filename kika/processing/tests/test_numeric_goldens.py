@@ -146,7 +146,15 @@ def check_golden(name: str, produced: dict[str, np.ndarray]) -> None:
 _AWRI = 55.454
 _ZA = 26056
 _SPIN = 0.0
-_AP = 0.5444
+#: **In fm, because these fixtures state the model and the model is in fm**
+#: (``MODEL_RADIUS_UNIT``, 2026-08-20). It was ``0.5444`` until then — ENDF's own
+#: number, put on the model unconverted, which is precisely the confusion the
+#: canonical unit removes. ``reconstruct`` divides by ten on the way into
+#: ``resonance_formulas``, so the physics sees the same 0.5444 it always did and
+#: **the goldens below did not have to be regenerated**. That is the gate: if
+#: this edit had moved a single reconstructed cross section, the conversion
+#: would be in the wrong place.
+_AP = 5.444
 _RANGE = (1.0e-5, 1.0e5)
 
 

@@ -261,25 +261,32 @@ def _radii(path):
     return found
 
 
-def test_an_endf_radius_is_never_labelled_fm(micro_tape, tmp_path):
-    """ENDF's AP is in units of 10^-12 cm and GNDS's radius is in fm.
+def test_an_endf_radius_is_written_in_fm_and_labelled_fm(micro_tape, tmp_path):
+    """**The rescale, arriving where the previous version of this test said it had to.**
 
-    The writer's rule has always been "the unit as the model holds it, or not
-    at all" — but two call sites wrote ``unit="fm"`` outright, and an
-    ENDF-sourced radius reaching them came out a factor of ten wrong *as a
-    statement of the file*, which no schema and no round trip can see. Measured
-    on this tape before the fix: ``0.5002`` labelled ``fm``, where FUDGE's own
-    conversion of the same evaluation writes ``5.002 fm``.
+    This test used to assert the opposite — ``{""}`` and ``{"0.5444", "0.5002"}``
+    — and it was right to, because until 2026-08-20 the model carried whatever
+    number its reader produced. Two call sites wrote ``unit="fm"`` outright, so
+    an ENDF-sourced radius came out a factor of ten wrong *as a statement of the
+    file*, which no schema and no round trip can see. The fix then was to stop
+    labelling; the fix now is that there is nothing left to mislabel.
 
-    The numbers are asserted too, so that a later decision to canonicalise to
-    fm has to come here and say so rather than arrive as a silent rescale.
+    Since ``MODEL_RADIUS_UNIT`` the ENDF adapter converts on read, so the model
+    holds fm and the writer labels fm because that is what the number is. The
+    old docstring asked that "a later decision to canonicalise to fm has to come
+    here and say so rather than arrive as a silent rescale" — this is that
+    decision, said here.
+
+    **And the numbers are now FUDGE's**, which is the part worth keeping: FUDGE's
+    own conversion of this evaluation writes ``5.002 fm`` where kika used to
+    write ``0.5002`` labelled ``fm``. Both halves of that disagreement are gone.
     """
     path, _ = _write(kika.read(micro_tape, covariances=False), tmp_path)
     radii = _radii(path)
 
     assert radii, "the tape's resonance block carries radii; none were written"
-    assert {unit for _, _, unit in radii} == {""}, radii
-    assert {value for _, value, _ in radii} == {"0.5444", "0.5002"}, radii
+    assert {unit for _, _, unit in radii} == {"fm"}, radii
+    assert {value for _, value, _ in radii} == {"5.444", "5.002"}, radii
 
 
 def test_a_gnds_radius_keeps_the_unit_it_came_with(micro_fe56_gnds, tmp_path):

@@ -72,8 +72,36 @@ def _targetSpin(formalism, region) -> float:
     return spins[0].value
 
 
+def _toEndfRadius(value):
+    """A model radius (fm) → ENDF's units. **The one boundary in this module.**
+
+    ``kika.nuclear_data.model`` states every radius in fm since 2026-08-20
+    (``MODEL_RADIUS_UNIT``), and :mod:`kika.processing.resonance_formulas` works
+    in ENDF's 10^-12 cm throughout — every one of its signatures says so. The
+    conversion lives here, at the edge, rather than inside the formulas: the
+    formulas are what the reconstruction goldens are pinned to, and changing a
+    unit underneath them would move numbers the thesis depends on. Four call
+    sites, and they are every path a radius takes into a formula: the NRO=1
+    table, the range's AP, the per-l APL, and the URR's AP.
+
+    The import is deferred like every other model import in this module — see
+    the module docstring, and ``test_layering.py``, which asserts it statically.
+    """
+    from kika.nuclear_data.model.resonances import radiusToEndf
+
+    return radiusToEndf(value)
+
+
 def _radiusTable(resonances, resolvedCount: int):
     """``(energies, values, (NBT, INT) pairs)`` for NRO=1, or ``None``.
+
+    **In ENDF's radius units, not the model's.** Everything downstream of here
+    is :mod:`kika.processing.resonance_formulas`, which works in ENDF units
+    throughout and says so in every signature (``ap : float — Scattering radius
+    (ENDF units: 10^{-12} cm)``). The model is in fm since 2026-08-20, so the
+    conversion happens **at this boundary** rather than inside the formulas.
+    That is the whole reason the reconstruction did not move when the model's
+    unit changed, and ``test_numeric_goldens`` is what says it did not.
 
     ENDF writes NRO per *range* while the model holds one scattering radius for
     the file, so a file that tabulates the radius on one range and not on
@@ -99,7 +127,7 @@ def _radiusTable(resonances, resolvedCount: int):
             "regions, so the values between its points mean nothing definite"
         )
     return (np.asarray(radius.energies, dtype=float),
-            np.asarray(radius.values, dtype=float),
+            _toEndfRadius(np.asarray(radius.values, dtype=float)),
             list(radius.interpolation))
 
 
@@ -262,7 +290,8 @@ def reconstruct(
         res_E_hi = max(res_E_hi, eh)
 
         spi = _targetSpin(formalism, (el, eh))
-        rangeRadius = formalism.scatteringRadius
+        # ENDF units from here down -- see `_radiusTable`.
+        rangeRadius = _toEndfRadius(formalism.scatteringRadius)
         groups, energiesAndWidths = _resolvedGroups(formalism)
 
         # Collect resonance energies for seeding the adaptive grid
@@ -306,8 +335,9 @@ def reconstruct(
                     # (ENDF's APL, which the model puts on the channel); the
                     # range's own AP otherwise. Every l used to get the range
                     # value, which for JEFF-4.0 Fe-56 meant the l=1 hard-sphere
-                    # phase shift was computed from AP = 0.5444 fm instead of
-                    # APL = 0.5002 fm.
+                    # phase shift was computed from AP = 5.444 fm instead of
+                    # APL = 5.002 fm. (Both are 0.5444 and 0.5002 in the ENDF
+                    # units this line is in; the model states them in fm.)
                     #
                     # An energy-dependent AP table (NRO=1) still wins, inside
                     # the formula functions: it is a property of the range and
@@ -410,7 +440,7 @@ def reconstruct(
 
         sel, scap, sfis = urr_cross_sections(
             urr_E, urr_groups, _targetSpin(widths, (el, eh)),
-            widths.scatteringRadius, atomicWeightRatio,
+            _toEndfRadius(widths.scatteringRadius), atomicWeightRatio,
         )
 
         # Merge URR grid with existing grid
@@ -552,10 +582,11 @@ def _groupRadius(group):
     back, rather than this function inventing the fallback.
     """
     radius = getattr(group, "scatteringRadius", None)
-    if radius is not None:
-        return radius
-    channels = getattr(group, "channels", None)
-    return channels[0].scatteringRadius if channels else None
+    if radius is None:
+        channels = getattr(group, "channels", None)
+        radius = channels[0].scatteringRadius if channels else None
+    # ENDF units out, because the caller hands this straight to the formulas.
+    return _toEndfRadius(radius)
 
 
 def _tabulated(form):

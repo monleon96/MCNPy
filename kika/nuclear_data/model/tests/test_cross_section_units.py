@@ -8,9 +8,14 @@ comes back as ``(b, eV)`` without asking.
 
 That assumption is **correct for every file anyone has**, and it was correct by
 luck rather than by construction. What being wrong looks like is on the record:
-``ScatteringRadius.constant`` held 5.444 down the GNDS path and 0.5444 down the
-ENDF path, for the same Fe-56 radius, because ENDF's AP is in units of 10⁻¹² cm
-and states so nowhere (``docs/gnds_endf_conflicts.md`` §4.1). Nothing raised.
+``ScatteringRadius.constant`` **used to hold** 5.444 down the GNDS path and
+0.5444 down the ENDF path, for the same Fe-56 radius, because ENDF's AP is in
+units of 10⁻¹² cm and states so nowhere. Nothing raised. That one was closed on
+2026-08-20 by giving the model a canonical radius unit — fm, GNDS's
+(``MODEL_RADIUS_UNIT``, ``docs/gnds_endf_conflicts.md`` §4.1) — which is the
+same move this file argues for and a reason to keep the example rather than
+drop it: the cross section's ``(b, eV)`` is still correct by luck, and the
+radius is the one that was checked.
 
 So the assumption is now checked at the one line that drops it, and this file
 holds both halves: that a stated wrong unit raises, and that an unstated one

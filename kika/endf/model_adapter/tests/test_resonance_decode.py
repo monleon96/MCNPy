@@ -24,6 +24,7 @@ import pytest
 
 from kika.endf.model_adapter import decodeMF2MT151
 from kika.endf.read_endf import read_endf
+from kika.nuclear_data.model import radiusFromEndf
 from kika.nuclear_data.model import BreitWigner, BreitWignerApproximation, RMatrix
 from kika.nuclear_data.resonance_parameters import (ResonanceParameters,
                                                     UnresolvedResonanceParameters)
@@ -68,7 +69,10 @@ def test_the_l_dependent_radius_reaches_the_channels(decoded, mf2):
         # The file's own APL field, not the *resolved* radius: what the model
         # must reproduce is what was written, and the fallback to AP is a
         # reading of a zero rather than a value in the file.
-        expected = block.apl_or_qx if block.apl_or_qx else None
+        # `radiusFromEndf`, because the model states radii in fm and the file
+        # states them in ENDF's 10^-12 cm. The *semantics* under test are
+        # untouched -- what survives, and what None means -- only the scale.
+        expected = radiusFromEndf(block.apl_or_qx) if block.apl_or_qx else None
         for channel in group.channels:
             assert channel.scatteringRadius == expected, (
                 f"L={block.l}: the per-l scattering radius did not survive"
@@ -98,7 +102,7 @@ def test_none_means_the_file_wrote_zero_not_a_radius_that_equals_ap(decoded, mf2
     formalism = resonances.resolved[0].formalism
     blocks = mf2.isotopes[0].energy_ranges[0].parameters.l_values
     ap = mf2.isotopes[0].energy_ranges[0].parameters.ap
-    assert resonances.scatteringRadius.constant == ap
+    assert resonances.scatteringRadius.constant == radiusFromEndf(ap)
 
     wroteZero = [not block.apl_or_qx for block in blocks]
     assert any(wroteZero) and not all(wroteZero), (
@@ -138,7 +142,7 @@ def test_an_apl_equal_to_ap_is_kept(request, tape):
     formalism = resonances.resolved[0].formalism
     for group, block in zip(formalism.spinGroups, blocks):
         if block.apl_or_qx and block.apl_or_qx == ap:
-            assert group.channels[0].scatteringRadius == ap, (
+            assert group.channels[0].scatteringRadius == radiusFromEndf(ap), (
                 f"{tape} L={block.l}: APL was written as {ap} and equals the "
                 f"range's AP; collapsing it to None loses what the file said"
             )
@@ -349,8 +353,8 @@ def test_a_reich_moore_range_carries_the_radius_it_declared(decoded, mf2):
     formalism = resonances.resolved[0].formalism
     parameters = mf2.isotopes[0].energy_ranges[0].parameters
 
-    assert formalism.scatteringRadius == parameters.ap
-    assert resonances.scatteringRadius.constant == parameters.ap
+    assert formalism.scatteringRadius == radiusFromEndf(parameters.ap)
+    assert resonances.scatteringRadius.constant == radiusFromEndf(parameters.ap)
 
 
 @pytest.mark.parametrize("tape", REAL_TAPES)
@@ -495,5 +499,10 @@ def test_an_energy_dependent_radius_wins_over_the_constant(mf2):
     resonances, _, _ = decodeMF2MT151(section)
     radius = resonances.scatteringRadius
     assert radius.isEnergyDependent
-    np.testing.assert_array_equal(radius.values, np.array([0.54, 0.55]))
-    assert radius.constant == 0.5444
+    # In fm on the model: the whole **table** crosses the unit boundary, not
+    # just the scalar, which is the half a scalar-only conversion would have
+    # missed silently -- NRO=1 is rare enough that no committed tape has one.
+    np.testing.assert_array_equal(radius.values,
+                                  np.array([0.54, 0.55]) * 10.0)
+    assert radius.constant == 0.5444 * 10.0
+    assert radius.unit == "fm"

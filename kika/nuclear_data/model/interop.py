@@ -13,6 +13,15 @@ is the bottom of the stack, and a model module importing
 above it. Returning plain data keeps the arrow pointing one way and keeps this
 module testable without constructing anything it does not own.
 
+**The flat classes are ENDF-shaped, and that includes their units.** Every
+radius they carry — ``ap``, ``scattering_radius`` — is in ENDF's 10^-12 cm,
+because that is what ``ResonanceParameters`` has always meant by it and what
+kika-app reads. The model states radii in fm (``MODEL_RADIUS_UNIT``, 2026-08-20),
+so this module converts on the way out. The two projections that come from
+*provenance* rather than from the model — ``fields["ap"]`` and
+``fields["radius_table"]`` — are ENDF's own numbers kept verbatim and are
+**not** converted; converting them would be dividing twice.
+
 **One-way, and deliberately so.** There is no ``from_flat_*``. The flat classes
 lose information the model keeps — a ``regions1d``'s per-region interpolation
 becomes one "dominant" string, an ``RMatrix``'s per-channel widths do not fit
@@ -24,6 +33,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+from .resonances import radiusToEndf
 
 __all__ = [
     "flatNuclideInfo", "flatCrossSection", "flatAngularDistribution",
@@ -323,7 +334,7 @@ def flatResonanceParameters(region, fields: Dict[str, Any], provenance
                 "awri": group.atomicWeightRatio,
                 "l": group.L,
                 "records": [r.toFlat() for r in group.resonances],
-                "ap": group.scatteringRadius,
+                "ap": radiusToEndf(group.scatteringRadius),
             }
             for group in formalism.resonanceParameters.spinGroups
         ]
@@ -337,7 +348,8 @@ def flatResonanceParameters(region, fields: Dict[str, Any], provenance
                     for energy, spin, widths in zip(
                         group.energies, group.spins, group.widths)
                 ],
-                "ap": group.channels[0].scatteringRadius if group.channels else None,
+                "ap": radiusToEndf(
+                    group.channels[0].scatteringRadius if group.channels else None),
             }
             for group in formalism.spinGroups
         ]
@@ -391,7 +403,7 @@ def flatUnresolvedResonanceParameters(unresolved, fields: Dict[str, Any],
     return {
         "nuclide_id": provenance.za or 0,
         "spin": fields.get("spi"),
-        "scattering_radius": widths.scatteringRadius,
+        "scattering_radius": radiusToEndf(widths.scatteringRadius),
         "energy_range": (unresolved.domainMin, unresolved.domainMax),
         "lssf": int(widths.selfShieldingOnly),
         "l_groups": [byL[key] for key in sorted(byL)],
