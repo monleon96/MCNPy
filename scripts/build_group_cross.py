@@ -31,6 +31,8 @@ Called by exfor_to_endf_research.py as Step 10b via
 from __future__ import annotations
 
 import argparse
+import ctypes
+import gc
 import sys
 from pathlib import Path
 
@@ -50,6 +52,77 @@ ZA, MT = 26056, 2
 NULL_TOL = 1e-10
 CHUNK = 250
 SPREAD_EPS = 1e-12
+
+# ⚑ THE BAR THE PIPELINE'S OWN MF34 HAS TO CLEAR ON THE CARRIED SLOTS.
+#
+# `--dead-parameters carry` takes those slots straight out of `c34_ship`, and
+# on run 99 that block came back with `lam_min = -8.60e-11` against a joint
+# scale of 4.17e-2 -- the shipped object is very slightly not PSD there, and
+# the direct sum inherits it by construction (that is the point: it MEASURES
+# the pipeline instead of hiding it behind a singular congruence).
+#
+# Projecting that away is legitimate ONLY while it is numerical dust. The bar
+# is a RATIO to the block's own largest eigenvalue, so it does not drift with
+# units or with the run:
+#
+#   * LAPACK's own floor for a symmetric eigendecomposition is ~n*eps*lam_max,
+#     i.e. ~3e-13 at n = 1307. Anything at that level is the solver, not the
+#     matrix.
+#   * ENDF-6 writes 11-character fields, so a round-tripped covariance carries
+#     relative perturbations several orders above that floor.
+#   * 1e-8 sits between the two: ~5 decades above the solver's noise and ~8
+#     decades below any eigenvalue that could carry physical variance.
+#
+# A block that FAILS this is not dust and must not be quietly projected -- it
+# means the pipeline's MF34 is genuinely indefinite on those parameters, which
+# is a finding about the deliverable, not a rounding problem. `carry` raises
+# there instead of clipping, and BOTH numbers below are printed on every run so
+# that an object drifting toward either bar is visible BEFORE it trips it.
+#
+# ── BAR 1, CONDITIONING: you cannot assert PSD more tightly than the format ──
+#
+# `c34_ship` is `c34_rel_ship * outer(a_nom, a_nom)` and `c34_rel_ship` is READ
+# BACK OUT OF THE ENDF TAPE, whose MF34 carries 7 significant digits
+# (`1.665047-2`; measured on run 99's `_mg`: 582060 fields with 6 decimals,
+# 39291 with 5 -- the short ones are the NEGATIVE entries, where the sign eats
+# a column and only 6 digits fit). Half a unit in the last place is a relative
+# perturbation of 5e-8 to 5e-7 per positive entry depending on the leading
+# digit, and up to 5e-6 on a negative one; by Weyl a
+# symmetric perturbation moves every eigenvalue by at most its 2-norm. So a
+# block whose TRUE lam_min is exactly zero comes back off the tape at
+# lam_min ~ -1e-7 * lam_max, and no gate can tell that apart from a real
+# violation of the same size. Anything at or below this is the text format,
+# not the matrix.
+#
+# ⚠ THIS BAR IS A PROPERTY OF THE FILE, NOT A TASTE. If MF34 is ever written
+# with more digits, tighten it; the derivation, not the number, is the rule.
+# 5e-7 is deliberately the TIGHT end of that range -- it errs toward refusing,
+# since the negative entries only carry 6 digits and could justify 5e-6.
+# Run 99 measured -1.514e-08: a factor 33 inside even the tight end.
+DEAD_BLOCK_PSD_RTOL = 5e-7
+
+# ── BAR 2, MASS: how much variance the projection actually invents ──────────
+#
+# The ratio above is a CONDITIONING number: it says the most negative direction
+# is small next to the largest positive one. It does NOT say the projection is
+# harmless -- a block could clear it with thousands of small negative
+# eigenvalues whose total is not small at all. This is the number that answers
+# "how much am I hiding": the negative spectral mass the clip has to
+# manufacture, against the block's own trace, i.e. the fraction of the declared
+# variance that the projection is inventing.
+#
+# It is the bar that actually protects the deliverable, and it is independent
+# of the first: a genuinely indefinite object fails HERE even when its worst
+# eigenvalue happens to look small.
+#
+# SAME NUMBER, SAME DERIVATION, DIFFERENT FUNCTIONAL -- and that is the point.
+# Bar 1 applies the tape's floor to the WORST direction, bar 2 applies it to
+# the TOTAL. Neither implies the other: one eigenvalue at 10x the floor trips
+# bar 1 with negligible mass, and a thousand eigenvalues each at a tenth of the
+# floor trip bar 2 while bar 1 sees nothing wrong. Both must hold. Picking two
+# unrelated numbers here would have made the pair a matter of taste; deriving
+# both from the file's 7 digits keeps it a statement about the object.
+DEAD_BLOCK_CLIP_MASS_MAX = 5e-7
 
 
 def shipped_mg_endf(run_dir: Path) -> Path:
@@ -332,6 +405,110 @@ def valid_and_collapsed(run_dir, n_fine, ids, g_shape, widths, n_gs):
             acc[:, :, l] += blk[:, :, l] @ A[l][:, i0:i1].T
         print(f"    collapse {i0}:{i1}", flush=True)
     return valid, A, acc
+
+
+def carry_dead_parameters(c34_post, c34_ship, d_mc34, d_tar34,
+                          psd_rtol=DEAD_BLOCK_PSD_RTOL,
+                          clip_mass_max=DEAD_BLOCK_CLIP_MASS_MAX):
+    """Put back the shape parameters the diagonal congruence cannot reach.
+
+    ``jj = d_tar / d_mc`` is a diagonal congruence, and a congruence cannot give
+    variance to a direction the Monte Carlo never explored: where ``d_mc = 0``
+    the whole row and column of ``c34_post`` go to zero and take the pipeline's
+    own sigma with them. That is not a modelling decision, it is the rescaling
+    deleting what it cannot rescale -- 1542 of 4218 slots on run 99, nearly all
+    of a_4..a_6, and the count does not shrink with more replicas because what
+    freezes them is the AIC mixture's BETWEEN-model variance, which the replicas
+    do not carry (the order cap and the analytic substitution both bite at fixed
+    n).
+
+    Those slots come back as a DIRECT SUMMAND out of ``c34_ship``, never as a
+    patch of the full block, and that choice is what keeps the diagnosis honest:
+
+    * ``c34_post`` is exactly zero on D in both its rows and its columns, so the
+      result is ``block_diag(live, c34_ship[D, D])`` and its smallest eigenvalue
+      is ``min`` of the two. A principal submatrix of a PSD matrix is PSD, so
+      the PSD gate becomes a real measurement of the pipeline's own MF34 instead
+      of a tautology about the chain being a congruence.
+    * the whitener of a block-diagonal matrix is block diagonal, and the cross
+      block is exactly zero on D, so ``||W33 Cx W34||_2`` cannot move. Row F has
+      to land on the CONTROL row exactly as before.
+
+    The alternative -- keeping the pipeline's ``corr(dead, live)`` as well -- has
+    neither property, which is why the caller prices it as a diagnostic row
+    rather than choosing between them on argument.
+
+    THE CARRIED BLOCK IS PROJECTED ONTO THE PSD CONE, AND ONLY WHILE THAT
+    PROJECTION IS DUST. ``c34_ship`` restricted to the dead slots is not quite
+    PSD (run 99: ``lam_min/lam_max`` a few times 1e-9), so the direct sum
+    inherits a negative eigenvalue that the old ``drop`` path never showed --
+    ``drop`` reached machine zero only because the singular congruence had
+    ANNIHILATED those very directions. Clipping the negative eigenvalues to
+    zero is safe here for the same reason the direct sum is: the block is
+    separate and ``cx`` is exactly zero on it, so ``sigma_max(K)`` provably
+    cannot move. Above ``psd_rtol`` it is not dust any more, and this raises
+    instead: an indefinite MF34 on real parameters is a finding about the
+    deliverable, not something a projection should absorb.
+
+    Returns
+    -------
+    (c34_post, dead, orphan, info)
+        ``c34_post`` modified in place, the boolean mask of what was carried,
+        the count of slots neither the replicas nor the pipeline declare, and
+        a dict with the carried block's spectrum and what the projection cost.
+    """
+    d_mc34 = np.asarray(d_mc34, float)
+    d_tar34 = np.asarray(d_tar34, float)
+    dead = (d_mc34 <= 0.0) & (d_tar34 > 0.0)
+    orphan = int(((d_mc34 <= 0.0) & (d_tar34 <= 0.0)).sum())
+    info = {"lam_min": 0.0, "lam_max": 0.0, "ratio": 0.0, "n_clipped": 0,
+            "d_shift_rel": 0.0, "clip_mass": 0.0, "trace": 0.0}
+    if dead.any():
+        D = np.ix_(dead, dead)
+        if np.abs(c34_post[dead, :]).max() > 0.0:
+            raise SystemExit(
+                "a row with zero MC spread is not identically zero in c34_post; "
+                "the congruence and the mask disagree and the direct-sum "
+                "argument does not hold.")
+        blk = 0.5 * (c34_ship[D] + c34_ship[D].T)
+        w, V = np.linalg.eigh(blk)
+        lam_min, lam_max = float(w[0]), float(w[-1])
+        neg = w[w < 0.0]
+        tr = float(np.sum(np.abs(w)))
+        mass = float(-neg.sum() / tr) if tr > 0 else 0.0
+        info.update(lam_min=lam_min, lam_max=lam_max,
+                    ratio=(lam_min / lam_max if lam_max > 0 else -np.inf),
+                    n_clipped=int(neg.size), clip_mass=mass, trace=tr)
+        if lam_min < 0.0:
+            if lam_min < -psd_rtol * lam_max:
+                raise SystemExit(
+                    f"the pipeline's own MF34 is INDEFINITE on the "
+                    f"{int(dead.sum())} carried parameters: lam_min "
+                    f"{lam_min:.6e}, lam_max {lam_max:.6e}, ratio "
+                    f"{lam_min / lam_max:.3e} against the bar "
+                    f"-{psd_rtol:.0e}. That is {abs(lam_min / lam_max) / psd_rtol:.1f}x "
+                    f"too negative to be the tape's own 7-digit rounding, so it "
+                    f"is NOT projected away: a real negative direction in the "
+                    f"shipped object would be hidden, not fixed. Find out why "
+                    f"c34_ship is indefinite there before carrying it.")
+            if mass > clip_mass_max:
+                raise SystemExit(
+                    f"the PSD projection would have to invent "
+                    f"{mass:.3e} of the carried block's variance "
+                    f"({neg.size} negative eigenvalues summing to "
+                    f"{-neg.sum():.6e} against a trace of {tr:.6e}), over the "
+                    f"bar {clip_mass_max:.0e}. The worst eigenvalue is small "
+                    f"but the total is not, which is exactly the case the "
+                    f"ratio bar cannot see. This is a defect in the pipeline's "
+                    f"MF34, not rounding.")
+            d0 = np.diag(blk).copy()
+            blk = (V * np.maximum(w, 0.0)) @ V.T
+            blk = 0.5 * (blk + blk.T)
+            info["d_shift_rel"] = float(np.max(
+                np.abs(np.diag(blk) - d0)
+                / np.maximum(np.abs(d0), np.finfo(float).tiny)))
+        c34_post[D] = blk
+    return c34_post, dead, orphan, info
 
 
 def assemble_c34_rel(c34_post, a_flat, c34_rel_ship, null_fill="zero"):
@@ -684,9 +861,21 @@ def diagnose(name, c33, c34, cx, tol=NULL_TOL):
     w33, p33, r33 = whiten(c33, tol)
     w34, p34, r34 = whiten(c34, tol)
     nx = float(np.linalg.norm(cx, "fro"))
-    j = np.block([[c33, cx], [cx.T, c34]])
-    lam = float(np.linalg.eigvalsh(0.5 * (j + j.T))[0])
+    # `0.5 * (J + J.T)` block by block instead of on the assembled joint. Same
+    # matrix to the last bit -- the symmetrised off-diagonal is
+    # `0.5 * (cx + (cx.T).T) = cx` -- but the temporaries are the BLOCKS, not
+    # two more copies of the joint. On the fine magnitude grid the joint is
+    # 5956 x 5956 = 271 MB, so the naive form asks for 1.4 GB per row of the
+    # table and dies on a 12 GB box before the CONTROL row prints.
+    m = c33.shape[0]
+    j = np.empty((m + c34.shape[0],) * 2)
+    j[:m, :m] = 0.5 * (c33 + c33.T)
+    j[m:, m:] = 0.5 * (c34 + c34.T)
+    j[:m, m:] = cx
+    j[m:, :m] = cx.T
+    lam = float(np.linalg.eigvalsh(j)[0])
     sc = float(np.max(np.abs(np.diag(j))))
+    del j
     return {"case": name, "rank33": f"{r33}/{c33.shape[0]}",
             "rank34": f"{r34}/{c34.shape[0]}",
             "sigma_max(K)": float(np.linalg.norm(w33 @ cx @ w34, 2)) if nx else 0.0,
@@ -1038,7 +1227,8 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
 
 
 def build_cross_and_write_endf(run_dir, source_endf, out_endf, *,
-                               mag_grid="fine", null_fill="zero", cache=None):
+                               mag_grid="fine", null_fill="zero", cache=None,
+                               dead_parameters="drop"):
     """Build the joint and write the cross-term ENDF. Library entry point.
 
     Goes through ``main`` on a constructed argv so the pipeline runs the exact
@@ -1048,7 +1238,8 @@ def build_cross_and_write_endf(run_dir, source_endf, out_endf, *,
             "--source-endf", str(source_endf),
             "--write-endf", str(out_endf),
             "--mag-grid", str(mag_grid),
-            "--null-fill", str(null_fill)]
+            "--null-fill", str(null_fill),
+            "--dead-parameters", str(dead_parameters)]
     if cache is not None:
         argv += ["--cache", str(cache)]
     rc = main(argv)
@@ -1078,6 +1269,19 @@ def main(argv=None):
              "of slots). 'zero': dead parameter, no covariance, PSD-safe. "
              "'ship': keep the file's declared value -- this reproduced the "
              "run-89 failure.",
+    )
+    ap.add_argument(
+        "--dead-parameters", choices=["drop", "carry"], default="drop",
+        help="What to do with the (group, order) slots whose REPLICAS never "
+             "move -- 1542 of 4218 on run 99, almost all of a_4..a_6. 'drop' "
+             "(what every run so far did): the nominal group mean is averaged "
+             "over the MC-valid bins only, comes out exactly zero there, and "
+             "the tape declares the parameter with NO uncertainty. 'carry': "
+             "the group mean is averaged over ALL fine bins -- the functional "
+             "the consumer interpolates back out of MF4 -- and the shape block "
+             "on those slots is taken from the pipeline's own MF34 as a DIRECT "
+             "SUMMAND. The cross block stays zero there, because the MC cannot "
+             "inform it.",
     )
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true",
@@ -1214,8 +1418,33 @@ def main(argv=None):
 
     A_mag = row_aggregator(g_mag, widths, n_gm, np.ones(n_fine, bool))
     c0_g = c0 @ A_mag.T
+
+    # ── the denominator has to be the number the CONSUMER multiplies back ─────
+    #
+    # `A_shape[l]` is masked by the MC's validity, so for a group whose replicas
+    # never move at order l it is an all-zero row and the group mean comes out
+    # EXACTLY ZERO -- 1542 of 4218 slots on run 99. The tape then declares
+    # `rel = 0` there, while `eval_covariance.build_mf34_block` scales that
+    # relative block by `a_l_per_pt` INTERPOLATED FROM THE FILE'S OWN MF4, which
+    # is not zero: the file asserts perfect knowledge of a parameter it does
+    # declare. The run's own log already prints the contradiction in one line --
+    # `a_pt` has 1 exact zero of 4218 against `a_nom_group`'s 1542.
+    #
+    # `carry` averages over every fine bin instead, which is the same functional
+    # the consumer interpolates. `drop` keeps the masked aggregator, so the
+    # default reproduces every earlier run byte for byte.
+    _carry = args.dead_parameters == "carry"
+    A_nom = ([row_aggregator(g_shape, widths, n_gs, np.ones(n_fine, bool))]
+             * L_MAX if _carry else A_shape)
     a_nom_group = np.stack(
-        [A_shape[l] @ a_nom_fine[:, l] for l in range(L_MAX)], axis=-1)
+        [A_nom[l] @ a_nom_fine[:, l] for l in range(L_MAX)], axis=-1)
+    if _carry:
+        _tiny = np.finfo(float).tiny
+        _was = np.stack([A_shape[l] @ a_nom_fine[:, l] for l in range(L_MAX)],
+                        axis=-1)
+        print(f"  --dead-parameters carry: group means over ALL fine bins  "
+              f"(exact zeros {int((np.abs(_was) < _tiny).sum())} -> "
+              f"{int((np.abs(a_nom_group) < _tiny).sum())} of {_was.size})")
 
     if args.write_null_mask:
         mask = np.abs(a_nom_group) < np.finfo(float).tiny
@@ -1251,6 +1480,24 @@ def main(argv=None):
     c34_mc = joint[n_gm:, n_gm:]
     cx_mc = joint[:n_gm, n_gm:]
 
+    # The replica arrays die here: `joint` is their only consumer, and the
+    # three blocks above are VIEWS into it, so `joint` is what has to stay.
+    # On the fine magnitude grid they are ~950 MB that would otherwise sit
+    # resident under the whole diagnostics table, where each row builds its
+    # own 5956 x 5956 joint. Dropping them is the difference between the table
+    # printing and the box swapping.
+    del c0, c0_g, a_g, a_flat, nom
+    gc.collect()
+    # `gc.collect()` returns the pages to glibc's arenas, NOT to the kernel, and
+    # the arenas are badly fragmented by here: the two parquet passes allocate
+    # and free hundreds of MB in 250-bin chunks. Measured on run 99, the process
+    # sat ~2 GB above the sum of its live arrays until this call. That is the
+    # difference between the diagnostics table fitting on a 12 GB box and not.
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except OSError:
+        pass  # not glibc; the free lists just stay resident
+
     print("  mapping the shipped MF34 onto the base shape grid ...", flush=True)
     c34_rel_ship = shipped_c34_rel_on_base(blocks, shape_ev)
     a_flat_nom = a_nom_group.reshape(-1)
@@ -1265,6 +1512,66 @@ def main(argv=None):
     c33_post = c33_mc * np.outer(j33, j33)
     c34_post = c34_mc * np.outer(j34, j34)
     cx_post = cx_mc * np.outer(j33, j34)
+
+    # ── the parameters the congruence cannot reach ────────────────────────────
+    #
+    # `jj = d_tar / d_mc` is a diagonal congruence, and a congruence cannot give
+    # variance to a direction the MC never explored: where `d_mc = 0` the whole
+    # row and column go to zero and take the pipeline's own sigma with them.
+    # That is not a modelling decision, it is the rescaling deleting what it
+    # cannot rescale.
+    #
+    # `carry` puts those slots back as a DIRECT SUMMAND out of the pipeline's
+    # own MF34. Direct sum, not a patch of the full block, and the reason is
+    # that it keeps the diagnosis honest:
+    #   * PSD becomes min(lam_min(congruence), lam_min(c34_ship[D, D])), and a
+    #     principal submatrix of a PSD matrix is PSD -- so the gate turns into a
+    #     real measurement of the pipeline object instead of a tautology about
+    #     the chain being a congruence;
+    #   * row F must still land on the CONTROL row's sigma_max(K), because
+    #     `cx_post` is exactly zero on D and the whitener of a block-diagonal
+    #     matrix is block diagonal, so the augmented directions are invisible to
+    #     ||W33 Cx W34||_2. The live block is still a positive diagonal
+    #     congruence of the CONTROL -- the denominator moves with `carry` on the
+    #     MIXED groups, but a congruence is a congruence. If row F pulls away
+    #     from CONTROL, the chain is not one and the tape must not ship.
+    # NOTE `lam_min_norm` IS NOT comparable across drop/carry: the normaliser is
+    # max|diag(J)| and `carry` restores relative variances up to ~7.6 at slots
+    # `drop` wrote as zero. Read sigma_max(K) and the raw lam_min.
+    # The alternative -- taking the pipeline's corr(dead, live) as well -- is
+    # priced as row G below rather than asserted.
+    dead34 = np.zeros(n_gs * L_MAX, bool)
+    if _carry:
+        if (d_mc[:n_gm] <= 0.0).any():
+            raise SystemExit(
+                f"{int((d_mc[:n_gm] <= 0.0).sum())} magnitude groups have zero "
+                f"MC spread. The c0 replicas always move, so that is a join or "
+                f"a masking bug, not a dead parameter.")
+        c34_post, dead34, _orphan, _pinfo = carry_dead_parameters(
+            c34_post, c34_ship, d_mc[n_gm:], d_tar[n_gm:])
+        _lam = (float(np.linalg.eigvalsh(c34_post[np.ix_(dead34, dead34)])[0])
+                if dead34.any() else 0.0)
+        _dg = dead34.reshape(n_gs, L_MAX)
+        print(f"\n  carried back: {int(dead34.sum())} of {dead34.size} shape "
+              f"parameters that the replicas never move and the pipeline does "
+              f"declare\n    ({_orphan} declared by neither, left at zero)")
+        print("    by order: " + "  ".join(
+            f"a_{l + 1} {int(_dg[:, l].sum())}/{n_gs}" for l in range(L_MAX)))
+        print(f"    the pipeline's MF34 on those slots: lam_min "
+              f"{_pinfo['lam_min']:.6e}  lam_max {_pinfo['lam_max']:.6e}")
+        print(f"    bar 1, conditioning: ratio {_pinfo['ratio']:.3e} vs "
+              f"-{DEAD_BLOCK_PSD_RTOL:.0e}  -- using "
+              f"{abs(_pinfo['ratio']) / DEAD_BLOCK_PSD_RTOL:.3f} of the tape's "
+              f"own 7-digit floor")
+        print(f"    bar 2, invented mass: {_pinfo['clip_mass']:.3e} vs "
+              f"{DEAD_BLOCK_CLIP_MASS_MAX:.0e}  -- using "
+              f"{_pinfo['clip_mass'] / DEAD_BLOCK_CLIP_MASS_MAX:.3f} of the bar "
+              f"(trace {_pinfo['trace']:.6e})")
+        print(f"    PSD projection: {_pinfo['n_clipped']} negative eigenvalues "
+              f"clipped to zero, worst relative shift of a declared variance "
+              f"{_pinfo['d_shift_rel']:.3e}")
+        print(f"    lam_min of the carried block AFTER the projection: "
+              f"{_lam:.6e}")
 
     e33 = np.max(np.abs(np.sqrt(np.maximum(np.diag(c33_post), 0)) - d_tar[:n_gm]))
     e34 = np.max(np.abs(np.sqrt(np.maximum(np.diag(c34_post), 0)) - d_tar[n_gm:]))
@@ -1317,6 +1624,22 @@ def main(argv=None):
                            where=(np.abs(a_flat_nom) >= np.finfo(float).tiny
                                   )[None, :])[:, K]),
     ]
+    if _carry and dead34.any():
+        # Not a direct sum: the pipeline's correlation between the dead
+        # parameters and the live ones, kept. PSD is not guaranteed and
+        # sigma_max(K) is no longer protected, which is the whole point of
+        # measuring it next to F instead of choosing between them on argument.
+        _cf = c34_post.copy()
+        _m = dead34[None, :] | dead34[:, None]
+        _cf[_m] = (0.5 * (c34_ship + c34_ship.T))[_m]
+        _rel_full = assemble_c34_rel(_cf, a_flat_nom, c34_rel_ship, "zero")
+        rows2.append(diagnose(
+            "G  carry, FULL pipeline block on the dead rows (NOT a direct sum)",
+            c33_ship, _rel_full[KK],
+            np.divide(cx_post, a_flat_nom[None, :], out=np.zeros_like(cx_post),
+                      where=(np.abs(a_flat_nom) >= np.finfo(float).tiny
+                             )[None, :])[:, K]))
+
     print("\n=== PSD in the space the chi2 folds (relative MF34, a_pt) ===")
     print("  ⚠ ROWS A-E MODEL THE SIDECAR ROUTE AND ARE HISTORY. They divide "
           "the cross\n  block by `a_pt` and the shape blocks by `a_nom` -- two "
@@ -1857,9 +2180,13 @@ def main(argv=None):
                         "base grid: there is no mesh to emit.")
             else:
                 _order_grids = _g
+                # Same width convention as the nominal aggregator above, or
+                # the emission weights u = w * a would average over a different
+                # set of fine bins than the group mean they normalise against.
                 _valid_width = np.stack(
                     [np.bincount(g_shape,
-                                 weights=np.where(valid[:, l], widths, 0.0),
+                                 weights=np.where(valid[:, l] | _carry,
+                                                  widths, 0.0),
                                  minlength=n_gs)
                      for l in range(L_MAX)], axis=-1)
                 print(f"\n  per-order mesh: "
