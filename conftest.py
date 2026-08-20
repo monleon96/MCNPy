@@ -182,6 +182,30 @@ _TAPES: Dict[str, Sequence[str]] = {
     "be9_b81": ("endfb81/n-004_Be_009.endf", "n-004_Be_009.endf"),
     "li6_b81": ("endfb81/n-003_Li_006.endf", "n-003_Li_006.endf"),
     "c12_b81": ("endfb81/n-006_C_012.endf", "n-006_C_012.endf"),
+    # LAW=5, charged-particle elastic scattering, which occurs nowhere in any
+    # neutron sublibrary: it needs a projectile that is charged. ENDF/B-VIII.0
+    # ships those sublibraries next to ``neutrons/`` and they are on the share.
+    # Four tapes because LAW=5 splits on two axes and all four cells are
+    # occupied -- LTP=1 (nuclear-amplitude expansion) vs LTP=12 (a table),
+    # crossed with LIDP=0 (distinguishable) vs LIDP=1 (identical particles,
+    # which is p+p, d+d, t+t, 3He+3He and alpha+alpha and nothing else). These
+    # are the smallest carriers of each cell; see ``docs/mf6_witness_hunt.md``
+    # in kika-workspace for the census over all 63 charged-particle tapes.
+    "p_he3_b80": ("endfb8/protons/p-002_He_003.endf",
+                  "endfb80/protons/p-002_He_003.endf"),
+    "d_h2_b80": ("endfb8/deuterons/d-001_H_002.endf",
+                 "endfb80/deuterons/d-001_H_002.endf"),
+    "h3_he4_b80": ("endfb8/helium3s/h-002_He_004.endf",
+                   "endfb80/helium3s/h-002_He_004.endf"),
+    "a_he4_b80": ("endfb8/alphas/a-002_He_004.endf",
+                  "endfb80/alphas/a-002_He_004.endf"),
+    # LAW=2/LANG=12 -- the tabulated two-body form -- which likewise occurs on
+    # no neutron tape here: 0 in all 557, against 503 nodes in these 63. This
+    # tape is also the cheapest witness to the interpolation-padding defect
+    # that ``test_interp_padding_is_probed_once_per_section_and_that_is_wrong``
+    # pins, which is why it is this Li-7 and not one of the other three.
+    "t_li7_b80": ("endfb8/tritons/t-003_Li_007.endf",
+                  "endfb80/tritons/t-003_Li_007.endf"),
     "fe56_gnds_cov": (
         "ENDF-B-VIII.1-GNDS/ENDF-B-VIII.1-GNDS/neutrons/Covariances/"
         "n-026_Fe_056.endf.gnds-covar.xml",
@@ -451,6 +475,13 @@ fe56_b81_tape = _tape_fixture("fe56_b81")
 be9_b81_tape = _tape_fixture("be9_b81")
 li6_b81_tape = _tape_fixture("li6_b81")
 c12_b81_tape = _tape_fixture("c12_b81")
+
+#: The charged-particle carriers: LAW=5's four cells, and LAW=2/LANG=12.
+p_he3_b80_tape = _tape_fixture("p_he3_b80")
+d_h2_b80_tape = _tape_fixture("d_h2_b80")
+h3_he4_b80_tape = _tape_fixture("h3_he4_b80")
+a_he4_b80_tape = _tape_fixture("a_he4_b80")
+t_li7_b80_tape = _tape_fixture("t_li7_b80")
 
 tsl_h_h2o_tape = _tape_fixture("tsl_h_h2o")
 tsl_ortho_h_tape = _tape_fixture("tsl_ortho_h")

@@ -329,10 +329,38 @@ class MF6LawTwoBody(MF6Law):
 class MF6LawChargedElastic(MF6Law):
     """LAW=5: charged-particle elastic scattering (ENDF-6 §6.2.5).
 
-    ``LTP`` on each node says whether the LIST is nuclear-amplitude
-    coefficients, a nuclear-plus-interference expansion, or a cross-section
-    table; the values are kept flat and unreshaped, because no tape on this
-    machine carries a LAW=5 to check a reshape against — see ``docs/mf6_notes.md``.
+    ``LTP`` on each node says whether the LIST is a nuclear-amplitude expansion
+    (``LTP=1``, ``LTP=2``) or a table of (μ, P) pairs (``LTP>2``). ``values``
+    stays **flat**, as it arrived: re-emitting what was read cannot be wrong,
+    and that is what makes the byte gate on the four committed charged-particle
+    fixtures pass. :meth:`amplitudes` and :meth:`tabulated` do the reshape for
+    callers who want the physics.
+
+    The reshape used to be refused, on the grounds that *"no tape on this
+    machine carries a LAW=5 to check a reshape against"*. That was true of
+    ``endfb81/``, which is neutron-only, and false of the share: ENDF/B-VIII.0
+    ships its charged-particle sublibraries and 63 of those tapes carry a
+    LAW=5. Measured over their 4 710 nodes, ``NW`` is fixed by ``LTP`` and
+    ``LIDP`` with no exceptions:
+
+    ==============  ==============  ==================
+    ``LTP``         ``LIDP``        ``NW``
+    ==============  ==============  ==================
+    1 or 2          0               ``4·NL + 3``
+    1 or 2          1               ``3·NL + 3``
+    >2              either          ``2·NL``
+    ==============  ==============  ==================
+
+    and the arithmetic says why, which is what makes it an identity rather than
+    a fit. Distinguishable particles need the nuclear expansion out to order
+    ``2NL`` (``2NL+1`` reals) beside ``NL+1`` complex interference amplitudes
+    (``2NL+2`` reals). Identical particles keep only the even orders (``NL+1``
+    reals) beside the same ``2NL+2``. A table is (μ, P) pairs, ``2NL``.
+
+    ``LTP=2``, ``LTP=14`` and ``LTP=15`` occur zero times in those 63 tapes, so
+    the ``LTP=2`` branch of :meth:`amplitudes` and the log-interpolated tables
+    are reshaped by the same identity but witnessed by nothing. See
+    ``docs/mf6_witness_hunt.md`` in kika-workspace.
     """
 
     law: int = 5
@@ -343,8 +371,9 @@ class MF6LawChargedElastic(MF6Law):
     ltp: List[int] = field(default_factory=list)
     values: List[List[float]] = field(default_factory=list)
     #: ``NL`` as written, per node. Kept rather than derived because what it
-    #: counts depends on ``LTP`` and no tape on this machine carries a LAW=5 to
-    #: check a derivation against; re-emitting what was read cannot be wrong.
+    #: counts is a different thing in each branch — a Legendre order under
+    #: ``LTP<=2``, a number of table points under ``LTP>2`` — so there is no one
+    #: expression to derive it by, and re-emitting what was read cannot be wrong.
     nl_values: List[int] = field(default_factory=list)
 
     def emit(self, mat, mf, mt, line_num, pad):
@@ -363,6 +392,54 @@ class MF6LawChargedElastic(MF6Law):
 
     def nl(self, k: int) -> int:
         return self.nl_values[k] if self.nl_values else len(self.values[k])
+
+    def amplitudes(self, k: int) -> Tuple[np.ndarray, np.ndarray]:
+        """``(nuclear, interference)`` at node *k*. ``LTP=1`` and ``LTP=2`` only.
+
+        *nuclear* is the real Legendre expansion of the nuclear scattering —
+        ``2NL+1`` coefficients with distinguishable particles, ``NL+1`` even
+        orders with identical ones. *interference* is the ``NL+1`` complex
+        amplitudes, which the tape writes as interleaved (real, imaginary)
+        reals. The split point is the identity in this class's docstring; the
+        interleaving is ENDF-6 §6.2.5 and is not separately witnessed.
+        """
+        if self.ltp[k] > 2:
+            raise ValueError(
+                f"LAW=5 node {k} is LTP={self.ltp[k]}, a table of (mu, P) "
+                f"pairs, not an amplitude expansion; use tabulated()"
+            )
+        nl = self.nl(k)
+        split = 2 * nl + 1 if self.lidp == 0 else nl + 1
+        flat = np.asarray(self.values[k], dtype=float)
+        self._check_width(k, flat, split + 2 * nl + 2)
+        pairs = flat[split:].reshape(-1, 2)
+        return flat[:split], pairs[:, 0] + 1j * pairs[:, 1]
+
+    def tabulated(self, k: int) -> Tuple[np.ndarray, np.ndarray]:
+        """``(mu, P)`` at node *k*. ``LTP>2`` only — 12 lin-lin, 14/15 log."""
+        if self.ltp[k] <= 2:
+            raise ValueError(
+                f"LAW=5 node {k} is LTP={self.ltp[k]}, a nuclear-amplitude "
+                f"expansion, not a table; use amplitudes()"
+            )
+        flat = np.asarray(self.values[k], dtype=float)
+        self._check_width(k, flat, 2 * self.nl(k))
+        table = flat.reshape(-1, 2)
+        return table[:, 0], table[:, 1]
+
+    def _check_width(self, k: int, flat: np.ndarray, expected: int) -> None:
+        """Refuse to reshape a body ENDF-6 does not admit.
+
+        A LAW=5 body whose length disagrees with its ``LTP``/``LIDP`` is either
+        a mis-walked record or a hand-built section, and reshaping it would turn
+        either into plausible numbers. The identity is cheap enough to check
+        every time.
+        """
+        if len(flat) != expected:
+            raise ValueError(
+                f"LAW=5 node {k}: LTP={self.ltp[k]} LIDP={self.lidp} "
+                f"NL={self.nl(k)} requires NW={expected}, body has {len(flat)}"
+            )
 
     def describe(self) -> str:
         return (f"LAW=5 SPI={self.spi} LIDP={self.lidp}, "
