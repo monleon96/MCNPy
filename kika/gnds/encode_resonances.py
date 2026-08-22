@@ -96,21 +96,27 @@ def _radiusUnit(unit: Optional[str], report: ConversionReport,
                 where: str) -> str:
     """The unit to label a radius axis with, and the warning when there is none.
 
-    **Every radius kika writes goes through here**, and that is the point. The
-    rule below used to live in :func:`_scatteringRadius` alone, while the two
-    call sites that write a radius through :func:`_constant` — a
-    ``resonanceReaction``'s and a ``channel``'s — labelled theirs ``fm``
-    outright. On an ENDF-sourced suite that is the factor-of-ten error this
-    docstring forbids, written into the file as a fact: measured on the
-    Fe-56 micro-tape, kika emitted ``0.5002`` labelled ``fm`` where FUDGE emits
-    ``5.002 fm``.
+    **Every radius kika writes goes through here**, and that is still the point,
+    though the danger it guards has moved. The rule used to live in
+    :func:`_scatteringRadius` alone while two call sites that write a radius
+    through :func:`_constant` — a ``resonanceReaction``'s and a ``channel``'s —
+    labelled theirs ``fm`` outright; on an ENDF-sourced suite that was a
+    factor-of-ten error written into the file as a fact, measured on the Fe-56
+    micro-tape as ``0.5002`` labelled ``fm`` where FUDGE emits ``5.002 fm``.
+
+    **Since 2026-08-20 the model is canonically fm** (``MODEL_RADIUS_UNIT``), so
+    both readers set the unit and this returns ``"fm"`` for anything that came
+    through one. What is left is the case that was always the honest one: a
+    model built by hand, or read from a GNDS file whose axis states a unit this
+    library does not convert. Neither may be labelled ``fm`` on a guess, and
+    neither is.
     """
     if unit is None:
         report.warn(
-            f"{where}: the scattering radius carries no unit — it came from a "
-            f"reader that states none, and ENDF's AP is in units of 10^-12 cm "
-            f"while GNDS's is in fm. The axis is written with an empty unit "
-            f"rather than labelled fm, because the number may not be in fm"
+            f"{where}: the scattering radius carries no unit. Both readers set "
+            f"one, so this suite was built by hand — the axis is written with "
+            f"an empty unit rather than labelled fm, because nothing has said "
+            f"the number is in fm and the model cannot check"
         )
         return ""
     return unit

@@ -91,18 +91,22 @@ from .distributions import (
     NOT_IMPLEMENTED_DISTRIBUTIONS,
     AngularEnergy,
     AngularTwoBody,
+    Branching3d,
+    DiscreteGamma,
     Distribution,
     EnergyAngular,
     Isotropic2d,
     KalbachMann,
     NBodyPhaseSpace,
+    PrimaryGamma,
     Recoil,
     Uncorrelated,
     Unspecified,
 )
-from .output_channel import (DelayedNeutron, DelayedNeutrons,
+from .output_channel import (Branching1d, DelayedNeutron, DelayedNeutrons,
                              FissionFragmentData, Multiplicity, OutputChannel,
-                             Product, Products, Q)
+                             Product, Products, Q,
+                             UnspecifiedMultiplicity)
 from .pops import Nuclide, Particle, PoPs
 from .provenance import (AceProvenance, EndfProvenance, GndsProvenance,
                          Provenance)
@@ -136,6 +140,11 @@ from .resonances import (
     UnresolvedChannel,
     UnresolvedRegion,
     UnresolvedSpinGroup,
+    MODEL_RADIUS_UNIT,
+    FM_PER_ENDF_RADIUS,
+    radiusFromEndf,
+    radiusToEndf,
+    radiusFromStatedUnit,
 )
 from .sums import Add, MultiplicitySum, MultiplicitySums, Summands
 from .styles import (
@@ -193,10 +202,13 @@ __all__ = [
     "URR_probabilityTables1d",
     # §17-18 output channels and distributions
     "OutputChannel", "Product", "Products", "Multiplicity", "Q",
+    "Branching1d", "UnspecifiedMultiplicity",
     "FissionFragmentData", "DelayedNeutron", "DelayedNeutrons",
     "Add", "Summands", "MultiplicitySum", "MultiplicitySums",
     "Distribution", "AngularTwoBody", "Isotropic2d", "Unspecified", "Uncorrelated",
-    "EnergyAngular", "AngularEnergy", "KalbachMann", "NBodyPhaseSpace",
+    "EnergyAngular", "AngularEnergy", "KalbachMann", "Branching3d",
+    "NBodyPhaseSpace",
+    "DiscreteGamma", "PrimaryGamma",
     "Recoil", "NOT_IMPLEMENTED_DISTRIBUTIONS",
     # §19 resonances, by formalism
     "Resonances", "ResolvedRegion", "UnresolvedRegion", "ScatteringRadius",
@@ -204,6 +216,8 @@ __all__ = [
     "RMatrix", "RMatrixSpinGroup", "Channel", "TabulatedWidths",
     "ResonanceParameters", "ResonanceReaction", "UnresolvedChannel",
     "UnresolvedSpinGroup",
+    "MODEL_RADIUS_UNIT", "FM_PER_ENDF_RADIUS", "radiusFromEndf", "radiusToEndf",
+    "radiusFromStatedUnit",
     # conversion bookkeeping (not GNDS nodes)
     "ConversionReport", "Provenance", "EndfProvenance", "AceProvenance",
     "GndsProvenance",

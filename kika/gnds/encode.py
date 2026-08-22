@@ -46,16 +46,24 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from kika.nuclear_data.model import (AngularTwoBody, Background,
+from kika.nuclear_data.model import (AngularEnergy, AngularTwoBody,
+                                     AverageParameterCovariance, Background,
+                                     Branching1d, Branching3d,
                                      BreitWigner, ConversionReport,
                                      Constant1d, CovarianceMatrix,
-                                     CrossSectionSum, Evaluated, Isotropic2d,
-                                     Legendre, Mixed, Nuclide, Polynomial1d,
+                                     CrossSectionSum, DiscreteGamma,
+                                     EnergyAngular, Evaluated, Isotropic2d,
+                                     KalbachMann, Legendre, Mixed,
+                                     NBodyPhaseSpace,
+                                     Nuclide, ParameterCovariance,
+                                     Polynomial1d, PrimaryGamma,
                                      GndsProvenance, Reference,
                                      Regions1d, Regions2d,
                                      ResonancesWithBackground, RMatrix,
                                      ShortRangeSelfScalingVariance, Sum,
-                                     Unspecified, XYs1d, XYs2d)
+                                     Uncorrelated, Unspecified,
+                                     UnspecifiedMultiplicity, XYs1d,
+                                     XYs2d, XYs3d)
 
 from .nodes import writes
 from .primitives import formatFraction
@@ -181,6 +189,7 @@ def _interpolation(element: ET.Element, form) -> None:
 @writes("function1d", "XYs1d", "regions1d", "constant1d", "Legendre",
         "polynomial1d")
 @writes("function2d", "XYs2d", "regions2d")
+@writes("function3d", "XYs3d")
 def _function(parent: ET.Element, form, report: ConversionReport,
               where: str, nested: bool = False,
               parentAxes=None, index: Optional[int] = None) -> Optional[ET.Element]:
@@ -281,6 +290,27 @@ def _function(parent: ET.Element, form, report: ConversionReport,
         _axesUnlessNested(element, form, report, where, nested, parentAxes)
         container = ET.SubElement(element, "function1ds")
         for child in form.function1ds:
+            _function(container, child, report, where, nested=True,
+                      parentAxes=form.axes)
+        return element
+    if isinstance(form, XYs3d):
+        element = ET.SubElement(parent, "XYs3d")
+        _writeCommon(element, form, nested, index)
+        _interpolation(element, form)
+        qualifier = getattr(form, "interpolationQualifier", None)
+        if qualifier is not None:
+            element.attrib["interpolationQualifier"] = (
+                "unitbase" if str(qualifier) == "unitBase" else str(qualifier)
+            )
+        _axesUnlessNested(element, form, report, where, nested, parentAxes)
+        container = ET.SubElement(element, "function2ds")
+        for child in form.function2ds:
+            # No `index`: `function2ds` (`gnds.xsd:2253`) is a choice of
+            # `xData_XYs2d`/`xData_regions_2d`, and both put `use="required"` on
+            # `outerDomainValue` and have no `index` attribute at all. That is
+            # the opposite of `function2ds_inRegions`, whose children are
+            # indexed and carry no outer value -- the same split `_writeCommon`
+            # already handles one floor down.
             _function(container, child, report, where, nested=True,
                       parentAxes=form.axes)
         return element
@@ -625,7 +655,15 @@ class _SuiteWriter:
             )
             return
         constant = ET.SubElement(element, "constant1d")
+        # The Q's own domain when it has one. It has one whenever it was read
+        # from GNDS, and for a threshold reaction it *is* the threshold: H-2's
+        # (n,2n) Q is stated over 3.339e6..1.5e8 and used to come back out over
+        # the evaluation's whole range, which says something the file does not.
+        # The style's domain is the fallback for a Q assembled from ENDF, where
+        # there is no GNDS domain to preserve.
         domainMin, domainMax = self.domain
+        if q.domainMin is not None and q.domainMax is not None:
+            domainMin, domainMax = _number(q.domainMin), _number(q.domainMax)
         _set(constant, label=q.label or "eval", value=_number(q.value),
              domainMin=domainMin, domainMax=domainMax)
         axes = ET.SubElement(constant, "axes")
@@ -643,32 +681,53 @@ class _SuiteWriter:
             self.outputChannel(element, product.outputChannel,
                                f"{where} product {product.pid!r}")
 
-    @writes("multiplicityForm", "constant1d")
+    @writes("multiplicityForm", "constant1d", "reference", "branching1d",
+            "unspecified")
     def multiplicity(self, parent: ET.Element, multiplicity, where: str) -> None:
+        """§17.3, and **one form or an empty node**.
+
+        The four functionals go out through :func:`_function` — ``constant1d``
+        included. It used to have a branch of its own that rebuilt the node from
+        a float and filled ``domainMin``/``domainMax`` from :attr:`domain`, the
+        ``evaluated`` style's ``projectileEnergyDomain``. That is what widened
+        every threshold multiplicity, and deleting the branch is the fix: a
+        :class:`Constant1d` carries its own domain and ``_function`` writes it.
+
+        The other three are attributes and nothing else, so they are written
+        here rather than delegated. Until phase 7b they were not written at all
+        and the node came out empty — invalid, in 17 749 places across the
+        distribution, for a reason that was never a decision.
+
+        An empty ``<multiplicity/>`` still does not validate — ``gnds.xsd:1626``
+        requires a child — and that is the same judgement the empty
+        ``<distribution/>`` gets: the file announces its own incompleteness
+        rather than asserting a 1 on the evaluator's behalf. What is left in
+        that state is a multiplicity kika genuinely could not read.
+        """
         element = ET.SubElement(parent, "multiplicity")
         if multiplicity is None:
             self.report.lost(f"{where}: no multiplicity, so <multiplicity> is empty")
             return
-        if multiplicity.function is not None:
-            _function(element, multiplicity.function, self.report, where)
-            return
-        if multiplicity.constant is None:
+        form = multiplicity.form
+        if form is None:
             self.report.lost(
-                f"{where}: the multiplicity was read from a node kika does not "
-                f"model — a reference, a branching1d or an unspecified — so "
+                f"{where}: the multiplicity held no form kika could read, so "
                 f"<multiplicity> is empty rather than filled with a 1"
             )
             return
-        constant = ET.SubElement(element, "constant1d")
-        domainMin, domainMax = self.domain
-        _set(constant, label=multiplicity.label or "eval",
-             value=_number(multiplicity.constant),
-             domainMin=domainMin, domainMax=domainMax)
-        axes = ET.SubElement(constant, "axes")
-        _set(ET.SubElement(axes, "axis"), index="1", label="energy_in", unit="eV")
-        _set(ET.SubElement(axes, "axis"), index="0", label="multiplicity", unit="")
+        if isinstance(form, Reference):
+            _set(ET.SubElement(element, "reference"), label=form.label,
+                 href=form.href)
+            return
+        if isinstance(form, Branching1d):
+            _set(ET.SubElement(element, "branching1d"), label=form.label)
+            return
+        if isinstance(form, UnspecifiedMultiplicity):
+            _set(ET.SubElement(element, "unspecified"), label=form.label)
+            return
+        _function(element, form, self.report, where)
 
-    @writes("distributionForm", "angularTwoBody", "unspecified")
+    @writes("distributionForm", "angularTwoBody", "unspecified", "branching3d")
     def distribution(self, parent: ET.Element, distribution, where: str) -> None:
         """§18. **An empty ``<distribution/>`` is deliberate and is reported.**
 
@@ -679,11 +738,17 @@ class _SuiteWriter:
         which is the file telling the next tool the truth.
         """
         element = ET.SubElement(parent, "distribution")
-        if distribution is None or len(distribution) == 0:
-            self.incompleteProducts.append(where)
-            return
-        for label, form in distribution.forms.items():
-            if isinstance(form, AngularTwoBody):
+        forms = {} if distribution is None else distribution.forms
+        for label, form in forms.items():
+            if isinstance(form, Uncorrelated):
+                self.uncorrelated(element, form, label, where)
+            elif isinstance(form, EnergyAngular):
+                self.energyAngular(element, form, label, where)
+            elif isinstance(form, AngularEnergy):
+                self.angularEnergy(element, form, label, where)
+            elif isinstance(form, KalbachMann):
+                self.kalbachMann(element, form, label, where)
+            elif isinstance(form, AngularTwoBody):
                 self.angularTwoBody(element, form, label, where)
             elif isinstance(form, Isotropic2d):
                 # A bare Isotropic2d is what `kika/endf/model_adapter/
@@ -705,6 +770,12 @@ class _SuiteWriter:
                 twoBody = ET.SubElement(element, "angularTwoBody")
                 _set(twoBody, label=label, productFrame=str(form.productFrame))
                 ET.SubElement(twoBody, "isotropic2d")
+            elif isinstance(form, Branching3d):
+                # Before Unspecified, because both are attribute-only nodes and
+                # a reader that saw them in the other order would be relying on
+                # the two classes being unrelated rather than on the order.
+                _set(ET.SubElement(element, "branching3d"), label=label,
+                     productFrame=str(form.productFrame))
             elif isinstance(form, Unspecified):
                 _set(ET.SubElement(element, "unspecified"), label=label,
                      productFrame=str(form.productFrame))
@@ -713,6 +784,194 @@ class _SuiteWriter:
                     f"{where}: kika's writer has no serialisation for a "
                     f"{type(form).__name__} distribution"
                 )
+        if len(element) == 0:
+            # Counted on the **element**, not on the model dict. A product
+            # whose only form is one this writer cannot serialise leaves the
+            # element childless too, and counting the dict missed it — so the
+            # file came out invalid without the "does not validate" sentence
+            # that `declareWhatIsMissing` is there to put in the report.
+            self.incompleteProducts.append(where)
+
+    def _distributionAE(self, parent: ET.Element, form, label: str, tag: str,
+                        where: str) -> None:
+        """§18.4 and §18.5, and **the one child or none**.
+
+        ``DistributionAEType`` (``gnds.xsd:1797-1803``) is the type of both, an
+        ``xs:sequence`` of one ``XYs3d``, so a node whose function kika could
+        not read is not a partial one but an invalid one — the same judgement
+        :meth:`uncorrelated` makes about its two halves, made in the same place
+        and for the same reason.
+
+        ``nested=False`` on the child: it is the *primary* of its container
+        (``xData_XYs3d_primary``), so it carries its own ``axes``, which
+        ``:2260`` makes a required child rather than an optional one.
+
+        **The tag is the caller's**, never ``type(form).__name__`` lower-cased
+        or anything else derived here: the element name is the only thing in a
+        written file that says which variable is outermost, so it comes from
+        the ``isinstance`` branch that already decided, not from a rule that
+        could quietly start agreeing with the wrong class.
+
+        **A known way this writes an invalid file, and it is not a defect
+        here.** ``xData_XYs3d_primary`` declares no ``interpolation`` attribute
+        where every 2-d type does (``library-gaps.md`` D24). If a real node
+        states a non-lin-lin law on its outermost axis, the round trip writes
+        it back and the file fails validation — which is correct: dropping the
+        attribute would validate by discarding what the evaluation said.
+        """
+        if not form.isComplete:
+            self.report.unsupportedNode(
+                f"{where}: an <{tag}> whose XYs3d kika could not read; "
+                f"gnds.xsd:1798-1800 requires the child, so the node is not "
+                f"written at all"
+            )
+            return
+        element = ET.SubElement(parent, tag)
+        _set(element, label=label, productFrame=str(form.productFrame))
+        _function(element, form.xys3d, self.report, where)
+
+    @writes("distributionForm", "energyAngular")
+    def energyAngular(self, parent: ET.Element, form, label: str,
+                      where: str) -> None:
+        """§18.4: the outgoing energy outermost."""
+        self._distributionAE(parent, form, label, "energyAngular", where)
+
+    @writes("distributionForm", "angularEnergy")
+    def angularEnergy(self, parent: ET.Element, form, label: str,
+                      where: str) -> None:
+        """§18.5: the angle outermost, and the same complexType.
+
+        Separate from the method above for the reason
+        :class:`~kika.nuclear_data.model.distributions.AngularEnergy` gives:
+        emitting one where the other belongs produces a file that **validates
+        and states the wrong physics**, so the two names are reached by two
+        ``isinstance`` branches and never by a parameter a caller could get
+        backwards.
+        """
+        self._distributionAE(parent, form, label, "angularEnergy", where)
+
+    @writes("distributionForm", "KalbachMann")
+    def kalbachMann(self, parent: ET.Element, form, label: str,
+                    where: str) -> None:
+        """§18.6, in the schema's order and with ``a`` only if it is there.
+
+        ``gnds.xsd:1806-1811`` is an ``xs:sequence``, so ``f`` before ``r``
+        before ``a`` is not a style choice — a file that swapped them would not
+        validate. Each child is an ``XYs2dWrapperType`` (``:2204``): a wrapper
+        element carrying **no attributes**, with the primary ``XYs2d`` inside
+        it. Hence ``nested=False`` on the inner call, the same as §18.4's:
+        ``xData_XYs2d_primary`` (``:2195``) makes ``axes`` a required first
+        child, so the function writes its own.
+
+        **``a`` is emitted only when present, and that is a measurement rather
+        than caution.** The census puts it at **0 of 3 730** across the
+        distribution, so writing an empty ``<a>`` on every node would add a
+        node no evaluation has ever carried to 3 730 places.
+
+        ``f`` and ``r`` are required, so a node missing either is invalid and
+        not partial — the same judgement :meth:`uncorrelated` makes about its
+        two halves and :meth:`_distributionAE` about its one child.
+        """
+        if not form.isComplete:
+            self.report.unsupportedNode(
+                f"{where}: a <KalbachMann> without both <f> and <r>; "
+                f"gnds.xsd:1808-1809 requires them, so the node is not written "
+                f"at all"
+            )
+            return
+        element = ET.SubElement(parent, "KalbachMann")
+        _set(element, label=label, productFrame=str(form.productFrame))
+        for name in ("f", "r", "a"):
+            function = getattr(form, name)
+            if function is None:
+                continue
+            _function(ET.SubElement(element, name), function, self.report,
+                      where)
+
+    @writes("distributionForm", "uncorrelated")
+    @writes("uncorrelatedAngularForm", "isotropic2d")
+    def uncorrelated(self, parent: ET.Element, form, label: str,
+                     where: str) -> None:
+        """§18.3, and **both halves or neither**.
+
+        ``DistributionUncorrelatedType`` (``gnds.xsd:1676-1682``) is an
+        ``xs:sequence`` of ``<angular>`` and ``<energy>``, so a node with one
+        of them is not a partial statement — it is an invalid one. When kika
+        read only one half, the honest output is the same empty
+        ``<distribution/>`` an unread law gets: it fails validation and says so,
+        instead of shipping a node whose missing child a reader would have to
+        guess at.
+        """
+        if not form.isComplete:
+            missing = "angular" if form.angular is None else "energy"
+            self.report.unsupportedNode(
+                f"{where}: an <uncorrelated> whose <{missing}> form kika could "
+                f"not read; gnds.xsd:1677-1680 requires both children, so the "
+                f"half that was read is not written either"
+            )
+            return
+        element = ET.SubElement(parent, "uncorrelated")
+        _set(element, label=label, productFrame=str(form.productFrame))
+        angular = ET.SubElement(element, "angular")
+        if isinstance(form.angular, Isotropic2d):
+            ET.SubElement(angular, "isotropic2d")
+        else:
+            _function(angular, form.angular, self.report, where)
+        self._uncorrelatedEnergy(element, form.energy, where)
+
+    @writes("uncorrelatedEnergyForm", "discreteGamma", "primaryGamma",
+            "NBodyPhaseSpace")
+    def _uncorrelatedEnergy(self, parent: ET.Element, form,
+                            where: str) -> None:
+        """``uncorrelated/energy``: the four non-functional forms, by hand.
+
+        None of the three gamma/phase-space nodes is a functional — no
+        ``function1ds``, no interpolation — so they do not go through
+        :func:`_function`, and their ``<axes>`` is a *required* child rather
+        than the inheritable one §5.1.1 lets a nested functional drop.
+        """
+        element = ET.SubElement(parent, "energy")
+        if isinstance(form, PrimaryGamma):
+            gamma = ET.SubElement(element, "primaryGamma")
+            _set(gamma, value=_number(form.value),
+                 domainMin=_number(form.domainMin),
+                 domainMax=_number(form.domainMax),
+                 finalState=form.finalState)
+            self._gammaAxes(gamma, form.axes, where, "primaryGamma")
+            return
+        if isinstance(form, DiscreteGamma):
+            gamma = ET.SubElement(element, "discreteGamma")
+            _set(gamma, value=_number(form.value),
+                 domainMin=_number(form.domainMin),
+                 domainMax=_number(form.domainMax))
+            self._gammaAxes(gamma, form.axes, where, "discreteGamma")
+            return
+        if isinstance(form, NBodyPhaseSpace):
+            phaseSpace = ET.SubElement(element, "NBodyPhaseSpace")
+            _set(phaseSpace, numberOfProducts=str(form.numberOfProducts))
+            if form.mass is not None:
+                _set(ET.SubElement(phaseSpace, "mass"),
+                     value=_number(form.mass.value), unit=form.mass.unit)
+            return
+        _function(element, form, self.report, where)
+
+    def _gammaAxes(self, parent: ET.Element, axes, where: str,
+                   tag: str) -> None:
+        """``<axes>`` is a *required* child of both gamma nodes.
+
+        Unlike a nested functional's, which §5.1.1 lets it inherit and
+        the schema then forbids it from repeating, this one has nothing
+        to inherit from: the gamma sits inside ``<energy>``, which is a
+        wrapper and not a container. Absent, it is a validation error,
+        so it is reported rather than quietly skipped.
+        """
+        if axes is None:
+            self.report.lost(
+                f"{where}: a <{tag}> with no axes; gnds.xsd:1777/1786 "
+                f"require the child, so the node written is invalid"
+            )
+            return
+        _axes(parent, axes)
 
     @writes("angularTwoBodyForm", "isotropic2d", "recoil")
     def angularTwoBody(self, parent: ET.Element, form, label: str,
@@ -835,6 +1094,10 @@ def writeCovarianceSuite(covarianceSuite, format: str,
     a writer that chose a compression would have to decide when a matrix is
     "sparse enough", and getting that wrong costs file size and nothing else,
     while getting the *encoding* wrong costs correctness.
+
+    §25.3's ``parameterCovariances`` are written too, and the container is a
+    **sequence**: all the ``parameterCovariance`` nodes, then all the
+    ``averageParameterCovariance`` ones, whatever order the model list had.
     """
     report = report if report is not None else ConversionReport()
     root = ET.Element("covarianceSuite")
@@ -885,12 +1148,8 @@ def writeCovarianceSuite(covarianceSuite, format: str,
         for section in covarianceSuite.covarianceSections:
             _covarianceSection(container, section, report)
     if covarianceSuite.parameterCovariances:
-        report.unsupportedNode(
-            f"{len(covarianceSuite.parameterCovariances)} parameterCovariances "
-            f"were read and are not written: §25.3's resonance-parameter "
-            f"covariances have no writer yet, and an empty "
-            f"<parameterCovariances/> would assert the file has none"
-        )
+        _parameterCovariances(root, covarianceSuite.parameterCovariances,
+                              report)
     return ET.ElementTree(root), report
 
 
@@ -943,6 +1202,47 @@ def _dataLink(parent: ET.Element, tag: str, link) -> None:
                  domainUnit=entry.domainUnit or None)
 
 
+#: The style label ``writeCovarianceSuite`` synthesises for a suite that has
+#: none. It is also what :func:`_formLabel` falls back to, and the two are the
+#: same constant on purpose rather than by coincidence: the suites that arrive
+#: without styles are exactly the suites whose forms arrive without labels —
+#: both are things ENDF has no concept of — so the label the fallback invents is
+#: always the label of a style the same call has just written.
+SYNTHESISED_STYLE_LABEL = "eval"
+
+
+def _formLabel(form, report, where: str) -> str:
+    """``label`` for a §25 form, and **all four of them require one.**
+
+    ``covariances.xsd`` marks it ``use="required"`` on ``covarianceMatrix``
+    (:118), ``shortRangeSelfScalingVariance`` (:126), ``mixed`` (:135) and
+    ``sum`` (:143), and the ENDF adapter sets it on none of them —
+    ``covariances.py:113`` builds every gridded matrix without one, because in
+    ENDF a covariance belongs to a file and a section, not to a *style*. So a
+    covariance sibling written from a tape was invalid once per matrix, which is
+    D25 and is what ``test_the_endf_decoded_covariance_sibling_is_pinned``
+    measures.
+
+    The value is not invented out of nothing: in GNDS a form's label names the
+    style it belongs to, and the only suites reaching this branch are the ones
+    ``writeCovarianceSuite`` has just given a synthesised ``evaluated`` style
+    called :data:`SYNTHESISED_STYLE_LABEL`. It is still reported — the source
+    said nothing about which style any of this belongs to, and a reader of the
+    written file cannot tell the synthesis from an evaluator's choice.
+    """
+    label = getattr(form, "label", None)
+    if label is not None:
+        return label
+    report.approximated(
+        f"{where}: the form carried no label and §25 requires one on all four "
+        f"covariance forms, so it is written as "
+        f"{SYNTHESISED_STYLE_LABEL!r} -- the style label the suite writer "
+        f"synthesises for a suite that has no styles, which is the same case. "
+        f"The source said nothing about which style this form belongs to"
+    )
+    return SYNTHESISED_STYLE_LABEL
+
+
 @writes("covarianceForm", "covarianceMatrix", "mixed", "sum",
         "shortRangeSelfScalingVariance")
 def _covarianceForm(parent: ET.Element, form, report, where: str) -> None:
@@ -966,17 +1266,20 @@ def _covarianceForm(parent: ET.Element, form, report, where: str) -> None:
         element = _covarianceMatrix(parent, "shortRangeSelfScalingVariance",
                                     form.matrix, report, where)
         if element is not None:
-            _set(element, label=form.label,
+            # Its own label overwrites the wrapped matrix's, which is the right
+            # way round: `covariances.xsd:126` requires the attribute on *this*
+            # element, and the matrix inside it is not a node of its own here.
+            _set(element, label=_formLabel(form, report, where),
                  dependenceOnProcessedGroupWidth=
                  form.dependenceOnProcessedGroupWidth)
     elif isinstance(form, Mixed):
         element = ET.SubElement(parent, "mixed")
-        _set(element, label=form.label)
+        _set(element, label=_formLabel(form, report, where))
         for component in form.components:
             _covarianceForm(element, component, report, where)
     elif isinstance(form, Sum):
         element = ET.SubElement(parent, "sum")
-        _set(element, label=form.label,
+        _set(element, label=_formLabel(form, report, where),
              domainMin=None if form.domainMin is None else _number(form.domainMin),
              domainMax=None if form.domainMax is None else _number(form.domainMax),
              domainUnit=form.domainUnit or None)
@@ -994,7 +1297,7 @@ def _covarianceForm(parent: ET.Element, form, report, where: str) -> None:
 def _covarianceMatrix(parent: ET.Element, tag: str, form, report,
                       where: str) -> Optional[ET.Element]:
     element = ET.SubElement(parent, tag)
-    _set(element, label=form.label,
+    _set(element, label=_formLabel(form, report, where),
          type="relative" if form.isRelative else "absolute")
     gridded = ET.SubElement(element, "gridded2d")
     axes = ET.SubElement(gridded, "axes")
@@ -1010,8 +1313,25 @@ def _covarianceMatrix(parent: ET.Element, tag: str, form, report,
         _set(grid, index=str(index), label=label, unit="eV", style="boundaries")
         _values(grid, values)
 
-    matrix = np.asarray(form.matrix)
-    array = ET.SubElement(gridded, "array")
+    _array(gridded, form.matrix)
+    return element
+
+
+def _array(parent: ET.Element, matrix) -> ET.Element:
+    """§25's ``array``, on its own — uncompressed, lower-triangular if symmetric.
+
+    Its own function because §25.3.2's ``parameterCovarianceMatrix`` holds an
+    ``array`` **directly** (``covariances.xsd:170-186``), where §25.2.2's
+    ``covarianceMatrix`` wraps one in a ``gridded2d``. Writing the parameter
+    matrix by calling :func:`_covarianceMatrix` and ignoring the grids would
+    emit that ``gridded2d`` and its ``axes`` as well, and the schema admits
+    neither there — the same shape of defect as D19, a node written into a file
+    that no reader of the standard takes back. A parameter covariance has no
+    grid to put in an ``axes`` either: row 47 is *a neutron width*, and what
+    says so is the ``parameterLink`` list, not an energy boundary.
+    """
+    matrix = np.asarray(matrix)
+    array = ET.SubElement(parent, "array")
     array.attrib["shape"] = f"{matrix.shape[0]},{matrix.shape[1]}"
     symmetric = (matrix.shape[0] == matrix.shape[1]
                  and np.array_equal(matrix, matrix.T))
@@ -1022,7 +1342,184 @@ def _covarianceMatrix(parent: ET.Element, tag: str, form, report,
         ))
     else:
         _values(array, matrix)
+    return array
+
+
+# ---------------------------------------------------------------------------
+# §25.3 parameter covariances
+# ---------------------------------------------------------------------------
+
+@writes("parameterCovarianceForm", "parameterCovariance",
+        "averageParameterCovariance")
+def _parameterCovariances(parent: ET.Element, covariances, report) -> None:
+    """§25.3's container — and it is an ``xs:sequence``, not a bag.
+
+    ``covariances.xsd:27-34`` gives ``<parameterCovariances>`` a sequence of two
+    unbounded refs: **every** ``parameterCovariance`` first, then every
+    ``averageParameterCovariance``. The model keeps both kinds in one list in
+    the order the file had them, which for Tm-171 happens to be that order
+    already — so writing them as they come would validate on the one fixture
+    that has both and fail on a file that interleaved them. The two passes below
+    are what makes that not depend on the input.
+
+    The container is dropped again when nothing could be written into it. An
+    empty ``<parameterCovariances/>`` is schema-valid, and that is the problem:
+    it says the evaluation has no parameter covariances, which is a different
+    statement from "kika could not write the ones it read".
+    """
+    container = ET.SubElement(parent, "parameterCovariances")
+    for covariance in covariances:
+        if isinstance(covariance, ParameterCovariance):
+            _parameterCovariance(container, covariance, report)
+    for covariance in covariances:
+        if isinstance(covariance, AverageParameterCovariance):
+            _averageParameterCovariance(container, covariance, report)
+    for covariance in covariances:
+        if not isinstance(covariance, (ParameterCovariance,
+                                       AverageParameterCovariance)):
+            report.unsupportedNode(
+                f"parameterCovariances holds a "
+                f"{type(covariance).__name__}, which is neither of §25.3's two "
+                f"nodes and is not written"
+            )
+    if len(container) == 0:
+        parent.remove(container)
+
+
+def _parameterCovariance(parent: ET.Element, covariance, report) -> None:
+    """§25.3.1. ``rowData`` then the matrix — and **no ``columnData``**.
+
+    The model carries a ``columnData`` and an ``isCrossTerm`` built off it, the
+    reader fills it if a file has one, and ``covariances.xsd:160-168`` does not
+    admit it: a ``parameterCovariance`` is ``rowData`` plus
+    ``parameterCovarianceMatrix``, full stop. So a cross-term parameter
+    covariance is a thing the model can hold and this format cannot say, and the
+    honest write is to report the link rather than emit an attribute that makes
+    the file invalid. ``averageParameterCovariance``, three functions down, is
+    the one of the two that *does* take a ``columnData``.
+    """
+    where = f"parameterCovariance {covariance.label!r}"
+    form = covariance.form
+    if form is None:
+        report.lost(
+            f"{where} holds no parameterCovarianceMatrix, which §25.3.1 makes "
+            f"mandatory, so the whole covariance is left out of the file"
+        )
+        return
+    if not getattr(form, "parameters", None):
+        # `_readParameterCovarianceMatrix` drops the links, deliberately, when
+        # they do not account for every row -- and `<parameters>` needs at least
+        # one `parameterLink` to be a valid element. A matrix written with its
+        # rows unnamed would be a block of numbers with no statement anywhere of
+        # what row 47 is, which is the very thing the reader refused to assert.
+        report.lost(
+            f"{where} has a matrix and no parameterLinks, so nothing in the "
+            f"file could say what its rows are; §25.3.2 requires at least one "
+            f"link and the covariance is left out rather than written unnamed"
+        )
+        return
+
+    element = ET.SubElement(parent, "parameterCovariance")
+    _set(element, label=covariance.label)
+    if covariance.rowData is None:
+        report.lost(
+            f"{where} has no rowData and §25.3.1 requires one; the covariance "
+            f"is written without it and **the file does not validate**"
+        )
+    _dataLink(element, "rowData", covariance.rowData)
+    if covariance.columnData is not None:
+        report.lost(
+            f"{where} is a cross term -- its columnData points at "
+            f"{covariance.columnData.href!r} -- and §25.3.1 has nowhere to put "
+            f"that. The matrix is written; the file no longer says the two "
+            f"axes are about different parameters"
+        )
+    _parameterCovarianceMatrix(element, form, report, where)
+
+
+def _parameterCovarianceMatrix(parent: ET.Element, form, report,
+                               where: str) -> ET.Element:
+    """§25.3.2. The links, then the bare array.
+
+    **``matrixStartIndex`` is written exactly as the model holds it.**
+    ``covariances/covariances.py:_readParameterCovarianceMatrix`` documents why
+    it is already zero-based — Si-32's ``scatteringRadius`` at 0 and its 18
+    ``resonanceParameters`` at 1 fill a 19x19 matrix only if row 1 is the
+    second row — and the reader records the number unchanged. Adding one here
+    to "convert back to one-based" would move every link by a row and no test
+    of counts would notice, because the counts would still sum to the order.
+    """
+    element = ET.SubElement(parent, "parameterCovarianceMatrix")
+    # §25.3.2 requires `label` exactly as §25.2.2 does, and
+    # `kika/endf/model_adapter/parameter_covariances.py` sets it exactly as
+    # rarely -- never. Same hole, same fallback, one function.
+    _set(element, label=_formLabel(form, report, where),
+         type="relative" if form.isRelative else "absolute")
+
+    container = ET.SubElement(element, "parameters")
+    named = 0
+    for link in form.parameters:
+        _set(ET.SubElement(container, "parameterLink"),
+             label=link.label, href=link.href,
+             nParameters=str(link.nParameters),
+             matrixStartIndex=str(link.matrixStartIndex))
+        named += len(link.parameterNames)
+    if named:
+        # `ParameterLink.parameterNames` is what makes `rowLabels()` able to say
+        # "the neutron width of resonance 12" rather than "row 47", and it comes
+        # from ENDF's MF32 slot order. §25.3.2's `parameterLink` has label, href,
+        # nParameters and matrixStartIndex and nothing else, so the names go
+        # nowhere: a GNDS reader recovers them by following the href into the
+        # reactionSuite's resonance table, which is where GNDS keeps them.
+        report.lost(
+            f"{where}: {named} parameter names are dropped -- §25.3.2's "
+            f"parameterLink has no attribute for them, and a reader of the "
+            f"written file gets them by following the href into the "
+            f"reactionSuite instead"
+        )
+
+    _array(element, form.matrix)
     return element
+
+
+def _averageParameterCovariance(parent: ET.Element, covariance, report) -> None:
+    """§25.3. A URR average parameter — an ordinary gridded matrix about it.
+
+    The one of §25.3's two nodes whose form is a §25.2.2 ``covarianceMatrix``,
+    ``gridded2d`` and all: its rows are energy bins of one unresolved-region
+    average, not individual resonance parameters. So this reuses
+    :func:`_covarianceMatrix` where :func:`_parameterCovariance` must not.
+
+    Only the GNDS reader ever builds one — ``parameter_covariances.py:449-454``
+    turns ENDF's LRU=2 into a relative :class:`ParameterCovariance` instead — so
+    Tm-171's ten are the only witnesses there are.
+    """
+    where = f"averageParameterCovariance {covariance.label!r}"
+    form = covariance.form
+    if form is None:
+        report.lost(
+            f"{where} holds no covarianceMatrix, which §25.3 makes mandatory, "
+            f"so the whole covariance is left out of the file"
+        )
+        return
+    if not isinstance(form, CovarianceMatrix):
+        report.unsupportedNode(
+            f"{where} holds a {type(form).__name__}; §25.3 admits only a "
+            f"covarianceMatrix there, and the covariance is not written"
+        )
+        return
+
+    element = ET.SubElement(parent, "averageParameterCovariance")
+    _set(element, label=covariance.label,
+         crossTerm=_boolean(covariance.crossTerm))
+    if covariance.rowData is None:
+        report.lost(
+            f"{where} has no rowData and §25.3 requires one; the covariance is "
+            f"written without it and **the file does not validate**"
+        )
+    _dataLink(element, "rowData", covariance.rowData)
+    _dataLink(element, "columnData", covariance.columnData)
+    _covarianceMatrix(element, "covarianceMatrix", form, report, where)
 
 
 # ---------------------------------------------------------------------------

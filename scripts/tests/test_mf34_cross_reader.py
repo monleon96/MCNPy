@@ -175,16 +175,22 @@ def test_a_shape_grid_the_self_blocks_do_not_share_is_refused(micro_cov_tape, tm
                         mf33_grid_ev=MAG_GRID)
 
 
-def test_self_blocks_on_several_grids_are_refused_before_the_cross_is_read(
+def test_a_self_block_grid_the_rest_of_the_file_ignores_is_refused(
         micro_cov_tape, tmp_path):
-    """The same defect seen from the other side: it is the shipped MF34 that
-    has four grids today (673/676/684/703), not the cross block."""
+    """The same defect seen from the other side, and the one a mesh per order
+    does NOT excuse.
+
+    Order `L_MAX`'s self block is moved to a coarser mesh and NOTHING else is:
+    its off-diagonals and its a_0 block stay on the fine grid. That is not a
+    mesh per order -- it is one order described by two different parameter
+    sets, and `bin_L` is then whatever block you happen to be reading.
+    """
     mf34 = _build(_cross_dict())
     coarse = np.array([0.85e6, 2.7e6, 4.0e6])
     ss = _find(mf34, L_MAX, L_MAX)
     ss.records[0] = _make_lb5_record(np.zeros((coarse.size - 1,) * 2), coarse)
     path = _write(mf34, micro_cov_tape, tmp_path, "four_grids.endf")
-    with pytest.raises(ValueError, match="four-grid|sits on a grid"):
+    with pytest.raises(ValueError, match="four-grid|column grid"):
         read_mf34_split(path, isotope=ISO, mt=MT, l_max=L_MAX,
                         mf33_grid_ev=MAG_GRID)
 
@@ -254,3 +260,166 @@ def test_the_fold_still_refuses_the_units_mismatch_on_file_borne_blocks(file_wit
             mf33_grid_ev=MAG_GRID, energies_mf4_mev=MAG_GRID / 1e6,
             a_is_relative=False,
         )
+
+
+# ── a mesh per order: accepted, and it folds to the same Σ_eval ───────────────
+#
+# Roadmap §10.8. The reader used to demand ONE shape grid for the whole family,
+# which refused the deliverable outright (run 98/99: 690/699/694/693/699/703).
+# The congruence never needed that -- it needs order L's shape leg to reach the
+# points through one map WHEREVER order L appears. These tests pin both halves:
+# the legal file is read, and folding it gives bit-for-bit what folding its
+# duplicated-onto-one-grid twin gives.
+
+MESH_3 = np.array([0.85e6, 2.7e6, 4.0e6])   # order 3 merges shape bins 0 and 1
+_C_IDX = {(1, 0): 0, (1, 1): 1, (1, 2): 2,
+          (2, 0): 3, (2, 1): 4, (2, 2): 5,
+          (3, 0): 6, (3, 1): 7}             # order 3 indexed on MESH_3
+_FINE_TO_COARSE_BIN_L3 = {0: 0, 1: 0, 2: 1}
+
+
+def _coarse_joint() -> np.ndarray:
+    """A PSD 8x8 over [a_1 x 3 bins, a_2 x 3 bins, a_3 x 2 bins]."""
+    rng = np.random.default_rng(20260820)
+    a = rng.uniform(-1.0, 1.0, size=(8, 8))
+    j = a @ a.T / 8.0 + np.diag(rng.uniform(0.02, 0.05, size=8))
+    return np.round(0.5 * (j + j.T), 6)
+
+
+def _coarse_index(l: int, e: int) -> int:
+    return _C_IDX[(l, _FINE_TO_COARSE_BIN_L3[e] if l == 3 else e)]
+
+
+def _fine_cov_from(j: np.ndarray) -> np.ndarray:
+    """The same joint written on ONE grid, order 3 duplicated across bins 0/1.
+
+    Identical bilinear form, more numbers -- which is exactly what
+    `to_ang_covmat` produces when it squares a rectangular block onto the union
+    of its two grids. If the fold is a congruence, this file and the meshed one
+    cannot disagree.
+    """
+    n = N_SH * L_MAX
+    out = np.zeros((n, n))
+    for e_r in range(N_SH):
+        for l_r in range(1, L_MAX + 1):
+            for e_c in range(N_SH):
+                for l_c in range(1, L_MAX + 1):
+                    out[e_r * L_MAX + (l_r - 1), e_c * L_MAX + (l_c - 1)] = \
+                        j[_coarse_index(l_r, e_r), _coarse_index(l_c, e_c)]
+    return out
+
+
+def _mesh_blocks_from(j: np.ndarray) -> dict:
+    rows = {1: [0, 1, 2], 2: [3, 4, 5], 3: [6, 7]}
+    return {(l, l1): j[np.ix_(rows[l], rows[l1])]
+            for l in range(1, L_MAX + 1) for l1 in range(l, L_MAX + 1)}
+
+
+def _cross_pair():
+    """``(coarse, fine)`` cross dicts -- order 3 on MESH_3 and duplicated."""
+    rng = np.random.default_rng(20260821)
+    coarse = {1: np.round(rng.uniform(-0.02, 0.02, (N_MAG, N_SH)), 6),
+              2: np.round(rng.uniform(-0.02, 0.02, (N_MAG, N_SH)), 6),
+              3: np.round(rng.uniform(-0.02, 0.02, (N_MAG, 2)), 6)}
+    fine = dict(coarse)
+    fine[3] = coarse[3][:, [0, 0, 1]]
+    return coarse, fine
+
+
+@pytest.fixture
+def per_order_pair(micro_cov_tape, tmp_path):
+    """Two tapes carrying the SAME joint: one meshed per order, one not."""
+    j = _coarse_joint()
+    cx_coarse, cx_fine = _cross_pair()
+    meshed = create_mf34_from_covariance(
+        _mesh_blocks_from(j),
+        {1: SHAPE_GRID, 2: SHAPE_GRID, 3: MESH_3},
+        L_MAX, ZA, AWR, MAT, MT, ltt=1,
+        cross_cov=cx_coarse, cross_energy_grid_ev=MAG_GRID,
+    )
+    flat = create_mf34_from_covariance(
+        _fine_cov_from(j), SHAPE_GRID, L_MAX, ZA, AWR, MAT, MT, ltt=1,
+        cross_cov=cx_fine, cross_energy_grid_ev=MAG_GRID,
+    )
+    return (_write(meshed, micro_cov_tape, tmp_path, "per_order.endf"),
+            _write(flat, micro_cov_tape, tmp_path, "one_grid.endf"))
+
+
+def test_a_mesh_per_order_is_read_with_each_order_on_its_own_grid(per_order_pair):
+    meshed, _ = per_order_pair
+    res = read_mf34_split(meshed, isotope=ISO, mt=MT, l_max=L_MAX,
+                          mf33_grid_ev=MAG_GRID)
+
+    assert res.info["per_order_mesh"] is True
+    assert res.info["shape_bins_by_order"] == {1: N_SH, 2: N_SH, 3: 2}
+    by_l = {b["l"]: b for b in res.cross}
+    assert by_l[3]["matrix"].shape == (N_MAG, 2), "the cross must stay on MESH_3"
+    np.testing.assert_array_equal(by_l[3]["shape_grid_ev"], MESH_3)
+    np.testing.assert_array_equal(by_l[1]["shape_grid_ev"], SHAPE_GRID)
+
+
+def _fold_points():
+    e_mev = np.array([0.9, 1.4, 1.8, 2.4, 3.0, 3.8])
+    mu = np.linspace(-0.8, 0.8, e_mev.size)
+    c0 = np.full(e_mev.size, 2.5)
+    a_l = np.tile(np.array([0.40, 0.20, 0.05]), (e_mev.size, 1))
+    y = c0 * (1.0 + 0.1 * mu)
+    return e_mev, mu, c0, a_l, y
+
+
+def test_the_meshed_file_folds_to_the_same_sigma_as_its_one_grid_twin(per_order_pair):
+    """⚑ THE CLAIM THE GUARD USED TO DENY.
+
+    `to_ang_covmat` squares a rectangular (L, L1) record onto
+    union(mesh_L, mesh_L1), and that is exact refinement -- every union bin
+    lies inside one bin of each mesh -- so `PointMap.nearest(union)` hands the
+    fold `mat[bin_L(E_j), bin_L1(E_k)]`, the two-map answer. Σ_eval is
+    therefore identical to the one built from the duplicated file, self blocks
+    and cross term alike.
+    """
+    from scripts.eval_covariance import build_mf34_block
+
+    meshed, flat = per_order_pair
+    e_mev, mu, c0, a_l, y = _fold_points()
+
+    r_mesh = read_mf34_split(meshed, isotope=ISO, mt=MT, l_max=L_MAX,
+                             mf33_grid_ev=MAG_GRID)
+    r_flat = read_mf34_split(flat, isotope=ISO, mt=MT, l_max=L_MAX,
+                             mf33_grid_ev=MAG_GRID)
+
+    s_mesh = build_mf34_block(r_mesh.mf34, e_mev, mu, c0, a_l)
+    s_flat = build_mf34_block(r_flat.mf34, e_mev, mu, c0, a_l)
+    assert np.abs(s_flat).max() > 0, "a fixture that folds to zero proves nothing"
+    np.testing.assert_allclose(s_mesh, s_flat, rtol=1e-12, atol=0)
+
+    kw = dict(mf33_grid_ev=MAG_GRID, energies_mf4_mev=np.array([0.85, 4.0]),
+              a_is_relative=True)
+    x_mesh = build_mf33_mf34_cross_block(r_mesh.cross, e_mev, mu, c0, a_l, y, **kw)
+    x_flat = build_mf33_mf34_cross_block(r_flat.cross, e_mev, mu, c0, a_l, y, **kw)
+    assert np.abs(x_flat).max() > 0
+    np.testing.assert_allclose(x_mesh, x_flat, rtol=1e-12, atol=0)
+
+
+def test_an_off_diagonal_off_the_union_of_its_two_meshes_is_refused(
+        per_order_pair, micro_cov_tape, tmp_path):
+    """The one thing the union projection cannot survive.
+
+    `mat_U[i, j] = mat[bin_L(i), bin_L1(j)]` only holds when the record was
+    written on ``mesh_L x mesh_L1``. A (1, 3) block on some third grid still
+    parses, still folds, and names parameters that are in no other block.
+    """
+    j = _coarse_joint()
+    cx_coarse, _ = _cross_pair()
+    mf34 = create_mf34_from_covariance(
+        _mesh_blocks_from(j), {1: SHAPE_GRID, 2: SHAPE_GRID, 3: MESH_3},
+        L_MAX, ZA, AWR, MAT, MT, ltt=1,
+        cross_cov=cx_coarse, cross_energy_grid_ev=MAG_GRID,
+    )
+    third = np.array([0.85e6, 1.2e6, 4.0e6])
+    ss = _find(mf34, 1, 3)
+    ss.records[0] = _make_lb6_record(
+        np.zeros((third.size - 1, MESH_3.size - 1)), third, MESH_3)
+    path = _write(mf34, micro_cov_tape, tmp_path, "off_union.endf")
+    with pytest.raises(ValueError, match="four-grid|union"):
+        read_mf34_split(path, isotope=ISO, mt=MT, l_max=L_MAX,
+                        mf33_grid_ev=MAG_GRID)

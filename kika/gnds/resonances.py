@@ -47,6 +47,7 @@ from kika.nuclear_data.model import (BreitWigner, BreitWignerApproximation,
                                      ResonanceReaction, Resonances,
                                      ResolvedRegion, RMatrix, RMatrixSpinGroup,
                                      ScatteringRadius, SpinGroup,
+                                     MODEL_RADIUS_UNIT, radiusFromStatedUnit,
                                      TabulatedWidths, UnresolvedChannel,
                                      UnresolvedRegion, UnresolvedSpinGroup,
                                      XYs1d)
@@ -158,10 +159,9 @@ class _ResonanceReader:
         here = f"{path}/scatteringRadius"
         constant = element.find("constant1d")
         if constant is not None:
-            return ScatteringRadius(
-                constant=float(constant.attrib["value"]),
-                unit=self.radiusUnit(constant),
-            )
+            value, unit = self.toModelUnits(
+                float(constant.attrib["value"]), self.radiusUnit(constant), here)
+            return ScatteringRadius(constant=value, unit=unit)
         table = element.find("XYs1d")
         if table is None:
             self.unsupported(
@@ -173,10 +173,39 @@ class _ResonanceReader:
         form = self.function(table, here)
         if form is None:
             return None
+        values, unit = self.toModelUnits(form.ys, self.radiusUnit(table), here)
         return ScatteringRadius(
-            energies=form.xs, values=form.ys, interpolation=form.interpolation,
-            unit=self.radiusUnit(table),
+            energies=form.xs, values=values, interpolation=form.interpolation,
+            unit=unit,
         )
+
+    def toModelUnits(self, value, stated: Optional[str], where: str):
+        """A radius as the file states it → ``(fm, unit)`` for the model.
+
+        The model states every radius in fm (``MODEL_RADIUS_UNIT``), so this is
+        where a GNDS file's own unit is honoured rather than assumed. Every
+        radius axis in ENDF/B-VIII.1-GNDS says ``fm``, which makes this a no-op
+        on the whole library — and that is exactly why it is worth having: the
+        one file that says something else would otherwise be read as fm without
+        a word, which is the shape of the error §7.2 is about.
+
+        A unit the converter does not know is **kept as read and reported**,
+        with the unit it came with, so a consumer asking for ``radiusUnit`` can
+        still tell. Refusing outright would lose a whole evaluation over a
+        field that most consumers never touch.
+        """
+        converted, problem = radiusFromStatedUnit(value, stated)
+        if problem is not None:
+            self.report.warn(f"{where}: {problem}")
+            return converted, stated
+        return converted, MODEL_RADIUS_UNIT
+
+    def modelRadius(self, wrapper: Optional[ET.Element], where: str):
+        """``(radius in fm, unit)`` out of a ``constant1d`` wrapper, or ``(None, None)``."""
+        value = _constant(wrapper)
+        if value is None:
+            return None, None
+        return self.toModelUnits(value, self.constantUnit(wrapper), where)
 
     def constantUnit(self, wrapper: Optional[ET.Element]) -> Optional[str]:
         """The radius unit out of the same wrapper :func:`_constant` reads.
@@ -235,6 +264,8 @@ class _ResonanceReader:
         label = element.attrib.get("label", "")
         here = f"{path}/RMatrix"
         pops = element.find("PoPs")
+        rMatrixRadius, rMatrixRadiusUnit = self.modelRadius(
+            element.find("scatteringRadius"), here)
         if element.attrib.get("supportsAngularReconstruction") == "true":
             # A capability hint FUDGE writes for its own reconstructor, not a
             # property of the evaluation. Recorded so the writer does not have
@@ -258,8 +289,8 @@ class _ResonanceReader:
             # width in the table.
             reducedWidthAmplitudes=_isTrue(element, "reducedWidthAmplitudes"),
             relativisticKinematics=_isTrue(element, "relativisticKinematics"),
-            scatteringRadius=_constant(element.find("scatteringRadius")),
-            radiusUnit=self.constantUnit(element.find("scatteringRadius")),
+            scatteringRadius=rMatrixRadius,
+            radiusUnit=rMatrixRadiusUnit,
             PoPs=None if pops is None else self.readPoPs(pops),
             resonanceReactions=self.readResonanceReactions(element, here),
             spinGroups=[
@@ -275,6 +306,8 @@ class _ResonanceReader:
             here = f"{path}/resonanceReactions/resonanceReaction" \
                    f"[@label='{child.attrib.get('label', '')}']"
             link = child.find("link")
+            reactionRadius, reactionRadiusUnit = self.modelRadius(
+                child.find("scatteringRadius"), here)
             if child.find("hardSphereRadius") is not None:
                 self.unsupported(
                     "hardSphereRadius", here,
@@ -287,8 +320,8 @@ class _ResonanceReader:
                 ejectile=child.attrib.get("ejectile"),
                 eliminated=_isTrue(child, "eliminated"),
                 Q=_constant(child.find("Q")),
-                scatteringRadius=_constant(child.find("scatteringRadius")),
-                radiusUnit=self.constantUnit(child.find("scatteringRadius")),
+                scatteringRadius=reactionRadius,
+                radiusUnit=reactionRadiusUnit,
                 href=None if link is None else link.attrib.get("href"),
             ))
         return out
@@ -322,6 +355,11 @@ class _ResonanceReader:
                 "range; 7 nodes in the whole library carry one and kika's model "
                 "has no node for it"
             )
+        where = f"{path}/channels/channel[@label='{label}']"
+        channelRadius, channelRadiusUnit = self.modelRadius(
+            element.find("scatteringRadius"), where)
+        hardSphere, hardSphereUnit = self.modelRadius(
+            element.find("hardSphereRadius"), where)
         return Channel(
             label=label,
             resonanceReaction=element.attrib.get("resonanceReaction", ""),
@@ -329,10 +367,11 @@ class _ResonanceReader:
             channelSpin=None if channelSpin is None else readFraction(channelSpin),
             columnIndex=(int(element.attrib["columnIndex"])
                          if "columnIndex" in element.attrib else None),
-            scatteringRadius=_constant(element.find("scatteringRadius")),
-            hardSphereRadius=_constant(element.find("hardSphereRadius")),
-            radiusUnit=(self.constantUnit(element.find("scatteringRadius"))
-                        or self.constantUnit(element.find("hardSphereRadius"))),
+            scatteringRadius=channelRadius,
+            hardSphereRadius=hardSphere,
+            # One unit for both, as the field's docstring says: they come
+            # off the same node and no file states them differently.
+            radiusUnit=channelRadiusUnit or hardSphereUnit,
         )
 
     def readParameterTable(self, element: ET.Element, channels: List[Channel],
@@ -415,6 +454,8 @@ class _ResonanceReader:
         """
         label = element.attrib.get("label", "")
         here = f"{path}/BreitWigner"
+        bwRadius, bwRadiusUnit = self.modelRadius(
+            element.find("scatteringRadius"), here)
         pops = element.find("PoPs")
         approximation = element.attrib.get("approximation")
         if approximation not in BREIT_WIGNER_APPROXIMATIONS:
@@ -431,8 +472,8 @@ class _ResonanceReader:
                 approximation, BreitWignerApproximation.multiLevel
             ),
             calculateChannelRadius=_isTrue(element, "calculateChannelRadius"),
-            scatteringRadius=_constant(element.find("scatteringRadius")),
-            radiusUnit=self.constantUnit(element.find("scatteringRadius")),
+            scatteringRadius=bwRadius,
+            radiusUnit=bwRadiusUnit,
             PoPs=None if pops is None else self.readPoPs(pops),
             resonanceParameters=self.readBreitWignerTable(element, here),
         )
@@ -508,12 +549,14 @@ class _ResonanceReader:
     def readTabulatedWidths(self, element: ET.Element,
                             path: str) -> TabulatedWidths:
         here = f"{path}/tabulatedWidths"
+        urrRadius, urrRadiusUnit = self.modelRadius(
+            element.find("scatteringRadius"), here)
         pops = element.find("PoPs")
         widths = TabulatedWidths(
             label=element.attrib.get("label", ""),
             selfShieldingOnly=_isTrue(element, "useForSelfShieldingOnly"),
-            scatteringRadius=_constant(element.find("scatteringRadius")),
-            radiusUnit=self.constantUnit(element.find("scatteringRadius")),
+            scatteringRadius=urrRadius,
+            radiusUnit=urrRadiusUnit,
             PoPs=None if pops is None else self.readPoPs(pops),
             resonanceReactions=self.readResonanceReactions(element, here),
         )

@@ -82,6 +82,46 @@ def test_a_three_digit_exponent_is_written_rather_than_flushed_to_zero():
     assert format_endf_number(1e-308) == " 1.0000-308"
 
 
+@pytest.mark.parametrize("source,canonical", [
+    (" 0.12640975", " 1.264097-1"),
+    (" .061916773", " 6.191677-2"),
+    (" 1680612.75", " 1.680613+6"),
+    ("  583632.75", " 5.836328+5"),
+    (" 6012.00000", " 6.012000+3"),
+])
+def test_a_field_written_without_an_exponent_can_hold_more_digits_than_we_write(
+        source, canonical):
+    """kika's writer keeps **seven significant digits**, and some tapes write more.
+
+    ENDF's 11-character field can be spent two ways. kika always spends it the
+    same way — sign, ``M.MMMMMM``, exponent sign, exponent — which leaves seven
+    significant digits. An evaluator who writes ``0.12640975`` instead spends
+    nothing on an exponent and gets nine. Reading is unaffected
+    (``parse_number`` takes either); **writing the value back loses the extra
+    digits**, with relative error bounded by half of the seventh digit, ~5e-7.
+
+    Found by the MF6 round-trip sweep over ENDF/B-VIII.1 and measured there: of
+    12 388 MF6 sections, the ones that do not come back byte-identical differ
+    *only* in fields of this kind, and the largest value change over the tapes
+    checked was 4.8e-7 relative. **The JEFF-4.0 Fe-56 host tape the thesis
+    pipeline writes has 0 such fields in 1 967 724**, so nothing that pipeline
+    produces is affected — which is why this is pinned as a measured property of
+    the writer rather than fixed under an MF6 branch. Fixing it means teaching
+    ``format_endf_number`` to prefer whichever spelling preserves more digits,
+    and that changes MF3, MF4, MF5 and MF7 output too.
+    """
+    value = parse_number(source)
+    assert format_endf_number(value) == canonical
+    reread = parse_number(canonical)
+    assert reread == pytest.approx(value, rel=5e-7)
+
+
+def test_the_seven_digit_limit_is_where_the_loss_starts():
+    """Seven digits survive exactly; the eighth is where it begins."""
+    assert parse_number(format_endf_number(0.1264097)) == 0.1264097
+    assert parse_number(format_endf_number(0.12640975)) != 0.12640975
+
+
 @pytest.mark.parametrize("value", [
     1.5963e-100, 5.1183e-100, 1.96567e-17, 8.89108e-18, 1.234567e5,
     -3.14159e-1, 1.0e10, 9.999999e9, 2.0e7, 1e-308, 4009.0,

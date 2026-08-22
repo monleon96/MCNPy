@@ -595,6 +595,101 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
     # ❌ DISQUALIFYING (§6e): if Kinney improves while n_absorbed FALLS elsewhere
     # in the corpus, that is redistribution dressed as information.
     # `corpus_absorbed.py` runs in the same chain and is not optional.
+    # ── RUN 99, PASOS C DEL PLAN: la rejilla fina pasa a ser la referencia ───
+    #
+    # Plan: kika-workspace/docs/plan_fine_reference_and_100k.md §C. Tres puntos
+    # del MISMO objeto (la run 99), que se leen en DOS parejas y cada pareja
+    # mueve UNA sola cosa:
+    #
+    #   99c0mg    mg 660 + cruzado, dead=drop, UNA rejilla   <- el ancla
+    #   99c1fine  fino 1738 + cruzado, dead=drop             <- 99c0mg vs 99c1fine
+    #                                                           = el cambio de REJILLA
+    #   99c2fine  fino 1738 + cruzado, dead=carry            <- 99c1fine vs 99c2fine
+    #                                                           = la RESTITUCION de a_5/a_6
+    #
+    # ⚠⚠ NO se leen contra `predictive_91_cross` ni contra `predictive_98raw`.
+    # Aquellas son OTRA run del pipeline; comparar contra ellas mueve la run y
+    # el objeto a la vez, que es exactamente el confound por el que se
+    # retiraron §L16 y §L18. El ancla de estas tres es 99c0mg y nada mas.
+    #
+    # ⚠ Los tres se emiten con `--per-order-mesh off`, INCLUIDO el mg. La run 99
+    # escribio `mf34_per_order_mesh.npz` sobre la rejilla de 660 (w_l es
+    # 649x660 ... 646x660), asi que `auto` la aplicaria — al mg legitimamente,
+    # pero al FINO le colapsaria 1738 bins sobre una malla elegida encima de los
+    # 660, que es el regroup-de-un-regroup que este plan elimina. Con `off` los
+    # tres estan en una sola rejilla y la unica diferencia entre c0 y c1 es fina
+    # contra mg.
+    #
+    # ⚠ Sin `KIKA_MF34_NULL_MASK`: la mascara vive en la malla de 703 de la
+    # run 86 y `eval_covariance` la coloca POR ENERGIA, asi que una mascara
+    # caduca se aplica en silencio. La retirada ya la lleva la cinta via
+    # `--null-fill zero` + el complemento de `live` en write_consistent_mf34.
+    #
+    # ⚠ VETO, igual que siempre: JEFF y JENDL al 0.00000 % entre los tres. Si
+    # se mueven, ninguno de los dos pares es de una sola variable.
+    #
+    # PREDICCION de 99c1fine vs 99c0mg: la run 86 midio el mismo cambio de
+    # rejilla SIN cruzado y V4 se movia hasta un 8 % (only KS -8.0 %,
+    # no_KS_no_Cierjacks +6.2 %), con V2 identico. Aqui hay cruzado ademas.
+    # PREDICCION de 99c2fine vs 99c1fine: `carry` restituye 1307 de 4218
+    # parametros de forma y rank34 sube de 2660 a 3481, o sea mete
+    # incertidumbre REAL donde hoy hay ceros ⇒ V4 tiene que BAJAR. V2 identico
+    # a cuatro decimales en los tres, que es el control gratis.
+    "predictive_99c0mg": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_99c0mg.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run 99, mg 660 + cruzado a_0, una rejilla: el ancla de los pasos C",
+        "systematic_block_col": None,
+    },
+    "predictive_99c1fine": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_99c1fine.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run 99, rejilla FINA 1738 + cruzado a_0, parámetros muertos DROP: aísla el cambio de rejilla",
+        "systematic_block_col": None,
+    },
+    "predictive_99c2fine": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_99c2fine.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run 99, rejilla FINA 1738 + cruzado a_0, 1307 parámetros de forma restituidos (hilo B): aísla a_5/a_6",
+        "systematic_block_col": None,
+    },
+    # ── RUN 97: una malla por orden Legendre (roadmap §10.8) ────────────────
+    #
+    # Candidata frente a `predictive_91_cross`, la misma base contra la que se
+    # leyo `predictive_95`, y por la MISMA ruta: los bloques a_0 del fichero
+    # (`KIKA_MF33_MF34_CROSS_FROM_FILE=1`), nunca el sidecar.
+    #
+    # ⚠ SIN `KIKA_MF34_NULL_MASK`, y por la razon que dejo escrita la run 95,
+    # solo que aqui es mas fuerte: la mascara vive en la malla de 703 grupos de
+    # la run 86 y el MF34 de la 97 esta en 679/703/637/472/299/105 -- SEIS
+    # mallas, ninguna de ellas esa. `eval_covariance` coloca la mascara POR
+    # ENERGIA y precompute solo valida el npz contra si mismo, asi que una
+    # mascara caduca se aplicaria en silencio en vez de fallar. La cinta ya
+    # lleva la retirada por `CROSS_NULL_FILL='zero'` mas el complemento de
+    # `live` en write_consistent_mf34.
+    #
+    # ⚑ MEMORIA: riesgo MENOR que el de la run 95, no mayor. Aquel job temia la
+    # OOM porque su MF34 era mas FINO que nada puntuado hasta entonces (896
+    # grupos, 485 MB); el de la 97 es mas GRUESO en cinco de los seis ordenes.
+    # Si aun asi la mata la OOM, descomentar `--mem` en la cabecera de run_chi.sh.
+    # La run 98 es un cambio de REPRESENTACION sobre la misma covarianza: la malla
+    # por orden colapsa MF34 y el cruzado con la MISMA U, y el colapso es una
+    # contraccion demostrada (amp = 1 en los seis ordenes, max|c34_rel| 0.9945 ->
+    # 0.9945 exacto). ⇒ EL CHI2 TIENE QUE SALIR IGUAL QUE EL DE LA RUN 96/94.
+    # Eso es lo que este job comprueba; una diferencia no seria una mejora, seria
+    # un fallo del colapso. La base de lectura es `predictive_91_cross`.
+    "predictive_98raw": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_98raw.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "\u03c7\u00b2 analysis \u2014 malla por orden emitida en 691/699/690/690/699/703 grupos, colapso demostrado contractivo",
+        "systematic_block_col": None,
+    },
+    "predictive_97mesh": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_97mesh.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "\u03c7\u00b2 analysis \u2014 una malla por orden Legendre: MF34 a 679/703/637/472/299/105 grupos, cruzado colapsado con la misma U",
+        "systematic_block_col": None,
+    },
     "predictive_95": {
         "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_95.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",

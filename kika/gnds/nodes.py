@@ -58,12 +58,17 @@ from typing import Callable, Dict, Optional, Tuple
 
 from kika.nuclear_data.model import (AngularEnergy, AngularTwoBody,
                                      AngularDistributionReconstructed,
+                                     AverageParameterCovariance,
+                                     Branching1d, Branching3d,
                                      Constant1d, CoulombPlusNuclearElastic,
                                      CovarianceMatrix,
-                                     CrossSectionReconstructed, EnergyAngular,
+                                     CrossSectionReconstructed,
+                                     DiscreteGamma, EnergyAngular,
                                      Evaluated, Gridded1d, GriddedCrossSection,
                                      Heated, HeatedMultiGroup, Isotropic2d,
                                      KalbachMann, Legendre, Mixed,
+                                     NBodyPhaseSpace, ParameterCovariance,
+                                     PrimaryGamma,
                                      Polynomial1d, Realization, Reference,
                                      Regions1d, Regions2d, Regions3d,
                                      ResonancesWithBackground,
@@ -71,7 +76,8 @@ from kika.nuclear_data.model import (AngularEnergy, AngularTwoBody,
                                      ThermalNeutronScatteringLaw1d,
                                      URR_probabilityTables,
                                      URR_probabilityTables1d, Uncorrelated,
-                                     Unspecified, XYs1d, XYs2d, XYs3d, Ys1d)
+                                     Unspecified, UnspecifiedMultiplicity,
+                                     XYs1d, XYs2d, XYs3d, Ys1d)
 from kika.nuclear_data.model.styles import (AverageProductData,
                                             CoulombPlusNuclearElasticMuCutoff,
                                             MonteCarlo_cdf, SnElasticUpScatter)
@@ -101,8 +107,9 @@ class NodeSpec:
     """One node at one choice point.
 
     ``cls`` is the model class the node becomes, or ``None`` where there is no
-    class — a ``branching1d`` multiplicity is *named* by the reader and turned
-    into nothing. It is the class→tag direction, and it lives here rather than
+    class — ``recoil`` is read onto :attr:`AngularTwoBody.recoilHref` and has no
+    class of its own, and every ``NEITHER`` entry has none by definition. It is
+    the class→tag direction, and it lives here rather than
     on the class: ``gndsNodeName`` exists on exactly three families of model
     class and in all three it means "the node name is **not** the class name
     lower-cased", i.e. it marks an exception. Adding it to the twenty-one
@@ -127,23 +134,63 @@ def _spec(*args, **kwargs) -> Tuple[Tuple[str, str], NodeSpec]:
     return spec.key, spec
 
 
-#: Phase 7b's landing strip: the §18 laws and the multiplicity forms kika
-#: declares are already here as ``READ_ONLY``/``NEITHER`` entries with a reason.
-#: When their writers land they become ``PAIRED``, and :func:`check` is what
-#: notices that the declaration and the code agree again.
+#: **Phase 7b's landing strip is empty, which is what finishing it means.**
+#: The strip was the §18 laws and the multiplicity forms kika declared but did
+#: not implement, sitting here as ``READ_ONLY``/``NEITHER`` entries with a
+#: reason until their writers landed and :func:`check` noticed the declaration
+#: and the code agreeing again. Every one of them has.
 #:
-#: **Four §18 entries carry this, not five.** ``gnds.xsd:1647-1662`` gives
-#: §18.1.1's choice twelve members; kika names six of them below and the count
-#: of *unimplemented* ones is four — ``uncorrelated``, ``energyAngular``,
-#: ``angularEnergy``, ``KalbachMann``. ``branching3d`` is deliberately absent,
-#: as the guinea pig of the import-time ratchet (see :func:`reads` and its
-#: test). The remaining five — ``reference``, ``CoulombPlusNuclearElastic``,
-#: ``coherentPhotonScattering``, ``incoherentPhotonScattering``,
-#: ``thermalNeutronScatteringLaw`` — occur **zero times** across the 558 neutron
-#: evaluations the census walked, which is why they are not entries.
-_PHASE_7B = ("declared in the model and not implemented — "
-             "kika/nuclear_data/model/distributions.py:163 lists them — "
-             "and scheduled for phase 7b")
+#: There was a ``_PHASE_7B`` reason here, carried by four §18 entries before
+#: ``uncorrelated`` and by three ``multiplicityForm`` entries after it. Every
+#: one of them is ``PAIRED`` now, so the constant had no users and is gone
+#: rather than kept as scaffolding for a phase that might want a different
+#: sentence anyway.
+#:
+#: ``gnds.xsd:1647-1662`` gives §18.1.1's choice twelve members and kika names
+#: **seven** below. The five it does not — ``reference``,
+#: ``CoulombPlusNuclearElastic``, ``coherentPhotonScattering``,
+#: ``incoherentPhotonScattering``, ``thermalNeutronScatteringLaw`` — occur
+#: **zero times** across the 558 neutron evaluations the census walked, which is
+#: why they are not entries and why one of them is now the import-time ratchet's
+#: guinea pig (see :func:`reads` and its test). ``branching3d`` held that job
+#: until §18.1.1 was finished and it became a real entry.
+
+#: The six analytic fission/evaporation spectra of §18.3, **with the census's
+#: numbers**. Each is a formula with named parameters, not a table, so kika
+#: reports one rather than tabulating it: a tabulation would put numbers in the
+#: file that the evaluator never wrote. On the ENDF side they are MF5's
+#: LF=5/7/9/11/12, which `MF5PartialRaw` keeps as verbatim bytes, so there is
+#: nothing to fill them from today either.
+#:
+#: **The census has run, so "no witness" is a measurement and not a guess** —
+#: and it says the six split four to two. ``generalEvaporation``,
+#: ``evaporation``, ``weightedFunctionals`` and ``simpleMaxwellianFission`` all
+#: have a reachable witness in the distribution; ``Watt`` and ``MadlandNix``
+#: occur **zero times**, which puts them with ``Ys1d`` and ``regions3d`` rather
+#: than with their four siblings. Reading a node no evaluation contains is
+#: untested code; reading one that 192 files contain is work with a witness
+#: waiting. The reason has to say which, so it carries the count.
+_ANALYTIC_SPECTRUM_OCCURRENCES = {
+    "generalEvaporation": 192,
+    "evaporation": 33,
+    "weightedFunctionals": 28,
+    "simpleMaxwellianFission": 15,
+    "Watt": 0,
+    "MadlandNix": 0,
+}
+
+
+def _analyticSpectrum(tag: str, line: str) -> str:
+    """The §18.3 analytic-spectrum reason for one node, with its own count."""
+    count = _ANALYTIC_SPECTRUM_OCCURRENCES[tag]
+    witness = (f"{count} occurrences across the 558 distributed neutron "
+               f"evaluations, so a witness is available"
+               if count else
+               "**zero** occurrences across the 558 distributed neutron "
+               "evaluations, so reading it would be untested code — the Ys1d "
+               "case")
+    return (f"an analytic §18.3 spectrum: a formula with named parameters, "
+            f"reported rather than tabulated; {witness}. {line}")
 
 #: Two of the six names in
 #: :data:`~kika.nuclear_data.model.distributions.NOT_IMPLEMENTED_DISTRIBUTIONS`
@@ -154,8 +201,10 @@ _PHASE_7B = ("declared in the model and not implemented — "
 NOT_A_DISTRIBUTION_FORM = {
     "recoil": "angularTwoBodyForm — gnds.xsd:1670, where it is already PAIRED "
               "as a bare <recoil href=…/> onto AngularTwoBody.recoilHref",
-    "NBodyPhaseSpace": "§18.3's energy choice — gnds.xsd:1703, inside "
-                       "uncorrelated/energy, so it lands with uncorrelated",
+    "NBodyPhaseSpace": "§18.3's energy choice — gnds.xsd:1697, inside "
+                       "uncorrelated/energy, where it is PAIRED under "
+                       "the uncorrelatedEnergyForm family since phase "
+                       "7b and lands with uncorrelated",
 }
 
 NODES: Dict[Tuple[str, str], NodeSpec] = dict([
@@ -174,12 +223,12 @@ NODES: Dict[Tuple[str, str], NodeSpec] = dict([
 
     _spec("XYs2d", "function2d", "§6.4.2", XYs2d, Status.PAIRED),
     _spec("regions2d", "function2d", "§6.4.3", Regions2d, Status.PAIRED),
-    _spec("XYs3d", "function3d", "§6.5", XYs3d, Status.NEITHER,
-          "kika/nuclear_data/model/functions/higher.py:307 — declared, "
-          "unimplemented, no phase scheduled"),
+    _spec("XYs3d", "function3d", "§6.5", XYs3d, Status.PAIRED),
     _spec("regions3d", "function3d", "§6.5", Regions3d, Status.NEITHER,
-          "kika/nuclear_data/model/functions/higher.py:311 — declared, "
-          "unimplemented, no phase scheduled"),
+          "unreachable, not unscheduled: gnds.xsd:2286 defines the type "
+          "xData_regions_3d_primary and no xs:element anywhere in the schema "
+          "is of it, so no valid GNDS-2.1 file can contain a regions3d. This "
+          "entry stays NEITHER permanently"),
 
     # -- §16.1.1 crossSection forms. gnds.xsd:1206, an xs:choice.
     #    XYs1d and regions1d are also legal here and are delegated to the
@@ -203,15 +252,15 @@ NODES: Dict[Tuple[str, str], NodeSpec] = dict([
 
     # -- §17.3 multiplicity forms. gnds.xsd:1626, an xs:choice.
     _spec("constant1d", "multiplicityForm", "§17.3", Constant1d, Status.PAIRED),
-    _spec("reference", "multiplicityForm", "§17.3", None, Status.READ_ONLY,
-          "kika/gnds/decode.py:576-597 names it and reports it; kika's Multiplicity "
-          "is a constant or a function of E, and a link needs a node the model "
-          "does not have. " + _PHASE_7B),
-    _spec("unspecified", "multiplicityForm", "§17.3", None, Status.READ_ONLY,
-          "kika/gnds/decode.py:576-597 names it and reports it. " + _PHASE_7B),
-    _spec("branching1d", "multiplicityForm", "§17.3", None, Status.READ_ONLY,
-          "kika/gnds/decode.py:576-597 names it and reports it; an isomeric "
-          "branching is not a multiplicity kika can evaluate. " + _PHASE_7B),
+    #    `reference` is the same class as §16.1.1's, and the key being
+    #    (family, tag) is what lets one class sit at two choice points — the
+    #    same arrangement `isotropic2d` has. XLinkType and §16.1.1's reference
+    #    are the same shape: an href and an optional label.
+    _spec("reference", "multiplicityForm", "§17.3", Reference, Status.PAIRED),
+    _spec("unspecified", "multiplicityForm", "§17.3", UnspecifiedMultiplicity,
+          Status.PAIRED),
+    _spec("branching1d", "multiplicityForm", "§17.3", Branching1d,
+          Status.PAIRED),
 
     # -- §18.1.1 distribution forms. gnds.xsd:1647, an xs:choice.
     _spec("angularTwoBody", "distributionForm", "§18.2", AngularTwoBody,
@@ -219,13 +268,15 @@ NODES: Dict[Tuple[str, str], NodeSpec] = dict([
     _spec("unspecified", "distributionForm", "§18.1.1", Unspecified,
           Status.PAIRED),
     _spec("uncorrelated", "distributionForm", "§18.3", Uncorrelated,
-          Status.NEITHER, _PHASE_7B),
+          Status.PAIRED),
     _spec("energyAngular", "distributionForm", "§18.4", EnergyAngular,
-          Status.NEITHER, _PHASE_7B),
+          Status.PAIRED),
     _spec("angularEnergy", "distributionForm", "§18.5", AngularEnergy,
-          Status.NEITHER, _PHASE_7B),
+          Status.PAIRED),
     _spec("KalbachMann", "distributionForm", "§18.6", KalbachMann,
-          Status.NEITHER, _PHASE_7B),
+          Status.PAIRED),
+    _spec("branching3d", "distributionForm", "§18.1.1", Branching3d,
+          Status.PAIRED),
 
     # -- §18.2's angularTwoBody forms. gnds.xsd:1665, an xs:choice.
     #    XYs2d and regions2d delegate to the functional family.
@@ -235,6 +286,44 @@ NODES: Dict[Tuple[str, str], NodeSpec] = dict([
           "read onto AngularTwoBody.recoilHref and written back from it; the "
           "link has no class of its own"),
 
+    # -- §18.3's uncorrelated/angular forms. gnds.xsd:1686, an xs:choice --
+    #    and NOT the same choice as angularTwoBody's: no regions2d, no recoil,
+    #    and a `forward` that appears at no other choice point in the schema.
+    #    That is why `isotropic2d` is here a second time; the key is the pair.
+    _spec("isotropic2d", "uncorrelatedAngularForm", "§18.3", Isotropic2d,
+          Status.PAIRED),
+    _spec("forward", "uncorrelatedAngularForm", "§18.3", None, Status.NEITHER,
+          "gnds.xsd:1694, an empty node meaning P(mu|E) is a delta at mu=1. "
+          "**Zero** occurrences across the 558 distributed neutron evaluations "
+          "— the census measured it, so this is not a fixture that happens to "
+          "be missing but a node the library does not contain. Same standing "
+          "as Ys1d and regions3d, and the reason a model class for it would be "
+          "untested code"),
+
+    # -- §18.3's uncorrelated/energy forms. gnds.xsd:1697, an xs:choice of
+    #    eleven. XYs2d and regions2d delegate to the functional family; the
+    #    four kika models are below, and the six analytic spectra are declared
+    #    and reported because each is a formula with named parameters and
+    #    tabulating one would put numbers in the file nobody wrote.
+    _spec("discreteGamma", "uncorrelatedEnergyForm", "§18.3", DiscreteGamma,
+          Status.PAIRED),
+    _spec("primaryGamma", "uncorrelatedEnergyForm", "§18.3", PrimaryGamma,
+          Status.PAIRED),
+    _spec("NBodyPhaseSpace", "uncorrelatedEnergyForm", "§18.3",
+          NBodyPhaseSpace, Status.PAIRED),
+    _spec("evaporation", "uncorrelatedEnergyForm", "§18.3", None,
+          Status.NEITHER, _analyticSpectrum("evaporation", "gnds.xsd:1714")),
+    _spec("generalEvaporation", "uncorrelatedEnergyForm", "§18.3", None,
+          Status.NEITHER, _analyticSpectrum("generalEvaporation", "gnds.xsd:1740")),
+    _spec("simpleMaxwellianFission", "uncorrelatedEnergyForm", "§18.3", None,
+          Status.NEITHER, _analyticSpectrum("simpleMaxwellianFission", "gnds.xsd:1748")),
+    _spec("Watt", "uncorrelatedEnergyForm", "§18.3", None,
+          Status.NEITHER, _analyticSpectrum("Watt", "gnds.xsd:1731")),
+    _spec("MadlandNix", "uncorrelatedEnergyForm", "§18.3", None,
+          Status.NEITHER, _analyticSpectrum("MadlandNix", "gnds.xsd:1722")),
+    _spec("weightedFunctionals", "uncorrelatedEnergyForm", "§18.3", None,
+          Status.NEITHER, _analyticSpectrum("weightedFunctionals", "gnds.xsd:1756")),
+
     # -- §25 covariance forms. covariances.xsd:83-87, an xs:choice.
     _spec("covarianceMatrix", "covarianceForm", "§25.2", CovarianceMatrix,
           Status.PAIRED),
@@ -242,6 +331,28 @@ NODES: Dict[Tuple[str, str], NodeSpec] = dict([
     _spec("sum", "covarianceForm", "§25.2", Sum, Status.PAIRED),
     _spec("shortRangeSelfScalingVariance", "covarianceForm", "§25.2",
           ShortRangeSelfScalingVariance, Status.PAIRED),
+
+    # -- §25.3's parameter covariances. covariances.xsd:29-32 is an
+    #    `xs:sequence` of two unbounded refs rather than an `xs:choice`, and it
+    #    is a dispatch point all the same: `<parameterCovariances>` holds both
+    #    kinds, the reader picks by tag, and a tag it does not know is exactly
+    #    the "reader lands on a form whose writer does not exist" this table
+    #    exists to make visible. The sequence is also why the writer emits all
+    #    the `parameterCovariance` nodes before all the average ones instead of
+    #    in model order.
+    #
+    #    `parameterCovarianceMatrix` is deliberately **not** an entry.
+    #    covariances.xsd:170 puts it inside `parameterCovariance`'s
+    #    `xs:sequence` as the mandatory, single-valued second child: there is
+    #    no alternative form to land on, so by the criterion in the module
+    #    docstring it is not a node at a choice point. Its coverage is its
+    #    parent's — a `parameterCovariance` cannot be read or written without
+    #    it, and the round trip in `test_encode.py` fails outright if either
+    #    half stops handling it.
+    _spec("parameterCovariance", "parameterCovarianceForm", "§25.3.1",
+          ParameterCovariance, Status.PAIRED),
+    _spec("averageParameterCovariance", "parameterCovarianceForm", "§25.3",
+          AverageParameterCovariance, Status.PAIRED),
 
     # -- §9 styles. Declaration only: `writeStyles` is already table-driven by
     #    `gndsNodeName`, so there is no dispatch here to convert -- what the
@@ -399,6 +510,7 @@ def check() -> Tuple[str, ...]:
     """
     import kika.gnds.covariances  # noqa: F401  - registers the covariance forms
     import kika.gnds.decode       # noqa: F401  - registers the reader's side
+    import kika.gnds.distributions  # noqa: F401  - registers §18
     import kika.gnds.encode       # noqa: F401  - registers the writer's side
     import kika.gnds.primitives   # noqa: F401  - registers the functionals
     import kika.gnds.styles       # noqa: F401  - registers §9

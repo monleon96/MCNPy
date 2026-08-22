@@ -173,6 +173,39 @@ _TAPES: Dict[str, Sequence[str]] = {
     # between them is a reader defect rather than a physics difference. Not the
     # same tape as ``fe56_host`` — that is JEFF-4.0 with a JEFF-3.3 MF4 graft.
     "fe56_b81": ("endfb81/n-026_Fe_056.endf", "n-026_Fe_056.endf"),
+    # MF6, the energy-angle distributions. These three are not a sample: they
+    # are the carriers. Swept over all 557 ENDF/B-VIII.1 neutron tapes, LAW=7
+    # occurs twice in the whole library and both are in Be-9's MT16 (which is
+    # also one of only 29 LCT=1 sections); LAW=6 occurs five times and three of
+    # them are Li-6's MT41; and C-12's MT5 is the readiest LCT=3. See
+    # ``docs/mf6_notes.md`` in kika-workspace for the census.
+    "be9_b81": ("endfb81/n-004_Be_009.endf", "n-004_Be_009.endf"),
+    "li6_b81": ("endfb81/n-003_Li_006.endf", "n-003_Li_006.endf"),
+    "c12_b81": ("endfb81/n-006_C_012.endf", "n-006_C_012.endf"),
+    # LAW=5, charged-particle elastic scattering, which occurs nowhere in any
+    # neutron sublibrary: it needs a projectile that is charged. ENDF/B-VIII.0
+    # ships those sublibraries next to ``neutrons/`` and they are on the share.
+    # Four tapes because LAW=5 splits on two axes and all four cells are
+    # occupied -- LTP=1 (nuclear-amplitude expansion) vs LTP=12 (a table),
+    # crossed with LIDP=0 (distinguishable) vs LIDP=1 (identical particles,
+    # which is p+p, d+d, t+t, 3He+3He and alpha+alpha and nothing else). These
+    # are the smallest carriers of each cell; see ``docs/mf6_witness_hunt.md``
+    # in kika-workspace for the census over all 63 charged-particle tapes.
+    "p_he3_b80": ("endfb8/protons/p-002_He_003.endf",
+                  "endfb80/protons/p-002_He_003.endf"),
+    "d_h2_b80": ("endfb8/deuterons/d-001_H_002.endf",
+                 "endfb80/deuterons/d-001_H_002.endf"),
+    "h3_he4_b80": ("endfb8/helium3s/h-002_He_004.endf",
+                   "endfb80/helium3s/h-002_He_004.endf"),
+    "a_he4_b80": ("endfb8/alphas/a-002_He_004.endf",
+                  "endfb80/alphas/a-002_He_004.endf"),
+    # LAW=2/LANG=12 -- the tabulated two-body form -- which likewise occurs on
+    # no neutron tape here: 0 in all 557, against 503 nodes in these 63. This
+    # tape is also the cheapest witness to the interpolation-padding defect
+    # that ``test_interp_padding_is_probed_once_per_section_and_that_is_wrong``
+    # pins, which is why it is this Li-7 and not one of the other three.
+    "t_li7_b80": ("endfb8/tritons/t-003_Li_007.endf",
+                  "endfb80/tritons/t-003_Li_007.endf"),
     "fe56_gnds_cov": (
         "ENDF-B-VIII.1-GNDS/ENDF-B-VIII.1-GNDS/neutrons/Covariances/"
         "n-026_Fe_056.endf.gnds-covar.xml",
@@ -307,8 +340,8 @@ _NJOY_FIXTURES = frozenset({"njoy_exe"})
 #: docstring above claimed it was applied automatically. It is applied now.
 _GNDS_FIXTURES = frozenset({
     "fe56_gnds_tape", "fe56_gnds_cov_tape",
-    "gnds_data_dir", "micro_fe56_gnds", "micro_ta182_gnds",
-    "h2_gnds", "h2_gnds_cov",
+    "gnds_data_dir", "micro_fe56_gnds", "micro_ta182_gnds", "micro_be9_gnds",
+    "h2_gnds", "h2_gnds_cov", "h3_gnds", "s36_gnds",
     "gnds_covariance_fixture",
 })
 
@@ -436,6 +469,19 @@ u5_boxer_tape = _tape_fixture("u5_boxer")
 fe56_gnds_tape = _tape_fixture("fe56_gnds")
 fe56_gnds_cov_tape = _tape_fixture("fe56_gnds_cov")
 fe56_b81_tape = _tape_fixture("fe56_b81")
+
+#: The MF6 law carriers. Named one at a time rather than looped, to match the
+#: block above; the census that picked them is in ``docs/mf6_notes.md``.
+be9_b81_tape = _tape_fixture("be9_b81")
+li6_b81_tape = _tape_fixture("li6_b81")
+c12_b81_tape = _tape_fixture("c12_b81")
+
+#: The charged-particle carriers: LAW=5's four cells, and LAW=2/LANG=12.
+p_he3_b80_tape = _tape_fixture("p_he3_b80")
+d_h2_b80_tape = _tape_fixture("d_h2_b80")
+h3_he4_b80_tape = _tape_fixture("h3_he4_b80")
+a_he4_b80_tape = _tape_fixture("a_he4_b80")
+t_li7_b80_tape = _tape_fixture("t_li7_b80")
 
 tsl_h_h2o_tape = _tape_fixture("tsl_h_h2o")
 tsl_ortho_h_tape = _tape_fixture("tsl_ortho_h")
@@ -688,10 +734,9 @@ def h2_gnds() -> Path:
     SHA-1 in ``externalFiles`` are both real. 113 kB for 1013 nodes, which is
     what makes it the pair worth committing: ``regions1d`` and ``regions2d``,
     a ``reference`` form, ``crossSectionSum`` with resolvable ``summands``,
-    ``angularTwoBody``/``isotropic2d``/``unspecified`` — the three distributions
-    kika implements — *and* ``uncorrelated``/``NBodyPhaseSpace``, which it does
-    not, so the report's ``unsupported`` list is exercised by a real file rather
-    than by a hand-built one.
+    ``angularTwoBody``/``isotropic2d``/``unspecified`` and
+    ``uncorrelated``/``NBodyPhaseSpace`` — all of them laws kika reads, since
+    ``uncorrelated`` landed in phase 7b.
     """
     return _gnds_file("n-001_H_002.endf.gnds.xml")
 
@@ -700,6 +745,25 @@ def h2_gnds() -> Path:
 def h2_gnds_cov() -> Path:
     """The covariance sibling of :func:`h2_gnds`, unmodified. 11 kB, 4 sections."""
     return _gnds_file("Covariances/n-001_H_002.endf.gnds-covar.xml")
+
+
+@pytest.fixture(scope="session")
+def h3_gnds() -> Path:
+    """n + H3 from ENDF/B-VIII.1, **unmodified**, and here for one node.
+
+    ``uncorrelated/angular`` is an ``xs:choice`` of three (``gnds.xsd:1686``),
+    and the census measured its members across the 558 distributed neutron
+    evaluations: ``isotropic2d`` 126 095, ``XYs2d`` **406 in 144 files**,
+    ``forward`` 0. The three fixtures beside it carry **25 ``isotropic2d`` and
+    not one ``XYs2d``**, so that branch of the reader shipped with
+    ``uncorrelated`` without ever having seen a real one. This is the smallest
+    of the 144 files that fixes it — 59 kB — and it carries exactly one, with
+    fifteen sub-functions and axes of its own.
+
+    It also reads with an **empty** ``unsupported`` list, which no other
+    committed evaluation does: every law in it is one kika implements.
+    """
+    return _gnds_file("n-001_H_003.endf.gnds.xml")
 
 
 @pytest.fixture(scope="session")
@@ -735,6 +799,46 @@ def micro_ta182_gnds() -> Path:
     it is abridged and is not physics. Built by the same script.
     """
     return _gnds_file("micro_ta182.gnds.xml")
+
+
+@pytest.fixture(scope="session")
+def s36_gnds() -> Path:
+    """n + S36 from ENDF/B-VIII.1, **unmodified**, and the witness of three nodes.
+
+    Committed for ``KalbachMann`` — it is the smallest of the 272 evaluations
+    carrying one and holds **six** — and it turned out to be the smallest file
+    carrying ``branching1d`` and ``branching3d`` as well, five of each. 226 kB
+    for three of the four nodes phase 7b had left, which is why it is copied
+    whole rather than trimmed: the trim would have had to keep most of it.
+
+    All six ``KalbachMann`` are ``f`` + ``r`` with no ``a``, which is not this
+    file being unusual — the census counted **0 ``a`` in 3 730** across the
+    distribution.
+    """
+    return _gnds_file("n-016_S_036.endf.gnds.xml")
+
+
+@pytest.fixture(scope="session")
+def micro_be9_gnds() -> Path:
+    """Be-9's ``2n + 2He4`` reaction, trimmed. The **only** §18.5 witness there is.
+
+    ``angularEnergy`` occurs **twice in the whole ENDF/B-VIII.1 GNDS
+    distribution**, and both are in ``n-004_Be_009`` — in this one reaction, one
+    per product. There is no second file to choose instead, so the alternative
+    to trimming was committing 0.92 MB for two nodes.
+
+    It is trimmed rather than copied for the reason the other two are: the
+    construct exists only in a file too big to commit. Its ``resonances`` is a
+    lone ``scatteringRadius`` with no ``resonanceReactions``, so unlike Fe-56
+    and Ta-182 the kept reaction is chosen by what it *carries*, not by what the
+    resonance block links to.
+
+    Same warning as the other trims: **the numbers are abridged and are not
+    physics.** What is faithful is the shape — including the axis order, which
+    is the one thing that distinguishes §18.5 from §18.4 and which no schema
+    checks.
+    """
+    return _gnds_file("micro_be9.gnds.xml")
 
 
 #: Covariance fixture -> the construct it is here for. Each is the *smallest*

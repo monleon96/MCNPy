@@ -45,6 +45,9 @@ from kika.nuclear_data.model import (
     Resonances,
     ResolvedRegion,
     ScatteringRadius,
+    MODEL_RADIUS_UNIT,
+    radiusFromEndf,
+    radiusToEndf,
     UnresolvedRegion,
 )
 from kika.nuclear_data.model.resonances import (
@@ -229,13 +232,16 @@ def _decodeRange(energyRange, resonances: Resonances, report: ConversionReport,
         # region, and ENDF gives no per-l version of it — so it wins over the
         # constant, and that precedence is stated here rather than left implicit.
         resonances.scatteringRadius = ScatteringRadius(
-            constant=getattr(parameters, "ap", None),
+            constant=radiusFromEndf(getattr(parameters, "ap", None)),
             energies=np.asarray(energyRange.ap_e.energies, dtype=float),
-            values=np.asarray(energyRange.ap_e.ap_values, dtype=float),
+            values=radiusFromEndf(
+                np.asarray(energyRange.ap_e.ap_values, dtype=float)),
             interpolation=list(energyRange.ap_e.interpolation),
+            unit=MODEL_RADIUS_UNIT,
         )
     elif resonances.scatteringRadius is None and getattr(parameters, "ap", None) is not None:
-        resonances.scatteringRadius = ScatteringRadius(constant=parameters.ap)
+        resonances.scatteringRadius = ScatteringRadius(
+            constant=radiusFromEndf(parameters.ap), unit=MODEL_RADIUS_UNIT)
 
     if energyRange.nro == 1 and energyRange.ap_e is not None:
         # Kept for *every* kind of range, not only resolved ones: NRO=1 is a
@@ -381,7 +387,8 @@ def _decodeBreitWigner(parameters, lrf: int, report: ConversionReport,
     return BreitWigner(
         approximation=LRF_TO_APPROXIMATION[lrf],
         resonanceParameters=ResonanceParameters(spinGroups=groups),
-        scatteringRadius=parameters.ap,
+        scatteringRadius=radiusFromEndf(parameters.ap),
+        radiusUnit=MODEL_RADIUS_UNIT,
     )
 
 
@@ -424,10 +431,14 @@ def _decodeReichMoore(parameters, report: ConversionReport,
         # U-235, Th-232 and Pu-241, which all write APL == AP explicitly, an
         # encoder would put 0.0 where the file has 9.686000-1. Three of the six
         # tapes to hand, and byte identity lost on all three.
-        perL = block.apl_or_qx if block.apl_or_qx else None
+        # The zero test is on the **file's** number, before the conversion:
+        # multiplying first would work today and would make the sentinel depend
+        # on a scale factor, which is one refactor away from being wrong.
+        perL = radiusFromEndf(block.apl_or_qx) if block.apl_or_qx else None
         channels = [
             Channel(label=label, resonanceReaction=reactions[i].label, L=block.l,
-                    columnIndex=i, scatteringRadius=perL)
+                    columnIndex=i, scatteringRadius=perL,
+                    radiusUnit=MODEL_RADIUS_UNIT)
             for i, label in enumerate(channelLabels)
         ]
         spinGroups.append(RMatrixSpinGroup(
@@ -445,7 +456,8 @@ def _decodeReichMoore(parameters, report: ConversionReport,
         approximation="ReichMoore",
         resonanceReactions=reactions,
         spinGroups=spinGroups,
-        scatteringRadius=parameters.ap,
+        scatteringRadius=radiusFromEndf(parameters.ap),
+        radiusUnit=MODEL_RADIUS_UNIT,
     )
 
 
@@ -494,8 +506,9 @@ def _decodeRMatrixLimited(parameters, report: ConversionReport,
                 # file writes both and they differ. Stored raw, never collapsed
                 # to None on a zero — a channel radius of 0.0 is what some
                 # evaluations write and it has to come back out that way.
-                scatteringRadius=channel.apt,
-                hardSphereRadius=channel.ape,
+                scatteringRadius=radiusFromEndf(channel.apt),
+                hardSphereRadius=radiusFromEndf(channel.ape),
+                radiusUnit=MODEL_RADIUS_UNIT,
                 boundaryConditionValue=channel.bnd,
             )
             for i, channel in enumerate(group.channels)
@@ -674,7 +687,8 @@ def _decodeUnresolved(parameters, report: ConversionReport,
     return TabulatedWidths(
         spinGroups=spinGroups,
         energyGrid=energyGrid,
-        scatteringRadius=parameters.ap,
+        scatteringRadius=radiusFromEndf(parameters.ap),
+        radiusUnit=MODEL_RADIUS_UNIT,
         selfShieldingOnly=bool(parameters.lssf),
     )
 
@@ -808,8 +822,12 @@ def _encodeResolved(formalism, fields: dict, report: ConversionReport):
             # LRF=3: C2 is APL, which *is* on the model — so a caller who
             # changed the radius gets the changed radius written. ``None``
             # means the file wrote 0 and 0 is what goes back.
+            # Back to ENDF's units on the way out. The file-level AP does not
+            # need this -- it is written from `fields["ap"]`, which is ENDF's
+            # own number kept verbatim -- but APL lives on the model and
+            # nowhere else, which is what makes a caller's edit effective.
             c2 = group.channels[0].scatteringRadius if group.channels else None
-            c2 = c2 if c2 is not None else 0.0
+            c2 = radiusToEndf(c2) if c2 is not None else 0.0
             records = [
                 EndfResonance(energy=energy, spin=spin,
                               c3=widths[0], c4=widths[1], c5=widths[2], c6=widths[3])
@@ -863,7 +881,8 @@ def _encodeRMatrixLimited(formalism: RMatrix, fields: dict):
             channels.append(RML_Channel(
                 ipp=ipp, l=channel.L, sch=channel.channelSpin,
                 bnd=channel.boundaryConditionValue,
-                ape=channel.hardSphereRadius, apt=channel.scatteringRadius,
+                ape=radiusToEndf(channel.hardSphereRadius),
+                apt=radiusToEndf(channel.scatteringRadius),
             ))
 
         spinGroups.append(RML_SpinGroup(

@@ -216,7 +216,9 @@ GENERATE_NOMINAL_ENDF = True             # Fine-grid tape: MF4 central + fine MF
 GENERATE_MULTIGROUP_COVARIANCE = True    # Collapse MF34 onto an adaptive group grid
 GENERATE_MF3_MF33 = 1                    # 0/1. Write the elastic magnitude covariance (MF33 MT2).
                                          # MF3 itself is NOT rewritten: the central stays at the host.
-GENERATE_CROSS_TERM_ENDF = True          # Write the final _a0cross tape (needs all three above)
+# Write the final _a0cross tape (needs all three above). Env-selectable for
+# variants; unset leaves it True, which is what every run so far had.
+GENERATE_CROSS_TERM_ENDF = _env_flag("KIKA_GENERATE_CROSS_TERM_ENDF", True)
 MF34_COVARIANCE_TYPE = "both"            # Which MF34 to write: "fine" | "multigroup" | "both"
 MF33_MG_REPRESENTATION = "fine"          # MF33 in the _mg tape: "fine" (full MF4 grid) | "multigroup".
                                          # Fine is shipped: grouping MF33 is irreversible and damps
@@ -233,6 +235,28 @@ STOP_AFTER_NOMINAL_FITS = _env_flag("KIKA_STOP_AFTER_NOMINAL_FITS", True)
                                          # MC (~5 h). Writes nominal_fits.parquet and nothing else, so
                                          # no covariance, no ENDF, nothing that can be shipped.
                                          # Set KIKA_STOP_AFTER_NOMINAL_FITS=0 for a full run.
+
+# The line above PROMISES "nothing that can be shipped", but the product
+# switches were left as the deliverable run set them, so `_preflight_products`
+# refused the run outright: GENERATE_CROSS_TERM_ENDF needs the MC, and this mode
+# exits before it. That is a contradiction in the config, not a user error, and
+# it cost P2 a job (8480964, 2026-08-12). Make the flag enforce what it claims.
+#
+# This can only ever turn products OFF, and only in a mode that by construction
+# cannot build them — the run exits before the MC that every one of them
+# consumes. SAVE_NOMINAL_FITS is untouched: nominal_fits.parquet is the product.
+if STOP_AFTER_NOMINAL_FITS:
+    _forced = [n for n, v in (("GENERATE_NOMINAL_ENDF", GENERATE_NOMINAL_ENDF),
+                              ("GENERATE_MULTIGROUP_COVARIANCE", GENERATE_MULTIGROUP_COVARIANCE),
+                              ("GENERATE_MF3_MF33", GENERATE_MF3_MF33),
+                              ("GENERATE_CROSS_TERM_ENDF", GENERATE_CROSS_TERM_ENDF)) if v]
+    GENERATE_NOMINAL_ENDF = False
+    GENERATE_MULTIGROUP_COVARIANCE = False
+    GENERATE_MF3_MF33 = 0
+    GENERATE_CROSS_TERM_ENDF = False
+    if _forced:
+        print("[config] STOP_AFTER_NOMINAL_FITS is on — forcing off, since the "
+              "run exits before the MC they all consume: " + ", ".join(_forced))
 
 # --- CROSS TERM (MF33 <-> MF34) -------------------------------------------- #
 # Cov(c0, a_l) shipped inside MF34's (L=0, L1) blocks, (0,0) self-block null.
@@ -260,7 +284,46 @@ SAVE_MF33_C0_SAMPLES = True              # mf33_c0_samples.parquet — the c0 re
 # --- OTHER DIAGNOSTIC OUTPUT ----------------------------------------------- #
 SAVE_COVARIANCE_FILES = False            # Fine + multigroup .npy (cov, mean, boundaries)
 SAVE_CORRELATION_MATRICES = False        # Correlation beside covariance (needs the line above)
-SAVE_RAW_KW_PARQUET = False              # legendre_samples_raw_kw.parquet — Pass-1 marginals
+# ⚑ Pass-1's OWN a_l marginals (~570 MB), and the ONLY route to sigma_1 for the
+# angular parameters. The TMC parquet cannot substitute for it: the combine
+# writes `mat_tmc = mean_2 + (mat_kw_1 - mean_1) * (sigma_2 / sigma_1)`, an
+# affine per-column rescale whose std is sigma_2 identically -- that line
+# DESTROYS sigma_1. Run 92 left this False, which is why the MF34 two-pass
+# repair (roadmap §2.7-bis) cannot be built from run 92 at all and needs a fresh
+# MC. Env-selectable so the runner can ask for it without editing the script.
+SAVE_RAW_KW_PARQUET = _env_flag("KIKA_SAVE_RAW_KW_PARQUET", False)
+
+# ⚑⚑ THE SAME LESSON, PAID A SECOND TIME ON A DIFFERENT ARTEFACT.
+# Run 93 recovered sigma_1 for a_l, and it was still not enough: the MF34
+# marginal that has to be preserved is `std_perbin`, which carries per-bin
+# MIXTURE blocks (1700/1738 bins in run 93) and near-zero regularisation
+# (2037/10428 parameters).  Neither is in any saved parquet, and the mixture
+# moments come from `_mc_one_bin` -- i.e. from the MC itself -- so no nominal
+# refit reproduces them.  MF33 ships `mf33_absolute_covariance.npy`; MF34 has
+# shipped NOTHING, and that asymmetry is what forces a re-run every time MF34
+# needs touching (roadmap §2.7-ter).
+#
+# This flag closes it for good: the full MF34 assembly state, in float64, at
+# the point of truth.  ⚠ SAVES ONLY -- every statement it guards is an
+# `np.save`/parquet write, so it cannot move a single computed value, and the
+# run 94 gate (byte-identical tapes vs run 93) proves that rather than assuming
+# it.  ~5 GB on /share_snc.
+SAVE_MF34_COV_SIDECARS = _env_flag("KIKA_SAVE_MF34_COV_SIDECARS", False)
+# Pass-2's own replicas.  The TMC parquet is an affine rescale of PASS 1, not
+# Pass 2, so sigma_2 is only ever inferred today.  This makes it measurable.
+SAVE_PERBIN_PARQUET = _env_flag("KIKA_SAVE_PERBIN_PARQUET", False)
+
+# (c) — the ONE knob that carries the MF34 split (roadmap §2.7-quinquies).
+# A .npy holding a replacement for `corr_kw`, Pass 1's correlation.  It is the
+# correlation and NOT `cov_combined` because `cov_combined` is not an interface:
+# it is rebuilt from `(corr_kw, std_perbin)` at the multigroup step (STEP 7,
+# MULTIGROUP_USE_RAW_MC_CORR) and never read back, so a covariance sidecar would
+# reach the fine MF34 and silently miss the multigroup collapse.  Substituting
+# the correlation at its single point of definition reaches both, plus the
+# saved sidecars, so the run documents what it actually used.
+# ⚠ Empty string = off.  The file is VALIDATED, not trusted: wrong shape, a
+# non-unit diagonal, asymmetry or |rho| > 1 aborts the run before the MC.
+MF34_CORR_OVERRIDE = os.environ.get("KIKA_MF34_CORR_OVERRIDE", "").strip()
 SAVE_MULTIGROUP_DIAGNOSTICS_CSV = True   # multigroup_boundary_decisions.csv
 SAVE_MF33_MULTIGROUP_DIAGNOSTICS_CSV = True   # mf33_boundary_decisions.csv
 
@@ -293,6 +356,19 @@ SUPPLEMENTARY_JSON_FILES = [                     # Loaded alongside the main sou
 ]
 EXCLUDE_EXPERIMENTS = ["32246002", "400750022"]  # Tostkii 1957; Morozov 1972 pointer 2
                                                  # (SPA-fitted sister of 400750021, double-counts it)
+
+# P2 (post-run-92 roadmap §3): out-of-sample refits. `KIKA_EXCLUDE_EXPERIMENTS`
+# is a comma-separated list that is APPENDED to the two above — the baseline
+# exclusions are provenance decisions and a variant must never silently drop
+# them. With KIKA_STOP_AFTER_NOMINAL_FITS=1 (the default) a variant costs ~2 min
+# and writes nominal_fits.parquet only: no covariance, no ENDF, nothing
+# shippable. ⚠ UNION_GRID_SUBENTRIES is deliberately NOT touched — the mesh is a
+# representation choice carrying no cross-section information, and freezing it
+# is what makes the refit monovariable (§3.1).
+if os.environ.get("KIKA_EXCLUDE_EXPERIMENTS"):
+    _extra = [s.strip() for s in os.environ["KIKA_EXCLUDE_EXPERIMENTS"].split(",")
+              if s.strip()]
+    EXCLUDE_EXPERIMENTS = list(dict.fromkeys(EXCLUDE_EXPERIMENTS + _extra))
 
 # =============================================================================
 # ENERGY RANGE & PHYSICS
@@ -499,6 +575,78 @@ MULTIGROUP_REGROUP_AFTER_SMOOTH = False          # Second regrouping pass after 
 USE_ORIGINAL_MF34_GRID = False                   # Force the grid from the host MF34
 MERGE_ORIGINAL_MF34 = True                       # Merge our MF34 with the host's over its full range
 
+# --- A MESH PER LEGENDRE ORDER (roadmap §10.8) ------------------------------ #
+# ENDF-6 states the energy grids INSIDE each (L, L1) sub-subsection, so an order
+# whose coefficient is well resolved need not be written at the resolution the
+# noisiest one needs. `scripts.per_order_mesh` chooses each order's partition of
+# the multigroup mesh above by a parameter-free DP (fewest degenerate segments,
+# then least information destroyed) and the covariance is carried onto it in
+# RELATIVE space, which is exact and does not go through an absolute matrix the
+# post-processing has no counterpart for.
+#
+# ⚑ OFF reproduces the shared-mesh emission byte for byte -- with every order on
+# the mesh it already has, the aggregators are the identity and the blocks are
+# slices. That is the property `test_per_order_mesh.py` gates, and it is what
+# makes this switchable rather than a fork.
+#
+# The CROSS term travels with it. `build_group_cross` picks the mesh up from the
+# `mf34_per_order_mesh.npz` this run writes and collapses shape and cross onto it
+# with the SAME U, in one congruence at the point of emission -- so the deliverable
+# _a0cross tape carries the mesh, not just the intermediate _mg.
+#
+# ⚠ The _mg tape does NOT keep the compression: `merge_mf34` with the host goes
+# through `to_ang_covmat`, which squares the ragged LB=6 off-diagonals onto the
+# union of their two grids. That is content-preserving (duplication onto a finer
+# grid is the same bilinear form) and size-inflating, and it does not reach the
+# deliverable, which `write_consistent_mf34` re-emits ragged.
+#
+# Measured on the mixture object (run 94's grids, 703 groups): 679/703/637/472/
+# 299/105 groups, MF34 entries -52.9 % in the ragged emission.
+MF34_PER_ORDER_MESH = _env_flag("KIKA_MF34_PER_ORDER_MESH", False)
+
+# ⛔ RUN 97: THE MESH WAS BEING CHOSEN AFTER ITS TRIGGER HAD BEEN ERASED.
+#
+# The DP merges only to repair segments with SNR < 1 -- a singleton whose own
+# SNR is already >= 1 scores (0 bad, 0 destroyed) and the tie-break keeps
+# resolution. But `regularize_near_zero_relative_covariance` runs first and caps
+# every flagged sigma at exactly SNR = 1, so by the time the mesh is asked, no
+# parameter fails the test any more. Measured on run 97:
+#
+#   post-convert   max sigma_rel  l=1..6:  2116 %  90 %  4128 %  5749 %  5208 %  744 %
+#   post-nz-nom    max sigma_rel  l=1..6:    94 %  90 %    99 %    99 %   100 %   98 %
+#
+# The mesh merged 33 groups of 3960 (-1.7 % of MF34) where the criterion,
+# measured on an unregularised object, had given 679/703/637/472/299/105.
+#
+# ⚑ THE DECISION AND THE EMISSION USE DIFFERENT MATRICES ON PURPOSE. The mesh is
+# chosen on the covariance BEFORE the cap -- the honest evidence about what the
+# data resolves -- while what gets collapsed and written is still the fully
+# post-processed object, unchanged from run 97. Capping a sigma is a
+# declaration; widening the group is a measurement, and only the second belongs
+# in the choice of grid.
+#
+# Set to 0 to reproduce run 97's mesh exactly.
+MF34_MESH_FROM_RAW = _env_flag("KIKA_MF34_MESH_FROM_RAW", True)
+
+# ⚑ LO MISMO QUE `mf34_mg_mesh_inputs.npz`, PERO EN LA REJILLA FINA.
+#
+# El agrupamiento deja de decidirse sobre los 660 multigrupos y pasa a decidirse
+# sobre los 1738 bins finos: un agrupado elegido encima de otro agrupado, con un
+# criterio distinto, no puede contestar "¿cuál es el agrupado correcto?" porque
+# el primero ya tiró la resolución que el segundo necesitaría.
+#
+#   cov_decision  la relativa fina ANTES del capado near-zero -- donde el
+#                 criterio SNR todavia tiene disparador (§ MF34_MESH_FROM_RAW)
+#   cov_emission  la que de verdad se escribe en 26-Fe-56g_nominal.endf
+#   means         `nominal_params`, el denominador de las dos: decide donde a_l
+#                 existe y donde cambia de signo ([[sign-change-of-a-l-is-a-boundary]])
+#
+# Cuesta 2 x 10428^2 x 8 = 1.74 GB. Se paga una vez y ahorra repetir el
+# pipeline por cada criterio nuevo. Misma leccion que
+# [[save-covariance-objects-not-just-samples]]; ponerlo a 0 solo para runs de
+# humo donde el disco importe mas que poder reanalizar.
+SAVE_FINE_MESH_INPUTS = _env_flag("KIKA_SAVE_FINE_MESH_INPUTS", True)
+
 # =============================================================================
 # MF33 ELASTIC MAGNITUDE CHANNEL
 # =============================================================================
@@ -551,8 +699,16 @@ ACE_SKIP_EXISTING = False
 # =============================================================================
 # RUNTIME
 # =============================================================================
-N_PROCS = 24                                     # Keep in step with --cpus-per-task in the sbatch
-                                                 # runner or the pool oversubscribes the allocation
+# ⚑ Was a bare `24` with the comment "keep in step with --cpus-per-task in the
+# sbatch runner or the pool oversubscribes the allocation" -- a coupling held by
+# hand, in two files, which is exactly the kind that drifts silently. It now
+# reads the allocation itself: SLURM_CPUS_PER_TASK is set by Slurm inside the
+# job, so the pool cannot oversubscribe no matter what the header says.
+# KIKA_N_PROCS overrides both, for interactive use off the batch system.
+# Falls back to 24, run 92's value, when neither is set.
+N_PROCS = int(os.environ.get("KIKA_N_PROCS")
+              or os.environ.get("SLURM_CPUS_PER_TASK")
+              or 24)
 N_EFF_WARNING_THRESHOLD = 5.0                    # Warn when the effective sample size falls below this
 VERBOSE_DIAGNOSTICS = True                       # Per-order percentile stats at every stage
 
@@ -597,6 +753,15 @@ def _preflight_products():
             problems.append(f"CROSS_NULL_FILL must be 'zero' or 'ship', not {CROSS_NULL_FILL!r}")
         if CROSS_MAG_GRID == "fine" and CROSS_NULL_FILL != "zero":
             problems.append("CROSS_MAG_GRID='fine' requires CROSS_NULL_FILL='zero'")
+        if MF34_PER_ORDER_MESH and CROSS_NULL_FILL != "zero":
+            # The cross step collapses shape and cross onto the per-order meshes
+            # with one U, in relative space. `--null-fill ship` writes the FILE's
+            # own relative values where a_l is exactly zero, and those slots are
+            # not what U averages -- so the two are incompatible. `zero` is what
+            # every shipped run uses; `ship` is the run-89 failure mode.
+            problems.append(
+                f"MF34_PER_ORDER_MESH needs CROSS_NULL_FILL='zero', not "
+                f"{CROSS_NULL_FILL!r}")
     if problems:
         raise SystemExit(
             "Product configuration cannot produce what it asks for:\n  - "
@@ -1473,6 +1638,50 @@ def _log_mc_bin_failures(bin_results, nominal_results, warning_counts, logger):
         )
 
 
+def _per_order_mf34_args(cov_rel, means, edges_ev, max_order, window_ev, logger,
+                         cov_for_mesh=None):
+    """`(cov_matrix, energy_grid_ev)` for `create_mf34_from_covariance`, per order.
+
+    Returns the dict forms the writer takes when each order carries a mesh of its
+    own, plus the aggregators, which the CROSS term must be collapsed with too:
+    a cross block whose columns sit on a different mesh than the shape block it
+    correlates with is silently wrong and nothing downstream can detect it.
+
+    ⚑ `cov_for_mesh` CHOOSES THE MESH; `cov_rel` IS WHAT GETS WRITTEN. They are
+    the same matrix at two different points of the post-processing chain, and the
+    split exists because the near-zero regularisation caps every sigma at exactly
+    SNR = 1 and so erases the DP's only trigger (run 97: -1.7 % where the
+    criterion had promised -52.9 %). Passing None keeps the old behaviour, which
+    is choosing the mesh on a matrix that has been made to pass the test.
+
+    ⚑ THE MESH DEPENDS ON WHICH ORDERS ARE DECLARED, so it must be computed from
+    the same central values the tape ships. Under the AICc mixture a_l is present
+    at 703/703 groups for l <= 5 and 694/703 for a_6; under winner-take-all the
+    same object declares a_6 at 74. Feeding this the winner's means would choose
+    a mesh for a file that does not exist.
+    """
+    from scripts.per_order_mesh import (
+        collapse_relative_per_order, mesh_report, per_order_meshes,
+    )
+
+    decide_on = cov_rel if cov_for_mesh is None else cov_for_mesh
+
+    # What the criterion sees, in both matrices: a singleton fails exactly when
+    # its own sigma_rel exceeds 1. If these two numbers are equal the mesh is
+    # again being chosen on a capped object and the run will merge nothing.
+    for tag, m in (("decision", decide_on), ("emission", cov_rel)):
+        sd = np.sqrt(np.maximum(np.diag(m), 0.0))
+        logger.info(f"    [mesh] {tag} matrix: {int((sd > 1.0).sum())}/{len(sd)} "
+                    f"slots with SNR < 1 (max sigma_rel {sd.max():.3g})")
+
+    meshes = per_order_meshes(edges_ev, decide_on, means, max_order,
+                              window_ev=window_ev, logger=logger)
+    blocks, grids, weights = collapse_relative_per_order(
+        edges_ev, cov_rel, means, max_order, meshes)
+    logger.info("  " + mesh_report(edges_ev, meshes, max_order))
+    return blocks, grids, weights
+
+
 def _write_cross_term_endf(mg_endf, output_path, logger):
     """Rewrite the _mg tape with the MF33<->MF34 cross term in MF34's a0 blocks.
 
@@ -1511,9 +1720,17 @@ def _write_cross_term_endf(mg_endf, output_path, logger):
                 null_fill=CROSS_NULL_FILL,
                 cache=Path(output_path) / ".group_cross_cache",
             )
-    except Exception as e:
+    except BaseException as e:
+        # ⚑ `SystemExit` IS NOT AN `Exception`. Every refusal build_group_cross
+        # raises is a SystemExit, so `except Exception` let the most likely
+        # failure mode past while `buf` -- the entire diagnostic output of the
+        # cross build -- was discarded unread. Run 97 died on one of those
+        # guards and the log kept nothing but the one-line message.
         for line in buf.getvalue().splitlines():
             logger.info(f"  | {line}")
+        if isinstance(e, SystemExit):
+            logger.error(f"[ERROR] [CROSS] cross-term ENDF refused: {e}", console=True)
+            raise                       # a refusal still ends the run non-zero
         logger.error(f"[ERROR] [CROSS] cross-term ENDF failed: {e}", console=True)
         logger.error(f"  Traceback:\n{traceback.format_exc()}", console=False)
         return None
@@ -3020,6 +3237,8 @@ def run_exfor_to_endf_sampling_v2(
     if generate_mf34_samples:
         _logger.info(f"  SAMPLING_RESOLUTION = {sampling_resolution}")
         _logger.info(f"  MERGE_ORIGINAL_MF34 = {merge_original_mf34}")
+        _logger.info(f"  MF34_PER_ORDER_MESH = {MF34_PER_ORDER_MESH}")
+        _logger.info(f"  MF34_MESH_FROM_RAW = {MF34_MESH_FROM_RAW}")
         _logger.info(f"  SAMPLING_SPACE = {sampling_space}")
         _logger.info(f"  SAMPLING_DECOMPOSITION = {sampling_decomposition}")
         _logger.info(f"  SAMPLING_METHOD = {sampling_method}")
@@ -3085,6 +3304,41 @@ def run_exfor_to_endf_sampling_v2(
 
     _logger.info(f"  [INFO] [EXFOR] Pre-loading EXFOR data (source={exfor_source})", console=True)
 
+    # ── The union grid must NOT move when a variant excludes an experiment ──
+    #
+    # P2 (roadmap §3.1) claims the refits are monovariable because
+    # UNION_GRID_SUBENTRIES is fixed by configuration. Job 8480970 falsified it:
+    # excluding an experiment removes it from the cache the grid is BUILT from,
+    # so V-noKIN (drops Kinney 10571002, which defines 0.847-2.5 MeV) collapsed
+    # from 1738 bins to 85, and V-KS (drops Pirovano 23365005, which defines
+    # 2.5-4 MeV) lost 83. The log said so plainly — "Union grid: 85 points from
+    # subentries ['23365005']" — and nothing stopped the run.
+    #
+    # The mesh is a representation choice carrying no cross-section information,
+    # so a grid-defining subentry stays in the cache for the GRID and is still
+    # excluded from every FIT. That is safe because the exclusion is enforced
+    # again, independently, inside `filter_exfor_with_energy_bin` (it parses the
+    # same patterns and `continue`s on a match), which is what every bin's fit
+    # goes through. The load-time filter is a second net, not the only one.
+    _load_exclusions = list(exclude_experiments or [])
+    _grid_keep: List[str] = []
+    if energy_grid_source == "union" and union_grid_subentries and _load_exclusions:
+        from scripts.exfor_utils import _parse_exclusion_list, _is_experiment_excluded
+        _pats = _parse_exclusion_list(_load_exclusions)
+        for _sub in [s[0] for s in union_grid_subentries]:
+            _ent, _sb = (_sub[:5], _sub[5:]) if len(_sub) >= 8 else (_sub, "")
+            if _is_experiment_excluded(_ent, _sb, _pats):
+                _grid_keep.append(_sub)
+        if _grid_keep:
+            _keep = set(_grid_keep)
+            _load_exclusions = [e for e in _load_exclusions if e not in _keep]
+            _logger.warning(
+                f"  [WARN] [GRID] {_grid_keep} define the union grid AND are in "
+                f"EXCLUDE_EXPERIMENTS. Kept in the cache so the mesh does not "
+                f"move; still excluded from every fit by "
+                f"filter_exfor_with_energy_bin. This is what makes the refit "
+                f"monovariable (roadmap §3.1).")
+
     try:
         exfor_cache, sorted_exfor_energies = load_exfor_with_new_api(
             exfor_directory=exfor_directory,
@@ -3095,7 +3349,7 @@ def run_exfor_to_endf_sampling_v2(
             mt=mt_number,
             energy_range=(energy_min_mev, energy_max_mev) if energy_min_mev and energy_max_mev else None,
             supplementary_json_files=supplementary_json_files,
-            exclude_experiments=exclude_experiments,
+            exclude_experiments=_load_exclusions,
             logger=_logger,
         )
         t_exfor_elapsed = time.time() - t_step
@@ -3684,6 +3938,25 @@ def run_exfor_to_endf_sampling_v2(
                         console=True,
                     )
 
+            if SAVE_PERBIN_PARQUET:
+                # Pass 2's OWN replicas.  `legendre_samples_tmc.parquet` is an
+                # affine rescale of Pass 1 and carries Pass-2's std only as a
+                # scale factor; this is the pass itself.
+                try:
+                    _perbin_path = save_all_legendre_coefficients(
+                        nominal_results=nominal_results,
+                        all_samples=all_samples_perbin,
+                        output_dir=str(output_path),
+                        max_degree=max_degree,
+                        filename='legendre_samples_perbin.parquet',
+                    )
+                    _logger.info(f"  [INFO] [MC] Pass-2 samples saved to: {_perbin_path}")
+                except Exception as e:
+                    _logger.error(
+                        f"[ERROR] [MC] Failed to save Pass-2 samples: {str(e)}",
+                        console=True,
+                    )
+
             energy_indices_kw = [nr.energy_index for nr in nominal_results if nr.has_data]
             nr_by_idx_kw = {nr.energy_index: nr for nr in nominal_results}
 
@@ -3932,6 +4205,46 @@ def run_exfor_to_endf_sampling_v2(
                 logger=_logger,
             )
             log_psd_diagnostics(corr_kw, "corr_kw (Pass 1)", _logger)
+
+            # ---- (c): the MF34 split enters HERE, and only here -----------
+            # Every consumer of Pass 1's correlation is downstream of this line:
+            # the branches below, `cov_combined`, STEP 7's multigroup input and
+            # the `mf34_corr_kw.npy` sidecar.  Replacing it once is what makes
+            # the fine MF34 and the multigroup collapse carry the SAME object.
+            if MF34_CORR_OVERRIDE:
+                _ov = np.load(MF34_CORR_OVERRIDE)
+                _n_ov = corr_kw.shape[0]
+                _dd = float(np.max(np.abs(np.diag(_ov) - 1.0))) if _ov.ndim == 2 else np.inf
+                _sy = float(np.abs(_ov - _ov.T).max()) if _ov.ndim == 2 else np.inf
+                _mx = float(np.abs(_ov).max()) if _ov.ndim == 2 else np.inf
+                if _ov.shape != (_n_ov, _n_ov):
+                    raise SystemExit(
+                        f"[MF34-OVERRIDE] {MF34_CORR_OVERRIDE} has shape "
+                        f"{_ov.shape}, this run's corr_kw is ({_n_ov}, {_n_ov})"
+                    )
+                if _dd != 0.0 or _sy != 0.0 or _mx > 1.0 + 1e-12:
+                    raise SystemExit(
+                        f"[MF34-OVERRIDE] not a correlation matrix: "
+                        f"max|diag-1| = {_dd:.3e}, max|A-A.T| = {_sy:.3e}, "
+                        f"max|rho| = {_mx:.6f}. Refusing to ship it."
+                    )
+                _before = float(np.mean(np.abs(corr_kw)))
+                corr_kw = _ov
+                _logger.info(
+                    f"  [MF34-OVERRIDE] corr_kw replaced from {MF34_CORR_OVERRIDE}"
+                )
+                _logger.info(
+                    f"  [MF34-OVERRIDE] <|rho|> over the whole matrix: "
+                    f"{_before:.6f} -> {float(np.mean(np.abs(corr_kw))):.6f}"
+                )
+                _logger.info(
+                    "  [MF34-OVERRIDE] std_perbin, the means and the replicas are "
+                    "UNTOUCHED, so the declared sigma is unchanged and this is a "
+                    "redistribution."
+                )
+                log_psd_diagnostics(corr_kw, "corr_kw (post-override)", _logger)
+                del _ov
+
             _mix_blocks, _mix_diag = ({}, {})
             if USE_MIXTURE_COVARIANCE and mixture_by_bin:
                 _mix_blocks, _mix_diag = build_mixture_blocks(
@@ -4198,6 +4511,83 @@ def run_exfor_to_endf_sampling_v2(
                     log_psd_diagnostics(cov_combined, "cov_combined (congruence, pure-KW)", _logger)
                     _diag_diff = float(np.max(np.abs(np.diag(cov_combined) - std_perbin**2)))
                     _logger.info(f"  [Congruence check, pure-KW] max |diag(cov) - std_perbin^2| = {_diag_diff:.3e}")
+
+            if SAVE_MF34_COV_SIDECARS:
+                # ⚑ THE POINT OF TRUTH.  Placed after every branch that can
+                # build `cov_combined` (hybrid, pure-KW-inject, pure-KW) and
+                # before anything consumes it, so what lands on disk is what
+                # goes into MF34 -- not a reconstruction of it.
+                #
+                # ⚠ SAVES ONLY.  Nothing here rebinds a name the pipeline reads.
+                try:
+                    _t0_sc = time.time()
+                    _sc = {
+                        # what ships: relative, LB=5, sign restored
+                        "mf34_cov_combined.npy": cov_combined,
+                        # the two passes, each at its own scale, RELATIVE --
+                        # this is what removes the sigma_1/sigma_2 unit-transfer
+                        # step the offline route needed (§2.7-ter D)
+                        "mf34_cov_kw_rel.npy": cov_kw,
+                        "mf34_cov_perbin_rel.npy": cov_perbin,
+                        "mf34_corr_kw.npy": corr_kw,
+                        "mf34_corr_perbin.npy": corr_perbin,
+                        # the marginal that has to be preserved, and the means
+                        # the relative<->absolute conversion needs
+                        "mf34_std_perbin.npy": std_perbin,
+                        "mf34_mean_perbin.npy": mc_mean_perbin,
+                        "mf34_mean_kw.npy": mc_mean_kw,
+                        "mf34_mean_signs.npy": _mean_signs,
+                        "mf34_valid_mask_kw.npy": _valid_mask_kw,
+                        "mf34_energy_indices.npy": np.asarray(energy_indices_kw),
+                    }
+                    for _fn, _obj in _sc.items():
+                        if _obj is None:
+                            _logger.warning(f"  [MF34-SC] {_fn}: object is None, skipped")
+                            continue
+                        np.save(output_path / _fn, np.asarray(_obj))
+                    # Phase 3's per-bin mixture, which exists today only as
+                    # aggregated log lines.  Ragged, so npz of per-bin arrays.
+                    if _mix_blocks:
+                        _mb = {}
+                        for _e, _blk in _mix_blocks.items():
+                            _mb[f"mean_{_e}"] = np.asarray(_blk["mean"])
+                            _mb[f"cov_{_e}"] = np.asarray(_blk["cov"])
+                        np.savez_compressed(
+                            output_path / "mf34_mixture_blocks.npz",
+                            bins=np.asarray(sorted(_mix_blocks.keys())), **_mb)
+                    if _mix_diag:
+                        # `within_var`/`between_var`/`total_var` are per-ORDER
+                        # vectors, not scalars -- the between/within split by
+                        # order IS the Phase-3 diagnostic (a_5 and a_6 came back
+                        # at between-share 1.000 in run 93), so expand them into
+                        # columns rather than dropping them.
+                        try:
+                            _rows_mx = []
+                            for _e, _d in sorted(_mix_diag.items()):
+                                _r = dict(energy_index=_e,
+                                          n_models=int(_d.get("n_models", 0)))
+                                for _key in ("within_var", "between_var", "total_var"):
+                                    _v = np.atleast_1d(np.asarray(_d.get(_key, [])))
+                                    for _l, _x in enumerate(_v, start=1):
+                                        _r[f"{_key}_a{_l}"] = float(_x)
+                                _rows_mx.append(_r)
+                            pd.DataFrame(_rows_mx).to_csv(
+                                output_path / "mf34_mixture_diagnostics.csv", index=False)
+                        except Exception as _e_diag:
+                            _logger.warning(f"  [MF34-SC] mixture diagnostics CSV: {_e_diag}")
+                    _logger.info(
+                        f"  [INFO] [MF34-SC] MF34 assembly state saved "
+                        f"({len(_sc)} arrays, {time.time() - _t0_sc:.1f}s) -> {output_path}"
+                    )
+                except Exception as e:
+                    # Never kill a 4.5 h run over a sidecar: the tape is written
+                    # AFTER this point and the tape is the deliverable.  The
+                    # gate checks the sidecars exist, so a failure here is loud
+                    # at the end rather than fatal in the middle.
+                    _logger.error(
+                        f"[ERROR] [MF34-SC] Failed to save MF34 sidecars: {str(e)}",
+                        console=True,
+                    )
 
             _logger.info(f"  Generating {n_samples} Cholesky samples from combined covariance")
             all_samples = generate_cholesky_samples(
@@ -4715,6 +5105,11 @@ def run_exfor_to_endf_sampling_v2(
             if verbose_diagnostics:
                 log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-convert", _logger, verbose=True)
 
+            # La copia SIN capar, antes de que la regularizacion near-zero pise
+            # toda sigma marcada en SNR = 1. Ver SAVE_FINE_MESH_INPUTS.
+            _fg_cov_for_mesh = (cov_matrix_nominal.copy()
+                                if SAVE_FINE_MESH_INPUTS else None)
+
             if regularize_near_zero:
                 cov_matrix_nominal, _nz_nom_diag = regularize_near_zero_relative_covariance(
                     cov_rel=cov_matrix_nominal,
@@ -4820,6 +5215,46 @@ def run_exfor_to_endf_sampling_v2(
                     log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-ffill", _logger, verbose=True)
             else:
                 _logger.info("  Post-processing DISABLED (APPLY_COV_POSTPROCESSING=False)")
+
+            # ⚑ LAS ENTRADAS DEL AGRUPAMIENTO, EN LA REJILLA FINA.
+            #
+            # ⚠ EN try/except A PROPOSITO. Esto es un diagnostico al final de una
+            # run de dias; si falla, se pierde el npz, no la run.
+            if SAVE_FINE_MESH_INPUTS and cov_matrix_nominal is not None:
+                try:
+                    _fg_edges = None
+                    _fg_edges_path = output_path / "mf33_energy_grid_ev.npy"
+                    if _fg_edges_path.exists():
+                        _fg_edges = np.load(_fg_edges_path)
+                    np.savez(
+                        output_path / "mf34_fine_mesh_inputs.npz",
+                        cov_decision=(_fg_cov_for_mesh
+                                      if _fg_cov_for_mesh is not None
+                                      else cov_matrix_nominal),
+                        cov_emission=cov_matrix_nominal,
+                        means=np.asarray(nominal_params, dtype=float),
+                        mc_means=np.asarray(mc_mean_params, dtype=float),
+                        energy_indices=np.asarray(energy_indices, dtype=np.int64),
+                        edges_ev=(np.asarray(_fg_edges, dtype=float)
+                                  if _fg_edges is not None
+                                  else np.zeros(0, dtype=float)),
+                        decision_is_raw=np.array(_fg_cov_for_mesh is not None),
+                        max_order=np.array(max_degree),
+                    )
+                    _logger.info(
+                        f"  entradas del agrupamiento FINO -> "
+                        f"mf34_fine_mesh_inputs.npz (decision "
+                        f"{'SIN capar' if _fg_cov_for_mesh is not None else 'capada'}, "
+                        f"emision, medias, {cov_matrix_nominal.shape[0]} parametros"
+                        f"{'' if _fg_edges is None else f', {_fg_edges.size} bordes'})"
+                        f": el agrupamiento se prueba desde aqui, sin pipeline")
+                except Exception as _e_fgmi:
+                    _logger.error(
+                        f"[ERROR] no se pudo escribir mf34_fine_mesh_inputs.npz: "
+                        f"{_e_fgmi}. La run SIGUE; el reanalisis del agrupamiento "
+                        f"tendra que releer 26-Fe-56g_nominal.endf (11 min).",
+                        console=True,
+                    )
 
             mf34_ref = mf34_source_file if mf34_source_file else endf_file
             original_mf34_mt = None
@@ -4948,6 +5383,7 @@ def run_exfor_to_endf_sampling_v2(
                             )
 
             cov_grouped_nominal = None
+            _mg_cov_for_mesh = None
             if multigroup_result is not None:
                 A = multigroup_result.aggregation_matrix
                 valid_indices = [
@@ -4987,6 +5423,14 @@ def run_exfor_to_endf_sampling_v2(
                 _logger.info(f"  MG abs→nominal conversion: max rel_std = {np.max(_mg_nom_rel_std)*100:.1f}%")
                 if verbose_diagnostics:
                     log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-convert", _logger, verbose=True)
+
+                # The per-order mesh is chosen on THIS matrix, not on what comes
+                # out of the steps below -- see MF34_MESH_FROM_RAW. 3960^2 float64
+                # = 125 MB, which is nothing next to the 870 MB fine arrays this
+                # run already holds.
+                _mg_cov_for_mesh = (cov_grouped_nominal.copy()
+                                    if (MF34_PER_ORDER_MESH and MF34_MESH_FROM_RAW)
+                                    else None)
 
                 if regularize_near_zero:
                     cov_grouped_nominal, _ = regularize_near_zero_relative_covariance(
@@ -5297,6 +5741,73 @@ def run_exfor_to_endf_sampling_v2(
                         logger=_logger,
                     )
 
+            # ── a mesh per Legendre order, for the NOMINAL tape only ─────────
+            #
+            # The average tape keeps the shared mesh on purpose. Collapsing a
+            # RELATIVE covariance needs the central values it is relative TO, and
+            # `multigroup_result.cov_grouped` does not state its denominator
+            # anywhere the caller can read; `cov_grouped_nominal` does
+            # (`nom_mean_grouped`, by construction two lines from where it is
+            # built). The nominal tape is also the only one the cross-term step
+            # reads back, so it is the only one whose mesh has a consumer.
+            _po_blocks = _po_grids = _po_weights = None
+            if MF34_PER_ORDER_MESH and cov_grouped_nominal is not None:
+                _po_window = None
+                _po_bins = [energy_bins[i] for i, nr in enumerate(nominal_results)
+                            if not nr.interpolated and nr.has_data]
+                if _po_bins:
+                    _po_window = (min(eb.bin_lower_mev for eb in _po_bins) * 1e6,
+                                  max(eb.bin_upper_mev for eb in _po_bins) * 1e6)
+                _logger.info("  MF34_PER_ORDER_MESH is ON — choosing a mesh per order")
+                _po_blocks, _po_grids, _po_weights = _per_order_mf34_args(
+                    cov_rel=cov_grouped_nominal,
+                    means=nom_mean_grouped,
+                    edges_ev=np.asarray(multigroup_result.group_boundaries_ev, float),
+                    max_order=max_degree,
+                    window_ev=_po_window,
+                    logger=_logger,
+                    cov_for_mesh=_mg_cov_for_mesh,
+                )
+                np.savez_compressed(
+                    output_path / "mf34_per_order_mesh.npz",
+                    **{f"e_{l}": _po_grids[l] for l in _po_grids},
+                    **{f"w_{l}": _po_weights[l] for l in _po_weights},
+                )
+                _logger.info("  per-order meshes + aggregators saved to "
+                             "mf34_per_order_mesh.npz (the cross term MUST "
+                             "collapse with the same weights)")
+
+                # ⚑ LAS ENTRADAS DE LA MALLA, QUE HASTA AHORA SE TIRABAN.
+                # Todo lo que el DP necesita vive treinta lineas y muere aqui, y
+                # por eso cada pregunta sobre el agrupamiento costaba una run de
+                # 5 h. Son 250 MB de los 7.7 GB de la run. Con esto, cualquier
+                # criterio nuevo se prueba en segundos y sin pipeline:
+                #   cov_decision  la covarianza ANTES del capado near-zero, que
+                #                 es donde el criterio SNR aun tiene disparador
+                #   cov_emission  la que de verdad se colapsa y escribe
+                #   means         el denominador de las dos, y lo que decide
+                #                 donde a_l existe y donde cambia de signo
+                # Misma leccion que [[save-covariance-objects-not-just-samples]].
+                np.savez(
+                    output_path / "mf34_mg_mesh_inputs.npz",
+                    cov_decision=(_mg_cov_for_mesh
+                                  if _mg_cov_for_mesh is not None
+                                  else cov_grouped_nominal),
+                    cov_emission=cov_grouped_nominal,
+                    means=nom_mean_grouped,
+                    edges_ev=np.asarray(multigroup_result.group_boundaries_ev, float),
+                    valid_mask=np.asarray(
+                        getattr(multigroup_result, "valid_mask_grouped",
+                                np.ones_like(nom_mean_grouped, dtype=bool))),
+                    decision_is_raw=np.array(_mg_cov_for_mesh is not None),
+                    max_order=np.array(max_degree),
+                )
+                _logger.info(
+                    "  entradas de la malla -> mf34_mg_mesh_inputs.npz "
+                    f"(decision {'SIN capar' if _mg_cov_for_mesh is not None else 'capada'}, "
+                    f"emision, medias, bordes): cualquier criterio nuevo se "
+                    f"prueba desde aqui sin repetir el pipeline")
+
             if mf34_covariance_type in ("multigroup", "both") and cov_grouped_nominal is not None:
                 if average_file:
                     _logger.info(f"  Pre-MF34 check (MG avg): cov shape={multigroup_result.cov_grouped.shape}, "
@@ -5330,8 +5841,10 @@ def run_exfor_to_endf_sampling_v2(
                                  f"grid len={len(multigroup_result.group_boundaries_ev)}, "
                                  f"grid finite={np.all(np.isfinite(multigroup_result.group_boundaries_ev))}")
                     mf34_mg_nom = create_mf34_from_covariance(
-                        cov_matrix=cov_grouped_nominal,
-                        energy_grid_ev=multigroup_result.group_boundaries_ev,
+                        cov_matrix=(_po_blocks if _po_blocks is not None
+                                    else cov_grouped_nominal),
+                        energy_grid_ev=(_po_grids if _po_grids is not None
+                                        else multigroup_result.group_boundaries_ev),
                         max_order=max_degree,
                         za=za,
                         awr=awr,

@@ -41,13 +41,10 @@ from ..classes.mf7.inelastic import (
     MF7MT4,
 )
 from ..utils import (
-    PAD_BLANK,
-    PAD_ZERO,
-    PadStyle,
+    PaddingProbe as _PaddingProbe,
     group_lines_by_mt_with_positions,
     parse_data_values,
     parse_line,
-    parse_number,
     parse_tab1,
     parse_tab2,
 )
@@ -57,55 +54,6 @@ logger = get_endf_logger(__name__)
 
 #: The only MT numbers ENDF-6 defines for File 7.
 KNOWN_MT = (2, 4, 451)
-
-#: Fields in a record line, and their width.
-FIELDS_PER_LINE = 6
-FIELD_WIDTH = 11
-
-
-class _PaddingProbe:
-    """Works out how this section's writer fills a short line's unused fields.
-
-    Both conventions are legal and both are in use, so re-emitting a section
-    faithfully means knowing which one it arrived in. The two body kinds are
-    probed apart because they disagree inside a single real section — see
-    :class:`~kika.endf.utils.PadStyle`.
-
-    The first short body of each kind decides it, and then that kind stops being
-    looked at: checking every record would cost a field lookup per line on a
-    file with a million of them, for a property that does not change within a
-    section. A body that fills all six fields tells us nothing and is skipped,
-    which is why a section can finish with a kind still unknown — that resolves
-    to blanks, the convention kika emitted before any of this existed.
-    """
-
-    def __init__(self) -> None:
-        self.pairs = None
-        self.values = None
-
-    def _read(self, lines: List[str], end_idx: int, n_fields: int):
-        used = n_fields % FIELDS_PER_LINE
-        if used == 0 or end_idx <= 0 or end_idx > len(lines):
-            return None
-        field = lines[end_idx - 1][used * FIELD_WIDTH:(used + 1) * FIELD_WIDTH]
-        if not field.strip():
-            return PAD_BLANK
-        return PAD_ZERO if parse_number(field) == 0 else None
-
-    def observe_pairs(self, lines: List[str], end_idx: int, n_pairs: int) -> None:
-        """A TAB1 x/y body, which uses two fields per point."""
-        if self.pairs is None:
-            self.pairs = self._read(lines, end_idx, 2 * n_pairs)
-
-    def observe_values(self, lines: List[str], end_idx: int, n: int) -> None:
-        """A LIST body, one field per value."""
-        if self.values is None:
-            self.values = self._read(lines, end_idx, n)
-
-    def resolve(self) -> PadStyle:
-        return PadStyle(pairs=self.pairs or PAD_BLANK,
-                        values=self.values or PAD_BLANK)
-
 
 def parse_mf7(lines: List[str]) -> MF:
     """Parse MF7 (thermal scattering) into an :class:`MF` of MF7 sections."""

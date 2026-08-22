@@ -145,27 +145,33 @@ def test_the_two_encodings_describe_the_same_region_and_formalism(fromGnds,
     assert fromEndf.resonances.unresolved is None
 
 
-def test_the_scattering_radius_differs_by_the_factor_the_units_differ_by(
-        fromGnds, fromEndf):
-    """5.444 fm against 0.5444, and the second one is in units of 10 fm.
+def test_the_two_paths_agree_on_the_scattering_radius(fromGnds, fromEndf):
+    """**5.444 fm both ways. This test is the record of that change.**
 
-    Asserted rather than papered over. ENDF states AP in units of 10^-12 cm;
-    GNDS states it in fm on an axis that says so. **kika does not convert on
-    read** — the ENDF reconstructor works in ENDF's units throughout — so the
-    two paths genuinely put different numbers in ``constant``, and what stops
-    that being silent is that only one of them now states a unit.
+    Its previous version asserted the opposite — ``fromGnds.constant ==
+    10 * fromEndf.constant``, with the ENDF side stating no unit — and closed
+    with "if a later phase makes the two agree on one canonical unit, this test
+    fails and is the place to record the change". That phase is 2026-08-20 and
+    this is the record.
 
-    If a later phase makes the two agree on one canonical unit, this test fails
-    and is the place to record the change.
+    ENDF still states AP in units of 10^-12 cm and GNDS still states fm; what
+    changed is that the **model** now states fm (``MODEL_RADIUS_UNIT``) and the
+    ENDF adapter converts at the boundary. So the disagreement is gone from the
+    place it mattered — a consumer reading ``constant`` — and stays where it
+    belongs, in each format's own file.
+
+    The reconstruction did not move with it: the conversion back to ENDF units
+    happens at the edge of :mod:`kika.processing.resonance_formulas` rather than
+    inside it, and ``test_numeric_goldens`` is the gate on that.
     """
     gnds, _ = fromGnds
     fromGndsRadius = gnds.resonances.scatteringRadius
     fromEndfRadius = fromEndf.resonances.scatteringRadius
 
     assert fromGndsRadius.unit == "fm"
-    assert fromEndfRadius.unit is None, "the ENDF adapter states no unit"
-    assert fromGndsRadius.constant == pytest.approx(
-        10.0 * fromEndfRadius.constant, rel=1e-12
+    assert fromEndfRadius.unit == "fm", "the ENDF adapter converts and says so"
+    assert fromEndfRadius.constant == pytest.approx(
+        fromGndsRadius.constant, rel=1e-12
     )
 
 

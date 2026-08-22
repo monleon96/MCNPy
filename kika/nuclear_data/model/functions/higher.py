@@ -1,8 +1,11 @@
-"""GNDS-2.1 §6 two-dimensional forms: ``XYs2d`` and ``regions2d``.
+"""GNDS-2.1 §6 higher-dimensional forms: ``XYs2d``, ``regions2d``, ``XYs3d``.
 
 Phase 5 declared these as ``NotImplementedError`` stubs under the model's rule
 that *empty slots exist, they are not absent*. Phase 7b fills the two the ENDF
-MF4 decoder needs; the three-dimensional pair stays declared and empty.
+MF4 decoder needs and then ``XYs3d``, which is what ``energyAngular`` and
+``angularEnergy`` hold. ``regions3d`` stays declared and empty **permanently**,
+and not for want of a phase: the schema gives it no reachable element. See
+:class:`Regions3d`.
 
 **Why a list and not a dict — the finding that forced this module.**
 ``AngularTwoBody`` was first written as ``byEnergy: Dict[float, Function1d]``,
@@ -286,6 +289,102 @@ def toEndfTab2(form: Function2d) -> Tuple[List[Function1d], List[Tuple[int, int]
 
 
 # ---------------------------------------------------------------------------
+# §6 three dimensions
+# ---------------------------------------------------------------------------
+
+@dataclass
+class XYs3d:
+    """§6.5. A function of three variables as one 2-d function per outer value.
+
+    Structurally ``XYs2d`` one floor up: the schema's ``xData_XYs3d_primary``
+    (``gnds.xsd:2260``) is the same ``seq(axes, <container>, uncertainty?)`` with
+    ``function2ds`` in place of ``function1ds``, and that container
+    (``gnds.xsd:2253``) is a choice of ``XYs2d`` or ``regions2d``, each of which
+    **must** carry an ``outerDomainValue``.
+
+    **Ordered, duplicates allowed**, for the reason the module docstring gives
+    for ``XYs2d``: a repeated outer abscissa is how ENDF writes a discontinuity,
+    and a dict keyed on energy drops one of the two silently. Nothing about the
+    third dimension makes that less likely — an energy-angle distribution has an
+    outer grid at least as ragged as an angular one.
+
+    **No ``Function3d`` ABC, and no ``regions3d`` sibling.** ``Function2d``
+    exists so a ``regions2d`` can hold children that know their own position;
+    ``regions3d`` has no such need because it cannot occur. See
+    :class:`Regions3d`.
+    """
+
+    function2ds: List[Function2d] = field(default_factory=list)
+    #: Interpolation along the *outermost* axis.
+    #:
+    #: Kept although ``xData_XYs3d_primary`` declares no ``interpolation``
+    #: attribute where ``xData_XYs2d_primary`` (``gnds.xsd:2193``) does: the
+    #: outer axis of a real energy-angular distribution has an interpolation
+    #: law whatever the schema forgot, and dropping the field would lose it on
+    #: the way in. §6.1.1's default is lin-lin and the writer omits the
+    #: attribute at the default, so the ordinary case still validates.
+    interpolation: Interpolation = Interpolation.linlin
+    interpolationQualifier: Optional[InterpolationQualifier] = None
+    axes: Optional[Axes] = None
+    label: Optional[str] = None
+    #: Only ever set on a child of a ``regions3d``, which no valid file has.
+    outerDomainValue: Optional[float] = None
+    index: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        self.interpolation = Interpolation(self.interpolation)
+        if self.interpolationQualifier is not None:
+            self.interpolationQualifier = InterpolationQualifier(self.interpolationQualifier)
+
+    def __len__(self) -> int:
+        return len(self.function2ds)
+
+    def __iter__(self):
+        return iter(self.function2ds)
+
+    def __getitem__(self, index: int) -> Function2d:
+        return self.function2ds[index]
+
+    @property
+    def outerDomainValues(self) -> List[float]:
+        """The outermost abscissae, in file order, **duplicates included**."""
+        return [f.outerDomainValue for f in self.function2ds]
+
+    @property
+    def domainMin(self) -> float:
+        if not self.function2ds:
+            return float("nan")
+        return float(self.function2ds[0].outerDomainValue)
+
+    @property
+    def domainMax(self) -> float:
+        if not self.function2ds:
+            return float("nan")
+        return float(self.function2ds[-1].outerDomainValue)
+
+    @property
+    def endfInterpolationCode(self) -> int:
+        """The ENDF-6 ``INT`` for the outermost axis (§3.4.4 adopted ENDF's codes)."""
+        return INTERPOLATION_TO_ENDF_INT[self.interpolation]
+
+    def evaluate(self, *args: Any, **kwargs: Any):
+        raise NotImplementedError(
+            "XYs3d.evaluate is deliberately absent, for XYs2d's reason and "
+            "more of it: interpolating between two 2-d functions needs the "
+            "interpolationQualifier convention (§3.4.5) at *both* levels, and "
+            "the 2-d evaluate it would have to call does not exist either. A "
+            "wrong answer here is indistinguishable from a right one."
+        )
+
+    def __repr__(self) -> str:
+        kinds = {type(f).__name__ for f in self.function2ds}
+        return (
+            f"XYs3d(n={len(self)}, of={'/'.join(sorted(kinds)) or 'nothing'}, "
+            f"interpolation={self.interpolation.value!r})"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Still declared, still empty
 # ---------------------------------------------------------------------------
 
@@ -304,15 +403,16 @@ class _UnimplementedNode:
         )
 
 
-class XYs3d(_UnimplementedNode):
-    gndsNodeName = "XYs3d"
-
-
 class Regions3d(_UnimplementedNode):
     gndsNodeName = "regions3d"
+    plannedFor = (
+        "no phase can: gnds.xsd defines xData_regions_3d_primary (:2286) and "
+        "no xs:element anywhere in the schema is of that type, so a regions3d "
+        "cannot appear in a valid GNDS-2.1 file at all"
+    )
 
 
 #: Every node still declared without an implementation, for the phase 5 reader
 #: to consult when it needs to say "I know this node exists and I cannot read
 #: it yet".
-NOT_IMPLEMENTED_NODES = {cls.gndsNodeName: cls for cls in (XYs3d, Regions3d)}
+NOT_IMPLEMENTED_NODES = {cls.gndsNodeName: cls for cls in (Regions3d,)}

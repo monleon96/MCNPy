@@ -705,7 +705,8 @@ def encodeMF35MT(source, mt: int, mat: Optional[int] = None,
 
 
 def decodeCovarianceSuite(endf, report: Optional[ConversionReport] = None,
-                          evaluation: Optional[str] = None):
+                          evaluation: Optional[str] = None,
+                          target: Optional[str] = None):
     """Every covariance file in a parsed ENDF → one :class:`CovarianceSuite`.
 
     MF31, MF33, MF34 and MF35 become ``covarianceSections``; **MF32 becomes
@@ -719,9 +720,37 @@ def decodeCovarianceSuite(endf, report: Optional[ConversionReport] = None,
     Building it separately here keeps that separation honest from the start,
     even though kika hangs the result off ``ReactionSuite.covarianceSuite`` for
     convenience.
+
+    **``target`` comes from the caller and there is nowhere else it could come
+    from.** §25.1.1 makes it a required attribute of the root, and ENDF has no
+    such string anywhere in MF31-MF35: the nuclide name is derived from MF1/451's
+    ZA through PoPs, which is work ``decodeReactionSuite`` has already done
+    (``decode.py:235``). Re-deriving it here would give the two documents of one
+    pair two independent chances to disagree about what evaluation they are, so
+    the reaction suite stays the authority and this is handed its answer —
+    exactly the arrangement ``evaluation`` has had since it was added, and for
+    the same reason. A caller who has no reaction suite (the samplers at
+    ``sampling/endf_perturbation.py:663`` and ``sampling/mf35_sampling.py:177``)
+    passes neither and gets a suite that cannot be written as valid GNDS, which
+    is honest: nothing said what it was about.
     """
     report = report if report is not None else ConversionReport()
-    suite = CovarianceSuite(evaluation=evaluation, projectile="n", interaction="nuclear")
+    if target is None:
+        # Announced where the absence happens, not where it bites. Without this
+        # the caller finds out from `xmllint` three steps later and in another
+        # session -- and the two callers that hit it (the samplers) never write
+        # GNDS at all, so for them the line is information rather than a fault.
+        report.warn(
+            "decodeCovarianceSuite was called without a target, so the "
+            "covarianceSuite says nothing about which nuclide it is about. "
+            "§25.1.1 makes `target` a required attribute of the root, so this "
+            "suite **cannot be written as valid GNDS**. ENDF has no target "
+            "string anywhere -- it is derived from MF1/451's ZA through PoPs by "
+            "decodeReactionSuite -- so the value has to come from the caller, "
+            "which is what `kika.read` does"
+        )
+    suite = CovarianceSuite(evaluation=evaluation, projectile="n",
+                            target=target, interaction="nuclear")
 
     mf1 = endf.mf.get(1) if hasattr(endf, "mf") else None
 

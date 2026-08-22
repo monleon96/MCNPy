@@ -132,8 +132,36 @@ def test_two_dimensional_evaluation_refuses_and_says_why():
         form.evaluate(1.5, 0.0)
 
 
-@pytest.mark.parametrize("cls", [XYs3d, Regions3d])
-def test_the_three_dimensional_forms_are_still_declared_and_still_empty(cls):
-    """Present rather than absent, so a reader is told what is missing."""
-    with pytest.raises(NotImplementedError, match=cls.gndsNodeName):
-        cls()
+def test_regions3d_is_the_one_that_stays_declared_and_empty():
+    """Present rather than absent, so a reader is told what is missing.
+
+    This used to be parametrised over ``[XYs3d, Regions3d]``. ``XYs3d`` left the
+    list by being implemented; ``Regions3d`` cannot ever leave it, because the
+    reason it is empty is not a missing phase — ``gnds.xsd:2286`` defines
+    ``xData_regions_3d_primary`` and no ``xs:element`` in the schema is of that
+    type, so the node cannot occur in a valid GNDS-2.1 file.
+    """
+    with pytest.raises(NotImplementedError, match="regions3d") as raised:
+        Regions3d()
+    assert "no xs:element" in str(raised.value), (
+        "the message must carry Regions3d.plannedFor, not a phase number")
+
+
+def test_three_dimensional_evaluation_refuses_for_the_two_dimensional_reason():
+    """One floor up the qualifier question is asked twice, not once."""
+    form = XYs3d(function2ds=[XYs2d(function1ds=[_at(1.0)], outerDomainValue=1.0)])
+    with pytest.raises(NotImplementedError, match="interpolationQualifier"):
+        form.evaluate(1.5, 1.5, 0.0)
+
+
+def test_xys3d_keeps_a_repeated_outermost_value():
+    """The list-not-dict finding of the module docstring, one dimension up."""
+    form = XYs3d(function2ds=[
+        XYs2d(function1ds=[_at(1.0)], outerDomainValue=3.905e6),
+        XYs2d(function1ds=[_at(2.0)], outerDomainValue=3.905e6),
+        XYs2d(function1ds=[_at(3.0)], outerDomainValue=7.0e6),
+    ])
+    assert form.outerDomainValues == [3.905e6, 3.905e6, 7.0e6]
+    assert len(form) == 3
+    assert form.domainMin == 3.905e6
+    assert form.domainMax == 7.0e6

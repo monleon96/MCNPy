@@ -22,7 +22,83 @@ __all__ = [
     "SpinGroup", "Channel", "RMatrix", "RMatrixSpinGroup", "ResonanceReaction",
     "TabulatedWidths", "UnresolvedChannel", "UnresolvedSpinGroup",
     "ScatteringRadius", "ResolvedRegion", "UnresolvedRegion", "Resonances",
+    "MODEL_RADIUS_UNIT", "FM_PER_ENDF_RADIUS", "radiusFromEndf", "radiusToEndf",
+    "radiusFromStatedUnit",
 ]
+
+#: **The unit every radius on this model is stated in, without exception.**
+#:
+#: Decided 2026-08-20 (owner: Juan): the canonical unit is GNDS's, because GNDS
+#: is the newer format and the one that states its units at all. Before that
+#: date the model carried whichever number its reader happened to produce —
+#: 5.444 through GNDS and 0.5444 through ENDF for the same Fe-56 radius — and
+#: :attr:`ScatteringRadius.unit` existed to *say so* rather than to fix it.
+#: ``gnds_endf_conflicts.md`` §4.1 and §7.2 are the account of that.
+#:
+#: The invariant is now: **anything on this model that is a radius is in fm.**
+#: That covers :attr:`ScatteringRadius.constant` and ``values``, and the bare
+#: floats — :attr:`Channel.scatteringRadius`, :attr:`Channel.hardSphereRadius`,
+#: :attr:`ResonanceReaction.scatteringRadius`, and the per-formalism
+#: ``scatteringRadius`` of :class:`BreitWigner`, :class:`RMatrix` and
+#: :class:`TabulatedWidths`. The ``unit`` / ``radiusUnit`` fields stay, and what
+#: they record is what the *source* said; they are ``"fm"`` for anything that
+#: came through either reader, and ``None`` only for a model built by hand.
+MODEL_RADIUS_UNIT = "fm"
+
+#: How many femtometres one ENDF radius unit is. ENDF-6 §2.2 writes AP, APL,
+#: APT and APE in units of 10^-12 cm, and 10^-12 cm is ten femtometres.
+FM_PER_ENDF_RADIUS = 10.0
+
+#: Unit strings a reader may meet, and what one of them is in fm. ``None`` and
+#: the empty string mean *the source stated nothing*, which for a radius that
+#: reached us through the ENDF adapter means ENDF's unit — but the adapter
+#: converts at the boundary and never calls this with ``None``, so a ``None``
+#: here is a **GNDS** file whose axis carries no unit, and that is a file
+#: defect rather than an ENDF convention. It is reported, not assumed.
+_RADIUS_UNITS_IN_FM = {"fm": 1.0, "10*fm": FM_PER_ENDF_RADIUS,
+                       "1e-12*cm": FM_PER_ENDF_RADIUS}
+
+
+def radiusFromEndf(value):
+    """An ENDF radius (AP, APL, APT, APE) → fm. ``None`` stays ``None``.
+
+    Works on a scalar or a numpy array, because NRO=1 tabulates the radius and
+    the whole table crosses the boundary at once.
+    """
+    return None if value is None else value * FM_PER_ENDF_RADIUS
+
+
+def radiusToEndf(value):
+    """fm → an ENDF radius. The inverse of :func:`radiusFromEndf`.
+
+    **Called at exactly two kinds of place**, and it is worth knowing which:
+    the encoder writes the file-level AP back from *provenance*, in ENDF's own
+    units, untouched — so this is only for the radii that live on the model and
+    nowhere else. Those are LRF=3's per-l APL and LRF=7's APT/APE. See
+    ``kika/endf/model_adapter/resonances.py``.
+    """
+    return None if value is None else value / FM_PER_ENDF_RADIUS
+
+
+def radiusFromStatedUnit(value, unit: Optional[str]):
+    """A radius in *unit* → fm, or ``(value, None)`` when the unit is unknown.
+
+    Returns ``(converted, problem)``: *problem* is ``None`` on success and a
+    sentence naming the unit when it is not one this function knows. The caller
+    decides whether that is a report entry or an error, because a reader and a
+    consumer mean different things by it.
+    """
+    if value is None:
+        return None, None
+    if not unit:
+        return value, ("the radius axis carries no unit, so the number cannot "
+                       "be placed on the model's fm scale; it is kept as read")
+    factor = _RADIUS_UNITS_IN_FM.get(unit)
+    if factor is None:
+        return value, (f"the radius axis is in {unit!r}, which is not a unit "
+                       f"this reader converts; the number is kept as read and "
+                       f"is therefore not on the model's fm scale")
+    return value * factor, None
 
 
 @dataclass
@@ -56,12 +132,18 @@ class ScatteringRadius:
     #: consumer reading it got a silent factor of ten depending on which
     #: encoding the evaluation happened to arrive in.
     #:
-    #: kika does **not** convert on read. The ENDF reconstructor works in ENDF's
-    #: units throughout and rescaling underneath it would move a number the
-    #: thesis pipeline depends on. What changes here is that the unit is stated
-    #: where the format states it, so the mismatch is visible rather than latent;
-    #: making the two paths agree on one canonical unit is a separate change
-    #: with its own gate.
+    #: ~~kika does **not** convert on read.~~ **It does, since 2026-08-20.**
+    #: Both readers now put fm on the model — see :data:`MODEL_RADIUS_UNIT` —
+    #: so ``constant`` is 5.444 for that Fe-56 whichever format it arrived in,
+    #: and this field records what the *source* said rather than what the
+    #: number means. It is ``"fm"`` for anything either reader produced.
+    #:
+    #: **What that cost, and where it was paid.** The ENDF reconstructor works
+    #: in ENDF's units throughout, so converting here would have moved the
+    #: reconstruction — the reason this was deferred. It does not, because the
+    #: conversion back happens at the boundary into
+    #: :mod:`kika.processing.resonance_formulas` rather than inside it, and
+    #: ``test_numeric_goldens`` is the gate that says so.
     unit: Optional[str] = None
 
     @property
@@ -96,6 +178,15 @@ class Resonances:
     scatteringRadius: Optional[ScatteringRadius] = None
     resolved: List[ResolvedRegion] = field(default_factory=list)
     unresolved: Optional[UnresolvedRegion] = None
+    #: Not a GNDS node — the same escape hatch ``Reaction.provenance`` is, and
+    #: here for a sharper reason. ``encodeMF2MT151`` takes ``(resonances,
+    #: provenance)`` because QX, LRX, LAD and the twelve particle-pair columns
+    #: have no model node; ``decodeReactionSuite`` used to **discard** that
+    #: second return value, so a suite decoded from a tape carried resonances
+    #: nobody could write back. Nothing noticed while the only caller was a test
+    #: that held both halves itself; the whole-file writer (§2.8) is the first
+    #: caller that has only the suite.
+    provenance: Optional[object] = None
 
     @property
     def domain(self) -> Optional[Tuple[float, float]]:

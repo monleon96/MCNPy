@@ -1,0 +1,502 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<reactionSuite projectile="n" target="Be9" evaluation="ENDF/B-8.1" format="2.0" projectileFrame="lab" interaction="nuclear">
+  <styles>
+    <evaluated label="eval" date="2009-10-01" library="ENDF/B" version="8.1.0">
+      <documentation>
+        <authors>
+          <author name="G.HALE,PERKINS ET AL,FRANKLE" />
+        </authors>
+        <dates>
+          <date value="2009-10-01" dateType="created" />
+        </dates>
+        <title>ENDF-6 file from ENDF/B version 8.1.0 translated to GNDS by FUDGE.</title>
+        <body>See the endfCompatible section.</body>
+        <endfCompatible>  4-Be-  9 LLNL,LANL  EVAL-OCT09 G.HALE,PERKINS ET AL,FRANKLE
+ NDS 148, 1 (2018)    DIST-AUG24 REV1-DEC23            20240830
+---- ENDF/B-VIII.1    MATERIAL  425         REVISION 1
+----- INCIDENT-NEUTRON DATA
+------ ENDF-6
+ ****************************************************************
+ * Adjust MT=1 interpolation for first 10 points to eliminate
+   mismatch between total cross section and sum of partials
+[trimmed]</endfCompatible>
+      </documentation>
+      <temperature value="0" unit="K" />
+      <projectileEnergyDomain min="1e-5" max="2e7" unit="eV" />
+    </evaluated>
+  </styles>
+  <PoPs name="protare_internal" version="1.0" format="2.0">
+    <aliases>
+      <alias id="a" pid="he4" />
+      <alias id="d" pid="h2" />
+      <alias id="t" pid="h3" />
+    </aliases>
+    <gaugeBosons>
+      <gaugeBoson id="photon">
+        <mass>
+          <double label="eval" value="0." unit="amu" />
+        </mass>
+        <spin>
+          <fraction label="eval" value="1" unit="hbar" />
+        </spin>
+        <parity>
+          <integer label="eval" value="1" />
+        </parity>
+        <charge>
+          <integer label="eval" value="0" unit="e" />
+        </charge>
+        <halflife>
+          <string label="eval" value="stable" unit="s" />
+        </halflife>
+      </gaugeBoson>
+    </gaugeBosons>
+    <baryons>
+      <baryon id="n">
+        <mass>
+          <double label="eval" value="1.00866491574" unit="amu" />
+        </mass>
+        <spin>
+          <fraction label="eval" value="1/2" unit="hbar" />
+        </spin>
+        <parity>
+          <integer label="eval" value="1" />
+        </parity>
+        <charge>
+          <integer label="eval" value="0" unit="e" />
+        </charge>
+        <halflife>
+          <double label="eval" value="881.5" unit="s" />
+        </halflife>
+      </baryon>
+      <baryon id="p">
+        <mass>
+          <double label="eval" value="1.00727646662" unit="amu" />
+        </mass>
+        <spin>
+          <fraction label="eval" value="1/2" unit="hbar" />
+        </spin>
+        <parity>
+          <integer label="eval" value="1" />
+        </parity>
+        <charge>
+          <integer label="eval" value="1" unit="e" />
+        </charge>
+        <halflife>
+          <string label="eval" value="stable" unit="s" />
+        </halflife>
+      </baryon>
+    </baryons>
+    <chemicalElements>
+      <chemicalElement symbol="He" Z="2" name="Helium">
+        <isotopes>
+          <isotope symbol="He4" A="4">
+            <nuclides>
+              <nuclide id="He4">
+                <mass>
+                  <double label="eval" value="4.00370137139" unit="amu" />
+                </mass>
+                <charge>
+                  <integer label="eval" value="0" unit="e" />
+                </charge>
+                <nucleus id="he4" index="0">
+                  <mass>
+                    <double label="eval" value="4.0015061791" unit="amu" />
+                  </mass>
+                  <spin>
+                    <fraction label="eval" value="0" unit="hbar" />
+                  </spin>
+                  <parity>
+                    <integer label="eval" value="1" />
+                  </parity>
+                  <charge>
+                    <integer label="eval" value="2" unit="e" />
+                  </charge>
+                  <halflife>
+                    <string label="eval" value="stable" unit="s" />
+                  </halflife>
+                  <energy>
+                    <double label="eval" value="0." unit="eV" />
+                  </energy>
+                </nucleus>
+              </nuclide>
+            </nuclides>
+          </isotope>
+        </isotopes>
+      </chemicalElement>
+      <chemicalElement symbol="Be" Z="4" name="Beryllium">
+        <isotopes>
+          <isotope symbol="Be9" A="9">
+            <nuclides>
+              <nuclide id="Be9">
+                <mass>
+                  <double label="eval" value="9.01219911586" unit="amu" />
+                </mass>
+                <charge>
+                  <integer label="eval" value="0" unit="e" />
+                </charge>
+                <nucleus id="be9" index="0">
+                  <spin>
+                    <fraction label="eval" value="3/2" unit="hbar" />
+                  </spin>
+                  <charge>
+                    <integer label="eval" value="4" unit="e" />
+                  </charge>
+                  <energy>
+                    <double label="eval" value="0." unit="eV" />
+                  </energy>
+                </nucleus>
+              </nuclide>
+            </nuclides>
+          </isotope>
+        </isotopes>
+      </chemicalElement>
+    </chemicalElements>
+  </PoPs>
+  <resonances>
+    <scatteringRadius>
+      <constant1d label="eval" value="6.994" domainMin="1e-5" domainMax="2e7">
+        <axes>
+          <axis index="1" label="energy_in" unit="eV" />
+          <axis index="0" label="radius" unit="fm" />
+        </axes>
+      </constant1d>
+    </scatteringRadius>
+  </resonances>
+  <reactions>
+    <reaction label="2n + 2He4" ENDF_MT="16">
+      <crossSection>
+        <XYs1d label="eval">
+          <axes>
+            <axis index="1" label="energy_in" unit="eV" />
+            <axis index="0" label="crossSection" unit="b" />
+          </axes>
+          <values>1.74883000e+06 0.00000000e+00 1.80000000e+06 1.00000000e-04 1.90000000e+06 8.66700000e-04 2.00000000e+06 2.20000000e-03 2.10000000e+06 4.40000000e-03 2.20000000e+06 8.00000000e-03 2.70000000e+06 3.30000000e-02 2.90000000e+06 2.70000000e-01 3.10000000e+06 3.70000000e-01 3.30000000e+06 4.27000000e-01 3.50000000e+06 4.68000000e-01 3.90000000e+06 5.10000000e-01 4.30000000e+06 5.27000000e-01 4.80000000e+06 5.40000000e-01 5.40000000e+06 5.50000000e-01 5.90000000e+06 5.57000000e-01 6.45000000e+06 5.58000000e-01 7.00000000e+06 5.59000000e-01 9.00000000e+06 5.47000000e-01 1.07000000e+07 5.30000000e-01</values>
+        </XYs1d>
+      </crossSection>
+      <outputChannel genre="NBody">
+        <Q>
+          <constant1d label="eval" value="-1572800" domainMin="1748830" domainMax="2e7">
+            <axes>
+              <axis index="1" label="energy_in" unit="eV" />
+              <axis index="0" label="Q" unit="eV" />
+            </axes>
+          </constant1d>
+        </Q>
+        <products>
+          <product pid="n" label="n">
+            <multiplicity>
+              <constant1d label="eval" value="2" domainMin="1748830" domainMax="2e7">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+              </constant1d>
+            </multiplicity>
+            <distribution>
+              <angularEnergy label="eval" productFrame="lab">
+                <XYs3d>
+                  <axes>
+                    <axis index="3" label="energy_in" unit="eV" />
+                    <axis index="2" label="mu" unit="" />
+                    <axis index="1" label="energy_out" unit="eV" />
+                    <axis index="0" label="P(mu,energy_out|energy_in)" unit="1/eV" />
+                  </axes>
+                  <function2ds>
+                    <XYs2d outerDomainValue="1748830">
+                      <function1ds>
+                        <XYs1d outerDomainValue="-1">
+                          <values>0 0 1e-5 0 2e-5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.9">
+                          <values>0 0 1e-5 0 2e-5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.8" interpolation="flat">
+                          <values>0 0 1e4 8.69271e-7 5e4 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.7" interpolation="flat">
+                          <values>0 0 1e3 7.30333e-6 5e3 2.92133e-6 1e4 1.0955e-6 5e4 2.92133e-7 1e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.6" interpolation="flat">
+                          <values>0 0 1e4 6.51953e-7 5e4 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.5" interpolation="flat">
+                          <values>0 0 5e3 2.40899e-6 1e4 1.50562e-6 5e4 0</values>
+                        </XYs1d>
+                      </function1ds>
+                    </XYs2d>
+                    <XYs2d outerDomainValue="2e6">
+                      <function1ds>
+                        <XYs1d outerDomainValue="-1">
+                          <values>0 0 1e-5 0 2e-5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.9">
+                          <values>0 0 1e-5 0 2e-5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.8" interpolation="flat">
+                          <values>0 0 1e4 8.69271e-7 5e4 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.7" interpolation="flat">
+                          <values>0 0 1e3 7.30333e-6 5e3 2.92133e-6 1e4 1.0955e-6 5e4 2.92133e-7 1e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.6" interpolation="flat">
+                          <values>0 0 1e4 6.51953e-7 5e4 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.5" interpolation="flat">
+                          <values>0 0 5e3 2.40899e-6 1e4 1.50562e-6 5e4 0</values>
+                        </XYs1d>
+                      </function1ds>
+                    </XYs2d>
+                    <XYs2d outerDomainValue="2.5e6">
+                      <function1ds>
+                        <XYs1d outerDomainValue="-1" interpolation="flat">
+                          <values>0 0 1e5 5.91079e-7 1.5e5 1.18216e-6 2e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.9" interpolation="flat">
+                          <values>0 0 5e3 1.18304e-6 1e4 4.43642e-7 5e4 5.3237e-7 1e5 5.3237e-7 1.5e5 8.87283e-7 2e5 4.14066e-7 2.5e5 2.95761e-7 3e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.8" interpolation="flat">
+                          <values>0 0 5e3 4.29731e-7 1e4 5.9088e-7 5e4 4.29731e-7 1e5 5.15677e-7 1.5e5 6.01623e-7 2e5 6.01623e-7 2.5e5 3.00812e-7 3e5 8.59462e-8 3.5e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.7" interpolation="flat">
+                          <values>0 0 1e3 9.02615e-7 5e3 0 1e4 4.06177e-7 5e4 6.85988e-7 1e5 7.22092e-7 1.5e5 5.41569e-7 2e5 6.85988e-7 2.5e5 2.88837e-7 3e5 1.08314e-7 3.5e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.6" interpolation="flat">
+                          <values>0 0 1e3 4.02873e-7 5e3 6.44596e-7 1e4 9.26607e-7 5e4 7.73516e-7 1e5 8.70205e-7 1.5e5 7.41286e-7 2e5 4.51218e-7 2.5e5 4.51218e-7 3e5 1.61149e-7 3.5e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.5" interpolation="flat">
+                          <values>0 0 1e3 3.72158e-7 5e3 2.97726e-7 1e4 4.4659e-7 5e4 5.35907e-7 1e5 8.03861e-7 1.5e5 6.54998e-7 2e5 3.87044e-7 2.5e5 4.16817e-7 3e5 2.08408e-7 3.5e5 2.08408e-7 4e5 5.95453e-8 4.5e5 0</values>
+                        </XYs1d>
+                      </function1ds>
+                    </XYs2d>
+                    <XYs2d outerDomainValue="3e6">
+                      <function1ds>
+                        <XYs1d outerDomainValue="-1" interpolation="flat">
+                          <values>0 0 1e4 4.37017e-7 5e4 3.49614e-7 1e5 1.17995e-6 1.5e5 4.37017e-7 2e5 4.37017e-8 2.5e5 3.05912e-7 3e5 4.80719e-7 3.5e5 1.74807e-7 4e5 1.74807e-7 4.5e5 1.74807e-7 5e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.9" interpolation="flat">
+                          <values>0 0 1e3 2.73341e-7 5e3 2.62407e-7 1e4 2.07739e-7 5e4 2.88648e-7 1e5 1.6313e-6 1.5e5 2.62407e-7 2e5 2.79901e-7 2.5e5 2.36166e-7 3e5 2.36166e-7 3.5e5 2.44913e-7 4e5 2.44913e-7 4.5e5 1.2683e-7 5e5 8.7469e-8 5.5e5 4.37345e-8 6e5 2.18672e-8 6.5e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.8" interpolation="flat">
+                          <values>0 0 1e3 3.97155e-8 5e3 1.90634e-7 1e4 1.98577e-7 5e4 4.35282e-7 1e5 1.74748e-6 1.5e5 3.11369e-7 2e5 3.08192e-7 2.5e5 2.73242e-7 3e5 2.54179e-7 3.5e5 2.16052e-7 4e5 2.25584e-7 4.5e5 2.00166e-7 5e5 1.2709e-7 5.5e5 5.4013e-8 6e5 2.85951e-8 6.5e5 1.2709e-8 7e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.7" interpolation="flat">
+                          <values>0 0 1e2 1.48301e-7 1e3 3.33677e-7 5e3 1.60165e-7 1e4 2.33574e-7 5e4 3.44354e-7 1e5 1.81253e-6 1.5e5 3.49693e-7 2e5 3.33677e-7 2.5e5 3.28338e-7 3e5 3.01644e-7 3.5e5 1.89528e-7 4e5 2.00206e-7 4.5e5 2.00206e-7 5e5 1.57495e-7 5.5e5 9.34295e-8 6e5 4.80494e-8 6.5e5 1.60165e-8 7e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.6" interpolation="flat">
+                          <values>0 0 1e3 1.19146e-7 5e3 1.19146e-7 1e4 3.36589e-7 5e4 3.31227e-7 1e5 1.86345e-6 1.5e5 3.31227e-7 2e5 3.28844e-7 2.5e5 3.59822e-7 3e5 2.5259e-7 3.5e5 2.7642e-7 4e5 3.81269e-7 4.5e5 2.88334e-7 5e5 2.16846e-7 5.5e5 1.11998e-7 6e5 9.05513e-8 6.5e5 4.05098e-8 7e5 1.66805e-8 7.5e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.5" interpolation="flat">
+                          <values>0 0 1e3 1.65094e-7 5e3 1.54088e-7 1e4 2.53144e-7 5e4 3.43396e-7 1e5 2.15723e-6 1.5e5 3.83018e-7 2e5 4.05031e-7 2.5e5 3.76415e-7 3e5 3.49999e-7 3.5e5 2.92767e-7 4e5 3.76415e-7 4.5e5 2.90566e-7 5e5 2.02515e-7 5.5e5 1.36478e-7 6e5 1.03459e-7 6.5e5 6.16351e-8 7e5 5.72326e-8 7.5e5 8.80502e-9 8e5 0</values>
+                        </XYs1d>
+                      </function1ds>
+                    </XYs2d>
+                    <XYs2d outerDomainValue="4e6">
+                      <function1ds>
+                        <XYs1d outerDomainValue="-1" interpolation="flat">
+                          <values>0 0 1e3 5.10909e-7 5e3 0 1e4 2.81e-7 5e4 3.67855e-7 1e5 1.02182e-7 1.5e5 2.65673e-7 2e5 1.22618e-7 2.5e5 2.04364e-7 3e5 1.63491e-7 3.5e5 8.17455e-8 4e5 8.17455e-8 4.5e5 2.45237e-7 5e5 0 5.5e5 1.63491e-7 6e5 8.17455e-8 6.5e5 6.13091e-7 7e5 0 7.5e5 4.08728e-8 8e5 4.08728e-8</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.9" interpolation="flat">
+                          <values>0 0 5e3 1.63614e-7 1e4 2.19856e-7 5e4 1.90201e-7 1e5 1.71794e-7 1.5e5 1.88156e-7 2e5 2.14743e-7 2.5e5 3.0064e-7 3e5 2.43375e-7 3.5e5 3.0473e-7 4e5 2.29059e-7 4.5e5 1.71794e-7 5e5 2.3724e-7 5.5e5 2.00427e-7 6e5 2.22924e-7 6.5e5 5.72648e-8 7e5 1.01849e-6 7.5e5 4.90841e-8 8e5 2.4542e-8 8.5e5 5.52196e-8</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.8" interpolation="flat">
+                          <values>0 0 1e3 1.48578e-7 5e3 1.3372e-7 1e4 1.28149e-7 5e4 1.58979e-7 1e5 2.09495e-7 1.5e5 2.03552e-7 2e5 1.85723e-7 2.5e5 3.16472e-7 3e5 3.01614e-7 3.5e5 2.86756e-7 4e5 2.68927e-7 4.5e5 2.27325e-7 5e5 2.45154e-7 5.5e5 1.97609e-7 6e5 1.70865e-7 6.5e5 1.81265e-7 7e5 1.07571e-6 7.5e5 6.38886e-8 8e5 5.05166e-8</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.7" interpolation="flat">
+                          <values>0 0 1e2 1.38701e-7 1e3 6.24153e-8 5e3 1.74763e-7 1e4 1.60719e-7 5e4 1.90991e-7 1e5 2.25943e-7 1.5e5 2.04722e-7 2e5 2.2844e-7 2.5e5 2.64641e-7 3e5 2.92104e-7 3.5e5 3.42036e-7 4e5 2.69634e-7 4.5e5 2.55903e-7 5e5 2.37178e-7 5.5e5 2.54655e-7 6e5 1.6228e-7 6.5e5 1.95984e-7 7e5 9.23747e-8 7.5e5 1.44304e-6</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.6" interpolation="flat">
+                          <values>0 0 1e2 1.23815e-7 1e3 2.78584e-8 5e3 1.3372e-7 1e4 1.85258e-7 5e4 2.36239e-7 1e5 2.5964e-7 1.5e5 2.60755e-7 2e5 2.19524e-7 2.5e5 2.36239e-7 3e5 3.38758e-7 3.5e5 3.17586e-7 4e5 2.87499e-7 4.5e5 2.81927e-7 5e5 2.69669e-7 5.5e5 2.22867e-7 6e5 2.30668e-7 6.5e5 1.66036e-7 7e5 1.10319e-7 7.5e5 1.06976e-6</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.5" interpolation="flat">
+                          <values>0 0 1e3 1.02938e-7 5e3 1.13232e-7 1e4 2.36757e-7 5e4 2.3264e-7 1e5 1.6676e-7 1.5e5 2.68668e-7 2e5 2.18229e-7 2.5e5 2.29552e-7 3e5 2.9955e-7 3.5e5 3.41754e-7 4e5 2.81021e-7 4.5e5 2.93373e-7 5e5 2.77933e-7 5.5e5 2.75874e-7 6e5 2.37787e-7 6.5e5 2.00729e-7 7e5 1.88376e-7 7.5e5 1.1632e-7 8e5 1.51319e-6</values>
+                        </XYs1d>
+                      </function1ds>
+                    </XYs2d>
+                    <XYs2d outerDomainValue="5e6">
+                      <function1ds>
+                        <XYs1d outerDomainValue="-1" interpolation="flat">
+                          <values>0 0 1e4 2.65589e-7 5e4 1.41647e-7 1e5 3.18707e-7 1.5e5 2.65589e-7 2e5 5.31178e-8 2.5e5 2.65589e-7 3e5 1.41647e-7 3.5e5 7.08237e-8 4e5 1.23941e-7 4.5e5 0 5e5 8.85296e-8 5.5e5 1.06236e-7 6e5 0 6.5e5 8.85296e-8 7e5 0 7.5e5 1.06236e-7 8e5 8.85296e-8 8.5e5 3.54119e-8 9e5 3.54119e-8</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.9" interpolation="flat">
+                          <values>0 0 5e3 1.94911e-7 1e4 8.8596e-8 5e4 1.63017e-7 1e5 1.82508e-7 1.5e5 2.23262e-7 2e5 2.26806e-7 2.5e5 2.09087e-7 3e5 2.10859e-7 3.5e5 1.55929e-7 4e5 1.18719e-7 4.5e5 1.73648e-7 5e5 1.54157e-7 5.5e5 1.16947e-7 6e5 9.39118e-8 6.5e5 7.26487e-8 7e5 9.56837e-8 7.5e5 8.15083e-8 8e5 1.09859e-7 8.5e5 7.08768e-8</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.8" interpolation="flat">
+                          <values>0 0 1e3 1.28727e-7 5e3 1.80218e-7 1e4 1.44818e-7 5e4 1.90516e-7 1e5 1.96952e-7 1.5e5 2.25272e-7 2e5 1.93091e-7 2.5e5 2.52305e-7 3e5 2.13687e-7 3.5e5 2.43294e-7 4e5 2.05963e-7 4.5e5 1.59622e-7 5e5 1.1328e-7 5.5e5 1.416e-7 6e5 1.416e-7 6.5e5 9.39707e-8 7e5 9.5258e-8 7.5e5 7.5949e-8 8e5 9.91198e-8</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.7" interpolation="flat">
+                          <values>0 0 1e3 4.05571e-8 5e3 1.83859e-7 1e4 1.59525e-7 5e4 1.62229e-7 1e5 2.49832e-7 1.5e5 2.45506e-7 2e5 1.99e-7 2.5e5 2.57403e-7 3e5 2.11979e-7 3.5e5 2.15223e-7 4e5 2.04408e-7 4.5e5 2.15223e-7 5e5 1.4925e-7 5.5e5 1.62229e-7 6e5 1.20049e-7 6.5e5 9.73371e-8 7e5 1.00582e-7 7.5e5 1.38435e-7 8e5 8.32773e-8</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.6" interpolation="flat">
+                          <values>0 0 1e2 1.60909e-7 1e3 6.03408e-8 5e3 8.68907e-8 1e4 1.39991e-7 5e4 2.2302e-7 1e5 2.49087e-7 1.5e5 2.76119e-7 2e5 2.2302e-7 2.5e5 2.2302e-7 3e5 2.29778e-7 3.5e5 2.08538e-7 4e5 2.03711e-7 4.5e5 1.94056e-7 5e5 1.6992e-7 5.5e5 1.593e-7 6e5 1.39025e-7 6.5e5 1.32267e-7 7e5 8.39944e-8 7.5e5 9.75107e-8</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.5" interpolation="flat">
+                          <values>0 0 1e3 3.34443e-8 5e3 2.3188e-7 1e4 1.34892e-7 5e4 2.3188e-7 1e5 1.99774e-7 1.5e5 2.49717e-7 2e5 2.59527e-7 2.5e5 3.282e-7 3e5 2.88958e-7 3.5e5 2.25637e-7 4e5 2.44366e-7 4.5e5 1.86396e-7 5e5 1.92639e-7 5.5e5 2.08692e-7 6e5 1.61424e-7 6.5e5 1.33777e-7 7e5 1.11481e-7 7.5e5 1.0613e-7 8e5 1.07022e-7</values>
+                        </XYs1d>
+                      </function1ds>
+                    </XYs2d>
+                  </function2ds>
+                </XYs3d>
+              </angularEnergy>
+            </distribution>
+          </product>
+          <product pid="He4" label="He4">
+            <multiplicity>
+              <constant1d label="eval" value="2" domainMin="1748830" domainMax="2e7">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+              </constant1d>
+            </multiplicity>
+            <distribution>
+              <angularEnergy label="eval" productFrame="lab">
+                <XYs3d>
+                  <axes>
+                    <axis index="3" label="energy_in" unit="eV" />
+                    <axis index="2" label="mu" unit="" />
+                    <axis index="1" label="energy_out" unit="eV" />
+                    <axis index="0" label="P(mu,energy_out|energy_in)" unit="1/eV" />
+                  </axes>
+                  <function2ds>
+                    <XYs2d outerDomainValue="1748830">
+                      <function1ds>
+                        <XYs1d outerDomainValue="-1">
+                          <values>0 0 1e-5 0 2e-5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.9">
+                          <values>0 0 1e-5 0 2e-5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.8" interpolation="flat">
+                          <values>0 0 1e3 4.37686e-6 5e3 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.7">
+                          <values>0 0 1e-5 0 2e-5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.6" interpolation="flat">
+                          <values>0 0 1e3 3.28265e-6 5e3 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.5" interpolation="flat">
+                          <values>0 0 5e3 2.4259e-6 1e4 0</values>
+                        </XYs1d>
+                      </function1ds>
+                    </XYs2d>
+                    <XYs2d outerDomainValue="2e6">
+                      <function1ds>
+                        <XYs1d outerDomainValue="-1">
+                          <values>0 0 1e-5 0 2e-5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.9">
+                          <values>0 0 1e-5 0 2e-5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.8" interpolation="flat">
+                          <values>0 0 1e3 4.37686e-6 5e3 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.7">
+                          <values>0 0 1e-5 0 2e-5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.6" interpolation="flat">
+                          <values>0 0 1e3 3.28265e-6 5e3 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.5" interpolation="flat">
+                          <values>0 0 5e3 2.4259e-6 1e4 0</values>
+                        </XYs1d>
+                      </function1ds>
+                    </XYs2d>
+                    <XYs2d outerDomainValue="2.5e6">
+                      <function1ds>
+                        <XYs1d outerDomainValue="-1">
+                          <values>0 0 1e-5 0 2e-5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.9" interpolation="flat">
+                          <values>0 0 1e4 2.22437e-7 5e4 3.55899e-7 1e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.8" interpolation="flat">
+                          <values>0 0 5e3 4.30925e-7 1e4 2.15462e-7 5e4 2.58555e-7 1e5 4.30925e-8 1.5e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.7" interpolation="flat">
+                          <values>0 0 1e3 4.52561e-7 5e3 1.08615e-6 1e4 1.35768e-7 5e4 4.70664e-7 1e5 1.81024e-7 1.5e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.6" interpolation="flat">
+                          <values>0 0 1e3 4.03992e-7 5e3 0 1e4 2.42395e-7 5e4 5.17109e-7 1e5 1.61597e-7 1.5e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.5" interpolation="flat">
+                          <values>0 0 5e3 2.98553e-7 1e4 3.35872e-7 5e4 5.37396e-7 1e5 5.07541e-7 1.5e5 5.97107e-8 2e5 0</values>
+                        </XYs1d>
+                      </function1ds>
+                    </XYs2d>
+                    <XYs2d outerDomainValue="3e6">
+                      <function1ds>
+                        <XYs1d outerDomainValue="-1" interpolation="flat">
+                          <values>0 0 5e3 8.6513e-7 1e4 2.70353e-7 5e4 6.05591e-7 1e5 4.75821e-7 1.5e5 8.6513e-8 2e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.9" interpolation="flat">
+                          <values>0 0 5e3 1.73156e-7 1e4 3.08434e-7 5e4 3.76614e-7 1e5 3.16009e-7 1.5e5 2.94365e-7 2e5 3.46311e-8 2.5e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.8" interpolation="flat">
+                          <values>0 0 1e3 7.86217e-8 5e3 1.88692e-7 1e4 2.35865e-7 5e4 3.74239e-7 1e5 3.42791e-7 1.5e5 2.10706e-7 2e5 6.91871e-8 2.5e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.7" interpolation="flat">
+                          <values>0 0 1e3 1.32111e-7 5e3 2.64222e-7 1e4 4.2936e-7 5e4 3.38204e-7 1e5 4.54461e-7 1.5e5 3.17066e-7 2e5 1.50606e-7 2.5e5 1.05689e-8 3e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.6" interpolation="flat">
+                          <values>0 0 1e3 1.17933e-7 5e3 1.17933e-7 1e4 3.53798e-7 5e4 4.10405e-7 1e5 4.5522e-7 1.5e5 3.4908e-7 2e5 2.90114e-7 2.5e5 8.96287e-8 3e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.5" interpolation="flat">
+                          <values>0 0 1e3 8.1706e-8 5e3 1.52518e-7 1e4 4.11254e-7 5e4 4.61912e-7 1e5 4.98952e-7 1.5e5 4.42302e-7 2e5 3.1593e-7 2.5e5 1.83022e-7 3e5 2.17883e-8 3.5e5 0</values>
+                        </XYs1d>
+                      </function1ds>
+                    </XYs2d>
+                    <XYs2d outerDomainValue="4e6">
+                      <function1ds>
+                        <XYs1d outerDomainValue="-1" interpolation="flat">
+                          <values>0 0 1e3 5.0544e-7 5e3 0 1e4 0 5e4 8.08704e-8 1e5 2.83046e-7 1.5e5 2.83046e-7 2e5 1.61741e-7 2.5e5 0 3e5 1.61741e-7 3.5e5 0 4e5 0 4.5e5 0 5e5 4.04352e-8 5.5e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.9" interpolation="flat">
+                          <values>0 0 1e3 1.01164e-7 5e3 1.41629e-7 1e4 2.25089e-7 5e4 2.95398e-7 1e5 2.1649e-7 1.5e5 1.94234e-7 2e5 3.56097e-7 2.5e5 5.26052e-8 3e5 4.45121e-8 3.5e5 7.08147e-8 4e5 3.23724e-8 4.5e5 2.02328e-8 5e5 8.0931e-9 5.5e5 0 6e5 0 6.5e5 8.0931e-9 7e5 4.04655e-9 7.5e5 0 8e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.8" interpolation="flat">
+                          <values>0 0 1e3 2.20481e-7 5e3 2.05783e-7 1e4 2.75602e-7 5e4 2.83686e-7 1e5 2.51349e-7 1.5e5 2.08722e-7 2e5 3.5424e-7 2.5e5 6.46745e-8 3e5 7.64335e-8 3.5e5 5.8795e-8 4e5 5.73252e-8 4.5e5 3.82168e-8 5e5 1.1759e-8 5.5e5 1.61686e-8 6e5 2.93975e-9 6.5e5 1.32289e-8 7e5 2.93975e-9 7.5e5 7.34938e-9 8e5 2.93975e-9</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.7" interpolation="flat">
+                          <values>0 0 1e3 1.54368e-7 5e3 4.93977e-8 1e4 2.62425e-7 5e4 2.82802e-7 1e5 3.03796e-7 1.5e5 2.34639e-7 2e5 1.42018e-7 2.5e5 3.69248e-7 3e5 7.40966e-8 3.5e5 8.02713e-8 4e5 8.6446e-8 4.5e5 5.92772e-8 5e5 3.82832e-8 5.5e5 1.23494e-8 6e5 1.72892e-8 6.5e5 2.46989e-9 7e5 2.46989e-9 7.5e5 4.93977e-9 8e5 2.46989e-9</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.6" interpolation="flat">
+                          <values>0 0 1e2 2.44979e-7 1e3 1.37801e-7 5e3 1.21265e-7 1e4 2.78358e-7 5e4 2.92138e-7 1e5 2.94343e-7 1.5e5 2.88831e-7 2e5 1.98433e-7 2.5e5 3.37336e-7 3e5 1.63156e-7 3.5e5 5.84276e-8 4e5 4.74035e-8 4.5e5 7.38613e-8 5e5 5.62227e-8 5.5e5 2.64578e-8 6e5 1.10241e-8 6.5e5 2.20481e-9 7e5 6.61444e-9 7.5e5 2.20481e-9</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.5" interpolation="flat">
+                          <values>0 0 1e3 7.6377e-8 5e3 2.85141e-7 1e4 2.85141e-7 5e4 3.40132e-7 1e5 3.79848e-7 1.5e5 3.43187e-7 2e5 1.83305e-7 2.5e5 1.64974e-7 3e5 4.64372e-7 3.5e5 6.61934e-8 4e5 7.73953e-8 4.5e5 6.11016e-8 5e5 8.45239e-8 5.5e5 6.31383e-8 6e5 3.25875e-8 6.5e5 1.62938e-8 7e5 5.0918e-9 7.5e5 8.14688e-9 8e5 4.07344e-9</values>
+                        </XYs1d>
+                      </function1ds>
+                    </XYs2d>
+                    <XYs2d outerDomainValue="5e6">
+                      <function1ds>
+                        <XYs1d outerDomainValue="-1" interpolation="flat">
+                          <values>0 0 1e3 6.64793e-7 5e3 0 1e4 1.99438e-7 5e4 2.4819e-7 1e5 8.86391e-8 1.5e5 1.06367e-7 2e5 3.54557e-8 2.5e5 0 3e5 1.41823e-7 3.5e5 5.31835e-8 4e5 0 4.5e5 1.95006e-7 5e5 3.54557e-8 5.5e5 0 6e5 5.31835e-8 6.5e5 0</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.9" interpolation="flat">
+                          <values>0 0 1e3 1.10882e-7 5e3 0 1e4 2.01805e-7 5e4 1.95152e-7 1e5 1.22414e-7 1.5e5 1.86282e-7 2e5 1.08221e-7 2.5e5 7.45127e-8 3e5 7.45127e-8 3.5e5 4.08046e-8 4e5 1.04673e-7 4.5e5 3.38855e-7 5e5 3.90305e-8 5.5e5 7.80609e-8 6e5 5.49975e-8 6.5e5 3.54822e-8 7e5 2.12893e-8 7.5e5 1.41929e-8 8e5 8.87056e-9</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.8" interpolation="flat">
+                          <values>0 0 1e3 4.83323e-8 5e3 9.02204e-8 1e4 1.48219e-7 5e4 2.20396e-7 1e5 2.02351e-7 1.5e5 1.61108e-7 2e5 1.28886e-7 2.5e5 1.35331e-7 3e5 4.25325e-8 3.5e5 6.44431e-8 4e5 6.18654e-8 4.5e5 7.21763e-8 5e5 3.8537e-7 5.5e5 5.15545e-8 6e5 3.47993e-8 6.5e5 7.21763e-8 7e5 1.41775e-8 7.5e5 1.67552e-8 8e5 1.80441e-8</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.7" interpolation="flat">
+                          <values>0 0 1e3 4.06073e-8 5e3 2.38229e-7 1e4 2.17926e-7 5e4 1.91666e-7 1e5 2.29567e-7 1.5e5 1.99246e-7 2e5 2.00329e-7 2.5e5 1.09369e-7 3e5 9.42089e-8 3.5e5 6.71374e-8 4e5 6.17231e-8 4.5e5 8.66289e-8 5e5 5.52259e-8 5.5e5 3.5193e-7 6e5 4.6563e-8 6.5e5 8.33803e-8 7e5 8.22974e-8 7.5e5 3.8983e-8 8e5 2.16572e-8</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.6" interpolation="flat">
+                          <values>0 0 1e3 3.62493e-8 5e3 1.6433e-7 1e4 1.8608e-7 5e4 2.39728e-7 1e5 2.45528e-7 1.5e5 2.05896e-7 2e5 1.83663e-7 2.5e5 1.69163e-7 3e5 1.16964e-7 3.5e5 8.69982e-8 4e5 5.31656e-8 4.5e5 5.99321e-8 5e5 1.07298e-7 5.5e5 7.53985e-8 6e5 4.38858e-7 6.5e5 3.76992e-8 7e5 5.31656e-8 7.5e5 8.2165e-8 8e5 6.47653e-8</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="-0.5" interpolation="flat">
+                          <values>0 0 1e3 3.34856e-8 5e3 8.03655e-8 1e4 1.84171e-7 5e4 2.91102e-7 1e5 2.64313e-7 1.5e5 2.50026e-7 2e5 1.97342e-7 2.5e5 2.00021e-7 3e5 1.47337e-7 3.5e5 1.31264e-7 4e5 9.10809e-8 4.5e5 9.10809e-8 5e5 9.64386e-8 5.5e5 1.02689e-7 6e5 9.64386e-8 6.5e5 3.77718e-7 7e5 1.33943e-7 7.5e5 4.46475e-8 8e5 6.69713e-8</values>
+                        </XYs1d>
+                      </function1ds>
+                    </XYs2d>
+                  </function2ds>
+                </XYs3d>
+              </angularEnergy>
+            </distribution>
+          </product>
+        </products>
+      </outputChannel>
+    </reaction>
+  </reactions>
+</reactionSuite>

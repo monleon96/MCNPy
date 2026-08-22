@@ -31,6 +31,8 @@ Called by exfor_to_endf_research.py as Step 10b via
 from __future__ import annotations
 
 import argparse
+import ctypes
+import gc
 import sys
 from pathlib import Path
 
@@ -50,6 +52,77 @@ ZA, MT = 26056, 2
 NULL_TOL = 1e-10
 CHUNK = 250
 SPREAD_EPS = 1e-12
+
+# ⚑ THE BAR THE PIPELINE'S OWN MF34 HAS TO CLEAR ON THE CARRIED SLOTS.
+#
+# `--dead-parameters carry` takes those slots straight out of `c34_ship`, and
+# on run 99 that block came back with `lam_min = -8.60e-11` against a joint
+# scale of 4.17e-2 -- the shipped object is very slightly not PSD there, and
+# the direct sum inherits it by construction (that is the point: it MEASURES
+# the pipeline instead of hiding it behind a singular congruence).
+#
+# Projecting that away is legitimate ONLY while it is numerical dust. The bar
+# is a RATIO to the block's own largest eigenvalue, so it does not drift with
+# units or with the run:
+#
+#   * LAPACK's own floor for a symmetric eigendecomposition is ~n*eps*lam_max,
+#     i.e. ~3e-13 at n = 1307. Anything at that level is the solver, not the
+#     matrix.
+#   * ENDF-6 writes 11-character fields, so a round-tripped covariance carries
+#     relative perturbations several orders above that floor.
+#   * 1e-8 sits between the two: ~5 decades above the solver's noise and ~8
+#     decades below any eigenvalue that could carry physical variance.
+#
+# A block that FAILS this is not dust and must not be quietly projected -- it
+# means the pipeline's MF34 is genuinely indefinite on those parameters, which
+# is a finding about the deliverable, not a rounding problem. `carry` raises
+# there instead of clipping, and BOTH numbers below are printed on every run so
+# that an object drifting toward either bar is visible BEFORE it trips it.
+#
+# ── BAR 1, CONDITIONING: you cannot assert PSD more tightly than the format ──
+#
+# `c34_ship` is `c34_rel_ship * outer(a_nom, a_nom)` and `c34_rel_ship` is READ
+# BACK OUT OF THE ENDF TAPE, whose MF34 carries 7 significant digits
+# (`1.665047-2`; measured on run 99's `_mg`: 582060 fields with 6 decimals,
+# 39291 with 5 -- the short ones are the NEGATIVE entries, where the sign eats
+# a column and only 6 digits fit). Half a unit in the last place is a relative
+# perturbation of 5e-8 to 5e-7 per positive entry depending on the leading
+# digit, and up to 5e-6 on a negative one; by Weyl a
+# symmetric perturbation moves every eigenvalue by at most its 2-norm. So a
+# block whose TRUE lam_min is exactly zero comes back off the tape at
+# lam_min ~ -1e-7 * lam_max, and no gate can tell that apart from a real
+# violation of the same size. Anything at or below this is the text format,
+# not the matrix.
+#
+# ⚠ THIS BAR IS A PROPERTY OF THE FILE, NOT A TASTE. If MF34 is ever written
+# with more digits, tighten it; the derivation, not the number, is the rule.
+# 5e-7 is deliberately the TIGHT end of that range -- it errs toward refusing,
+# since the negative entries only carry 6 digits and could justify 5e-6.
+# Run 99 measured -1.514e-08: a factor 33 inside even the tight end.
+DEAD_BLOCK_PSD_RTOL = 5e-7
+
+# ── BAR 2, MASS: how much variance the projection actually invents ──────────
+#
+# The ratio above is a CONDITIONING number: it says the most negative direction
+# is small next to the largest positive one. It does NOT say the projection is
+# harmless -- a block could clear it with thousands of small negative
+# eigenvalues whose total is not small at all. This is the number that answers
+# "how much am I hiding": the negative spectral mass the clip has to
+# manufacture, against the block's own trace, i.e. the fraction of the declared
+# variance that the projection is inventing.
+#
+# It is the bar that actually protects the deliverable, and it is independent
+# of the first: a genuinely indefinite object fails HERE even when its worst
+# eigenvalue happens to look small.
+#
+# SAME NUMBER, SAME DERIVATION, DIFFERENT FUNCTIONAL -- and that is the point.
+# Bar 1 applies the tape's floor to the WORST direction, bar 2 applies it to
+# the TOTAL. Neither implies the other: one eigenvalue at 10x the floor trips
+# bar 1 with negligible mass, and a thousand eigenvalues each at a tenth of the
+# floor trip bar 2 while bar 1 sees nothing wrong. Both must hold. Picking two
+# unrelated numbers here would have made the pair a matter of taste; deriving
+# both from the file's 7 digits keeps it a statement about the object.
+DEAD_BLOCK_CLIP_MASS_MAX = 5e-7
 
 
 def shipped_mg_endf(run_dir: Path) -> Path:
@@ -202,16 +275,47 @@ def mf33_file_grid_ev(mg: Path, cache: Path) -> np.ndarray:
 
 
 def base_shape_grid(blocks: dict) -> np.ndarray:
-    """The finest MF34 grid; every other block's grid must be a subset of it."""
+    """A grid every MF34 block's grid is a subset of, so duplication is well defined.
+
+    With one mesh shared by all orders — every tape written before roadmap
+    §10.8 — the blocks are nested and this is the finest of them, which is what
+    it used to return outright.
+
+    ⚑ WITH A MESH PER ORDER THEY NEED NOT BE NESTED, and refusing was wrong.
+    ENDF-6 states the grids inside each (L, L1) sub-subsection precisely so that
+    a_1 and a_5 can be written at different resolutions; two coarsenings of the
+    same parent mesh are then both legal and neither contains the other. What
+    the expansion actually needs is a common refinement, and the union of the
+    block grids IS one — every block's grid is a subset of it by construction,
+    so `shipped_c34_rel_on_base`'s duplication stays exactly as well defined as
+    it was.
+
+    The old guard survives only as a postcondition, and it can no longer fire:
+    every block grid is a subset of the union BY CONSTRUCTION. The case it used
+    to catch — a boundary falling strictly inside another grid's interval — is
+    not an error any more, because the union splits that interval and both
+    blocks expand onto it unambiguously. It is kept as a cheap invariant on how
+    `base` is built, not as a check on the data.
+    """
     keys = [k[2:] for k in blocks if k.startswith("m_")]
-    cand = max((blocks[f"e_{k}"] for k in keys), key=len)
-    for k in keys:
-        if not np.isin(blocks[f"e_{k}"], cand).all():
+    grids = [np.asarray(blocks[f"e_{k}"], dtype=float) for k in keys]
+    # `np.unique` also DEDUPLICATES, so a block grid carrying a repeated
+    # boundary — a zero-width group — would come back one group shorter than the
+    # old `max(..., key=len)` returned, silently changing n_gs. Refuse instead.
+    for k, g in zip(keys, grids):
+        if np.any(np.diff(g) <= 0):
+            raise SystemExit(
+                f"MF34 block {k}'s grid is not strictly increasing; it has "
+                f"{int((np.diff(g) <= 0).sum())} zero-width or reversed groups.")
+    base = np.unique(np.concatenate(grids)) if grids else np.array([])
+    for k, g in zip(keys, grids):
+        if not np.isin(g, base).all():
             raise SystemExit(
                 f"MF34 block {k} sits on a grid that is not a subset of the "
-                f"finest one; expanding by duplication would be wrong."
+                f"union of all block grids; expanding by duplication would be "
+                f"wrong."
             )
-    return cand
+    return base
 
 
 def fine_to_group(fine_edges_ev: np.ndarray, target_edges_ev: np.ndarray) -> np.ndarray:
@@ -303,6 +407,110 @@ def valid_and_collapsed(run_dir, n_fine, ids, g_shape, widths, n_gs):
     return valid, A, acc
 
 
+def carry_dead_parameters(c34_post, c34_ship, d_mc34, d_tar34,
+                          psd_rtol=DEAD_BLOCK_PSD_RTOL,
+                          clip_mass_max=DEAD_BLOCK_CLIP_MASS_MAX):
+    """Put back the shape parameters the diagonal congruence cannot reach.
+
+    ``jj = d_tar / d_mc`` is a diagonal congruence, and a congruence cannot give
+    variance to a direction the Monte Carlo never explored: where ``d_mc = 0``
+    the whole row and column of ``c34_post`` go to zero and take the pipeline's
+    own sigma with them. That is not a modelling decision, it is the rescaling
+    deleting what it cannot rescale -- 1542 of 4218 slots on run 99, nearly all
+    of a_4..a_6, and the count does not shrink with more replicas because what
+    freezes them is the AIC mixture's BETWEEN-model variance, which the replicas
+    do not carry (the order cap and the analytic substitution both bite at fixed
+    n).
+
+    Those slots come back as a DIRECT SUMMAND out of ``c34_ship``, never as a
+    patch of the full block, and that choice is what keeps the diagnosis honest:
+
+    * ``c34_post`` is exactly zero on D in both its rows and its columns, so the
+      result is ``block_diag(live, c34_ship[D, D])`` and its smallest eigenvalue
+      is ``min`` of the two. A principal submatrix of a PSD matrix is PSD, so
+      the PSD gate becomes a real measurement of the pipeline's own MF34 instead
+      of a tautology about the chain being a congruence.
+    * the whitener of a block-diagonal matrix is block diagonal, and the cross
+      block is exactly zero on D, so ``||W33 Cx W34||_2`` cannot move. Row F has
+      to land on the CONTROL row exactly as before.
+
+    The alternative -- keeping the pipeline's ``corr(dead, live)`` as well -- has
+    neither property, which is why the caller prices it as a diagnostic row
+    rather than choosing between them on argument.
+
+    THE CARRIED BLOCK IS PROJECTED ONTO THE PSD CONE, AND ONLY WHILE THAT
+    PROJECTION IS DUST. ``c34_ship`` restricted to the dead slots is not quite
+    PSD (run 99: ``lam_min/lam_max`` a few times 1e-9), so the direct sum
+    inherits a negative eigenvalue that the old ``drop`` path never showed --
+    ``drop`` reached machine zero only because the singular congruence had
+    ANNIHILATED those very directions. Clipping the negative eigenvalues to
+    zero is safe here for the same reason the direct sum is: the block is
+    separate and ``cx`` is exactly zero on it, so ``sigma_max(K)`` provably
+    cannot move. Above ``psd_rtol`` it is not dust any more, and this raises
+    instead: an indefinite MF34 on real parameters is a finding about the
+    deliverable, not something a projection should absorb.
+
+    Returns
+    -------
+    (c34_post, dead, orphan, info)
+        ``c34_post`` modified in place, the boolean mask of what was carried,
+        the count of slots neither the replicas nor the pipeline declare, and
+        a dict with the carried block's spectrum and what the projection cost.
+    """
+    d_mc34 = np.asarray(d_mc34, float)
+    d_tar34 = np.asarray(d_tar34, float)
+    dead = (d_mc34 <= 0.0) & (d_tar34 > 0.0)
+    orphan = int(((d_mc34 <= 0.0) & (d_tar34 <= 0.0)).sum())
+    info = {"lam_min": 0.0, "lam_max": 0.0, "ratio": 0.0, "n_clipped": 0,
+            "d_shift_rel": 0.0, "clip_mass": 0.0, "trace": 0.0}
+    if dead.any():
+        D = np.ix_(dead, dead)
+        if np.abs(c34_post[dead, :]).max() > 0.0:
+            raise SystemExit(
+                "a row with zero MC spread is not identically zero in c34_post; "
+                "the congruence and the mask disagree and the direct-sum "
+                "argument does not hold.")
+        blk = 0.5 * (c34_ship[D] + c34_ship[D].T)
+        w, V = np.linalg.eigh(blk)
+        lam_min, lam_max = float(w[0]), float(w[-1])
+        neg = w[w < 0.0]
+        tr = float(np.sum(np.abs(w)))
+        mass = float(-neg.sum() / tr) if tr > 0 else 0.0
+        info.update(lam_min=lam_min, lam_max=lam_max,
+                    ratio=(lam_min / lam_max if lam_max > 0 else -np.inf),
+                    n_clipped=int(neg.size), clip_mass=mass, trace=tr)
+        if lam_min < 0.0:
+            if lam_min < -psd_rtol * lam_max:
+                raise SystemExit(
+                    f"the pipeline's own MF34 is INDEFINITE on the "
+                    f"{int(dead.sum())} carried parameters: lam_min "
+                    f"{lam_min:.6e}, lam_max {lam_max:.6e}, ratio "
+                    f"{lam_min / lam_max:.3e} against the bar "
+                    f"-{psd_rtol:.0e}. That is {abs(lam_min / lam_max) / psd_rtol:.1f}x "
+                    f"too negative to be the tape's own 7-digit rounding, so it "
+                    f"is NOT projected away: a real negative direction in the "
+                    f"shipped object would be hidden, not fixed. Find out why "
+                    f"c34_ship is indefinite there before carrying it.")
+            if mass > clip_mass_max:
+                raise SystemExit(
+                    f"the PSD projection would have to invent "
+                    f"{mass:.3e} of the carried block's variance "
+                    f"({neg.size} negative eigenvalues summing to "
+                    f"{-neg.sum():.6e} against a trace of {tr:.6e}), over the "
+                    f"bar {clip_mass_max:.0e}. The worst eigenvalue is small "
+                    f"but the total is not, which is exactly the case the "
+                    f"ratio bar cannot see. This is a defect in the pipeline's "
+                    f"MF34, not rounding.")
+            d0 = np.diag(blk).copy()
+            blk = (V * np.maximum(w, 0.0)) @ V.T
+            blk = 0.5 * (blk + blk.T)
+            info["d_shift_rel"] = float(np.max(
+                np.abs(np.diag(blk) - d0)
+                / np.maximum(np.abs(d0), np.finfo(float).tiny)))
+        c34_post[D] = blk
+    return c34_post, dead, orphan, info
+
+
 def assemble_c34_rel(c34_post, a_flat, c34_rel_ship, null_fill="zero"):
     """The RELATIVE MF34 the writer emits. One definition, used by both paths.
 
@@ -322,6 +530,230 @@ def assemble_c34_rel(c34_post, a_flat, c34_rel_ship, null_fill="zero"):
     base = (np.array(c34_rel_ship, float) if null_fill == "ship"
             else np.zeros_like(c34_post))
     return np.divide(c34_post, np.outer(a_flat, a_flat), out=base, where=both)
+
+
+def _snap_to_base(g_run, base_ev, label, tol_rel=5e-5):
+    """The mesh's boundaries, replaced by the base grid's own values for them.
+
+    ⚑ THE NPZ IS FLOAT64; THE TAPE IS SIX SIGNIFICANT DIGITS. The mesh is
+    chosen on the multigroup boundaries and saved as it stands
+    (``847499.9999999999``); by the time the same boundary comes back off the
+    tape it has been through ``format_endf_number`` and reads ``8.475000+5``.
+    That moves 287 of a_1's 661 boundaries, so exact set membership called our
+    own mesh foreign and run 97 died on the guard below with every other
+    artefact already on disk.
+
+    The tolerance is what separates a text round trip from a real difference.
+    Six significant digits move a value by at most 5e-6 relative -- half a unit
+    in the last place, worst case at mantissa 1.0; measured maximum over the
+    six meshes 2.0e-6 -- while the narrowest group in any of them is 4.0e-4
+    relative wide. 5e-5 sits an order above the round trip and an order below
+    the narrowest group's half width, so it can only ever snap a boundary onto
+    itself.
+
+    Anything outside that band is NOT a round trip and is refused: it means the
+    npz and the tape did not come from the same run, and silently accepting it
+    would emit the cross term on a mesh the shape blocks are not written on.
+    """
+    base_ev = np.asarray(base_ev, float)
+    out = np.asarray(g_run, float)
+    if base_ev.size < 2:
+        raise SystemExit(f"{label}: the base shape grid has no groups to snap onto.")
+    j = np.clip(np.searchsorted(base_ev, out), 1, base_ev.size - 1)
+    lo, hi = base_ev[j - 1], base_ev[j]
+    near = np.where(np.abs(out - lo) <= np.abs(hi - out), lo, hi)
+    off = np.abs(near - out) / np.maximum(np.abs(out), 1.0)
+    if np.any(off > tol_rel):
+        k = int(np.argmax(off))
+        raise SystemExit(
+            f"{label}: mesh boundary {out[k]!r} eV is not in the base shape "
+            f"grid and is not a rounding of anything in it (nearest "
+            f"{near[k]!r}, {off[k]:.2e} relative, tolerance {tol_rel:.0e}). "
+            f"The npz and the tape do not come from the same run.")
+    if np.any(np.diff(near) <= 0):
+        raise SystemExit(
+            f"{label}: snapping put two mesh boundaries on the same base "
+            f"boundary, which would emit a zero-width group.")
+    return near
+
+
+def per_order_shape_grids(blocks: dict, base_ev: np.ndarray, run_dir=None,
+                          l_max: int = L_MAX) -> dict:
+    """``{l: e_l}`` — the mesh each Legendre order's parameters actually live on.
+
+    ENDF-6 states the grids inside each (L, L1) sub-subsection, so order l's
+    parameters are the ones its DIAGONAL block declares: the off-diagonal
+    (l, l1) records are LB=6 on the pair (e_l, e_l1), and reading them back
+    squares them onto the union of the two, which is why they must not be used
+    to infer either mesh.
+
+    ⚑ THE RUN'S OWN `mf34_per_order_mesh.npz` WINS when it is there. The tape's
+    grids have been through `merge_mf34` with the host by the time this reads
+    them, and a host boundary landing inside our window would re-split a group
+    the mesh deliberately merged. Deriving the mesh from the tape is the
+    fallback for a foreign file, not the primary source.
+    """
+    base_ev = np.asarray(base_ev, float)
+    from_npz = None
+    if run_dir is not None:
+        p = Path(run_dir) / "mf34_per_order_mesh.npz"
+        if p.exists():
+            z = np.load(p)
+            from_npz = {l: np.asarray(z[f"e_{l}"], float)
+                        for l in range(1, l_max + 1) if f"e_{l}" in z}
+            if len(from_npz) != l_max:
+                from_npz = None
+
+    grids = {}
+    for l in range(1, l_max + 1):
+        key = f"e_{l}_{l}"
+        if key not in blocks:
+            raise SystemExit(
+                f"MF34 has no (L={l}, L1={l}) block, so order {l}'s mesh is not "
+                f"stated anywhere; the cross term cannot be put on it.")
+        g = np.asarray(blocks[key], float)
+        if from_npz is not None:
+            # Snap FIRST: everything below compares mesh boundaries against
+            # tape boundaries, and on raw float64 every one of those
+            # comparisons is wrong in the same way -- `extra` would report our
+            # own rounded boundaries as the host's, and the closing guard would
+            # refuse the run.
+            g_run = _snap_to_base(from_npz[l], base_ev, f"a_{l}")
+            # ⚑ THE MESH SPANS OUR WINDOW; THE BASE GRID SPANS THE HOST'S RANGE.
+            # `merge_mf34` gave the tape the host's coverage outside our fits,
+            # where a_l is exactly zero and the emission writes zeros. Splice
+            # those boundaries back so the per-order grids cover exactly what
+            # the shared-mesh emission covered: then the ONLY thing the mesh
+            # changes is the resolution INSIDE the window, and the outside
+            # groups carry the same nothing they carry today.
+            outside = np.concatenate([base_ev[base_ev < g_run[0] - 1e-3],
+                                      base_ev[base_ev > g_run[-1] + 1e-3]])
+            g_run = np.unique(np.concatenate([g_run, outside]))
+            extra = g[(g > g_run[0]) & (g < g_run[-1]) & ~np.isin(g, g_run)]
+            if extra.size:
+                # The host's own MF34 boundaries inside our window (JEFF-4.0
+                # declares 14, on a 0.2 MeV grid) come back through the union
+                # the merge takes. Re-splitting a group the DP merged is not
+                # fatal -- it costs resolution the mesh said was not supported,
+                # nothing more -- but the emission must then use the mesh, not
+                # the tape, or shape and cross would sit on different grids.
+                print(f"    a_{l}: the tape has {extra.size} in-window "
+                      f"boundaries the mesh merged away (host merge); emitting "
+                      f"on the mesh")
+            g = g_run
+        if not np.isin(g, base_ev).all():
+            raise SystemExit(
+                f"a_{l}'s mesh is not a subset of the base shape grid; the "
+                f"collapse onto it would not be a congruence.")
+        grids[l] = g
+    return grids
+
+
+def _fixed_cut_points(order_ev, base_ev, u):
+    """``order_ev`` refined with the boundaries the CENTRAL VALUES force.
+
+    Two of them, and both are properties of ``u = w * a`` alone -- no covariance
+    is involved, so the rule reads the same here as it does inside the DP.
+
+    ⚑ A SIGN CHANGE OF ``a_l`` IS A BOUNDARY. ``rel_S = Var_S / mean_S^2``, and
+    the mean of a segment straddling a zero crossing is a DIFFERENCE, not an
+    average: it can be arbitrarily small while its terms are not. Run 98 merged
+    across crossings and the emission blew ``max|rel|`` from 0.9945 to 260.4,
+    with ``(sum|u| / |sum u|)^2`` reaching 2.6e5 at a_5. With every coarse group
+    of one sign, ``sum|u| == |sum u|``, so ``|rel_S| <= max|rel|`` termwise and
+    the collapse is a CONTRACTION rather than something the guard below has to
+    catch. a_2 has no crossing, ratio exactly 1, and it is the one order the DP
+    never touched.
+
+    ⚑ ENFORCED HERE AS WELL AS IN THE DP because the two see different values.
+    The DP works on the pipeline's multigroup mesh with the mixture's means; this
+    works on the tape's base grid with the means the MC replicas actually
+    support (a_1 1738 fine bins, a_4 727, a_6 106). The theorem holds for
+    whichever ``u`` the collapse is done with, so it has to be checked with THIS
+    one.
+
+    ⚑ A dead base group keeps both edges.
+
+    ⚑ THE BASE GRID HAS GROUPS THE MESH NEVER SAW. The DP chooses the mesh on
+    the pipeline's 660-group multigroup mesh, but what comes back off the tape
+    has been through `merge_mf34` with the host, which splits our groups at the
+    host's own boundaries -- 14 of them inside the analysis window. A sliver
+    between a host boundary and ours can contain no fine bin at all, and then
+    its ``a_l`` is exactly zero. The DP could not make those cut points because
+    on its own grid they do not exist: run 98 died with 10 of them at a_1
+    absorbed into live coarse groups.
+
+    Keeping BOTH edges of every dead base group is the conservative repair. Each
+    one then stays exactly one coarse group and is written zero -- which is what
+    the shared-mesh emission declared for it -- and the merging happens only
+    among live groups, which is what the mesh is for. It costs at most one cut
+    point per dead group, against meshes of 550-660.
+
+    ⚠ Not the same thing as letting them merge. The aggregator weights are
+    ``w * a``, so a dead member would contribute zero weight and nothing would
+    be *fabricated* -- but the coarse group would then declare the neighbour's
+    relative covariance over an interval where we fitted nothing, which is the
+    same objection that keeps the out-of-window groups untouched.
+    """
+    base_ev = np.asarray(base_ev, float)
+    order_ev = np.asarray(order_ev, float)
+    u = np.asarray(u, float)
+    if u.size != base_ev.size - 1:
+        raise SystemExit(
+            f"the weight vector has {u.size} entries for {base_ev.size - 1} base "
+            f"groups; it is not on the base grid.")
+    keep = np.isin(base_ev, order_ev)
+    idx = np.flatnonzero(u == 0.0)
+    keep[idx] = True
+    keep[idx + 1] = True
+    # Between two adjacent LIVE groups of opposite sign. Dead groups already
+    # separate what lies either side of them, so they need no second rule.
+    sgn = np.sign(u)
+    both = (sgn[:-1] != 0) & (sgn[1:] != 0)
+    keep[1:-1] |= both & (sgn[:-1] != sgn[1:])
+    out = base_ev[keep]
+    if not np.isin(order_ev, out).all():
+        raise SystemExit("refining the mesh dropped one of its own boundaries.")
+    return out
+
+
+def order_emission_weights(base_ev, order_ev, base_valid_width, a_base):
+    """``U[coarse, base]``: the map that collapses RELATIVE MF34 entries exactly.
+
+    The absolute collapse is width-weighted over the bins the aggregator counts
+    as valid, and the group central value is the same width-weighted mean, so
+
+        rel_S = abs_S / m_S^2
+              = sum_ij (w_i a_i)(w_j a_j) rel_ij / (sum_i w_i a_i)^2
+
+    i.e. the relative entries average with weights ``u = w * a``.  Absolute
+    never appears, which matters because what reaches this point has been
+    through the near-zero regularisation, the between-experiment floor and the
+    order smoothing — steps that put content exactly where ``a`` is zero and an
+    absolute round trip would delete it.
+
+    ⚑ EXACTLY TRANSITIVE, which is why the collapse can happen here instead of
+    on the replicas: a base group's ``w_g * a_g`` IS the sum of ``w_i * a_i``
+    over the fine bins it covers, so composing fine -> base -> coarse gives the
+    same weights as fine -> coarse.  Everything upstream — the marginal-identity
+    gate, the PSD diagnosis, the Cauchy-Schwarz margin — therefore stays on the
+    base grid where it is comparable with every previous run, and the emission
+    is a congruence of the object that was diagnosed, so PSD survives it.
+
+    ⚠ ``a`` CAN CHANGE SIGN, and then ``sum_i w_i a_i`` can approach zero and the
+    relative form explodes.  That is a true property of the relative form, not
+    an artefact — and it is exactly what the mesh's SNR >= 1 criterion and its
+    no-cancellation constraint exist to prevent.  A mesh that did not come from
+    that DP can violate it, so the caller checks the result.
+    """
+    base_ev = np.asarray(base_ev, float)
+    order_ev = np.asarray(order_ev, float)
+    g = fine_to_group(base_ev, order_ev)
+    U = np.zeros((len(order_ev) - 1, len(base_ev) - 1))
+    U[g, np.arange(len(g))] = np.asarray(base_valid_width, float) * np.asarray(a_base, float)
+    tot = U.sum(axis=1, keepdims=True)
+    np.divide(U, tot, out=U, where=tot != 0)
+    return U
 
 
 def shipped_c34_rel_on_base(blocks, base_ev):
@@ -429,9 +861,21 @@ def diagnose(name, c33, c34, cx, tol=NULL_TOL):
     w33, p33, r33 = whiten(c33, tol)
     w34, p34, r34 = whiten(c34, tol)
     nx = float(np.linalg.norm(cx, "fro"))
-    j = np.block([[c33, cx], [cx.T, c34]])
-    lam = float(np.linalg.eigvalsh(0.5 * (j + j.T))[0])
+    # `0.5 * (J + J.T)` block by block instead of on the assembled joint. Same
+    # matrix to the last bit -- the symmetrised off-diagonal is
+    # `0.5 * (cx + (cx.T).T) = cx` -- but the temporaries are the BLOCKS, not
+    # two more copies of the joint. On the fine magnitude grid the joint is
+    # 5956 x 5956 = 271 MB, so the naive form asks for 1.4 GB per row of the
+    # table and dies on a 12 GB box before the CONTROL row prints.
+    m = c33.shape[0]
+    j = np.empty((m + c34.shape[0],) * 2)
+    j[:m, :m] = 0.5 * (c33 + c33.T)
+    j[m:, m:] = 0.5 * (c34 + c34.T)
+    j[:m, m:] = cx
+    j[m:, :m] = cx.T
+    lam = float(np.linalg.eigvalsh(j)[0])
     sc = float(np.max(np.abs(np.diag(j))))
+    del j
     return {"case": name, "rank33": f"{r33}/{c33.shape[0]}",
             "rank34": f"{r34}/{c34.shape[0]}",
             "sigma_max(K)": float(np.linalg.norm(w33 @ cx @ w34, 2)) if nx else 0.0,
@@ -485,7 +929,8 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
                           a_nom_group, shape_ev, mag_ev, c34_rel_ship,
                           null_fill="zero",
                           cross_emin_ev=None, cross_emax_ev=None,
-                          mf33_file_grid=None):
+                          mf33_file_grid=None,
+                          order_grids_ev=None, base_valid_width=None):
     """Write the _mg tape whose MF34 is the joint that was just diagnosed.
 
     `cx_post` is Cauchy-Schwarz-compatible with `c34_post`, not with the MF34
@@ -592,10 +1037,153 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
         cross_grid = g_file
 
     cross_cov = {l1: cx_win[:, :, l1 - 1] for l1 in range(1, L_MAX + 1)}
+    shape_arg = np.asarray(shape_ev, float)
+
+    # ── a mesh per Legendre order, as one congruence at the point of emission ──
+    #
+    # Shape and cross are collapsed HERE, together, with the SAME U. Handing
+    # them meshes separately is the failure this whole step exists to avoid: a
+    # cross block whose columns sit on a different mesh than the shape block it
+    # correlates with stays PSD, passes every marginal gate, and is wrong, with
+    # nothing downstream able to detect it.
+    if order_grids_ev is not None:
+        if null_fill != "zero":
+            raise SystemExit(
+                f"--null-fill {null_fill!r} cannot be combined with a mesh per "
+                f"order: it writes the file's own relative values where a_l is "
+                f"exactly zero, and those slots are not what U was built to "
+                f"average. Use --null-fill zero.")
+        # The base grid carries groups the DP never saw, and the DP's means are
+        # not these means -- see `_fixed_cut_points`. Refine here, before
+        # anything is built from the grids, so U, the blocks and what gets
+        # written all use the same one.
+        _n_before = {l: len(np.asarray(order_grids_ev[l], float)) - 1
+                     for l in range(1, L_MAX + 1)}
+        order_grids_ev = {
+            l: _fixed_cut_points(
+                order_grids_ev[l], shape_ev,
+                np.asarray(base_valid_width[:, l - 1], float)
+                * np.asarray(a_nom_group[:, l - 1], float))
+            for l in range(1, L_MAX + 1)}
+        n_ord = {l: len(np.asarray(order_grids_ev[l], float)) - 1
+                 for l in range(1, L_MAX + 1)}
+        _added = {l: n_ord[l] - _n_before[l] for l in n_ord}
+        if any(_added.values()):
+            print("    cortes que fuerzan los centrales (muertos + signo): "
+                  + "  ".join(f"a_{l} +{_added[l]}" for l in range(1, L_MAX + 1)))
+        U = {}
+        for l in range(1, L_MAX + 1):
+            U[l] = order_emission_weights(shape_ev, order_grids_ev[l],
+                                          base_valid_width[:, l - 1],
+                                          a_nom_group[:, l - 1])
+            # A coarse group must be entirely live or entirely dead.
+            # `_fixed_cut_points` above makes that true by construction, so
+            # this is now an assertion on that refinement rather than a check on
+            # the mesh. It is kept because the failure it describes is silent:
+            # the merged entry would carry a central value the file does not
+            # declare, and every downstream gate would still pass.
+            dead = np.abs(a_nom_group[:, l - 1]) < np.finfo(float).tiny
+            g_of = fine_to_group(np.asarray(shape_ev, float),
+                                 np.asarray(order_grids_ev[l], float))
+            n_dead = np.bincount(g_of, weights=dead.astype(float),
+                                 minlength=n_ord[l])
+            n_tot = np.bincount(g_of, minlength=n_ord[l])
+            mixed = int(((n_dead > 0) & (n_dead < n_tot)).sum())
+            if mixed:
+                raise SystemExit(
+                    f"a_{l}: {mixed} coarse groups merge an absent group with a "
+                    f"live one; the mesh was not built with absent groups as cut "
+                    f"points, so the merged entry would carry a fabricated "
+                    f"central value.")
+        # ── how much room the mesh leaves the relative form to explode ────────
+        #
+        # rel_S = u^T R u / (sum u)^2 with u = w * a, so
+        #
+        #     |rel_S| <= max|R| * (sum|u| / |sum u|)^2
+        #
+        # and the whole budget is the SIGN CANCELLATION of u inside each coarse
+        # group. It depends on the mesh and the central values only -- not on the
+        # covariance -- so it can be read off here, before a single block is
+        # built, and it says which merge is responsible rather than leaving the
+        # guard below to guess.
+        amp = {}
+        for l in range(1, L_MAX + 1):
+            u = (np.asarray(base_valid_width[:, l - 1], float)
+                 * np.asarray(a_nom_group[:, l - 1], float))
+            g_of = fine_to_group(np.asarray(shape_ev, float),
+                                 np.asarray(order_grids_ev[l], float))
+            s_abs = np.bincount(g_of, weights=np.abs(u), minlength=n_ord[l])
+            s_net = np.abs(np.bincount(g_of, weights=u, minlength=n_ord[l]))
+            live = s_abs > 0
+            r = np.ones(n_ord[l])
+            r[live] = (s_abs[live] / np.maximum(s_net[live],
+                                                np.finfo(float).tiny)) ** 2
+            amp[l] = r
+        _worst_l = max(amp, key=lambda l: amp[l].max())
+        _worst_g = int(np.argmax(amp[_worst_l]))
+        print("    cancelacion en u = w*a, (sum|u|/|sum u|)^2 por orden: "
+              + "  ".join(f"a_{l} {amp[l].max():.3g}" for l in range(1, L_MAX + 1)))
+        _ge = np.asarray(order_grids_ev[_worst_l], float)
+        print(f"    peor: a_{_worst_l} grupo {_worst_g} "
+              f"[{_ge[_worst_g] / 1e6:.4f}, {_ge[_worst_g + 1] / 1e6:.4f}] MeV, "
+              f"factor {amp[_worst_l].max():.4g} sobre max|rel| base")
+
+        a_ord = {l: U[l] @ a_nom_group[:, l - 1] for l in range(1, L_MAX + 1)}
+
+        rows_of = {l: np.arange(n_gs) * L_MAX + (l - 1) for l in range(1, L_MAX + 1)}
+        blocks_rel = {}
+        for l in range(1, L_MAX + 1):
+            for l1 in range(l, L_MAX + 1):
+                blocks_rel[(l, l1)] = (
+                    U[l] @ c34_rel[np.ix_(rows_of[l], rows_of[l1])] @ U[l1].T)
+        cross_cov = {l1: cross_cov[l1] @ U[l1].T for l1 in range(1, L_MAX + 1)}
+
+        before = float(np.abs(c34_rel).max())
+        worst = max(float(np.abs(b).max()) for b in blocks_rel.values())
+        print(f"\n  per-order mesh: groups "
+              + "/".join(str(n_ord[l]) for l in range(1, L_MAX + 1))
+              + f" of {n_gs}")
+        print(f"    MF34 entries {L_MAX * L_MAX * n_gs * n_gs:,d} -> "
+              f"{sum(n_ord[a] * n_ord[b] for a in n_ord for b in n_ord):,d} "
+              f"({100 * (sum(n_ord[a] * n_ord[b] for a in n_ord for b in n_ord) / (L_MAX * L_MAX * n_gs * n_gs) - 1):+.1f} %)")
+        # ⚑ THE MESH IMPROVES THE RELATIVE FORM, IT DOES NOT STRAIN IT, and the
+        # right guard is a comparison rather than an absolute bar. The SNR >= 1
+        # criterion is exactly "the group mean is not small against its sigma",
+        # so merging removes the near-cancelling groups where rel explodes:
+        # measured on the mixture object, max |rel| falls from 1.35e7 to 5.5 at
+        # a_3 and from 3.86e7 to 6.4 at a_6. A fixed threshold would have
+        # aborted a run whose object is thousands of times better behaved than
+        # the shared-mesh one that ships today.
+        print(f"    max |c34_rel|: {before:.4g} -> {worst:.4g} "
+              f"({worst / max(before, 1e-300):.2e}x)")
+        if not np.isfinite(worst):
+            raise SystemExit(
+                "the per-order collapse produced non-finite relative entries: a "
+                "merged group's central value cancelled to exactly zero.")
+        if worst > 10.0 * max(before, np.finfo(float).tiny):
+            _pred = before * amp[_worst_l].max()
+            raise SystemExit(
+                f"the per-order collapse made the relative form {worst / before:.1f}x "
+                f"WORSE (max |rel| {before:.4g} -> {worst:.4g}).\n"
+                f"    La cota de cancelacion predice {_pred:.4g} "
+                f"(= {before:.4g} x {amp[_worst_l].max():.4g}), asi que "
+                f"{'ES' if worst <= 1.5 * _pred else 'NO ES'} eso: "
+                f"{'algun grupo grueso fusiona valores centrales que se cancelan' if worst <= 1.5 * _pred else 'la explosion viene de la covarianza, no de la malla'}.\n"
+                f"    rel_S = 1/SNR_S^2 exactamente, asi que un grupo con rel > 1 "
+                f"es un grupo que el DP habria rechazado si lo hubiera evaluado "
+                f"sobre ESTA rejilla y ESTAS medias.")
+        for l in range(1, L_MAX + 1):
+            live_b = np.abs(a_nom_group[:, l - 1]) >= np.finfo(float).tiny
+            live_c = np.abs(a_ord[l]) >= np.finfo(float).tiny
+            print(f"    a_{l}: {int(live_b.sum())} live of {n_gs} -> "
+                  f"{int(live_c.sum())} live of {n_ord[l]}")
+        c34_rel = blocks_rel
+        shape_arg = {l: np.asarray(order_grids_ev[l], float)
+                     for l in range(1, L_MAX + 1)}
 
     za, awr, mat = _za_awr_mat_from_endf(source_endf)
     mf34 = create_mf34_from_covariance(
-        c34_rel, np.asarray(shape_ev, float), L_MAX, za, awr, mat, 2,
+        c34_rel, shape_arg, L_MAX, za, awr, mat, 2,
         ltt=1, cross_cov=cross_cov, cross_energy_grid_ev=cross_grid,
     )
     sub = mf34._subsections[0]
@@ -639,7 +1227,8 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
 
 
 def build_cross_and_write_endf(run_dir, source_endf, out_endf, *,
-                               mag_grid="fine", null_fill="zero", cache=None):
+                               mag_grid="fine", null_fill="zero", cache=None,
+                               dead_parameters="drop"):
     """Build the joint and write the cross-term ENDF. Library entry point.
 
     Goes through ``main`` on a constructed argv so the pipeline runs the exact
@@ -649,7 +1238,8 @@ def build_cross_and_write_endf(run_dir, source_endf, out_endf, *,
             "--source-endf", str(source_endf),
             "--write-endf", str(out_endf),
             "--mag-grid", str(mag_grid),
-            "--null-fill", str(null_fill)]
+            "--null-fill", str(null_fill),
+            "--dead-parameters", str(dead_parameters)]
     if cache is not None:
         argv += ["--cache", str(cache)]
     rc = main(argv)
@@ -679,6 +1269,19 @@ def main(argv=None):
              "of slots). 'zero': dead parameter, no covariance, PSD-safe. "
              "'ship': keep the file's declared value -- this reproduced the "
              "run-89 failure.",
+    )
+    ap.add_argument(
+        "--dead-parameters", choices=["drop", "carry"], default="drop",
+        help="What to do with the (group, order) slots whose REPLICAS never "
+             "move -- 1542 of 4218 on run 99, almost all of a_4..a_6. 'drop' "
+             "(what every run so far did): the nominal group mean is averaged "
+             "over the MC-valid bins only, comes out exactly zero there, and "
+             "the tape declares the parameter with NO uncertainty. 'carry': "
+             "the group mean is averaged over ALL fine bins -- the functional "
+             "the consumer interpolates back out of MF4 -- and the shape block "
+             "on those slots is taken from the pipeline's own MF34 as a DIRECT "
+             "SUMMAND. The cross block stays zero there, because the MC cannot "
+             "inform it.",
     )
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true",
@@ -744,6 +1347,13 @@ def main(argv=None):
     ap.add_argument("--cross-emin-ev", type=float, default=None,
                     help="Clip the cross block's magnitude axis (default: the whole grid)")
     ap.add_argument("--cross-emax-ev", type=float, default=None)
+    ap.add_argument(
+        "--per-order-mesh", choices=["auto", "on", "off"], default="auto",
+        help="Emit each Legendre order on its own mesh. 'auto': on exactly when "
+             "the run wrote mf34_per_order_mesh.npz, so a run that did not "
+             "choose a mesh is untouched byte for byte. 'on' also accepts the "
+             "tape's own diagonal grids, for a foreign file.",
+    )
     args = ap.parse_args(argv)
 
     run_dir = Path(args.run_dir)
@@ -808,8 +1418,33 @@ def main(argv=None):
 
     A_mag = row_aggregator(g_mag, widths, n_gm, np.ones(n_fine, bool))
     c0_g = c0 @ A_mag.T
+
+    # ── the denominator has to be the number the CONSUMER multiplies back ─────
+    #
+    # `A_shape[l]` is masked by the MC's validity, so for a group whose replicas
+    # never move at order l it is an all-zero row and the group mean comes out
+    # EXACTLY ZERO -- 1542 of 4218 slots on run 99. The tape then declares
+    # `rel = 0` there, while `eval_covariance.build_mf34_block` scales that
+    # relative block by `a_l_per_pt` INTERPOLATED FROM THE FILE'S OWN MF4, which
+    # is not zero: the file asserts perfect knowledge of a parameter it does
+    # declare. The run's own log already prints the contradiction in one line --
+    # `a_pt` has 1 exact zero of 4218 against `a_nom_group`'s 1542.
+    #
+    # `carry` averages over every fine bin instead, which is the same functional
+    # the consumer interpolates. `drop` keeps the masked aggregator, so the
+    # default reproduces every earlier run byte for byte.
+    _carry = args.dead_parameters == "carry"
+    A_nom = ([row_aggregator(g_shape, widths, n_gs, np.ones(n_fine, bool))]
+             * L_MAX if _carry else A_shape)
     a_nom_group = np.stack(
-        [A_shape[l] @ a_nom_fine[:, l] for l in range(L_MAX)], axis=-1)
+        [A_nom[l] @ a_nom_fine[:, l] for l in range(L_MAX)], axis=-1)
+    if _carry:
+        _tiny = np.finfo(float).tiny
+        _was = np.stack([A_shape[l] @ a_nom_fine[:, l] for l in range(L_MAX)],
+                        axis=-1)
+        print(f"  --dead-parameters carry: group means over ALL fine bins  "
+              f"(exact zeros {int((np.abs(_was) < _tiny).sum())} -> "
+              f"{int((np.abs(a_nom_group) < _tiny).sum())} of {_was.size})")
 
     if args.write_null_mask:
         mask = np.abs(a_nom_group) < np.finfo(float).tiny
@@ -845,6 +1480,24 @@ def main(argv=None):
     c34_mc = joint[n_gm:, n_gm:]
     cx_mc = joint[:n_gm, n_gm:]
 
+    # The replica arrays die here: `joint` is their only consumer, and the
+    # three blocks above are VIEWS into it, so `joint` is what has to stay.
+    # On the fine magnitude grid they are ~950 MB that would otherwise sit
+    # resident under the whole diagnostics table, where each row builds its
+    # own 5956 x 5956 joint. Dropping them is the difference between the table
+    # printing and the box swapping.
+    del c0, c0_g, a_g, a_flat, nom
+    gc.collect()
+    # `gc.collect()` returns the pages to glibc's arenas, NOT to the kernel, and
+    # the arenas are badly fragmented by here: the two parquet passes allocate
+    # and free hundreds of MB in 250-bin chunks. Measured on run 99, the process
+    # sat ~2 GB above the sum of its live arrays until this call. That is the
+    # difference between the diagnostics table fitting on a 12 GB box and not.
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except OSError:
+        pass  # not glibc; the free lists just stay resident
+
     print("  mapping the shipped MF34 onto the base shape grid ...", flush=True)
     c34_rel_ship = shipped_c34_rel_on_base(blocks, shape_ev)
     a_flat_nom = a_nom_group.reshape(-1)
@@ -859,6 +1512,66 @@ def main(argv=None):
     c33_post = c33_mc * np.outer(j33, j33)
     c34_post = c34_mc * np.outer(j34, j34)
     cx_post = cx_mc * np.outer(j33, j34)
+
+    # ── the parameters the congruence cannot reach ────────────────────────────
+    #
+    # `jj = d_tar / d_mc` is a diagonal congruence, and a congruence cannot give
+    # variance to a direction the MC never explored: where `d_mc = 0` the whole
+    # row and column go to zero and take the pipeline's own sigma with them.
+    # That is not a modelling decision, it is the rescaling deleting what it
+    # cannot rescale.
+    #
+    # `carry` puts those slots back as a DIRECT SUMMAND out of the pipeline's
+    # own MF34. Direct sum, not a patch of the full block, and the reason is
+    # that it keeps the diagnosis honest:
+    #   * PSD becomes min(lam_min(congruence), lam_min(c34_ship[D, D])), and a
+    #     principal submatrix of a PSD matrix is PSD -- so the gate turns into a
+    #     real measurement of the pipeline object instead of a tautology about
+    #     the chain being a congruence;
+    #   * row F must still land on the CONTROL row's sigma_max(K), because
+    #     `cx_post` is exactly zero on D and the whitener of a block-diagonal
+    #     matrix is block diagonal, so the augmented directions are invisible to
+    #     ||W33 Cx W34||_2. The live block is still a positive diagonal
+    #     congruence of the CONTROL -- the denominator moves with `carry` on the
+    #     MIXED groups, but a congruence is a congruence. If row F pulls away
+    #     from CONTROL, the chain is not one and the tape must not ship.
+    # NOTE `lam_min_norm` IS NOT comparable across drop/carry: the normaliser is
+    # max|diag(J)| and `carry` restores relative variances up to ~7.6 at slots
+    # `drop` wrote as zero. Read sigma_max(K) and the raw lam_min.
+    # The alternative -- taking the pipeline's corr(dead, live) as well -- is
+    # priced as row G below rather than asserted.
+    dead34 = np.zeros(n_gs * L_MAX, bool)
+    if _carry:
+        if (d_mc[:n_gm] <= 0.0).any():
+            raise SystemExit(
+                f"{int((d_mc[:n_gm] <= 0.0).sum())} magnitude groups have zero "
+                f"MC spread. The c0 replicas always move, so that is a join or "
+                f"a masking bug, not a dead parameter.")
+        c34_post, dead34, _orphan, _pinfo = carry_dead_parameters(
+            c34_post, c34_ship, d_mc[n_gm:], d_tar[n_gm:])
+        _lam = (float(np.linalg.eigvalsh(c34_post[np.ix_(dead34, dead34)])[0])
+                if dead34.any() else 0.0)
+        _dg = dead34.reshape(n_gs, L_MAX)
+        print(f"\n  carried back: {int(dead34.sum())} of {dead34.size} shape "
+              f"parameters that the replicas never move and the pipeline does "
+              f"declare\n    ({_orphan} declared by neither, left at zero)")
+        print("    by order: " + "  ".join(
+            f"a_{l + 1} {int(_dg[:, l].sum())}/{n_gs}" for l in range(L_MAX)))
+        print(f"    the pipeline's MF34 on those slots: lam_min "
+              f"{_pinfo['lam_min']:.6e}  lam_max {_pinfo['lam_max']:.6e}")
+        print(f"    bar 1, conditioning: ratio {_pinfo['ratio']:.3e} vs "
+              f"-{DEAD_BLOCK_PSD_RTOL:.0e}  -- using "
+              f"{abs(_pinfo['ratio']) / DEAD_BLOCK_PSD_RTOL:.3f} of the tape's "
+              f"own 7-digit floor")
+        print(f"    bar 2, invented mass: {_pinfo['clip_mass']:.3e} vs "
+              f"{DEAD_BLOCK_CLIP_MASS_MAX:.0e}  -- using "
+              f"{_pinfo['clip_mass'] / DEAD_BLOCK_CLIP_MASS_MAX:.3f} of the bar "
+              f"(trace {_pinfo['trace']:.6e})")
+        print(f"    PSD projection: {_pinfo['n_clipped']} negative eigenvalues "
+              f"clipped to zero, worst relative shift of a declared variance "
+              f"{_pinfo['d_shift_rel']:.3e}")
+        print(f"    lam_min of the carried block AFTER the projection: "
+              f"{_lam:.6e}")
 
     e33 = np.max(np.abs(np.sqrt(np.maximum(np.diag(c33_post), 0)) - d_tar[:n_gm]))
     e34 = np.max(np.abs(np.sqrt(np.maximum(np.diag(c34_post), 0)) - d_tar[n_gm:]))
@@ -911,6 +1624,22 @@ def main(argv=None):
                            where=(np.abs(a_flat_nom) >= np.finfo(float).tiny
                                   )[None, :])[:, K]),
     ]
+    if _carry and dead34.any():
+        # Not a direct sum: the pipeline's correlation between the dead
+        # parameters and the live ones, kept. PSD is not guaranteed and
+        # sigma_max(K) is no longer protected, which is the whole point of
+        # measuring it next to F instead of choosing between them on argument.
+        _cf = c34_post.copy()
+        _m = dead34[None, :] | dead34[:, None]
+        _cf[_m] = (0.5 * (c34_ship + c34_ship.T))[_m]
+        _rel_full = assemble_c34_rel(_cf, a_flat_nom, c34_rel_ship, "zero")
+        rows2.append(diagnose(
+            "G  carry, FULL pipeline block on the dead rows (NOT a direct sum)",
+            c33_ship, _rel_full[KK],
+            np.divide(cx_post, a_flat_nom[None, :], out=np.zeros_like(cx_post),
+                      where=(np.abs(a_flat_nom) >= np.finfo(float).tiny
+                             )[None, :])[:, K]))
+
     print("\n=== PSD in the space the chi2 folds (relative MF34, a_pt) ===")
     print("  ⚠ ROWS A-E MODEL THE SIDECAR ROUTE AND ARE HISTORY. They divide "
           "the cross\n  block by `a_pt` and the shape blocks by `a_nom` -- two "
@@ -1426,6 +2155,44 @@ def main(argv=None):
               f"{int(_outside.sum())} of {_outside.size} — these carried the "
               f"host's merged MF34 and now carry nothing")
 
+        # ── the mesh per order, if this run has one ───────────────────────────
+        #
+        # `auto` is what makes this switch safe to leave in: with one shared
+        # mesh every e_l IS the base grid, the branch is not entered at all, and
+        # the emission is the pre-existing code path untouched.
+        # ⚑ `auto` KEYS ON THE RUN'S OWN mf34_per_order_mesh.npz, NOT on whether
+        # the tape's grids differ. They already differ on every tape shipped so
+        # far -- run 94's blocks carry 703/703/703/684/673/673 groups -- because
+        # `merge_mf34` unions each pair with the host's, which adds ~30
+        # boundaries in 0.05-0.55 and 14.5-19 MeV. Those sit entirely OUTSIDE
+        # the fits, where a_l is zero and the emission writes zeros either way;
+        # collapsing onto them would still move those zeros to a coarser grid
+        # and change the file. Firing only on the npz means a run that did not
+        # choose a mesh is untouched, byte for byte.
+        _order_grids = _valid_width = None
+        _has_mesh = (run_dir / "mf34_per_order_mesh.npz").exists()
+        if args.per_order_mesh == "on" or (args.per_order_mesh == "auto" and _has_mesh):
+            _g = per_order_shape_grids(blocks, shape_ev, run_dir=run_dir)
+            if all(np.array_equal(_g[l], shape_ev) for l in _g):
+                if args.per_order_mesh == "on":
+                    raise SystemExit(
+                        "--per-order-mesh on, but every order is already on the "
+                        "base grid: there is no mesh to emit.")
+            else:
+                _order_grids = _g
+                # Same width convention as the nominal aggregator above, or
+                # the emission weights u = w * a would average over a different
+                # set of fine bins than the group mean they normalise against.
+                _valid_width = np.stack(
+                    [np.bincount(g_shape,
+                                 weights=np.where(valid[:, l] | _carry,
+                                                  widths, 0.0),
+                                 minlength=n_gs)
+                     for l in range(L_MAX)], axis=-1)
+                print(f"\n  per-order mesh: "
+                      + ("mf34_per_order_mesh.npz" if _has_mesh
+                         else "the tape's own diagonal blocks"))
+
         write_consistent_mf34(
             out_path=Path(args.write_endf),
             source_endf=source_endf,
@@ -1435,6 +2202,7 @@ def main(argv=None):
             cross_emin_ev=args.cross_emin_ev, cross_emax_ev=args.cross_emax_ev,
             mf33_file_grid=(mf33_file_grid_ev(source_endf, cache)
                             if _fine_mag else None),
+            order_grids_ev=_order_grids, base_valid_width=_valid_width,
         )
     return 0
 

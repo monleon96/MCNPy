@@ -507,11 +507,13 @@ class CovarianceSuite:
     #: Not a GNDS node. What the decode did beyond producing this object, on
     #: the same footing as :attr:`ReactionSuite.report` and for the same
     #: reason: the decoders keep returning it as the second element of a tuple,
-    #: and a tuple element is what gets dropped by a caller in a hurry. §25.3's
-    #: parameter covariances are not written, ``flattened`` arrays are read and
-    #: not written back, and a covariance file read without its ``reactionSuite``
-    #: sibling cannot resolve a single ``rowData`` href — all three are report
-    #: entries and none of them is visible in the object otherwise.
+    #: and a tuple element is what gets dropped by a caller in a hurry. A §25.3
+    #: parameter covariance that is a cross term loses that fact on the way out
+    #: (``covariances.xsd:160-168`` has no ``columnData`` there), ``flattened``
+    #: arrays are read and not written back, and a covariance file read without
+    #: its ``reactionSuite`` sibling cannot resolve a single ``rowData`` href —
+    #: all three are report entries and none of them is visible in the object
+    #: otherwise.
     report: Optional[ConversionReport] = None
 
     def __len__(self) -> int:
