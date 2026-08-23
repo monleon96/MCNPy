@@ -1,15 +1,14 @@
 # KIKA
 
-[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://github.com/juanmonleon/kika)
 [![Documentation Status](https://readthedocs.org/projects/kika/badge/?version=latest)](https://kika.readthedocs.io/en/latest/?badge=latest)
 [![PyPI](https://img.shields.io/pypi/v/kika-nd)](https://pypi.org/project/kika-nd/)
 [![Python](https://img.shields.io/pypi/pyversions/kika-nd)](https://pypi.org/project/kika-nd/)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-green.svg)](https://github.com/juanmonleon/kika/blob/main/LICENSE)
+[![Website](https://img.shields.io/badge/website-kika--app.com-4db8eb)](https://kika-app.com/)
 
-A comprehensive Python toolkit for nuclear data analysis, Monte Carlo simulation support, and uncertainty quantification. KIKA provides tools for working with MCNP, ENDF, ACE files, covariance matrices, and sensitivity analysis.
+A comprehensive Python toolkit for nuclear data analysis, Monte Carlo simulation support, and uncertainty quantification. KIKA provides tools for working with MCNP, ENDF, ACE files, covariance matrices, and sensitivity analysis, and powers the KIKA desktop workspace.
 
-> **Looking for the desktop application?** KIKA is also available as a standalone GUI — no Python required.
-> Download the latest installer from [**kika-release**](https://github.com/juanmonleon/kika-release).
+> **Looking for the desktop application?** Visit [**kika-app.com**](https://kika-app.com/) to download KIKA for Windows, macOS, or Linux and explore the user guides. No Python installation is required.
 
 ## Features
 
@@ -81,8 +80,9 @@ cov = kika.read_coverx("path/to/covmat_file")  # text or binary, auto-detected
 
 ## Documentation
 
-For complete documentation, examples, and API reference, visit:
-[KIKA Documentation](https://kika.readthedocs.io/en/latest/)
+- [Desktop application and workflow guides](https://kika-app.com/docs)
+- [Python library documentation and API reference](https://kika.readthedocs.io/en/latest/)
+- [Latest desktop installers](https://kika-app.com/#downloads)
 
 ## Contributing
 
