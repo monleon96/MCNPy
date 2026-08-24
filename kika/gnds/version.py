@@ -16,6 +16,10 @@ rests on two independent sources:
   versions and contains **no branch on it anywhere**. Its only version-dependent
   node renames (``LUPY/ancestry.py``'s ``monikerByFormat``) are for 1.10:
   ``section`` → ``covarianceSection``, ``crossSections`` → ``crossSectionSums``.
+  Measured over the installed copy on 2026-08-24 — ``2.1`` appears **0** times
+  outside ``GNDS_formatVersion.py`` against **61** for ``1.10`` — and the
+  measurement, with what FUDGE's ``master`` has done since, is written out in
+  :mod:`kika.gnds`. Re-measure it there rather than here when FUDGE is upgraded.
 
 So a version-dispatch layer between 2.0 and 2.1 would have zero branches in it,
 and building one would be paying for a difference that does not exist. If a
@@ -26,6 +30,13 @@ down in advance.
 **1.9 and 1.10 are refused rather than attempted.** That is where the real break
 is, and a reader that half-works on them would produce a ``reactionSuite`` with
 silently missing content, which is worse than a refusal.
+
+**2.2 and 2.2.rc1 are refused by name too**, for the mirror-image reason: newer
+rather than older. They would otherwise land in the generic "unrecognised"
+branch, whose message can only guess at the direction; naming them buys a
+refusal that says *newer than what this reader was built to* and what closing
+it would cost. FUDGE's ``master`` declares ``2.2.rc1``; the copy installed here,
+6.10.0, does not — see :mod:`kika.gnds`.
 
 kika's model is built to the 2.1 specification; every published library is
 written in 2.0. Both are read here. The *writer* preserves whatever version it
@@ -44,7 +55,10 @@ __all__ = [
 ACCEPTED: Tuple[str, ...] = ("2.0", "2.1")
 
 #: Refused, with the reason the message carries. The keys are the ``format``
-#: strings those versions actually write.
+#: strings those versions actually write. The dict is refusals in **both**
+#: directions: 1.9/1.10 are older than what this reader knows, 2.2 is newer,
+#: and both are named so the failure says which of the two it is rather than
+#: falling through to the generic "unrecognised" branch.
 REFUSED = {
     "1.9": (
         "GNDS 1.9 predates the 149 approved change requests that produced 2.0, "
@@ -54,6 +68,21 @@ REFUSED = {
         "GNDS 1.10 predates the 149 approved change requests that produced 2.0. "
         "Among other differences it calls a covarianceSection a 'section' and "
         "crossSectionSums 'crossSections'"
+    ),
+    "2.2": (
+        "GNDS 2.2 is newer than the 2.1 specification kika's model is built to "
+        "(see MODEL_FORMAT), and no kika node has been read against it. It is "
+        "named here rather than left to the unrecognised branch so the refusal "
+        "says newer and not merely unknown. When 2.2 leaves release candidate, "
+        "the work is to diff its change requests against the nodes this reader "
+        "touches and then either move it to ACCEPTED or replace this sentence "
+        "with what actually changed — not to widen the gate"
+    ),
+    "2.2.rc1": (
+        "GNDS 2.2.rc1 is a release candidate, and FUDGE's master declares it "
+        "while the copy installed here (6.10.0) does not. A file written by a "
+        "release candidate is not a file to read against a released reader. "
+        "See the 2.2 entry for what closing this costs"
     ),
 }
 
@@ -91,9 +120,11 @@ def checkFormat(declared: Optional[str], source: str = "this file") -> str:
     UnsupportedGndsVersion
         For a version in :data:`REFUSED`, for an absent attribute, and for
         anything unrecognised. An unrecognised version is refused rather than
-        attempted **because it is probably newer**: reading a 2.2 file with 2.1
+        attempted **because it is probably newer**: reading a 2.3 file with 2.1
         rules would not fail, it would quietly return whatever the unchanged
-        nodes happened to yield, and the caller would have no way to tell.
+        nodes happened to yield, and the caller would have no way to tell. 2.2
+        is no longer that example — it is in :data:`REFUSED` by name, which is
+        the whole difference the entry buys.
     """
     if declared is None:
         raise UnsupportedGndsVersion(
