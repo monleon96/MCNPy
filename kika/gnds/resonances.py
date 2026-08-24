@@ -28,11 +28,15 @@ missing one. :attr:`~kika.nuclear_data.model.resonances.UnresolvedChannel.energi
 was added for it, and the block-level grid is filled only when every curve
 agrees.
 
-**What is not read, and is reported instead:** ``externalRMatrix`` (7 nodes in
-the library), a ``hardSphereRadius`` on a ``resonanceReaction`` (4), and the
-per-region interpolation of a ``regions1d`` average width — that last one is an
-*approximation*, not a loss, because the flattened numbers look exactly like
-data and only the rule connecting them is gone.
+**What is not read, and is reported instead:** ``externalRMatrix`` — 7 nodes,
+all in ``n-038_Sr_088.endf.gnds.xml``, the only file in the corpus that carries
+one — and the per-region interpolation of a ``regions1d`` average width, which
+is an *approximation* and not a loss, because the flattened numbers look
+exactly like data and only the rule connecting them is gone.
+``supportsAngularReconstruction`` (65 files) is reported and will stay that
+way: it is a FUDGE capability hint, not a property of the evaluation.
+A ``hardSphereRadius`` on a ``resonanceReaction`` (4 nodes in 3 files) **used
+to be on this list and is read now** — see :meth:`_SuiteReader.readResonanceReactions`.
 """
 from __future__ import annotations
 
@@ -270,10 +274,19 @@ class _ResonanceReader:
             # A capability hint FUDGE writes for its own reconstructor, not a
             # property of the evaluation. Recorded so the writer does not have
             # to guess whether its absence was meaningful.
+            #
+            # **Reported permanently, decided 2026-08-24**, and it is the one
+            # row of `gnds_endf_conflicts.md` §6.4 that closes as "won't fix"
+            # rather than as work. 65 files set it, so it is not rare — but a
+            # model node for it would state, in a format-neutral model, what
+            # one reader can do with the numbers. The number it qualifies is
+            # not lost: every resonance parameter it applies to is read.
             self.report.lost(
                 f"{here}: supportsAngularReconstruction=true, a hint about what "
                 f"a reconstructor can do with these parameters rather than a "
-                f"property of them; kika has no node for it"
+                f"property of them; kika has no node for it, and will not — it "
+                f"is FUDGE's capability and not the evaluation's (65 files set "
+                f"it; gnds_endf_conflicts.md §6.4)"
             )
         return RMatrix(
             label=label,
@@ -308,20 +321,25 @@ class _ResonanceReader:
             link = child.find("link")
             reactionRadius, reactionRadiusUnit = self.modelRadius(
                 child.find("scatteringRadius"), here)
-            if child.find("hardSphereRadius") is not None:
-                self.unsupported(
-                    "hardSphereRadius", here,
-                    "§19.3.3 allows one here and §19.3.4 allows one per channel; "
-                    "kika's model carries the channel's, which is the one the "
-                    "phase shift uses, and 4 nodes in the whole library set this"
-                )
+            # §19.3.3 allows a hard-sphere radius here as well as one per
+            # channel (§19.3.4). This used to be reported and dropped, on the
+            # argument that the channel's is the one the phase shift uses —
+            # which says which radius the *physics* reads, not which one the
+            # file states, and a reader that drops the second cannot write the
+            # file back. Four nodes in three files carry one (V-51, Ca-40,
+            # Cl-35; measured 2026-08-24 over the 558 distributed evaluations).
+            reactionHardSphere, hardSphereUnit = self.modelRadius(
+                child.find("hardSphereRadius"), here)
             out.append(ResonanceReaction(
                 label=child.attrib.get("label", ""),
                 ejectile=child.attrib.get("ejectile"),
                 eliminated=_isTrue(child, "eliminated"),
                 Q=_constant(child.find("Q")),
                 scatteringRadius=reactionRadius,
-                radiusUnit=reactionRadiusUnit,
+                hardSphereRadius=reactionHardSphere,
+                # One unit for both, as `Channel` already does: they come off
+                # sibling nodes and no file states them differently.
+                radiusUnit=reactionRadiusUnit or hardSphereUnit,
                 href=None if link is None else link.attrib.get("href"),
             ))
         return out

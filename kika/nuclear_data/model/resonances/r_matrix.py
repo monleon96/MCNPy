@@ -73,8 +73,20 @@ class ResonanceReaction:
     #: gets. ``None`` for an ENDF-decoded evaluation, which has no link to give.
     href: Optional[str] = None
     #: The unit ``scatteringRadius`` was read with. Same field, same reason as
-    #: :attr:`Channel.radiusUnit`.
+    #: :attr:`Channel.radiusUnit`, and it covers ``hardSphereRadius`` too — they
+    #: come off sibling nodes and no file states them differently.
     radiusUnit: Optional[str] = None
+    #: §19.3.3 allows a hard-sphere radius here as well as on each channel
+    #: (§19.3.4). **Four nodes in three files** carry one — V-51, Ca-40 and
+    #: Cl-35, measured over the 558 distributed neutron evaluations on
+    #: 2026-08-24 — and until then the reader dropped it with a report entry,
+    #: on the argument that the channel's is the one the phase shift uses.
+    #: That argument is about which radius the *physics* reads, not about which
+    #: one the file states, so it justified not consuming the number and never
+    #: justified not carrying it: a reader that drops it cannot write the file
+    #: back. Modelled now, one field beside its sibling. See
+    #: ``docs/library/gnds_endf_conflicts.md`` §6.4.
+    hardSphereRadius: Optional[float] = None
 
 
 @dataclass

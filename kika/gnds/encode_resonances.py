@@ -237,10 +237,14 @@ def _resonanceReaction(parent: ET.Element, reaction, report: ConversionReport,
         )
     if reaction.Q is not None:
         _constant(element, "Q", reaction.Q, domain, unit="eV", label="Q")
-    if reaction.scatteringRadius is not None:
-        _constant(element, "scatteringRadius", reaction.scatteringRadius,
-                  domain, unit=_radiusUnit(reaction.radiusUnit, report,
-                                           "resonanceReaction"))
+    # Both radii §19.3.3 allows here, in the schema's order. The channel writer
+    # below does the same pair for §19.3.4's.
+    for tag, value in (("scatteringRadius", reaction.scatteringRadius),
+                       ("hardSphereRadius", reaction.hardSphereRadius)):
+        if value is not None:
+            _constant(element, tag, value, domain,
+                      unit=_radiusUnit(reaction.radiusUnit, report,
+                                       f"resonanceReaction/{tag}"))
 
 
 def _spinGroup(parent: ET.Element, group, report: ConversionReport,
