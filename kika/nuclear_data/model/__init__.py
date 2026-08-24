@@ -30,8 +30,28 @@ for it.
 What exists is §2-7 (units, quantities, enumerations, axes, values, the
 one-dimensional functional containers) and the §9-25 hierarchy — ``styles``,
 ``reactionSuite`` and its children, resonances split by formalism, and the
-``covarianceSuite``. The containers are structurally complete and mostly empty:
-nothing decodes an ENDF file into them yet, which is phase 3c.
+``covarianceSuite``.
+
+**Three decoders fill these containers, and one door reaches all three.**
+``kika.endf.model_adapter.decode``, ``kika.ace.model_adapter.decode`` and
+``kika.gnds.decode`` each build a ``ReactionSuite``; ``kika.read()``
+(``kika/_read.py``) sniffs the format from the file's content and routes to
+whichever applies. Do not take that on this docstring's word —
+``kika/tests/test_read_front_door.py`` holds it up, asserting for each of the
+three that the door is a *route* and not a fourth decoder.
+
+What the decoders do not reach is the shorter list. **MF6** is parsed but no
+adapter hangs it on the model — ``endf/model_adapter/decode.py`` says so in the
+``ConversionReport``, and the model slots have existed since phase 7b, so what
+is missing is the adapter and not a node. **MF12-15** have no parser at all. Of
+**MF5** only the tabulated LF=1 spectra become model nodes; the six analytic
+laws of §18.3 and every NK>1 partial are carried as bytes in the provenance, so
+they return to the tape without ever being modelled.
+
+A docstring that reasons about the state of *another* part of this tree expires
+in silence: the paragraph above replaced one that had gone on claiming, long
+after phase 3c closed, that nothing decoded ENDF into these containers. Either
+date such a sentence or point it at the test that fails when it stops holding.
 """
 from __future__ import annotations
 

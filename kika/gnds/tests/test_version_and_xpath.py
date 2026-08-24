@@ -28,8 +28,13 @@ def test_both_accepted_versions_pass_through_unchanged(declared):
 
 
 @pytest.mark.parametrize("declared", sorted(REFUSED))
-def test_the_pre_2_0_versions_are_refused_by_name(declared):
-    """1.9 and 1.10 are where the 149 change requests fell. Refused, not attempted."""
+def test_every_named_version_is_refused_with_its_own_reason(declared):
+    """Refusal is two-sided: 1.9/1.10 are older, 2.2/2.2.rc1 newer.
+
+    1.9 and 1.10 are where the 149 change requests fell. 2.2 is past the
+    specification the model is built to. Both are refused rather than
+    attempted, and both say which they are.
+    """
     with pytest.raises(UnsupportedGndsVersion) as raised:
         checkFormat(declared, source="Fe56.gnds.xml")
     message = str(raised.value)
@@ -38,10 +43,24 @@ def test_the_pre_2_0_versions_are_refused_by_name(declared):
     assert "2.0, 2.1" in message
 
 
+def test_the_newer_versions_are_named_and_not_left_to_the_generic_branch():
+    """The whole value of the 2.2 entry is that the message says *newer*.
+
+    Without it 2.2 falls through to "kika does not recognise", which can only
+    guess at the direction. This is the assertion that entry buys.
+    """
+    for declared in ("2.2", "2.2.rc1"):
+        with pytest.raises(UnsupportedGndsVersion) as raised:
+            checkFormat(declared)
+        message = str(raised.value)
+        assert "does not recognise" not in message
+        assert "newer" in message or "release candidate" in message
+
+
 def test_an_unknown_version_is_refused_rather_than_attempted():
-    """A future 2.2 must not be read with 2.1 rules and no complaint."""
+    """A version past every name in REFUSED must not be read with 2.1 rules."""
     with pytest.raises(UnsupportedGndsVersion) as raised:
-        checkFormat("2.2")
+        checkFormat("2.3")
     assert "would not raise" in str(raised.value)
 
 

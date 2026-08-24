@@ -15,12 +15,25 @@ refuses ``1.9``/``1.10`` by name. That is not a shortcut. The 2.1 specification
 (NEA/WKP(2025)6, foreword) describes itself as *"a modest update"* over 2.0
 whose changes *"focus on improving handling for thermal neutron scattering law
 data"* — which kika does not read at all — against **149** approved change
-requests for 1.9 → 2.0. And FUDGE 6.10.0, the reference implementation, lists
-2.1 among its allowed format versions while containing not one branch on it:
-its only per-version renames are for 1.10. For everything kika models, 2.0 and
+requests for 1.9 → 2.0. And FUDGE 6.10.0 — the reference implementation, and
+the copy installed here at ``/soft_snc/FUDGE/6.10.0/`` — lists 2.1 among its
+allowed format versions while containing not one branch on it. **Measured
+2026-08-24** over that tree: ``fudge/GNDS_formatVersion.py`` declares
+``allowed = ('1.10', '2.0', '2.1')`` with ``default = '2.0'``, and outside that
+module ``2.1`` appears **0** times against **61** for ``1.10`` — every
+per-version branch it has is a 1.10 rename. For everything kika models, 2.0 and
 2.1 are the same format, so a version-dispatch layer would have zero branches
 in it. If a later version does change a node kika reads, the branch goes in at
 that node, with a fixture of each version beside it.
+
+That measurement is of **6.10.0, the version installed here**, and it is the
+whole point of naming it: FUDGE's ``master`` has since moved on — an external
+architecture review of 2026-08-24 reports it declaring ``1.10``, ``2.0``,
+``2.1`` and ``2.2.rc1``, and defaulting to 2.1 rather than 2.0 when writing
+(not verified here; the installed copy is 6.10.0). That does not reopen the
+decision, because the specification's own foreword is the other half of the
+argument and does not move. It does mean this paragraph must be re-measured
+rather than trusted the day the installed FUDGE changes.
 
 kika's model is built to 2.1; the published libraries are written in 2.0. Both
 are read here, and the writer emits whichever version the suite came in as —
