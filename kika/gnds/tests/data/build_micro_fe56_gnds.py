@@ -24,6 +24,12 @@ So two files are trimmed, between them covering §19 completely:
                   file. Ta-182's whole ``resonances`` subtree is 11.7 kB; the
                   373 kB is all ``reactions`` and ``sums``, which is exactly
                   what this trim removes.
+``micro_sr88``    §19.3.4's ``externalRMatrix``. Added 2026-08-24 with the row
+                  of ``gnds_endf_conflicts.md`` §6.4 it closes: the node exists
+                  **7 times in the whole library and all 7 are in this file**,
+                  so there was no fixture that could gate reading or writing it
+                  and the reader reported it instead. Its ``resonances`` is
+                  41 kB.
 
 **What is kept, whole and unedited:** ``resonances`` — the ``scatteringRadius``,
 the ``resolved`` region with its formalism, the ``resonanceReactions``, the
@@ -118,6 +124,15 @@ TARGETS = {
     "micro_be9.gnds.xml": (
         "n-004_Be_009.endf.gnds.xml",
         ("2n + 2He4",),
+    ),
+    # Same condition as `micro_be9`, one section further on: Sr-88 is the whole
+    # population of §19.3.4's `externalRMatrix` across the 558 distributed
+    # neutron evaluations -- 7 nodes, one file, all `type="SAMMY"`, measured
+    # 2026-08-24. Its `resonances` block is 41 kB of the file's 5.2 MB, so the
+    # trim is almost entirely `reactions` and `sums`, exactly as Ta-182's is.
+    "micro_sr88.gnds.xml": (
+        "n-038_Sr_088.endf.gnds.xml",
+        ("n + Sr88", "Sr89 + photon [inclusive]"),
     ),
 }
 
@@ -275,8 +290,16 @@ def build(source: Path, keepReactions) -> ET.ElementTree:
 
 
 def validate(path: Path) -> None:
-    if not SCHEMA.exists():
-        print(f"[skip] {SCHEMA} is absent; the trim was not schema-validated")
+    if not SCHEMA.exists() or shutil.which("xmllint") is None:
+        # Skipped rather than fatal, and **said out loud**, because a fixture
+        # built without validation is the exact failure this script exists to
+        # prevent. It used to skip only on a missing schema and then die with
+        # `FileNotFoundError` on a machine that has FUDGE and no `xmllint` —
+        # which is every WSL box here. `test_encode.py:322` has always guarded
+        # both; this now does the same.
+        print(f"[skip] {SCHEMA} or xmllint is absent; the trim was NOT "
+              f"schema-validated. Validate it on a machine that has both "
+              f"before committing it.")
         return
     result = subprocess.run(
         ["xmllint", "--noout", "--huge", "--schema", str(SCHEMA), str(path)],

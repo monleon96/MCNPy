@@ -1,0 +1,1001 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<reactionSuite projectile="n" target="Sr88" evaluation="ENDF/B-8.1" format="2.0" projectileFrame="lab" interaction="nuclear">
+  <styles>
+    <evaluated label="eval" date="2023-08-01" library="ENDF/B" version="8.1.1">
+      <documentation>
+        <authors>
+          <author name="M. PIGNI, J. MCDONNELL, K. GUBER" />
+        </authors>
+        <dates>
+          <date value="2023-08-01" dateType="created" />
+        </dates>
+        <title>ENDF-6 file from ENDF/B version 8.1.1 translated to GNDS by FUDGE.</title>
+        <body>See the endfCompatible section.</body>
+        <endfCompatible> 38-Sr- 88 ORNL       EVAL-AUG23 M. PIGNI, J. MCDONNELL, K. GUBER
+                      DIST-AUG24 REV1-JAN24            20240830
+---- ENDF/B-VIII.1    MATERIAL 3837         REVISION 1
+----- INCIDENT-NEUTRON DATA
+------ ENDF-6
+ UPDATING ENDF/B-VIII.0 FILE WITH RESONANCE PARAMETER FOUND IN
+ PHYS. REV. C62 055803 2000.
+ FILE 2 EXTEND UP TO 950 KEV USING EXTERNAL FUNCTION PARAMETERS
+[trimmed]</endfCompatible>
+      </documentation>
+      <temperature value="0" unit="K" />
+      <projectileEnergyDomain min="1e-5" max="2e7" unit="eV" />
+    </evaluated>
+    <crossSectionReconstructed label="recon" derivedFrom="eval" date="2016-11-06" />
+  </styles>
+  <PoPs name="protare_internal" version="1.0" format="2.0">
+    <aliases>
+      <alias id="d" pid="h2" />
+      <alias id="t" pid="h3" />
+      <alias id="h" pid="he3" />
+      <alias id="a" pid="he4" />
+    </aliases>
+    <gaugeBosons>
+      <gaugeBoson id="photon">
+        <mass>
+          <double label="eval" value="0." unit="amu" />
+        </mass>
+        <spin>
+          <fraction label="eval" value="1" unit="hbar" />
+        </spin>
+        <parity>
+          <integer label="eval" value="1" />
+        </parity>
+        <charge>
+          <integer label="eval" value="0" unit="e" />
+        </charge>
+        <halflife>
+          <string label="eval" value="stable" unit="s" />
+        </halflife>
+      </gaugeBoson>
+    </gaugeBosons>
+    <baryons>
+      <baryon id="n">
+        <mass>
+          <double label="eval" value="1.00866491574" unit="amu" />
+        </mass>
+        <spin>
+          <fraction label="eval" value="1/2" unit="hbar" />
+        </spin>
+        <parity>
+          <integer label="eval" value="1" />
+        </parity>
+        <charge>
+          <integer label="eval" value="0" unit="e" />
+        </charge>
+        <halflife>
+          <double label="eval" value="881.5" unit="s" />
+        </halflife>
+      </baryon>
+      <baryon id="p">
+        <mass>
+          <double label="eval" value="1.00727646662" unit="amu" />
+        </mass>
+        <spin>
+          <fraction label="eval" value="1/2" unit="hbar" />
+        </spin>
+        <parity>
+          <integer label="eval" value="1" />
+        </parity>
+        <charge>
+          <integer label="eval" value="1" unit="e" />
+        </charge>
+        <halflife>
+          <string label="eval" value="stable" unit="s" />
+        </halflife>
+      </baryon>
+    </baryons>
+    <chemicalElements>
+      <chemicalElement symbol="Sr" Z="38" name="Strontium">
+        <isotopes>
+          <isotope symbol="Sr88" A="88">
+            <nuclides>
+              <nuclide id="Sr88">
+                <mass>
+                  <double label="eval" value="87.9051474067" unit="amu" />
+                </mass>
+                <charge>
+                  <integer label="eval" value="0" unit="e" />
+                </charge>
+                <nucleus id="sr88" index="0">
+                  <spin>
+                    <fraction label="eval" value="0" unit="hbar" />
+                  </spin>
+                  <parity>
+                    <integer label="eval" value="1" />
+                  </parity>
+                  <charge>
+                    <integer label="eval" value="38" unit="e" />
+                  </charge>
+                  <energy>
+                    <double label="eval" value="0." unit="eV" />
+                  </energy>
+                </nucleus>
+              </nuclide>
+            </nuclides>
+          </isotope>
+          <isotope symbol="Sr89" A="89">
+            <nuclides>
+              <nuclide id="Sr89">
+                <mass>
+                  <double label="eval" value="88.9142763083" unit="amu" />
+                </mass>
+                <charge>
+                  <integer label="eval" value="0" unit="e" />
+                </charge>
+                <nucleus id="sr89" index="0">
+                  <charge>
+                    <integer label="eval" value="38" unit="e" />
+                  </charge>
+                  <energy>
+                    <double label="eval" value="0." unit="eV" />
+                  </energy>
+                </nucleus>
+              </nuclide>
+            </nuclides>
+          </isotope>
+        </isotopes>
+      </chemicalElement>
+    </chemicalElements>
+  </PoPs>
+  <resonances>
+    <scatteringRadius>
+      <constant1d label="eval" value="7.1" domainMin="1e-5" domainMax="9.5e5">
+        <axes>
+          <axis index="1" label="energy_in" unit="eV" />
+          <axis index="0" label="radius" unit="fm" />
+        </axes>
+      </constant1d>
+    </scatteringRadius>
+    <resolved domainMin="1e-5" domainMax="9.5e5" domainUnit="eV">
+      <RMatrix label="eval" approximation="ReichMoore" boundaryCondition="EliminateShiftFunction" supportsAngularReconstruction="true">
+        <resonanceReactions>
+          <resonanceReaction label="Sr89 + photon [inclusive]" ejectile="photon" eliminated="true">
+            <link href="/reactionSuite/reactions/reaction[@label='Sr89 + photon [inclusive]']" />
+          </resonanceReaction>
+          <resonanceReaction label="n + Sr88" ejectile="n">
+            <link href="/reactionSuite/reactions/reaction[@label='n + Sr88']" />
+          </resonanceReaction>
+        </resonanceReactions>
+        <spinGroups>
+          <spinGroup label="0" spin="1/2" parity="1">
+            <channels>
+              <channel label="0" resonanceReaction="Sr89 + photon [inclusive]" L="0" channelSpin="0" columnIndex="1" />
+              <channel label="1" resonanceReaction="n + Sr88" L="0" channelSpin="1/2" columnIndex="2">
+                <externalRMatrix type="SAMMY">
+                  <double label="constantExternalR" value="-0.043" />
+                  <double label="linearExternalR" value="2.8e-8" unit="1/eV" />
+                  <double label="quadraticExternalR" value="0." unit="1/eV**2" />
+                  <double label="constantLogarithmicCoefficient" value="0.01" />
+                  <double label="linearLogarithmicCoefficient" value="0." unit="1/eV" />
+                  <double label="singularityEnergyBelow" value="0." unit="eV" />
+                  <double label="singularityEnergyAbove" value="9.55e5" unit="eV" />
+                </externalRMatrix>
+                <hardSphereRadius>
+                  <constant1d value="6.8" domainMin="1e-5" domainMax="9.5e5">
+                    <axes>
+                      <axis index="1" label="energy_in" unit="eV" />
+                      <axis index="0" label="radius" unit="fm" />
+                    </axes>
+                  </constant1d>
+                </hardSphereRadius>
+              </channel>
+            </channels>
+            <resonanceParameters>
+              <table rows="66" columns="3">
+                <columnHeaders>
+                  <column index="0" name="energy" unit="eV" />
+                  <column index="1" name="Sr89 + photon [inclusive] width" unit="eV" />
+                  <column index="2" name="n + Sr88 width" unit="eV" />
+                </columnHeaders>
+                <data>
+                 
+                 
+                       13840                      0.0805     194.15
+                       48570                      0.0663       7.97
+                       58900                      0.0234       2.03
+                       91340                       0.273        953
+                      105460                       0.305      256.2
+                      141680                       0.079        501
+                      181060                         0.1      176.3
+                      194810                       0.166       47.4
+                      230200                       0.419       1452
+                      258670                       0.339      476.3
+                      265060                       0.098      153.5
+                      302080                       0.297      232.8
+                      318810                       0.178       21.2
+                      340120                         0.1        3.2
+                      347290                       0.064        202
+                      392240                        0.19       24.4
+                      418860                        0.19      478.5
+                      422640                        0.19       22.4
+                      441320                        0.19      718.8
+                      455760                        0.19        6.8
+                      460090                        0.19       20.1
+                      477620                        0.19      374.1
+                      516500                        0.19      584.1
+                      551430                        0.19       51.5
+                      584810                        0.19       3132
+                      605900                        0.19       53.9
+                      615300                        0.19        470
+                      632670                        0.19      339.4
+                      655830                        0.19       42.3
+                      670690                        0.19        336
+                      686400                        0.19       21.6
+                      687250                        0.19       29.5
+                      687790                        0.19       29.4
+                      693460                        0.19       57.7
+                      695830                        0.19       28.1
+                      699380                        0.19       52.2
+                      704170                        0.19         34
+                      717070                        0.19        490
+                      743790                        0.19        718
+                      764150                        0.19        408
+                      770420                        0.19        112
+                      801880                        0.19       46.4
+                      810940                        0.19       29.1
+                      811720                        0.19       40.6
+                      821290                        0.19       15.5
+                      821680                        0.19       67.4
+                      823820                        0.19       48.1
+                      836110                        0.19       1163
+                      837360                        0.19       72.4
+                      838500                        0.19       36.4
+                      840540                        0.19       75.2
+                      850980                        0.19       1620
+                      862310                        0.19       60.9
+                      866750                        0.19        526
+                      868470                        0.19       53.2
+                      870320                        0.19       38.3
+                      883570                        0.19       17.8
+                      883730                        0.19       19.6
+                      885220                        0.19       28.1
+                      895560                        0.19        326
+                      899290                        0.19        517
+                      902480                        0.19        237
+                      913880                        0.19        622
+                      917050                        0.19      127.9
+                      940780                        0.19       79.8
+                      943340                        0.19        199</data>
+              </table>
+            </resonanceParameters>
+          </spinGroup>
+          <spinGroup label="1" spin="1/2" parity="-1">
+            <channels>
+              <channel label="0" resonanceReaction="Sr89 + photon [inclusive]" L="0" channelSpin="0" columnIndex="1" />
+              <channel label="1" resonanceReaction="n + Sr88" L="1" channelSpin="1/2" columnIndex="2">
+                <externalRMatrix type="SAMMY">
+                  <double label="constantExternalR" value="0.45" />
+                  <double label="linearExternalR" value="3.2e-7" unit="1/eV" />
+                  <double label="quadraticExternalR" value="0." unit="1/eV**2" />
+                  <double label="constantLogarithmicCoefficient" value="0.075" />
+                  <double label="linearLogarithmicCoefficient" value="0." unit="1/eV" />
+                  <double label="singularityEnergyBelow" value="0." unit="eV" />
+                  <double label="singularityEnergyAbove" value="9.55e5" unit="eV" />
+                </externalRMatrix>
+              </channel>
+            </channels>
+            <resonanceParameters>
+              <table rows="70" columns="3">
+                <columnHeaders>
+                  <column index="0" name="energy" unit="eV" />
+                  <column index="1" name="Sr89 + photon [inclusive] width" unit="eV" />
+                  <column index="2" name="n + Sr88 width" unit="eV" />
+                </columnHeaders>
+                <data>
+                 
+                 
+                       12410                      0.4462      20.86
+                       12910                        0.22     4.8e-3
+                       20810                        0.22     0.0897
+                       26980                        0.22     0.0105
+                       36780                        0.22     0.0679
+                       39070                      0.0842       3.89
+                       40150                        0.22      0.099
+                       46470                        0.22      0.118
+                       53790                        0.11       2.24
+                       55950                       0.079      146.3
+                       65480                        0.22      0.083
+                      110150                       0.146      284.9
+                      117150                        0.22      0.091
+                      120100                        0.22      0.058
+                      150870                       0.703       1205
+                      186870                       0.114       4.88
+                      200670                       0.078      425.3
+                      202530                       0.081       16.1
+                      225190                       0.058       8.53
+                      227690                       0.415      364.5
+                      232930                       0.152       0.92
+                      235760                       0.056       15.7
+                      241080                       0.117      10.23
+                      245110                       0.281        9.3
+                      246060                       0.126       10.9
+                      256240                       0.187         29
+                      267960                       0.067          7
+                      277640                       0.615        7.1
+                      297820                        7e-2       11.8
+                      298040                       0.054       12.5
+                      308130                       0.068       96.5
+                      310960                       0.286        5.8
+                      322670                       0.182      183.8
+                      330040                       0.029       23.4
+                      334330                       0.092       90.2
+                      350860                        0.22       47.7
+                      353640                        0.22       17.1
+                      355030                        0.22      472.7
+                      358980                        0.22       44.7
+                      368180                        0.22      158.1
+                      385850                        0.22        938
+                      403960                        0.22       6158
+                      422900                        0.22      109.2
+                      423300                        0.22       95.3
+                      436090                        0.22      374.5
+                      437920                        0.22       13.7
+                      446250                        0.22      118.5
+                      447040                        0.22       66.8
+                      466110                        0.22       38.4
+                      485300                        0.22      196.3
+                      486960                        0.22      133.1
+                      506140                        0.22       3699
+                      521030                        0.22      14568
+                      536660                        0.22      10997
+                      571180                        0.22       1759
+                      616960                        0.22       5071
+                      621200                        0.22      156.9
+                      621990                        0.22      221.1
+                      623190                        0.22       60.1
+                      643880                        0.22        395
+                      659840                        0.22      303.6
+                      660680                        0.22      140.3
+                      693420                        0.22       1039
+                      696880                        0.22      12074
+                      715890                        0.22       3064
+                      739670                        0.22        373
+                      743810                        0.22       20.4
+                      780240                        0.22        534
+                      814260                        0.22       1482
+                      833170                        0.22       1331</data>
+              </table>
+            </resonanceParameters>
+          </spinGroup>
+          <spinGroup label="2" spin="3/2" parity="-1">
+            <channels>
+              <channel label="0" resonanceReaction="Sr89 + photon [inclusive]" L="0" channelSpin="0" columnIndex="1" />
+              <channel label="1" resonanceReaction="n + Sr88" L="1" channelSpin="1/2" columnIndex="2">
+                <externalRMatrix type="SAMMY">
+                  <double label="constantExternalR" value="0.43" />
+                  <double label="linearExternalR" value="-1.8e-7" unit="1/eV" />
+                  <double label="quadraticExternalR" value="0." unit="1/eV**2" />
+                  <double label="constantLogarithmicCoefficient" value="0.22" />
+                  <double label="linearLogarithmicCoefficient" value="0." unit="1/eV" />
+                  <double label="singularityEnergyBelow" value="0." unit="eV" />
+                  <double label="singularityEnergyAbove" value="9.55e5" unit="eV" />
+                </externalRMatrix>
+              </channel>
+            </channels>
+            <resonanceParameters>
+              <table rows="104" columns="3">
+                <columnHeaders>
+                  <column index="0" name="energy" unit="eV" />
+                  <column index="1" name="Sr89 + photon [inclusive] width" unit="eV" />
+                  <column index="2" name="n + Sr88 width" unit="eV" />
+                </columnHeaders>
+                <data>
+                 
+                 
+                       18210                        0.28     8.5e-4
+                       23610                      0.1315      66.07
+                       29520                      0.1989       68.5
+                       47950                        0.28     0.0755
+                       54660                      0.2211      19.25
+                       56990                        0.28      0.063
+                       73770                        0.28      0.045
+                       75500                         0.3       0.18
+                       76890                        0.28      0.059
+                       88560                       0.099     210.85
+                       93080                        0.28     0.0695
+                       95370                       0.227     223.95
+                      101950                        0.28      0.061
+                      107450                        0.28     0.0715
+                      115920                        0.28      0.075
+                      122290                       0.625     1555.5
+                      125950                        0.28     0.0645
+                      126400                        0.28     0.0945
+                      127900                        0.28     0.1505
+                      132850                        0.28      0.076
+                      137350                        0.28     0.0605
+                      147300                        0.28      0.113
+                      150200                       0.084       21.7
+                      153890                       0.085        279
+                      1.56e5                        0.28     0.0955
+                      160850                        0.28     0.1135
+                      169850                        0.28     0.0525
+                      170790                       0.091     331.45
+                      173380                       0.339       1.03
+                      177850                       0.196       3.15
+                      187620                       0.202       2.68
+                      192850                        0.28      0.099
+                      195230                       0.173     1107.3
+                      204210                        0.24      75.65
+                      212130                        0.28     0.1835
+                      214290                       0.191        5e2
+                      224760                       0.153       1.91
+                      228290                       0.094      942.7
+                      247030                       0.571       1810
+                      252020                        0.28     0.0985
+                      258990                       0.319      24.05
+                      270600                        0.28     0.0935
+                      278790                       0.128      35.75
+                      281630                        0.28       0.38
+                      287470                        0.68        7.3
+                      289490                       0.718      12466
+                      302960                       0.479     1258.5
+                      325300                       0.572      11041
+                      344330                        9e-2     2026.5
+                      364880                        0.28      495.2
+                      368300                        0.28      70.25
+                      370210                        0.28      16.75
+                      373570                        0.28      14.05
+                      377700                        0.28       77.3
+                      379460                        0.28      34.05
+                      382290                        0.28     353.15
+                      386080                        0.28     2197.5
+                      400580                        0.28     166.45
+                      410110                        0.28     178.95
+                      430690                        0.28     567.95
+                      441650                        0.28     8201.5
+                      475490                        0.28      449.7
+                      487580                        0.28       1844
+                      492810                        0.28       1629
+                      502470                        0.28       1381
+                      520920                        0.28      21504
+                      524900                        0.28        573
+                      535260                        0.28     1101.5
+                      542430                        0.28       1524
+                      545530                        0.28       1091
+                      553150                        0.28        959
+                      563440                        0.28       7439
+                      581550                        0.28       3599
+                      589460                        0.28      11685
+                      591940                        0.28        130
+                      603120                        0.28       21.6
+                      639530                        0.28       6216
+                      662090                        0.28       1476
+                      666290                        0.28       6953
+                      680220                        0.28     4147.5
+                      699040                        0.28       1527
+                      719530                        0.28      259.5
+                      723100                        0.28     2316.5
+                      731130                        0.28       7547
+                      739520                        0.28     3215.5
+                      754670                        0.28     7773.5
+                      766260                        0.28      15680
+                      772620                        0.28      827.5
+                      774700                        0.28     9702.5
+                      780500                        0.28     1142.5
+                      785310                        0.28       6001
+                      788400                        0.28        266
+                      794430                        0.28     7369.9
+                      808710                        0.28      372.5
+                      813760                        0.28        653
+                      820830                        0.28       5399
+                      822970                        0.28       2717
+                      827640                        0.28     2113.5
+                      851970                        0.28      19285
+                      893830                        0.28      16460
+                      905660                        0.28      442.5
+                      920490                        0.28      10173
+                      930380                        0.28     4318.5
+                      948230                        0.28      10135</data>
+              </table>
+            </resonanceParameters>
+          </spinGroup>
+          <spinGroup label="3" spin="3/2" parity="1">
+            <channels>
+              <channel label="0" resonanceReaction="Sr89 + photon [inclusive]" L="0" channelSpin="0" columnIndex="1" />
+              <channel label="1" resonanceReaction="n + Sr88" L="2" channelSpin="1/2" columnIndex="2">
+                <externalRMatrix type="SAMMY">
+                  <double label="constantExternalR" value="-0.7" />
+                  <double label="linearExternalR" value="2.3e-6" unit="1/eV" />
+                  <double label="quadraticExternalR" value="0." unit="1/eV**2" />
+                  <double label="constantLogarithmicCoefficient" value="0.041" />
+                  <double label="linearLogarithmicCoefficient" value="0." unit="1/eV" />
+                  <double label="singularityEnergyBelow" value="0." unit="eV" />
+                  <double label="singularityEnergyAbove" value="9.55e5" unit="eV" />
+                </externalRMatrix>
+              </channel>
+            </channels>
+            <resonanceParameters>
+              <table rows="30" columns="3">
+                <columnHeaders>
+                  <column index="0" name="energy" unit="eV" />
+                  <column index="1" name="Sr89 + photon [inclusive] width" unit="eV" />
+                  <column index="2" name="n + Sr88 width" unit="eV" />
+                </columnHeaders>
+                <data>
+                 
+                 
+                      266530                       0.121      25.25
+                      329400                       0.027      105.7
+                      409110                        0.28      19.65
+                      422450                        0.28      956.5
+                      426870                        0.28      31.85
+                      432860                        0.28       57.3
+                      458350                        0.28     114.75
+                      469380                        0.28     205.55
+                      480860                        0.28      27.05
+                      487540                        0.28        7.5
+                      491420                        0.28       32.3
+                      494780                        0.28      27.05
+                      497310                        0.28       16.7
+                      506520                        0.28       5.75
+                      513790                        0.28       68.2
+                      531750                        0.28       3.85
+                      570610                        0.28       8.15
+                      585720                        0.28      88.85
+                      593400                        0.28      91.65
+                      596110                        0.28      91.45
+                      6.11e5                        0.28      24.15
+                      611870                        0.28      24.45
+                      615790                        0.28      51.25
+                      620890                        0.28      14.25
+                      623580                        0.28        173
+                      628240                        0.28      158.7
+                      708650                        0.28       3697
+                      847530                        0.28      195.5
+                      850280                        0.28      751.5
+                      874940                        0.28       1506</data>
+              </table>
+            </resonanceParameters>
+          </spinGroup>
+          <spinGroup label="4" spin="5/2" parity="1">
+            <channels>
+              <channel label="0" resonanceReaction="Sr89 + photon [inclusive]" L="0" channelSpin="0" columnIndex="1" />
+              <channel label="1" resonanceReaction="n + Sr88" L="2" channelSpin="1/2" columnIndex="2">
+                <externalRMatrix type="SAMMY">
+                  <double label="constantExternalR" value="-2.5" />
+                  <double label="linearExternalR" value="3.3e-6" unit="1/eV" />
+                  <double label="quadraticExternalR" value="0." unit="1/eV**2" />
+                  <double label="constantLogarithmicCoefficient" value="2.6e-3" />
+                  <double label="linearLogarithmicCoefficient" value="0." unit="1/eV" />
+                  <double label="singularityEnergyBelow" value="0." unit="eV" />
+                  <double label="singularityEnergyAbove" value="9.55e5" unit="eV" />
+                </externalRMatrix>
+              </channel>
+            </channels>
+            <resonanceParameters>
+              <table rows="10" columns="3">
+                <columnHeaders>
+                  <column index="0" name="energy" unit="eV" />
+                  <column index="1" name="Sr89 + photon [inclusive] width" unit="eV" />
+                  <column index="2" name="n + Sr88 width" unit="eV" />
+                </columnHeaders>
+                <data>
+                 
+                 
+                      409820                        0.28     3.6333
+                      477070                        0.28       21.9
+                      505920                        0.28     4.4333
+                      507360                        0.28     5.1667
+                      542500                        0.28     16.433
+                      564470                        0.28     28.233
+                      571050                        0.28     127.53
+                      695030                        0.28     46.667
+                      722500                        0.28     51.467
+                      849610                        0.28     71.667</data>
+              </table>
+            </resonanceParameters>
+          </spinGroup>
+          <spinGroup label="5" spin="5/2" parity="-1">
+            <channels>
+              <channel label="0" resonanceReaction="Sr89 + photon [inclusive]" L="0" channelSpin="0" columnIndex="1" />
+              <channel label="1" resonanceReaction="n + Sr88" L="3" channelSpin="1/2" columnIndex="2">
+                <externalRMatrix type="SAMMY">
+                  <double label="constantExternalR" value="1.e-3" />
+                  <double label="linearExternalR" value="4.6e-7" unit="1/eV" />
+                  <double label="quadraticExternalR" value="0." unit="1/eV**2" />
+                  <double label="constantLogarithmicCoefficient" value="0.24" />
+                  <double label="linearLogarithmicCoefficient" value="0." unit="1/eV" />
+                  <double label="singularityEnergyBelow" value="0." unit="eV" />
+                  <double label="singularityEnergyAbove" value="9.55e5" unit="eV" />
+                </externalRMatrix>
+              </channel>
+            </channels>
+            <resonanceParameters>
+              <table rows="90" columns="3">
+                <columnHeaders>
+                  <column index="0" name="energy" unit="eV" />
+                  <column index="1" name="Sr89 + photon [inclusive] width" unit="eV" />
+                  <column index="2" name="n + Sr88 width" unit="eV" />
+                </columnHeaders>
+                <data>
+                 
+                 
+                      408460                        0.28       10.6
+                      409280                        0.28     38.833
+                      430580                        0.28     10.067
+                      486740                        0.28     84.567
+                      487180                        0.28     11.733
+                      506930                        0.28     5.2667
+                      509330                        0.28     8.4333
+                      522210                        0.28     33.867
+                      530580                        0.28     38.367
+                      532860                        0.28       78.8
+                      544620                        0.28          9
+                      575190                        0.28     35.267
+                      592320                        0.28     12.933
+                      598880                        0.28     22.233
+                      613460                        0.28     49.633
+                      619550                        0.28     19.467
+                      625720                        0.28        7.4
+                      626950                        0.28     56.667
+                      627090                        0.28       62.5
+                      637580                        0.28       38.8
+                      638200                        0.28     64.767
+                      652130                        0.28         29
+                      652440                        0.28     36.467
+                      656600                        0.28       10.4
+                      664620                        0.28     38.633
+                      673090                        0.28     14.733
+                      674400                        0.28     60.933
+                      676170                        0.28       47.2
+                      677520                        0.28         17
+                      678110                        0.28     16.633
+                      681520                        0.28     52.167
+                      682230                        0.28     20.067
+                      682850                        0.28     13.433
+                      688320                        0.28     5.0333
+                      694570                        0.28     105.33
+                      697430                        0.28     22.967
+                      698650                        0.28         30
+                      700120                        0.28       18.8
+                      704780                        0.28     14.967
+                      705480                        0.28     14.733
+                      706090                        0.28     111.73
+                      710410                        0.28     30.833
+                      714570                        0.28       43.7
+                      716980                        0.28     79.733
+                      719110                        0.28     48.133
+                      724380                        0.28     22.367
+                      726860                        0.28       13.4
+                      731630                        0.28     37.533
+                      734930                        0.28     17.967
+                      747230                        0.28     20.533
+                      751120                        0.28     22.067
+                      757940                        0.28     76.667
+                      758900                        0.28       80.4
+                      761830                        0.28     103.27
+                      765620                        0.28       15.6
+                      767040                        0.28     137.33
+                      767710                        0.28       25.2
+                      774550                        0.28         70
+                      774880                        0.28        221
+                      781900                        0.28     33.667
+                      783300                        0.28       41.9
+                      785550                        0.28       63.7
+                      793440                        0.28     63.533
+                      794340                        0.28         52
+                      798660                        0.28     125.13
+                      801290                        0.28     43.033
+                      802510                        0.28     71.367
+                      804250                        0.28     34.033
+                      815550                        0.28     25.733
+                      816130                        0.28       16.3
+                      820230                        0.28       98.3
+                      822410                        0.28     167.23
+                      828500                        0.28     39.767
+                      832600                        0.28        192
+                      8.34e5                        0.28     131.67
+                      839690                        0.28     99.933
+                      861360                        0.28     37.933
+                      871390                        0.28       26.3
+                      874970                        0.28         40
+                      878200                        0.28     286.67
+                      880070                        0.28       88.6
+                      881180                        0.28     179.67
+                      887650                        0.28     23.633
+                      889160                        0.28     204.67
+                      889710                        0.28     56.667
+                      891090                        0.28     161.33
+                      892790                        0.28         69
+                      893150                        0.28     125.67
+                      898730                        0.28     30.333
+                      899440                        0.28     129.33</data>
+              </table>
+            </resonanceParameters>
+          </spinGroup>
+          <spinGroup label="6" spin="7/2" parity="-1">
+            <channels>
+              <channel label="0" resonanceReaction="Sr89 + photon [inclusive]" L="0" channelSpin="0" columnIndex="1" />
+              <channel label="1" resonanceReaction="n + Sr88" L="3" channelSpin="1/2" columnIndex="2">
+                <externalRMatrix type="SAMMY">
+                  <double label="constantExternalR" value="1.e-3" />
+                  <double label="linearExternalR" value="9.e-8" unit="1/eV" />
+                  <double label="quadraticExternalR" value="0." unit="1/eV**2" />
+                  <double label="constantLogarithmicCoefficient" value="0.19" />
+                  <double label="linearLogarithmicCoefficient" value="0." unit="1/eV" />
+                  <double label="singularityEnergyBelow" value="0." unit="eV" />
+                  <double label="singularityEnergyAbove" value="9.55e5" unit="eV" />
+                </externalRMatrix>
+              </channel>
+            </channels>
+            <resonanceParameters>
+              <table rows="73" columns="3">
+                <columnHeaders>
+                  <column index="0" name="energy" unit="eV" />
+                  <column index="1" name="Sr89 + photon [inclusive] width" unit="eV" />
+                  <column index="2" name="n + Sr88 width" unit="eV" />
+                </columnHeaders>
+                <data>
+                 
+                 
+                      528840                        0.28      59.95
+                      533660                        0.28     27.925
+                      574720                        0.28     19.175
+                      600410                        0.28     12.775
+                      604650                        0.28         10
+                      618450                        0.28       42.1
+                      639070                        0.28     20.625
+                      639300                        0.28     70.075
+                      671150                        0.28     32.825
+                      672620                        0.28     11.725
+                      673890                        0.28     12.575
+                      676760                        0.28     10.075
+                      678640                        0.28     68.325
+                      681190                        0.28     33.825
+                      684720                        0.28     70.725
+                      689930                        0.28       20.7
+                      694330                        0.28      50.25
+                      694900                        0.28         81
+                      696950                        0.28      10.05
+                      697810                        0.28       24.5
+                      698230                        0.28      34.85
+                      709710                        0.28     17.725
+                      766160                        0.28     16.175
+                      766630                        0.28     36.125
+                      770040                        0.28         30
+                      770280                        0.28         77
+                      775810                        0.28         11
+                      776380                        0.28     29.225
+                      782380                        0.28      43.65
+                      782820                        0.28      36.75
+                      786190                        0.28       65.5
+                      786740                        0.28       62.5
+                      788170                        0.28        115
+                      794820                        0.28        107
+                      795310                        0.28       45.5
+                      807410                        0.28      70.05
+                      812870                        0.28     54.175
+                      813340                        0.28         68
+                      816900                        0.28     33.325
+                      841470                        0.28      53.35
+                      842670                        0.28        6.3
+                      846030                        0.28       25.3
+                      847900                        0.28      192.5
+                      853260                        0.28      17.75
+                      863850                        0.28         16
+                      872120                        0.28     21.925
+                      877720                        0.28      115.5
+                      878850                        0.28      63.75
+                      880670                        0.28     130.25
+                      881780                        0.28     132.75
+                      884370                        0.28      60.35
+                      888320                        0.28       20.7
+                      890560                        0.28     222.75
+                      891680                        0.28      154.5
+                      893850                        0.28      33.25
+                      894530                        0.28      24.25
+                      895500                        0.28       21.5
+                      896620                        0.28      29.75
+                      899090                        0.28     125.25
+                      900040                        0.28      20.75
+                      904250                        0.28         81
+                      911420                        0.28     13.075
+                      913760                        0.28     123.75
+                      915820                        0.28      75.25
+                      921430                        0.28      28.25
+                      928440                        0.28      306.5
+                      933820                        0.28      17.25
+                      934260                        0.28     385.25
+                      939110                        0.28      386.5
+                      942290                        0.28     153.75
+                      944200                        0.28      103.5
+                      945420                        0.28     113.75
+                      947560                        0.28       8.75</data>
+              </table>
+            </resonanceParameters>
+          </spinGroup>
+        </spinGroups>
+      </RMatrix>
+    </resolved>
+  </resonances>
+  <reactions>
+    <reaction label="n + Sr88" ENDF_MT="2">
+      <crossSection>
+        <resonancesWithBackground label="eval">
+          <resonances href="/reactionSuite/resonances" />
+          <background>
+            <resolvedRegion>
+              <XYs1d>
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="crossSection" unit="b" />
+                </axes>
+                <values>
+                  1.00000000e-05 0.00000000e+00 9.50000000e+05 0.00000000e+00</values>
+              </XYs1d>
+            </resolvedRegion>
+            <fastRegion>
+              <XYs1d>
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="crossSection" unit="b" />
+                </axes>
+                <values>9.50000000e+05 6.71340000e+00 1.00000000e+06 6.55840000e+00 1.10670000e+06 6.26350000e+00 1.20000000e+06 6.03170000e+00 1.30000000e+06 5.80760000e+00 1.40000000e+06 5.60620000e+00 1.50000000e+06 5.42500000e+00 1.60000000e+06 5.26160000e+00 1.70000000e+06 5.11390000e+00 1.80000000e+06 4.98040000e+00 1.85720000e+06 4.90960000e+00 1.90910000e+06 4.60840000e+00 1.94250000e+06 4.46300000e+00 2.00000000e+06 4.26440000e+00 2.25000000e+06 3.76700000e+00 2.50000000e+06 3.49330000e+00 2.76550000e+06 3.28850000e+00 3.00000000e+06 3.00790000e+00 3.18820000e+06 2.87880000e+00 3.25540000e+06 2.82460000e+00</values>
+              </XYs1d>
+            </fastRegion>
+          </background>
+        </resonancesWithBackground>
+        <XYs1d label="recon">
+          <axes>
+            <axis index="1" label="energy_in" unit="eV" />
+            <axis index="0" label="crossSection" unit="b" />
+          </axes>
+          <values>1.00000000e-05 8.84320944e+00 1.69385825e-05 8.76449643e+00 2.61092603e-05 8.70013285e+00 3.81244942e-05 8.64401554e+00 5.23520570e-05 8.59714453e+00 9.37653897e-05 8.51134090e+00 1.49096924e-04 8.44336515e+00 2.23780279e-04 8.38407459e+00 3.24112596e-04 8.33017035e+00 5.99441833e-04 8.24107307e+00 1.03338276e-03 8.16256396e+00 1.60067596e-03 8.09975311e+00 2.34244731e-03 8.04529524e+00 3.29478071e-03 7.99666081e+00 6.26457226e-03 7.90545436e+00 1.05048975e-02 7.83246076e+00 1.62717412e-02 7.77093531e+00 2.42408806e-02 7.71510119e+00 3.56786213e-02 7.66115392e+00 5.05020455e-02 7.61281823e+00</values>
+        </XYs1d>
+      </crossSection>
+      <outputChannel genre="twoBody">
+        <Q>
+          <constant1d label="eval" value="0" domainMin="1e-5" domainMax="2e7">
+            <axes>
+              <axis index="1" label="energy_in" unit="eV" />
+              <axis index="0" label="Q" unit="eV" />
+            </axes>
+          </constant1d>
+        </Q>
+        <products>
+          <product pid="n" label="n">
+            <multiplicity>
+              <constant1d label="eval" value="1" domainMin="1e-5" domainMax="2e7">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+              </constant1d>
+            </multiplicity>
+            <distribution>
+              <angularTwoBody label="eval" productFrame="centerOfMass">
+                <XYs2d>
+                  <axes>
+                    <axis index="2" label="energy_in" unit="eV" />
+                    <axis index="1" label="mu" unit="" />
+                    <axis index="0" label="P(mu|energy_in)" unit="" />
+                  </axes>
+                  <function1ds>
+                    <Legendre outerDomainValue="1e-5">
+                      <values>1 0 0</values>
+                    </Legendre>
+                    <Legendre outerDomainValue="1">
+                      <values>1 0 0</values>
+                    </Legendre>
+                    <Legendre outerDomainValue="3">
+                      <values>1 5.64092e-8 9.84221e-8</values>
+                    </Legendre>
+                    <Legendre outerDomainValue="10">
+                      <values>1 3.26104e-7 1.82769e-6</values>
+                    </Legendre>
+                    <Legendre outerDomainValue="30">
+                      <values>1 1.59691e-6 2.37457e-5</values>
+                    </Legendre>
+                    <Legendre outerDomainValue="1e2">
+                      <values>1 8.87063e-6 2.76843e-4</values>
+                    </Legendre>
+                  </function1ds>
+                </XYs2d>
+              </angularTwoBody>
+            </distribution>
+          </product>
+          <product pid="Sr88" label="Sr88">
+            <multiplicity>
+              <constant1d label="eval" value="1" domainMin="1e-5" domainMax="2e7">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+              </constant1d>
+            </multiplicity>
+            <distribution>
+              <angularTwoBody label="eval" productFrame="centerOfMass">
+                <recoil href="../../../../product[@label='n']/distribution/angularTwoBody[@label='eval']" />
+              </angularTwoBody>
+            </distribution>
+          </product>
+        </products>
+      </outputChannel>
+    </reaction>
+    <reaction label="Sr89 + photon [inclusive]" ENDF_MT="102">
+      <crossSection>
+        <resonancesWithBackground label="eval">
+          <resonances href="/reactionSuite/resonances" />
+          <background>
+            <resolvedRegion>
+              <regions1d>
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="crossSection" unit="b" />
+                </axes>
+                <function1ds>
+                  <XYs1d index="0" interpolation="log-log">
+                    <values>
+                      1.00000000e-05 2.16286200e-02 1.00000000e-04 6.83956900e-03 1.00000000e-03 2.16286200e-03 1.00000000e-02 6.83956900e-04 2.53000000e-02 4.30000000e-04 1.00000000e-01 2.16286200e-04 1.00000000e+00 6.83956900e-05 1.00000000e+01 2.16286200e-05 1.00000000e+02 6.83956900e-06 1.00000000e+03 2.16286200e-06 5.00000000e+03 9.67261100e-07</values>
+                  </XYs1d>
+                  <XYs1d index="1">
+                    <values>
+                      5.00000000e+03 9.67261100e-07 1.00000000e+04 0.00000000e+00 1.00000000e+05 0.00000000e+00 9.50000000e+05 0.00000000e+00</values>
+                  </XYs1d>
+                </function1ds>
+              </regions1d>
+            </resolvedRegion>
+            <fastRegion>
+              <XYs1d>
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="crossSection" unit="b" />
+                </axes>
+                <values>9.50000000e+05 3.08313900e-03 1.00000000e+06 3.21770000e-03 1.10670000e+06 3.52940000e-03 1.20000000e+06 3.82180000e-03 1.30000000e+06 4.15670000e-03 1.40000000e+06 4.51560000e-03 1.50000000e+06 4.90030000e-03 1.60000000e+06 5.31270000e-03 1.70000000e+06 5.75480000e-03 1.80000000e+06 6.22840000e-03 1.85720000e+06 6.51420000e-03 1.90910000e+06 5.11160000e-03 1.94250000e+06 4.89020000e-03 2.00000000e+06 4.64460000e-03 2.25000000e+06 4.30380000e-03 2.50000000e+06 4.55090000e-03 2.76550000e+06 4.94710000e-03 3.00000000e+06 3.64310000e-03 3.18820000e+06 3.53160000e-03 3.25540000e+06 3.49200000e-03</values>
+              </XYs1d>
+            </fastRegion>
+          </background>
+        </resonancesWithBackground>
+        <XYs1d label="recon">
+          <axes>
+            <axis index="1" label="energy_in" unit="eV" />
+            <axis index="0" label="crossSection" unit="b" />
+          </axes>
+          <values>1.00000000e-05 2.03947318e-01 1.06524853e-05 1.97612304e-01 1.13049706e-05 1.91826997e-01 1.19574559e-05 1.86515900e-01 1.26099412e-05 1.81620827e-01 1.38441114e-05 1.73341025e-01 1.46668915e-05 1.68406042e-01 1.54896716e-05 1.63869439e-01 1.69385825e-05 1.56709228e-01 1.84948639e-05 1.49966761e-01 2.00511452e-05 1.44032463e-01 2.20136068e-05 1.37464040e-01 2.39760684e-05 1.31713658e-01 2.52843761e-05 1.28270813e-01 2.69341445e-05 1.24277259e-01 2.94087970e-05 1.18933293e-01 3.10585654e-05 1.15726132e-01 3.29236237e-05 1.12405058e-01 3.50039719e-05 1.09014159e-01 3.70843201e-05 1.05911077e-01</values>
+        </XYs1d>
+      </crossSection>
+      <outputChannel genre="NBody" process="inclusive">
+        <Q>
+          <constant1d label="eval" value="6.367e6" domainMin="1e-5" domainMax="2e7">
+            <axes>
+              <axis index="1" label="energy_in" unit="eV" />
+              <axis index="0" label="Q" unit="eV" />
+            </axes>
+          </constant1d>
+        </Q>
+        <products>
+          <product pid="Sr89" label="Sr89">
+            <multiplicity>
+              <constant1d label="eval" value="1" domainMin="1e-5" domainMax="2e7">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+              </constant1d>
+            </multiplicity>
+            <distribution>
+              <unspecified label="eval" productFrame="lab" />
+            </distribution>
+          </product>
+          <product pid="photon" label="photon">
+            <multiplicity>
+              <constant1d label="eval" value="1" domainMin="1e-5" domainMax="2e7">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+              </constant1d>
+            </multiplicity>
+            <distribution>
+              <unspecified label="eval" productFrame="lab" />
+            </distribution>
+          </product>
+        </products>
+      </outputChannel>
+    </reaction>
+  </reactions>
+</reactionSuite>

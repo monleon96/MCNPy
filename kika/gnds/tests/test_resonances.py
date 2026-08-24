@@ -2,9 +2,11 @@
 
 ``micro_fe56`` carries an ``RMatrix``; ``micro_ta182`` carries a
 ``BreitWigner`` and a ``tabulatedWidths``. Between them that is every §19
-formalism in ENDF/B-VIII.1-GNDS, and in both files the ``resonances`` subtree is
-**verbatim** — the build script never touches it, which is the reason those two
-files exist.
+*formalism* in ENDF/B-VIII.1-GNDS. ``micro_sr88`` joined them on 2026-08-24 for
+a node rather than a formalism: §19.3.4's ``externalRMatrix`` exists 7 times in
+the distribution and all 7 are in that one evaluation. In all three the
+``resonances`` subtree is **verbatim** — the build script never touches it,
+which is the reason those files exist.
 
 Numbers here may therefore be asserted, unlike the cross sections in the same
 fixtures. Whether they are the *right* numbers is
@@ -12,6 +14,7 @@ fixtures. Whether they are the *right* numbers is
 """
 from __future__ import annotations
 
+import copy
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -282,17 +285,6 @@ def test_a_table_whose_data_is_short_is_refused_rather_than_reshaped(
                for entry in report.unsupported)
 
 
-def test_an_external_r_matrix_is_named_rather_than_ignored(micro_fe56_gnds):
-    """7 channels in the whole library carry one and kika has no node for it."""
-    tree = ET.parse(micro_fe56_gnds)
-    channel = tree.getroot().find(".//spinGroup/channels/channel")
-    ET.SubElement(channel, "externalRMatrix")
-
-    resonances, report = _readBlock(None, tree.getroot())
-    assert len(resonances.resolved[0].formalism.spinGroups) == 5
-    assert any("externalRMatrix" in entry for entry in report.unsupported)
-
-
 def test_an_unmodelled_resolved_formalism_is_reported(micro_fe56_gnds):
     tree = ET.parse(micro_fe56_gnds)
     resolved = tree.getroot().find("resonances/resolved")
@@ -437,3 +429,166 @@ def test_supports_angular_reconstruction_stays_a_report_entry(ta182):
     if "supportsAngularReconstruction" not in said:
         pytest.skip("this fixture does not set the attribute")
     assert "FUDGE's capability and not the evaluation's" in said
+
+
+# ---------------------------------------------------------------------------
+# §19.3.4's externalRMatrix — the last open row of §6.4, closed 2026-08-24
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def sr88(micro_sr88_gnds):
+    return readReactionSuite(Document.parse(micro_sr88_gnds))
+
+
+def _externalRMatrices(suite):
+    """Every ``externalRMatrix`` on the suite's R-matrix, channel order kept."""
+    formalism = suite.resonances.resolved[0].formalism
+    return [channel.externalRMatrix
+            for group in formalism.spinGroups
+            for channel in group.channels
+            if channel.externalRMatrix is not None]
+
+
+def test_the_external_r_matrix_is_read_from_the_only_file_that_has_one(sr88):
+    """Seven nodes, all SAMMY, all seven terms — the whole population.
+
+    This is not a sample of §19.3.4's node, it **is** §19.3.4's node: 7
+    occurrences across the 558 distributed neutron evaluations, every one of
+    them in ``n-038_Sr_088``, measured 2026-08-24. Until this fixture existed
+    the reader named the node and dropped it, and there was nothing that could
+    have gated doing better.
+
+    The terms are asserted with their units because the units are the half a
+    reader is most likely to get wrong: they are **not uniform** — ``1/eV``,
+    ``1/eV**2``, ``eV`` and dimensionless in one node — and a term read without
+    one is a number the reconstruction cannot use.
+    """
+    suite, report = sr88
+    externals = _externalRMatrices(suite)
+    assert len(externals) == 7
+    assert {external.type for external in externals} == {"SAMMY"}
+
+    stated = [(term.label, term.value, term.unit) for term in externals[0].terms]
+    assert stated == [
+        ("constantExternalR", -0.043, ""),
+        ("linearExternalR", 2.8e-8, "1/eV"),
+        ("quadraticExternalR", 0.0, "1/eV**2"),
+        ("constantLogarithmicCoefficient", 0.01, ""),
+        ("linearLogarithmicCoefficient", 0.0, "1/eV"),
+        ("singularityEnergyBelow", 0.0, "eV"),
+        ("singularityEnergyAbove", 9.55e5, "eV"),
+    ]
+    assert not [entry for entry in report.unsupported
+                if "externalRMatrix" in entry]
+
+
+def test_a_term_the_file_omits_is_none_and_not_zero(sr88):
+    """``None`` and zero are different statements and only one is the file's.
+
+    ``quadraticExternalR`` **is** stated here, and stated as zero, so the two
+    readings are distinguishable on this very node: asking for a term the file
+    does not carry has to come back ``None``. Folding the two together is what
+    FUDGE's ``getTerm`` does at the point of *use*, which is the right place —
+    doing it at the point of reading would make a file that says nothing
+    indistinguishable from one that says zero.
+    """
+    external = _externalRMatrices(sr88[0])[0]
+    assert external.term("quadraticExternalR").value == 0.0
+    assert external.term("averageRadiationWidth") is None
+
+
+def test_the_external_r_matrix_survives_a_round_trip(micro_sr88_gnds, tmp_path):
+    """Read is half of it; §6.4's argument for modelling it was writing it back.
+
+    The channel's children are asserted **in order**, and that assert is not
+    decoration: ``RML_ChannelType`` (``gnds.xsd:915-919``) is an ``xs:sequence``
+    with ``externalRMatrix`` ahead of both radii, so a writer that appended it
+    where it was convenient would emit a file no validator accepts — measured,
+    by moving the node to the end of a written file and watching the schema
+    reject it. It is the same lesson §25.3's ``parameterCovariances`` container
+    taught on 2026-08-19, one node along.
+    """
+    import kika
+
+    suite, _ = readReactionSuite(Document.parse(micro_sr88_gnds))
+    written = tmp_path / "out.gnds.xml"
+    kika.write(suite, written)
+
+    root = ET.parse(written).getroot()
+    channels = [channel for channel in root.iter("channel")
+                if channel.find("externalRMatrix") is not None]
+    assert len(channels) == 7
+    assert [child.tag for child in channels[0]] == ["externalRMatrix",
+                                                    "hardSphereRadius"]
+
+    again, _ = readReactionSuite(Document.parse(written))
+    before = _externalRMatrices(suite)
+    after = _externalRMatrices(again)
+    assert [(e.type, [(t.label, t.value, t.unit) for t in e.terms])
+            for e in after] == \
+           [(e.type, [(t.label, t.value, t.unit) for t in e.terms])
+            for e in before]
+
+
+@pytest.mark.parametrize("break_it, expected", [
+    (lambda node: node.attrib.__setitem__("type", "Bayes"), "is not one of"),
+    (lambda node: node.remove(node.findall("double")[-1]), "is missing"),
+    (lambda node: node.append(copy.deepcopy(node.findall("double")[0])),
+     "more than one term labelled"),
+])
+def test_an_external_r_matrix_the_model_refuses_is_reported_not_repaired(
+        micro_sr88_gnds, break_it, expected):
+    """A file kika cannot represent is named, not guessed at.
+
+    The three defects are the three invariants the model states, and each is a
+    place where repairing would mean **choosing a formula**: SAMMY's
+    parametrisation is purely real and Froehner's has an imaginary part, so an
+    unknown ``type`` is not a label to default and a missing singularity energy
+    is not a zero to supply. The channel around it still reads — losing a
+    background R-matrix must not lose the resonances.
+    """
+    tree = ET.parse(micro_sr88_gnds)
+    node = tree.getroot().find(".//channel/externalRMatrix")
+    assert node is not None, "fixture changed"
+    break_it(node)
+
+    resonances, report = _readBlock(None, tree.getroot())
+    externals = [channel.externalRMatrix
+                 for group in resonances.resolved[0].formalism.spinGroups
+                 for channel in group.channels]
+    assert externals.count(None) == len(externals) - 6   # the broken one dropped
+    assert any(expected in entry and "externalRMatrix" in entry
+               for entry in report.unsupported)
+
+
+def test_a_channel_boundary_condition_is_read_and_written(micro_sr88_gnds,
+                                                          tmp_path):
+    """ENDF's **BND**, found on the way to the node above and fixed with it.
+
+    ``Channel.boundaryConditionValue`` has been on the model since B1a and the
+    ENDF adapter fills it from every LRF=7 tape, but the GNDS side neither read
+    nor wrote it — so an ENDF -> GNDS conversion dropped the evaluator's
+    boundary condition in silence, which is the worst shape a loss can take.
+
+    **Zero of the 558 distributed GNDS evaluations state the attribute**
+    (measured 2026-08-24), so this is planted rather than fixture-borne, and
+    that measurement is also the reason nothing noticed: no oracle and no round
+    trip over the corpus could have.
+    """
+    import kika
+
+    tree = ET.parse(micro_sr88_gnds)
+    channel = tree.getroot().find(".//spinGroup/channels/channel")
+    assert "boundaryConditionValue" not in channel.attrib, "fixture changed"
+    channel.attrib["boundaryConditionValue"] = "-1.5"
+    source = tmp_path / "planted.gnds.xml"
+    tree.write(source, encoding="UTF-8", xml_declaration=True)
+
+    suite, _ = readReactionSuite(Document.parse(source))
+    first = suite.resonances.resolved[0].formalism.spinGroups[0].channels[0]
+    assert first.boundaryConditionValue == -1.5
+
+    written = tmp_path / "out.gnds.xml"
+    kika.write(suite, written)
+    back = ET.parse(written).getroot().find(".//spinGroup/channels/channel")
+    assert back.attrib["boundaryConditionValue"] == "-1.5"

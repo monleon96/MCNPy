@@ -13,13 +13,17 @@ from typing import List, Optional, Tuple
 
 from .breit_wigner import (BreitWigner, BreitWignerApproximation, Resonance,
                            ResonanceParameters, SpinGroup)
-from .r_matrix import Channel, RMatrix, RMatrixSpinGroup, ResonanceReaction
+from .r_matrix import (Channel, EXTERNAL_R_MATRIX_REQUIRED_TERMS,
+                       EXTERNAL_R_MATRIX_TYPES, ExternalRMatrix, RMatrix,
+                       RMatrixSpinGroup, ResonanceReaction)
 from .tabulated_widths import (TabulatedWidths, UnresolvedChannel,
                                UnresolvedSpinGroup)
 
 __all__ = [
     "BreitWigner", "BreitWignerApproximation", "Resonance", "ResonanceParameters",
     "SpinGroup", "Channel", "RMatrix", "RMatrixSpinGroup", "ResonanceReaction",
+    "ExternalRMatrix", "EXTERNAL_R_MATRIX_TYPES",
+    "EXTERNAL_R_MATRIX_REQUIRED_TERMS",
     "TabulatedWidths", "UnresolvedChannel", "UnresolvedSpinGroup",
     "ScatteringRadius", "ResolvedRegion", "UnresolvedRegion", "Resonances",
     "MODEL_RADIUS_UNIT", "FM_PER_ENDF_RADIUS", "radiusFromEndf", "radiusToEndf",

@@ -203,18 +203,23 @@ def test_the_writer_emits_the_tag_the_key_claims(family):
 # ---------------------------------------------------------------------------
 
 def test_the_known_defects_are_pinned_by_count():
-    """Four on the day the table landed, one now: D19 went with the isotropic2d
-    fix, and the two R-matrix flags and the nested PoPs went with the commit
-    after that. What is left is ``supportsAngularReconstruction``, read and
-    reported and never written. Each repair lowers the number and this test is
-    what notices — the same shape as
+    """Four on the day the table landed, **zero** since 2026-08-24. D19 went
+    with the isotropic2d fix, and the two R-matrix flags and the nested PoPs
+    went with the commit after that. Each repair lowered the number and this
+    test is what noticed — the same shape as
     ``test_the_only_schema_errors_are_the_distributions_phase_7b_will_fill``.
 
-    The survivor is of *attribute*, which the tag table cannot express. It is
-    here because writing the table found it, and saying otherwise would credit
-    the key-set comparison with a catch it did not make.
+    **The last one left by decision, not by repair, and that is the reason this
+    docstring is longer than the assert.** ``supportsAngularReconstruction`` is
+    still read, still reported and still never written; what changed is that
+    ``gnds_endf_conflicts.md`` §6.4 ruled it won't-fix — no number sits under
+    the attribute — so it moved to ``ONE_SIDED_ATTRIBUTES`` carrying its count
+    and its reason. Zero here therefore means *nothing left that is wrong*, not
+    *nothing left that is one-sided*, and the second assert is what keeps the
+    difference visible. If a later reading disagrees with §6.4, the entry comes
+    back here rather than the count being quietly reinterpreted.
     """
-    assert len(nodes.KNOWN_DEFECTS) == 1
+    assert len(nodes.KNOWN_DEFECTS) == 0
     assert len(nodes.ONE_SIDED_ATTRIBUTES) == 1
     for defect in nodes.KNOWN_DEFECTS:
         assert defect.where and defect.caughtBy
