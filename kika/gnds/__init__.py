@@ -1,13 +1,35 @@
 """GNDS — reading and writing the Generalized Nuclear Database Structure.
 
-**The package is empty at import time, and must stay that way.** Nothing here
-imports :mod:`kika.nuclear_data.model` at module scope, for the same reason
+**The model must stay asleep when this package is imported, and everything
+here is arranged around that.** Nothing under ``kika/gnds`` imports
+:mod:`kika.nuclear_data.model` at module scope, for the same reason
 :mod:`kika.endf.model_adapter` does not: everything under ``kika/`` reaches
 ``kika.nuclear_data`` transitively on ``import kika``, so a module-level import
 of the model would wake it for the cluster pipeline, the desktop app and every
 notebook at once. ``kika/nuclear_data/model/tests/test_dormancy.py`` asserts the
 model stays unreachable from a plain ``import kika``, and the GNDS reader is
 reached through :func:`kika.read`, which imports it inside the call.
+
+This module used to say *"the package is empty at import time, and must stay
+that way"*, and that was the invariant stated one size too large. What must
+stay true is the **dormancy**, not the emptiness: :func:`capabilities` is
+exported below and imported eagerly, and it costs nothing because
+:mod:`kika.gnds._capabilities` is a table of strings that imports nothing but
+the standard library. ``import kika.gnds`` still loads zero model modules;
+``import kika.gnds.nodes`` loads thirty, which is why the capability table is
+written by hand rather than derived from :data:`kika.gnds.nodes.NODES`, and why
+the join between the two lives in ``tests/test_capabilities.py``.
+
+**What kika supports, as something a user can ask.** :func:`capabilities`
+answers it for all 300 nodes ``gnds.xsd`` and ``covariances.xsd`` declare, plus
+the twelve names kika uses that they do not::
+
+    >>> import kika.gnds
+    >>> print(kika.gnds.capabilities().summary())
+    >>> print(kika.gnds.capabilities(coverage="unsupported").text())
+
+It says what the *library* can lose, without opening a file;
+``suite.report`` says what *your* file lost. Neither stands in for the other.
 
 **Which versions this reads, and why there is no compatibility layer.**
 :mod:`kika.gnds.version` accepts ``2.0`` and ``2.1`` through one code path and
@@ -71,4 +93,13 @@ reader and writer returns.
 """
 from __future__ import annotations
 
-__all__ = []
+from ._capabilities import (CAPABILITIES, Capabilities, Capability, Coverage,
+                            NOT_IN_SCHEMA, capabilities)
+
+#: The private module name is load-bearing, not a style choice. ``importlib``
+#: binds a submodule onto its package as a side effect of importing it, so a
+#: module named ``capabilities.py`` would overwrite the function above with
+#: itself on first access — the first call returns the function and every later
+#: one returns the module. ``kika/__init__.py:40-43`` documents the same trap.
+__all__ = ["capabilities", "Capabilities", "Capability", "Coverage",
+           "CAPABILITIES", "NOT_IN_SCHEMA"]

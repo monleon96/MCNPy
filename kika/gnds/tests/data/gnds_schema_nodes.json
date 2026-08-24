@@ -1,0 +1,1218 @@
+{
+  "gndsVersion": "2.0",
+  "schemas": {
+    "gnds.xsd": {
+      "path": "/soft_snc/FUDGE/6.10.0/fudge/fudge/gnds.xsd",
+      "bytes": 97905,
+      "sha256": "289576789678adeac760e023cc1572898c42be4e25974f4a4e03319c1ca54057"
+    },
+    "covariances.xsd": {
+      "path": "/soft_snc/FUDGE/6.10.0/fudge/fudge/covariances/covariances.xsd",
+      "bytes": 10498,
+      "sha256": "4a08b5d449c037f5328c06060d4d6de898056819963419e584cc1efa070280c5"
+    }
+  },
+  "nodeCount": 300,
+  "nodes": {
+    "BraggEdge": [
+      "gnds.xsd",
+      1373
+    ],
+    "BraggEdges": [
+      "gnds.xsd",
+      1351
+    ],
+    "BraggEnergy": [
+      "gnds.xsd",
+      1366
+    ],
+    "BreitWigner": [
+      "gnds.xsd",
+      833
+    ],
+    "CoulombPlusNuclearElastic": [
+      "gnds.xsd",
+      1212
+    ],
+    "DebyeWallerIntegral": [
+      "gnds.xsd",
+      1380
+    ],
+    "EFH": [
+      "gnds.xsd",
+      1724
+    ],
+    "EFL": [
+      "gnds.xsd",
+      1723
+    ],
+    "GaussianApproximation": [
+      "gnds.xsd",
+      1425
+    ],
+    "J": [
+      "gnds.xsd",
+      1010
+    ],
+    "Js": [
+      "gnds.xsd",
+      1007
+    ],
+    "KalbachMann": [
+      "gnds.xsd",
+      1653
+    ],
+    "L": [
+      "gnds.xsd",
+      995
+    ],
+    "Legendre": [
+      "gnds.xsd",
+      2187
+    ],
+    "Ls": [
+      "gnds.xsd",
+      992
+    ],
+    "MadlandNix": [
+      "gnds.xsd",
+      1709
+    ],
+    "NBodyPhaseSpace": [
+      "gnds.xsd",
+      1703
+    ],
+    "PoPs": [
+      "gnds.xsd",
+      479
+    ],
+    "Q": [
+      "gnds.xsd",
+      724
+    ],
+    "RMatrix": [
+      "gnds.xsd",
+      834
+    ],
+    "RutherfordScattering": [
+      "gnds.xsd",
+      1264
+    ],
+    "SCTApproximation": [
+      "gnds.xsd",
+      1426
+    ],
+    "S_table": [
+      "gnds.xsd",
+      1350
+    ],
+    "T_M": [
+      "gnds.xsd",
+      1725
+    ],
+    "T_effective": [
+      "gnds.xsd",
+      1410
+    ],
+    "U": [
+      "gnds.xsd",
+      1716
+    ],
+    "Watt": [
+      "gnds.xsd",
+      1708
+    ],
+    "XYs1d": [
+      "gnds.xsd",
+      821
+    ],
+    "XYs2d": [
+      "gnds.xsd",
+      1294
+    ],
+    "XYs3d": [
+      "gnds.xsd",
+      1799
+    ],
+    "a": [
+      "gnds.xsd",
+      1732
+    ],
+    "abstract": [
+      "gnds.xsd",
+      204
+    ],
+    "acknowledgement": [
+      "gnds.xsd",
+      243
+    ],
+    "acknowledgements": [
+      "gnds.xsd",
+      200
+    ],
+    "add": [
+      "gnds.xsd",
+      1135
+    ],
+    "affiliation": [
+      "gnds.xsd",
+      342
+    ],
+    "affiliations": [
+      "gnds.xsd",
+      348
+    ],
+    "alias": [
+      "gnds.xsd",
+      516
+    ],
+    "aliases": [
+      "gnds.xsd",
+      484
+    ],
+    "angular": [
+      "gnds.xsd",
+      1678
+    ],
+    "angularEnergy": [
+      "gnds.xsd",
+      1651
+    ],
+    "angularTwoBody": [
+      "gnds.xsd",
+      1649
+    ],
+    "applicationData": [
+      "gnds.xsd",
+      59
+    ],
+    "array": [
+      "gnds.xsd",
+      2342
+    ],
+    "atomic": [
+      "gnds.xsd",
+      599
+    ],
+    "author": [
+      "gnds.xsd",
+      358
+    ],
+    "authors": [
+      "gnds.xsd",
+      195
+    ],
+    "averageEnergies": [
+      "gnds.xsd",
+      703
+    ],
+    "averageEnergy": [
+      "gnds.xsd",
+      709
+    ],
+    "averageParameterCovariance": [
+      "covariances.xsd",
+      192
+    ],
+    "averageProductData": [
+      "gnds.xsd",
+      92
+    ],
+    "averageProductEnergy": [
+      "gnds.xsd",
+      1606
+    ],
+    "axes": [
+      "gnds.xsd",
+      1779
+    ],
+    "axis": [
+      "gnds.xsd",
+      2043
+    ],
+    "b": [
+      "gnds.xsd",
+      1733
+    ],
+    "background": [
+      "gnds.xsd",
+      1221
+    ],
+    "baryon": [
+      "gnds.xsd",
+      554
+    ],
+    "baryons": [
+      "gnds.xsd",
+      487
+    ],
+    "bibitem": [
+      "gnds.xsd",
+      465
+    ],
+    "bibliography": [
+      "gnds.xsd",
+      208
+    ],
+    "bindingEnergy": [
+      "gnds.xsd",
+      621
+    ],
+    "body": [
+      "gnds.xsd",
+      205
+    ],
+    "boundAtomCrossSection": [
+      "gnds.xsd",
+      1379
+    ],
+    "boundAtomCrossSectionByNuclide": [
+      "gnds.xsd",
+      1406
+    ],
+    "branching1d": [
+      "gnds.xsd",
+      1633
+    ],
+    "branching3d": [
+      "gnds.xsd",
+      1655
+    ],
+    "channel": [
+      "gnds.xsd",
+      931
+    ],
+    "channels": [
+      "gnds.xsd",
+      901
+    ],
+    "charge": [
+      "gnds.xsd",
+      563
+    ],
+    "chemicalElement": [
+      "gnds.xsd",
+      169
+    ],
+    "chemicalElements": [
+      "gnds.xsd",
+      163
+    ],
+    "codeRepo": [
+      "gnds.xsd",
+      413
+    ],
+    "coherentAtomCrossSection": [
+      "gnds.xsd",
+      1407
+    ],
+    "coherentPhotonScattering": [
+      "gnds.xsd",
+      1254
+    ],
+    "collaboration": [
+      "gnds.xsd",
+      218
+    ],
+    "collaborations": [
+      "gnds.xsd",
+      197
+    ],
+    "column": [
+      "gnds.xsd",
+      2315
+    ],
+    "columnData": [
+      "covariances.xsd",
+      82
+    ],
+    "columnHeaders": [
+      "gnds.xsd",
+      2312
+    ],
+    "computerCode": [
+      "gnds.xsd",
+      431
+    ],
+    "computerCodes": [
+      "gnds.xsd",
+      206
+    ],
+    "confidenceIntervals": [
+      "gnds.xsd",
+      1993
+    ],
+    "configuration": [
+      "gnds.xsd",
+      612
+    ],
+    "configurations": [
+      "gnds.xsd",
+      609
+    ],
+    "constant1d": [
+      "gnds.xsd",
+      820
+    ],
+    "continuum": [
+      "gnds.xsd",
+      761
+    ],
+    "contributor": [
+      "gnds.xsd",
+      375
+    ],
+    "contributors": [
+      "gnds.xsd",
+      196
+    ],
+    "copyright": [
+      "gnds.xsd",
+      199
+    ],
+    "correctionScript": [
+      "gnds.xsd",
+      450
+    ],
+    "covariance": [
+      "gnds.xsd",
+      2299
+    ],
+    "covarianceMatrix": [
+      "covariances.xsd",
+      84
+    ],
+    "covarianceScript": [
+      "gnds.xsd",
+      449
+    ],
+    "covarianceSection": [
+      "covariances.xsd",
+      78
+    ],
+    "covarianceSections": [
+      "covariances.xsd",
+      20
+    ],
+    "covarianceSuite": [
+      "covariances.xsd",
+      15
+    ],
+    "crossSection": [
+      "gnds.xsd",
+      1205
+    ],
+    "crossSectionReconstructed": [
+      "gnds.xsd",
+      90
+    ],
+    "crossSectionSum": [
+      "gnds.xsd",
+      1113
+    ],
+    "crossSectionSums": [
+      "gnds.xsd",
+      1096
+    ],
+    "data": [
+      "gnds.xsd",
+      2319
+    ],
+    "date": [
+      "gnds.xsd",
+      224
+    ],
+    "dates": [
+      "gnds.xsd",
+      198
+    ],
+    "decay": [
+      "gnds.xsd",
+      743
+    ],
+    "decayData": [
+      "gnds.xsd",
+      565
+    ],
+    "decayMode": [
+      "gnds.xsd",
+      715
+    ],
+    "decayModes": [
+      "gnds.xsd",
+      702
+    ],
+    "decayPath": [
+      "gnds.xsd",
+      725
+    ],
+    "delayedBetaEnergy": [
+      "gnds.xsd",
+      1487
+    ],
+    "delayedGammaEnergy": [
+      "gnds.xsd",
+      1486
+    ],
+    "delayedNeutron": [
+      "gnds.xsd",
+      1476
+    ],
+    "delayedNeutronKE": [
+      "gnds.xsd",
+      1484
+    ],
+    "delayedNeutrons": [
+      "gnds.xsd",
+      1461
+    ],
+    "discrete": [
+      "gnds.xsd",
+      760
+    ],
+    "discreteGamma": [
+      "gnds.xsd",
+      1702
+    ],
+    "distinctScatteringKernel": [
+      "gnds.xsd",
+      1408
+    ],
+    "distribution": [
+      "gnds.xsd",
+      1302
+    ],
+    "documentation": [
+      "gnds.xsd",
+      101
+    ],
+    "double": [
+      "gnds.xsd",
+      572
+    ],
+    "doubleDifferentialCrossSection": [
+      "gnds.xsd",
+      1250
+    ],
+    "e_critical": [
+      "gnds.xsd",
+      1403
+    ],
+    "e_max": [
+      "gnds.xsd",
+      1404
+    ],
+    "elapsedTime": [
+      "gnds.xsd",
+      1542
+    ],
+    "elapsedTimes": [
+      "gnds.xsd",
+      1509
+    ],
+    "endfCompatible": [
+      "gnds.xsd",
+      209
+    ],
+    "energy": [
+      "gnds.xsd",
+      668
+    ],
+    "energyAngular": [
+      "gnds.xsd",
+      1652
+    ],
+    "energyInterval": [
+      "gnds.xsd",
+      970
+    ],
+    "energyIntervals": [
+      "gnds.xsd",
+      835
+    ],
+    "evaluated": [
+      "gnds.xsd",
+      89
+    ],
+    "evaporation": [
+      "gnds.xsd",
+      1705
+    ],
+    "executionArguments": [
+      "gnds.xsd",
+      412
+    ],
+    "exforDataSet": [
+      "gnds.xsd",
+      459
+    ],
+    "exforDataSets": [
+      "gnds.xsd",
+      275
+    ],
+    "experimentalDataSets": [
+      "gnds.xsd",
+      207
+    ],
+    "externalFile": [
+      "gnds.xsd",
+      142
+    ],
+    "externalFiles": [
+      "gnds.xsd",
+      49
+    ],
+    "externalRMatrix": [
+      "gnds.xsd",
+      917
+    ],
+    "f": [
+      "gnds.xsd",
+      1808
+    ],
+    "fastRegion": [
+      "gnds.xsd",
+      1232
+    ],
+    "fissionComponent": [
+      "gnds.xsd",
+      1142
+    ],
+    "fissionComponents": [
+      "gnds.xsd",
+      56
+    ],
+    "fissionEnergyRelease": [
+      "gnds.xsd",
+      1496
+    ],
+    "fissionEnergyReleases": [
+      "gnds.xsd",
+      1462
+    ],
+    "fissionFragmentData": [
+      "gnds.xsd",
+      1458
+    ],
+    "formFactor": [
+      "gnds.xsd",
+      1312
+    ],
+    "forward": [
+      "gnds.xsd",
+      1690
+    ],
+    "fraction": [
+      "gnds.xsd",
+      574
+    ],
+    "freeGasApproximation": [
+      "gnds.xsd",
+      1429
+    ],
+    "function1ds": [
+      "gnds.xsd",
+      2152
+    ],
+    "function2ds": [
+      "gnds.xsd",
+      2238
+    ],
+    "function3ds": [
+      "gnds.xsd",
+      2289
+    ],
+    "g": [
+      "gnds.xsd",
+      1741
+    ],
+    "gaugeBoson": [
+      "gnds.xsd",
+      523
+    ],
+    "gaugeBosons": [
+      "gnds.xsd",
+      485
+    ],
+    "generalEvaporation": [
+      "gnds.xsd",
+      1701
+    ],
+    "grid": [
+      "gnds.xsd",
+      2049
+    ],
+    "gridded2d": [
+      "gnds.xsd",
+      1360
+    ],
+    "gridded3d": [
+      "gnds.xsd",
+      1424
+    ],
+    "halflife": [
+      "gnds.xsd",
+      564
+    ],
+    "hardSphereRadius": [
+      "gnds.xsd",
+      891
+    ],
+    "heated": [
+      "gnds.xsd",
+      91
+    ],
+    "imaginaryAnomalousFactor": [
+      "gnds.xsd",
+      1314
+    ],
+    "imaginaryInterferenceTerm": [
+      "gnds.xsd",
+      1286
+    ],
+    "incidentEnergies": [
+      "gnds.xsd",
+      1535
+    ],
+    "incidentEnergy": [
+      "gnds.xsd",
+      1563
+    ],
+    "incoherentPhotonScattering": [
+      "gnds.xsd",
+      1255
+    ],
+    "incompleteReactions": [
+      "gnds.xsd",
+      58
+    ],
+    "inputDeck": [
+      "gnds.xsd",
+      437
+    ],
+    "inputDecks": [
+      "gnds.xsd",
+      415
+    ],
+    "institution": [
+      "gnds.xsd",
+      1197
+    ],
+    "integer": [
+      "gnds.xsd",
+      573
+    ],
+    "intensity": [
+      "gnds.xsd",
+      775
+    ],
+    "internalConversionCoefficients": [
+      "gnds.xsd",
+      722
+    ],
+    "internalPairFormationCoefficient": [
+      "gnds.xsd",
+      780
+    ],
+    "interval": [
+      "gnds.xsd",
+      1974
+    ],
+    "isotope": [
+      "gnds.xsd",
+      638
+    ],
+    "isotopes": [
+      "gnds.xsd",
+      600
+    ],
+    "isotopicAbundances": [
+      "gnds.xsd",
+      157
+    ],
+    "isotropic2d": [
+      "gnds.xsd",
+      1669
+    ],
+    "keyword": [
+      "gnds.xsd",
+      249
+    ],
+    "keywords": [
+      "gnds.xsd",
+      201
+    ],
+    "lepton": [
+      "gnds.xsd",
+      540
+    ],
+    "leptons": [
+      "gnds.xsd",
+      486
+    ],
+    "levelSpacing": [
+      "gnds.xsd",
+      1021
+    ],
+    "link": [
+      "gnds.xsd",
+      888
+    ],
+    "listOfCovariances": [
+      "gnds.xsd",
+      2300
+    ],
+    "mass": [
+      "gnds.xsd",
+      560
+    ],
+    "metaStable": [
+      "gnds.xsd",
+      517
+    ],
+    "mixed": [
+      "covariances.xsd",
+      85
+    ],
+    "multiplicity": [
+      "gnds.xsd",
+      1121
+    ],
+    "multiplicitySum": [
+      "gnds.xsd",
+      1128
+    ],
+    "multiplicitySums": [
+      "gnds.xsd",
+      1097
+    ],
+    "neutrinoEnergy": [
+      "gnds.xsd",
+      1488
+    ],
+    "nonNeutrinoEnergy": [
+      "gnds.xsd",
+      1489
+    ],
+    "note": [
+      "gnds.xsd",
+      349
+    ],
+    "nuclearAmplitudeExpansion": [
+      "gnds.xsd",
+      1266
+    ],
+    "nuclearPlusInterference": [
+      "gnds.xsd",
+      1267
+    ],
+    "nuclearTerm": [
+      "gnds.xsd",
+      1284
+    ],
+    "nucleus": [
+      "gnds.xsd",
+      648
+    ],
+    "nuclide": [
+      "gnds.xsd",
+      182
+    ],
+    "nuclides": [
+      "gnds.xsd",
+      175
+    ],
+    "orphanProduct": [
+      "gnds.xsd",
+      1077
+    ],
+    "orphanProducts": [
+      "gnds.xsd",
+      54
+    ],
+    "outputChannel": [
+      "gnds.xsd",
+      1062
+    ],
+    "outputDeck": [
+      "gnds.xsd",
+      443
+    ],
+    "outputDecks": [
+      "gnds.xsd",
+      416
+    ],
+    "parameterCovariance": [
+      "covariances.xsd",
+      160
+    ],
+    "parameterCovarianceMatrix": [
+      "covariances.xsd",
+      164
+    ],
+    "parameterCovariances": [
+      "covariances.xsd",
+      27
+    ],
+    "parameterLink": [
+      "covariances.xsd",
+      175
+    ],
+    "parameters": [
+      "covariances.xsd",
+      172
+    ],
+    "parity": [
+      "gnds.xsd",
+      562
+    ],
+    "phononSpectrum": [
+      "gnds.xsd",
+      1438
+    ],
+    "photonEmissionProbabilities": [
+      "gnds.xsd",
+      723
+    ],
+    "polynomial1d": [
+      "gnds.xsd",
+      1501
+    ],
+    "positronEmissionIntensity": [
+      "gnds.xsd",
+      779
+    ],
+    "primaryGamma": [
+      "gnds.xsd",
+      1704
+    ],
+    "probability": [
+      "gnds.xsd",
+      721
+    ],
+    "product": [
+      "gnds.xsd",
+      691
+    ],
+    "productYield": [
+      "gnds.xsd",
+      1515
+    ],
+    "productYields": [
+      "gnds.xsd",
+      1463
+    ],
+    "production": [
+      "gnds.xsd",
+      1160
+    ],
+    "productions": [
+      "gnds.xsd",
+      57
+    ],
+    "products": [
+      "gnds.xsd",
+      734
+    ],
+    "projectileEnergyDomain": [
+      "gnds.xsd",
+      99
+    ],
+    "promptGammaEnergy": [
+      "gnds.xsd",
+      1485
+    ],
+    "promptNeutronKE": [
+      "gnds.xsd",
+      1483
+    ],
+    "promptProductKE": [
+      "gnds.xsd",
+      1482
+    ],
+    "r": [
+      "gnds.xsd",
+      1809
+    ],
+    "rate": [
+      "gnds.xsd",
+      1469
+    ],
+    "reaction": [
+      "gnds.xsd",
+      1056
+    ],
+    "reactionSuite": [
+      "gnds.xsd",
+      46
+    ],
+    "reactions": [
+      "gnds.xsd",
+      53
+    ],
+    "realAnomalousFactor": [
+      "gnds.xsd",
+      1313
+    ],
+    "realInterferenceTerm": [
+      "gnds.xsd",
+      1285
+    ],
+    "recoil": [
+      "gnds.xsd",
+      1670
+    ],
+    "reference": [
+      "gnds.xsd",
+      1211
+    ],
+    "regions1d": [
+      "gnds.xsd",
+      1032
+    ],
+    "regions2d": [
+      "gnds.xsd",
+      1293
+    ],
+    "relatedItem": [
+      "gnds.xsd",
+      269
+    ],
+    "relatedItems": [
+      "gnds.xsd",
+      202
+    ],
+    "resolved": [
+      "gnds.xsd",
+      813
+    ],
+    "resolvedRegion": [
+      "gnds.xsd",
+      1230
+    ],
+    "resonanceParameters": [
+      "gnds.xsd",
+      847
+    ],
+    "resonanceReaction": [
+      "gnds.xsd",
+      882
+    ],
+    "resonanceReactions": [
+      "gnds.xsd",
+      858
+    ],
+    "resonances": [
+      "gnds.xsd",
+      52
+    ],
+    "resonancesWithBackground": [
+      "gnds.xsd",
+      1210
+    ],
+    "rowData": [
+      "covariances.xsd",
+      81
+    ],
+    "scatteringAtom": [
+      "gnds.xsd",
+      1418
+    ],
+    "scatteringAtoms": [
+      "gnds.xsd",
+      1390
+    ],
+    "scatteringFactor": [
+      "gnds.xsd",
+      1332
+    ],
+    "scatteringRadius": [
+      "gnds.xsd",
+      812
+    ],
+    "selfScatteringKernel": [
+      "gnds.xsd",
+      1409
+    ],
+    "shell": [
+      "gnds.xsd",
+      787
+    ],
+    "shortRangeSelfScalingVariance": [
+      "covariances.xsd",
+      138
+    ],
+    "simpleMaxwellianFission": [
+      "gnds.xsd",
+      1707
+    ],
+    "slice": [
+      "covariances.xsd",
+      99
+    ],
+    "slices": [
+      "covariances.xsd",
+      96
+    ],
+    "spectra": [
+      "gnds.xsd",
+      726
+    ],
+    "spectrum": [
+      "gnds.xsd",
+      769
+    ],
+    "spin": [
+      "gnds.xsd",
+      561
+    ],
+    "spinGroup": [
+      "gnds.xsd",
+      911
+    ],
+    "spinGroups": [
+      "gnds.xsd",
+      859
+    ],
+    "standard": [
+      "gnds.xsd",
+      1986
+    ],
+    "string": [
+      "gnds.xsd",
+      575
+    ],
+    "structureFactor": [
+      "gnds.xsd",
+      1367
+    ],
+    "styles": [
+      "gnds.xsd",
+      50
+    ],
+    "subtract": [
+      "gnds.xsd",
+      1136
+    ],
+    "sum": [
+      "covariances.xsd",
+      86
+    ],
+    "summand": [
+      "covariances.xsd",
+      146
+    ],
+    "summands": [
+      "gnds.xsd",
+      1104
+    ],
+    "sums": [
+      "gnds.xsd",
+      55
+    ],
+    "table": [
+      "gnds.xsd",
+      952
+    ],
+    "tabulatedWidths": [
+      "gnds.xsd",
+      979
+    ],
+    "targetInfo": [
+      "gnds.xsd",
+      100
+    ],
+    "temperature": [
+      "gnds.xsd",
+      98
+    ],
+    "thermalNeutronScatteringLaw": [
+      "gnds.xsd",
+      1659
+    ],
+    "thermalNeutronScatteringLaw1d": [
+      "gnds.xsd",
+      1213
+    ],
+    "thermalNeutronScatteringLaw_coherentElastic": [
+      "gnds.xsd",
+      1256
+    ],
+    "thermalNeutronScatteringLaw_incoherentElastic": [
+      "gnds.xsd",
+      1257
+    ],
+    "thermalNeutronScatteringLaw_incoherentInelastic": [
+      "gnds.xsd",
+      1258
+    ],
+    "theta": [
+      "gnds.xsd",
+      1717
+    ],
+    "time": [
+      "gnds.xsd",
+      1532
+    ],
+    "title": [
+      "gnds.xsd",
+      203
+    ],
+    "totalEnergy": [
+      "gnds.xsd",
+      1490
+    ],
+    "uncertainty": [
+      "gnds.xsd",
+      800
+    ],
+    "uncorrelated": [
+      "gnds.xsd",
+      1650
+    ],
+    "unorthodox": [
+      "gnds.xsd",
+      676
+    ],
+    "unorthodoxes": [
+      "gnds.xsd",
+      489
+    ],
+    "unresolved": [
+      "gnds.xsd",
+      814
+    ],
+    "unresolvedRegion": [
+      "gnds.xsd",
+      1231
+    ],
+    "unspecified": [
+      "gnds.xsd",
+      1634
+    ],
+    "values": [
+      "gnds.xsd",
+      1549
+    ],
+    "weighted": [
+      "gnds.xsd",
+      1756
+    ],
+    "weightedFunctionals": [
+      "gnds.xsd",
+      1706
+    ],
+    "width": [
+      "gnds.xsd",
+      1038
+    ],
+    "widths": [
+      "gnds.xsd",
+      1022
+    ],
+    "yields": [
+      "gnds.xsd",
+      1534
+    ]
+  }
+}
