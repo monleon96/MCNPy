@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 
 from scripts.build_group_cross import (DEAD_BLOCK_CLIP_MASS_MAX,
+                                       DEAD_BLOCK_D_SHIFT_MAX,
                                        DEAD_BLOCK_PSD_RTOL,
                                        carry_dead_parameters, diagnose)
 
@@ -218,10 +219,17 @@ def test_a_psd_pipeline_block_is_not_touched_at_all():
     np.testing.assert_allclose(np.sqrt(np.diag(out)), d_tar, rtol=0, atol=1e-14)
 
 
-def test_many_small_negatives_are_refused_though_the_ratio_bar_passes():
-    """Bar 2's whole reason to exist. Every eigenvalue is individually far
-    inside the conditioning bar, but their TOTAL is not dust -- and that total
-    is what the projection would have to invent. The ratio bar cannot see it."""
+def test_many_small_negatives_WARN_but_are_judged_by_the_consequence():
+    """⚑ LA POLITICA CAMBIO EL 2026-08-22 (Juan), y este test la fija.
+
+    Bar 2 aplicaba el suelo de las 7 cifras -- derivado para la PEOR direccion
+    -- a la SUMA sobre cientos de autovalores, y esa parte no se sostiene: la
+    masa negativa que el formato puede fabricar escala con el numero de
+    direcciones. Aqui cada autovalor esta 100x dentro de bar 1 y la masa pasa de
+    bar 2, y eso ya NO rechaza: avisa, y el veredicto lo da ``d_shift_rel`` --
+    cuanto mueve el recorte una varianza DECLARADA, que es la unica lectura que
+    distingue redondeo acumulado de un defecto repartido.
+    """
     n_dead = 60
     c34_post, c34_ship, d_mc, d_tar, dead = _case(n_live=4, n_dead=n_dead)
     D = np.ix_(dead, dead)
@@ -236,10 +244,39 @@ def test_many_small_negatives_are_refused_though_the_ratio_bar_passes():
 
     _, _, _, probe = _spectrum(c34_ship[D])
     assert probe["ratio"] > -DEAD_BLOCK_PSD_RTOL, "bar 1 must PASS here"
-    assert probe["clip_mass"] > DEAD_BLOCK_CLIP_MASS_MAX, "bar 2 must catch it"
+    assert probe["clip_mass"] > DEAD_BLOCK_CLIP_MASS_MAX, (
+        "bar 2 tiene que dispararse aqui, o el test no prueba el cambio")
 
-    with pytest.raises(SystemExit, match="invent"):
-        carry_dead_parameters(c34_post, c34_ship, d_mc, d_tar)
+    out, _, _, info = carry_dead_parameters(c34_post.copy(), c34_ship.copy(),
+                                            d_mc, d_tar)
+    assert info["clip_mass"] > DEAD_BLOCK_CLIP_MASS_MAX
+    assert info["d_shift_rel"] < DEAD_BLOCK_D_SHIFT_MAX, (
+        "el caso sintetico tenia que ser inocuo en la consecuencia")
+    assert np.linalg.eigvalsh(out[np.ix_(dead, dead)])[0] >= -1e-12
+
+    # y el rechazo SIGUE VIVO: lo decide d_shift_rel, no la masa
+    with pytest.raises(SystemExit, match="varianza DECLARADA"):
+        carry_dead_parameters(c34_post.copy(), c34_ship.copy(), d_mc, d_tar,
+                              d_shift_max=0.1 * info["d_shift_rel"])
+
+
+def test_la_masa_por_si_sola_ya_no_rechaza_pero_sigue_reportandose():
+    """Que bar 2 avise y no rechace no puede significar perder la senal: el
+    diagnostico tiene que seguir trayendo la masa, o el defecto se vuelve
+    invisible en vez de tolerado."""
+    n_dead = 60
+    c34_post, c34_ship, d_mc, d_tar, dead = _case(n_live=4, n_dead=n_dead)
+    D = np.ix_(dead, dead)
+    w, V = np.linalg.eigh(0.5 * (c34_ship[D] + c34_ship[D].T))
+    w[: n_dead // 2] = -0.9 * DEAD_BLOCK_PSD_RTOL * w[-1]
+    c34_ship = c34_ship.copy()
+    c34_ship[D] = 0.5 * (((V * w) @ V.T) + ((V * w) @ V.T).T)
+    d_tar = d_tar.copy()
+    d_tar[dead] = np.sqrt(np.maximum(np.diag(c34_ship[D]), 0.0))
+    _, _, _, info = carry_dead_parameters(c34_post.copy(), c34_ship, d_mc, d_tar)
+    assert info["n_clipped"] == n_dead // 2
+    assert info["clip_mass"] > 0.0 and info["trace"] > 0.0
+    assert info["d_shift_rel"] >= 0.0
 
 
 def _spectrum(blk):

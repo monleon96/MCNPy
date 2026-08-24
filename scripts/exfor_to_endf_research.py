@@ -103,9 +103,10 @@ from scripts.exfor_utils import (
     regularize_near_zero_relative_covariance,
     apply_between_experiment_floor,
     apply_between_experiment_floor_mg,
+    apply_between_experiment_floor_pooled,
+    pool_between_experiment_sigma,
     smooth_absent_order_uncertainties,
     log_rel_std_profile,
-    cap_order_relative_uncertainty,
     smooth_diagonal_median,
     forward_fill_rel_std,
     save_all_legendre_coefficients,
@@ -534,7 +535,78 @@ REGULARIZE_NEAR_ZERO_REL_UNC = True              # Tame relative sigma where the
                                                  # construction (a_l glides through zero).
 NEAR_ZERO_SNR_THRESHOLD = 1.0                    # Flag when |mean|/sigma_abs falls below this
 NEAR_ZERO_N_NEIGHBORS = 3                        # Valid neighbours sought each side
-APPLY_BETWEEN_EXP_FLOOR = False                  # Between-experiment scatter floor (redundant with tau)
+APPLY_BETWEEN_EXP_FLOOR = False                  # Suelo VIEJO. Dejar apagado: no hace lo que dice.
+                                                 # (a) exige >=2 experimentos cualificados, o sea solo
+                                                 #     toca los bins que YA ven el desacuerdo -- 62 % --
+                                                 #     y no hace nada en el 38 % que esta ciego;
+                                                 # (b) congela c0 al agregado, asi que cuenta la
+                                                 #     NORMALIZACION de cada experimento como
+                                                 #     desacuerdo de FORMA.
+                                                 # El comentario historico decia "redundant with tau" y
+                                                 # eso es falso, medido: tau varia por bin (1.0-5.0) pero
+                                                 # rho(n_exp, tau_M) = +0.049. tau infla por desajuste de
+                                                 # banda ANGULAR, no por desacuerdo entre experimentos.
+# ⚑ POR ENTORNO, no constante. Las dos runs que miden este suelo (101a inerte /
+# 101b encendido) tienen que ser EL MISMO CODIGO y diferir solo en la variable,
+# o la comparacion mide dos cosas a la vez y no se puede atribuir el cambio.
+APPLY_BETWEEN_EXP_FLOOR_POOLED = _env_flag(      # Suelo NUEVO, agrupado por experimento.
+    "KIKA_BETWEEN_EXP_FLOOR_POOLED", False)      # Ver docs/chi2-mf4/between_experiment_floor_design.md
+BETWEEN_EXP_POOL_MIN_BINS = int(os.environ.get(  # bins minimos para calibrar un experimento
+    "KIKA_BETWEEN_EXP_POOL_MIN_BINS", "30"))
+BETWEEN_EXP_FLOOR_ONLY_BLIND = _env_flag(        # actuar solo donde k_cual <= 1
+    "KIKA_BETWEEN_EXP_FLOOR_ONLY_BLIND", True)
+# ⚑ EL TOPE SE RETIRA — 2026-08-22. Estaba en 4 porque sigma_e se calibra como
+# |Delta a_l|/|a_l_nom| y el orden mas inflado era el que pasa mas cerca de cero;
+# medido sobre 101a (RESTORE apagado), a_5/a_6 se inflaban x34 y x40 y se
+# llevaban la varianza de orden alto de 2 % a 27 % (p90).
+#
+# ⛔ ESA MEDIDA ES DE ANTES DE RESTORE_MIXTURE_HIGH_ORDER Y YA NO VALE. El x30
+# nunca fue del suelo: era la sigma CONGELADA de c0 contra la que se comparaba
+# (a_5 entraba con 3,83 %). Con la mezcla restaurada a_5 entra con 168,2 % y a_6
+# con 319,2 %, por encima del propio objetivo del suelo, y como el suelo es un
+# MAXIMO -- ``scale = max(1, target/rel_std)`` -- deja de morder. Medido sobre
+# 102cp: retirar el tope mueve 400 entradas de 10 428 (3,8 %), a_5 374 y a_6 26,
+# con inflacion mediana 1,62x en las dos. Antes eran x34 y x40.
+#
+# Se retira porque, a ese precio, es una variable arbitraria menos que justificar
+# (Juan, 22-ago-2026) y porque inflar solo puede sobre-declarar, que bajo la
+# barra de conservadurismo es desperdicio y no un error. Poner 4 lo restaura.
+BETWEEN_EXP_FLOOR_MAX_ORDER = int(os.environ.get(
+    "KIKA_BETWEEN_EXP_FLOOR_MAX_ORDER", str(MAX_SAMPLE_ORDER)))
+# ── la dependencia en ENERGIA del suelo (diseño §8, 2026-08-22) ──────────────
+# El estimador de hoy es un escalar por (experimento, orden) sobre TODO el rango,
+# y fuera de muestra su cobertura CAE con la energia: 90,6 / 79,3 / 63,1 % por
+# tercios en Cierjacks y 88,2 / 78,2 / 67,4 % en Kinney. O sea sub-declara justo
+# donde mas desacuerdo hay. La forma en energia se mide en espacio DCS -- donde
+# no hay denominador que equivocar -- desde los a_l que el pipeline YA guarda, y
+# entra como un factor multiplicativo sobre el objetivo.
+#
+# ⚑ ENCENDIDO POR DEFECTO, y es inocuo mientras el suelo este apagado: este flag
+# solo MODIFICA a APPLY_BETWEEN_EXP_FLOOR_POOLED, que sigue en False, y con
+# `apply=False` la covarianza sale intacta. O sea el defecto no cambia ningun
+# objeto hoy; lo que garantiza es que el dia que se encienda el suelo se encienda
+# con el estimador BUENO y no con la constante, que sub-declara a alta energia
+# (cobertura fuera de muestra 90,6 / 79,3 / 63,1 % por tercios).
+BETWEEN_EXP_FLOOR_ENERGY = _env_flag(
+    "KIKA_BETWEEN_EXP_FLOOR_ENERGY", True)
+BETWEEN_EXP_FLOOR_ENERGY_WINDOW = int(os.environ.get(
+    "KIKA_BETWEEN_EXP_FLOOR_ENERGY_WINDOW", "40"))
+# ⚑ El recorte a 1 es la mitad CONSERVADORA: sin el, la curva preserva la
+# mediana y por tanto declara MENOS que la constante a baja energia. Con el, el
+# suelo nunca declara menos que hoy y en la misma puerta sale igual o mejor
+# (dispersion entre tercios 27,5 -> 7,8 pp y 20,8 -> 8,1 pp).
+BETWEEN_EXP_FLOOR_ENERGY_CLAMP = _env_flag(
+    "KIKA_BETWEEN_EXP_FLOOR_ENERGY_CLAMP", True)
+# ⚑ POR ENTORNO y por defecto APAGADO, igual que el suelo agrupado: con el flag
+# a 0 la cinta tiene que salir byte a byte contra la run 101a, y esa es la
+# puerta de inercia. Encenderlo cambia MF34 en a_5/a_6 por un factor 10-250.
+# Opción 3 de docs/chi2-mf4/between_experiment_floor_design.md §7.7:
+#   (a) el regularizador near-zero deja de trasplantar la sigma de los bins
+#       congelados a los que sí se muestrearon, y
+#   (b) en los bins congelados vuelve el término entre-modelos ANALÍTICO.
+# No toca MF4: el central se queda exactamente como está.
+RESTORE_MIXTURE_HIGH_ORDER = _env_flag(
+    "KIKA_RESTORE_MIXTURE_HIGH_ORDER", False)
 APPLY_POSITIVITY_PROJECTION = True               # Project MC samples onto non-negative distributions
                                                  # (min ||c*-c||^2 s.t. sum a_l P_l(mu) >= 0, SLSQP).
                                                  # Nothing is discarded; a passing sample is untouched.
@@ -550,7 +622,12 @@ SMOOTH_MEDIAN_FILL_THRESHOLD = 0.50              # Above this absent fraction, u
 MG_SMOOTH_SPIKE_FACTOR = 2.0                     # Tighter spike threshold at multigroup level
 MG_SMOOTH_DIP_N_NEIGHBORS = 5
 SMOOTH_DIAGONAL_WINDOW = 0                       # Gaussian kernel window (0 = off, >= 3 to enable)
-ORDER_REL_STD_CAPS = {1: 0.50, 2: 0.50, 3: 0.40, 4: 0.35, 5: 0.25, 6: 0.20}
+# ORDER_REL_STD_CAPS retirado el 2026-08-24: sus tres puntos de llamada vivian
+# dentro de `if apply_cov_postprocessing:`, que lleva apagado desde al menos la
+# run 92, asi que NUNCA se aplico a una cinta embarcada. Aparecia en
+# run_metadata.json (que vuelca el modulo entero) y se leia como un prior
+# afinado a mano sin derivacion. `cap_order_relative_uncertainty` se queda en
+# exfor_utils.py porque la importa exfor_to_endf_sampling_v2.py, que esta congelado.
 FORWARD_FILL_REL_STD_ENABLED = False             # Propagate the last valid rel_std into absent bins
 
 # =============================================================================
@@ -561,7 +638,31 @@ FORWARD_FILL_REL_STD_ENABLED = False             # Propagate the last valid rel_
 # single-variable. Irreversible: a consumer can regroup a fine file, nobody can
 # ungroup a collapsed one.
 MULTIGROUP_RHO_MIN = 0.85                        # Min l=1 adjacent correlation to merge two bins
-MULTIGROUP_SIGMA_RATIO_MAX = 5.0                 # Max running max(sigma_l1)/min(sigma_l1) in a group.
+MULTIGROUP_SIGMA_RATIO_MAX = 5.0                 # Max running max(sigma)/min(sigma) in a group.
+# ⛔ EL 5.0 NO TIENE DERIVACION. Entro el 30-ene-2026 (67f65ce) sin justificacion
+# en ningun sitio, y el «recommended range 3-10» que decia el docstring no tenia
+# fuente. Lo que acota de verdad es la SUB-DECLARACION del peor miembro: el grupo
+# embarca un numero, asi que un bin cuya sigma sea c veces la mas pequena del
+# grupo se declara hasta c corto en sigma (c^2 en varianza). Con esa lectura c es
+# un presupuesto de conservadurismo, no un parametro de gusto.
+#
+# ⚑ Y EL DEFECTO ERA EL SITIO, NO EL VALOR. El tope se leia SOLO en a_1, que lo
+# cumple por construccion (max 5.0) mientras a_4-a_6 llegan a 2000x. Leyendo el
+# MISMO 5.0 en los seis ordenes, sobre la run 99:
+#
+#     solo l=1, tope 5     677 grupos   100.0 % de varianza destruida
+#     por orden, tope 5   1245 grupos    43.2 %
+#     por orden, tope 3   1424 grupos    27.8 %
+#     por orden, tope 2   1575 grupos    15.1 %
+#     sin agrupar         1738 grupos     0.0 %
+#
+# ⚑ ENCENDIDO POR DEFECTO, y es seguro porque es MONOTONO: exigir la cota en mas
+# ordenes solo puede RECHAZAR fusiones, luego la malla solo puede salir mas fina
+# y la varianza destruida solo puede bajar. No puede sub-declarar nada que la
+# version de a_1 declarase. Y cabe: 1245 grupos son ~709 MiB ANTES de que el DP
+# por orden los vuelva a engrosar.
+MULTIGROUP_SIGMA_RATIO_PER_ORDER = _env_flag(
+    "KIKA_MULTIGROUP_SIGMA_RATIO_PER_ORDER", True)
                                                  # Stops heterogeneous merges forcing the percentile
                                                  # compensation to over-inflate. None disables.
 MULTIGROUP_USE_RAW_MC_CORR = True                # Feed the collapse raw KW correlations + Pass-2 std,
@@ -603,6 +704,37 @@ MERGE_ORIGINAL_MF34 = True                       # Merge our MF34 with the host'
 # Measured on the mixture object (run 94's grids, 703 groups): 679/703/637/472/
 # 299/105 groups, MF34 entries -52.9 % in the ragged emission.
 MF34_PER_ORDER_MESH = _env_flag("KIKA_MF34_PER_ORDER_MESH", False)
+# ── EL AGRUPAMIENTO EN UNA SOLA ETAPA (2026-08-22) ───────────────────────────
+# Hoy son DOS: `find_adaptive_group_boundaries` lleva el fino (1738) a 660 con
+# rho y sigma-ratio LOS DOS leidos en a_1, y el DP por orden particiona ESOS 660.
+# Luego el DP no puede deshacer lo que la primera etapa fusiono, y la primera
+# etapa es la que destruye el 42,5 % (a_4 51 %, a_5 53 %).
+#
+# Con esto la malla se elige UNA vez, por orden, DESDE LA REJILLA FINA, con el
+# criterio fisico: anchura <= res_factor * sigma_E (la resolucion la fija el TOF,
+# no nosotros), a_l constante dentro de k sigmas de su miembro mas preciso (el
+# fichero es RELATIVO, asi que lo homogeneo tiene que ser el DENOMINADOR), y el
+# tope sigma-ratio por orden. Medido offline sobre la run 99: 6746 parametros con
+# peor error plegado 1,46x, contra 3960 y 711x hoy.
+#
+# ⚑ APAGADO POR DEFECTO, y la diferencia con SIGMA_RATIO_PER_ORDER es real: aquel
+# es MONOTONO (solo puede rechazar fusiones, la malla solo puede salir mas fina),
+# asi que encenderlo no puede empeorar nada. Esto es una RUTA DE CONSTRUCCION
+# distinta, no tiene garantia de monotonia y no se ha corrido nunca de punta a
+# punta. Se enciende cuando una run lo haya medido, no antes.
+MF34_MESH_SINGLE_STAGE = _env_flag("KIKA_MF34_MESH_SINGLE_STAGE", False)
+MF34_MESH_RES_FACTOR = float(os.environ.get("KIKA_MF34_MESH_RES_FACTOR", "1.0"))
+MF34_MESH_A_CONSISTENCY_K = float(os.environ.get(
+    "KIKA_MF34_MESH_A_CONSISTENCY_K", "10.0"))
+MF34_MESH_SIGMA_RATIO_MAX = float(os.environ.get(
+    "KIKA_MF34_MESH_SIGMA_RATIO_MAX", "3.0"))
+# ⚑ La diagonal del grupo pasa a ser el MAXIMO de sus miembros, no la media. La
+# media SUB-DECLARA (hasta 100x menos en a_6), y con el fichero relativo el
+# maximo da sigma_abs(i) >= la fina en TODO miembro, que es aritmetica y no un
+# argumento. El margen plegado cierra ademas las fronteras entre grupos, y es
+# exacto: el plegado es LINEAL, asi que 1/min(cociente) pone el minimo en 1.
+MF34_MESH_COLLAPSE = os.environ.get("KIKA_MF34_MESH_COLLAPSE", "max")
+MF34_MESH_CALIBRATE_MARGIN = _env_flag("KIKA_MF34_MESH_CALIBRATE_MARGIN", True)
 
 # ⛔ RUN 97: THE MESH WAS BEING CHOSEN AFTER ITS TRIGGER HAD BEEN ERASED.
 #
@@ -1074,7 +1206,133 @@ def bin_valid_orders(nr, max_degree):
     return min(nr.frozen_degree, max_degree)
 
 
-def build_mixture_blocks(mixture_by_bin, nominal_results, max_degree, logger=None):
+def analytic_between_block(nr, max_degree):
+    """Exact between-model covariance of the zero-padded mixture, from the
+    NOMINAL per-degree fits. No Monte Carlo involved.
+
+    ``mixture_moments(w, means)`` with no covariances returns exactly
+    ``Σ_L w_L (a_L − ā)(a_L − ā)ᵀ``: how much the candidate degrees disagree.
+    It is the same quantity the degree-sampling MC estimates, and here it is
+    exact — the module's own docstring makes that point.
+
+    ⚑ WHY IT IS NEEDED. Above ``mc_order_cap`` the MC freezes every replica to
+    the nominal (`_mc_one_bin`, the `sample_coeffs[l] = nr_nominal_coeffs[l]`
+    branch), so every candidate degree carries the SAME value there and the
+    sampled between-model term collapses to ~0. What survives is the c₀
+    renormalisation jitter — measured at 2.5 % relative for a_5 against the
+    174.7 % the mixture actually implies, and with |rho| = 1 EXACTLY between
+    the frozen orders because they all move with the same 1/c₀. This function
+    is where the real number comes back.
+
+    Returns ``(max_degree, max_degree)`` or None when the bin has no candidate
+    set (interpolated bins, single-degree bins).
+    """
+    weights_map = getattr(nr, 'degree_weights', None)
+    all_info = getattr(nr, 'all_degrees_info', None)
+    if not weights_map or not all_info:
+        return None
+    degrees = sorted(d for d in weights_map if d in all_info)
+    if len(degrees) < 2:
+        return None
+    w = np.array([float(weights_map[d]) for d in degrees], dtype=float)
+    if not np.isfinite(w).all() or w.sum() <= 0:
+        return None
+    a_vectors = [
+        endf_normalize_legendre_coeffs(
+            np.asarray(all_info[d]['coeffs'], dtype=float), include_a0=False)
+        for d in degrees
+    ]
+    means = stack_padded(a_vectors, max_degree)
+    return mixture_moments(w, means)['between']
+
+
+def mixture_regularisation_inputs(nominal_results, energy_indices, max_degree):
+    """``(frozen_mask, mixture_abs_std)`` con el layout de la covarianza.
+
+    Las dos entradas que ``regularize_near_zero_relative_covariance`` necesita
+    para dejar de trasplantar: quien esta congelado -- y por tanto no puede ser
+    donante -- y que sigma ABSOLUTA implica el propio promediado en cada
+    parametro. Absoluta a proposito: asi el mismo array vale donde la forma
+    relativa se toma contra ``a_nom`` y donde se toma contra la media muestral.
+    """
+    n = len(energy_indices) * max_degree
+    frozen = np.zeros(n, dtype=bool)
+    abs_std = np.full(n, np.nan, dtype=float)
+    nr_by_idx = {nr.energy_index: nr for nr in nominal_results}
+    for k, e_idx in enumerate(energy_indices):
+        nr = nr_by_idx.get(e_idx)
+        if nr is None:
+            continue
+        cap = getattr(nr, 'mc_order_cap', None)
+        if cap is not None:
+            for l in range(max(0, int(cap)), max_degree):
+                frozen[k * max_degree + l] = True
+        an = analytic_between_block(nr, max_degree)
+        if an is not None:
+            abs_std[k * max_degree:(k + 1) * max_degree] = np.sqrt(
+                np.maximum(np.diag(an), 0.0))
+    return frozen, abs_std
+
+
+def mixture_regularisation_inputs_grouped(nominal_results, valid_indices,
+                                          groups, max_degree):
+    """Las mismas dos entradas, en el layout AGRUPADO.
+
+    ⛔ POR QUE ESTO HACIA FALTA. La rama multigrupo llamaba a
+    ``regularize_near_zero_relative_covariance`` SIN ``frozen_mask`` ni
+    ``mixture_abs_std``, o sea con el comportamiento viejo: sustituir la sigma
+    relativa marcada por la mediana de hasta 3 vecinos del mismo orden. Se
+    documento como hueco conocido ("``q`` no esta definido por grupo") y el
+    coste, medido sobre 102cp, es que **destruye la sigma que RESTORE acaba de
+    restaurar, en la cinta que se entrega**:
+
+        orden   decision -> EMITIDA (mediana)   grupos recortados
+        a_4      61,77 % -> 38,83 %  (1,59x)    269 de 688
+        a_5     118,23 % -> 57,27 %  (2,06x)    387 de 685
+        a_6     233,11 % -> 64,31 %  (3,62x)    548 de 684
+
+    Y de paso explica el techo del 100 % del objeto multigrupo, que parecia un
+    tope arbitrario y no lo es: ``snr_threshold = 1.0`` marca TODO parametro con
+    ``rel_std > 100 %`` y lo sustituye por el de un vecino no marcado, que por
+    construccion esta por debajo. La rama FINA, que si lleva la guarda, emite
+    38 674 % en la misma run y con el mismo umbral -- o sea el techo se va solo
+    en cuanto la guarda entra, sin tocar ningun numero.
+
+    LAS DOS ELECCIONES DE TRANSPORTE, y las dos van hacia el lado seguro:
+
+    * ``frozen``: el grupo cuenta como congelado si **algun** miembro lo esta.
+      Eso solo puede EXCLUIR donantes, que es la direccion del arreglo.
+    * ``abs_std``: el **maximo** de sus miembros. La funcion calcula
+      ``min(rel_std, s/|mu|)`` y por tanto SOLO PUEDE ENCOGER: un ``s`` mayor
+      significa encoger menos, o sea quedarse mas cerca de la identidad. Y es el
+      mismo argumento que ``COLLAPSE = max`` -- el fichero es relativo y el
+      consumidor forma ``sigma_abs(i) = sqrt(R_gg)|a_i|``, asi que el maximo del
+      grupo es el unico agregado que no se queda corto en ningun miembro.
+
+    ``groups[g]`` son posiciones dentro de ``valid_indices``, misma convencion
+    que ``apply_between_experiment_floor_mg``.
+    """
+    fine_frozen, fine_abs = mixture_regularisation_inputs(
+        nominal_results, valid_indices, max_degree)
+    n_g = len(groups)
+    frozen = np.zeros(n_g * max_degree, dtype=bool)
+    abs_std = np.full(n_g * max_degree, np.nan, dtype=float)
+    for g, members in enumerate(groups):
+        ks = np.asarray(members, dtype=int)
+        if ks.size == 0:
+            continue
+        for l in range(max_degree):
+            idx = ks * max_degree + l
+            frozen[g * max_degree + l] = bool(fine_frozen[idx].any())
+            v = fine_abs[idx]
+            v = v[np.isfinite(v)]
+            if v.size:
+                abs_std[g * max_degree + l] = float(v.max())
+    return frozen, abs_std
+
+
+def build_mixture_blocks(mixture_by_bin, nominal_results, max_degree, logger=None,
+                         restore_frozen_between=False):
     """Collapse per-candidate moments into one mixture covariance per bin.
 
     Parameters
@@ -1101,8 +1359,10 @@ def build_mixture_blocks(mixture_by_bin, nominal_results, max_degree, logger=Non
     weights_by_idx = {
         nr.energy_index: (nr.degree_weights or {}) for nr in nominal_results
     }
+    nr_by_idx = {nr.energy_index: nr for nr in nominal_results}
     blocks, diag = {}, {}
     n_skipped = 0
+    n_restored = 0
     for e_idx, by_deg in (mixture_by_bin or {}).items():
         if not by_deg:
             continue
@@ -1115,13 +1375,33 @@ def build_mixture_blocks(mixture_by_bin, nominal_results, max_degree, logger=Non
         means = np.vstack([by_deg[d]['mean'] for d in degs])
         covs = np.stack([by_deg[d]['cov'] for d in degs])
         mm = mixture_moments(w, means, covs)
-        blocks[e_idx] = {'mean': mm['mean'], 'cov': mm['total']}
+        total = mm['total']
+        between_used = mm['between']
+
+        # ── Opción 3: devolver el término entre-modelos donde el MC lo destruyó
+        # Sólo entra en los bins que TIENEN algún orden congelado. Se sustituye
+        # el bloque `between` ENTERO por el analítico, no sólo las filas
+        # congeladas: mezclar dos estimadores del mismo bloque no conserva la
+        # PSD, y `within + between_analitico` sí la conserva porque los dos
+        # sumandos lo son por construcción.
+        nr_cap = getattr(nr_by_idx.get(e_idx), 'mc_order_cap', None)
+        if restore_frozen_between and nr_cap is not None and int(nr_cap) < max_degree:
+            an = analytic_between_block(nr_by_idx[e_idx], max_degree)
+            if an is not None:
+                between_used = an
+                total = 0.5 * ((mm['within'] + an) + (mm['within'] + an).T)
+                n_restored += 1
+
+        blocks[e_idx] = {'mean': mm['mean'], 'cov': total}
         diag[e_idx] = {
             'n_models': len(degs),
             'within_var': np.diag(mm['within']).copy(),
-            'between_var': np.diag(mm['between']).copy(),
-            'total_var': np.diag(mm['total']).copy(),
+            'between_var': np.diag(between_used).copy(),
+            'total_var': np.diag(total).copy(),
         }
+        if restore_frozen_between:
+            # lo que el MC habia estimado, para poder ver la diferencia
+            diag[e_idx]['between_var_sampled'] = np.diag(mm['between']).copy()
     if logger:
         if n_skipped:
             logger.warning(
@@ -1136,6 +1416,17 @@ def build_mixture_blocks(mixture_by_bin, nominal_results, max_degree, logger=Non
                 "  [MIX] between-model share of the variance, median by order: "
                 + ", ".join(f"a_{l+1} {np.nanmedian(frac[:, l]):.3f}"
                             for l in range(min(max_degree, frac.shape[1])))
+            )
+        if restore_frozen_between:
+            _bs = np.vstack([d.get('between_var_sampled', d['between_var'])
+                             for d in diag.values()])
+            _gain = np.sqrt(np.maximum(bv, 0)) / np.sqrt(np.maximum(_bs, 1e-300))
+            logger.info(
+                f"  [MIX] between-model ANALITICO restaurado en {n_restored}/"
+                f"{len(diag)} bins (los que tienen algun orden congelado por "
+                f"mc_order_cap); ganancia en sigma, mediana por orden: "
+                + ", ".join(f"a_{l+1} x{np.nanmedian(_gain[:, l]):.1f}"
+                            for l in range(min(max_degree, _gain.shape[1])))
             )
     return blocks, diag
 
@@ -1639,7 +1930,8 @@ def _log_mc_bin_failures(bin_results, nominal_results, warning_counts, logger):
 
 
 def _per_order_mf34_args(cov_rel, means, edges_ev, max_order, window_ev, logger,
-                         cov_for_mesh=None):
+                         cov_for_mesh=None, physical=None, sigma_E=None,
+                         variant="mean", calibrate_margin=False):
     """`(cov_matrix, energy_grid_ev)` for `create_mf34_from_covariance`, per order.
 
     Returns the dict forms the writer takes when each order carries a mesh of its
@@ -1675,21 +1967,30 @@ def _per_order_mf34_args(cov_rel, means, edges_ev, max_order, window_ev, logger,
                     f"slots with SNR < 1 (max sigma_rel {sd.max():.3g})")
 
     meshes = per_order_meshes(edges_ev, decide_on, means, max_order,
-                              window_ev=window_ev, logger=logger)
+                              window_ev=window_ev, logger=logger,
+                              physical=physical, sigma_E=sigma_E)
     blocks, grids, weights = collapse_relative_per_order(
-        edges_ev, cov_rel, means, max_order, meshes)
+        edges_ev, cov_rel, means, max_order, meshes,
+        variant=variant, sigma_E=sigma_E,
+        calibrate_margin=calibrate_margin, logger=logger)
     logger.info("  " + mesh_report(edges_ev, meshes, max_order))
     return blocks, grids, weights
 
 
-def _write_cross_term_endf(mg_endf, output_path, logger):
-    """Rewrite the _mg tape with the MF33<->MF34 cross term in MF34's a0 blocks.
+def _write_cross_term_endf(mg_endf, output_path, logger,
+                           dead_parameters="drop", strict=True):
+    """Rewrite a tape with the MF33<->MF34 cross term in MF34's a0 blocks.
 
     Reads this run's own c0 and a_l replicas back off disk, collapses them onto
     the grids the _mg tape already carries, and rescales the whole joint as one
     congruence so the shipped marginals are reproduced and the result is PSD by
     construction. The cross term cannot ship as a sidecar and cannot be attached
     to marginals it was not built with.
+
+    `strict=False` downgrades a build_group_cross refusal (`SystemExit`) to a
+    warning and returns None instead of ending the run. That is for the FINE
+    tape only: it is an addition, and a refusal there must not throw away a
+    two-day run whose _mg tape is already on disk.
 
     Returns the path written, or None on failure.
     """
@@ -1702,7 +2003,8 @@ def _write_cross_term_endf(mg_endf, output_path, logger):
                 f"{mg_path.stem}{CROSS_ENDF_SUFFIX}{mg_path.suffix}")
     out_path = mg_path.parent / out_name
 
-    logger.info(f"  source _mg tape : {mg_path}")
+    logger.info(f"  source tape     : {mg_path}")
+    logger.info(f"  dead parameters : {dead_parameters}")
     logger.info(f"  magnitude grid  : {CROSS_MAG_GRID}")
     logger.info(f"  null fill       : {CROSS_NULL_FILL}")
     logger.info(f"  output          : {out_path}")
@@ -1718,6 +2020,7 @@ def _write_cross_term_endf(mg_endf, output_path, logger):
                 out_endf=out_path,
                 mag_grid=CROSS_MAG_GRID,
                 null_fill=CROSS_NULL_FILL,
+                dead_parameters=dead_parameters,
                 cache=Path(output_path) / ".group_cross_cache",
             )
     except BaseException as e:
@@ -1729,6 +2032,12 @@ def _write_cross_term_endf(mg_endf, output_path, logger):
         for line in buf.getvalue().splitlines():
             logger.info(f"  | {line}")
         if isinstance(e, SystemExit):
+            if not strict:
+                logger.warning(
+                    f"[WARN] [CROSS] cross-term ENDF refused for {mg_path.name} "
+                    f"(dead={dead_parameters}): {e} -- continuing, the tape above "
+                    f"is unaffected.", console=True)
+                return None
             logger.error(f"[ERROR] [CROSS] cross-term ENDF refused: {e}", console=True)
             raise                       # a refusal still ends the run non-zero
         logger.error(f"[ERROR] [CROSS] cross-term ENDF failed: {e}", console=True)
@@ -1764,6 +2073,9 @@ class NominalFitResult:
     mc_order_cap: Optional[int] = None
     between_exp_scatter: Optional[np.ndarray] = None
     between_exp_L_common: int = 0
+    between_exp_n_qual: int = 0            # experimentos que CUALIFICAN en el bin
+    between_exp_lone_entry: Optional[Any] = None   # el unico, si n_qual == 1
+    between_exp_per_experiment: Optional[Dict] = None
     skip_reason: Optional[str] = None
     expanded_bins: int = 0
     endf_index: Optional[int] = None
@@ -2467,14 +2779,32 @@ def perform_nominal_fits(
 
         n_unique_entries = exfor_df['entry'].nunique() if 'entry' in exfor_df.columns else 0
         scatter_info = None
-        if len(exfor_df) >= 3 and n_unique_entries >= 2:
+        # ⚑ `min_experiments=1`: hace falta el CENSO, no solo la dispersion. Un bin
+        #   con un unico experimento cualificado es justo donde el ajuste no puede
+        #   ver ningun desacuerdo, y el estimador viejo se negaba a reportarlo.
+        # ⚑ `freeze_c0=False`: `a_l = c_l/c_0`, asi que congelar c0 al agregado mete
+        #   la NORMALIZACION de cada experimento en sus a_l y la cuenta como forma.
+        #   MF34 declara forma. Con c0 libre la normalizacion se cancela exacta.
+        #   ⚠ Esto CAMBIA `between_exp_scatter` respecto de las runs anteriores. Es
+        #   inerte para la cinta mientras los dos suelos esten apagados -- lo unico
+        #   que lo consume aparte de ellos son un log y una figura de diagnostico --
+        #   y la puerta es cinta byte a byte.
+        if len(exfor_df) >= 3 and n_unique_entries >= 1:
             scatter_info = compute_between_experiment_coeffs(
                 exfor_df=exfor_df, degree=frozen_degree,
                 fixed_c0=nominal_coeffs[0],
+                freeze_c0=False,
+                min_experiments=1,
             )
             if scatter_info is not None:
                 results[-1].between_exp_scatter = scatter_info['scatter']
-                results[-1].between_exp_L_common = scatter_info['L_common']
+                results[-1].between_exp_per_experiment = scatter_info['per_experiment']
+                results[-1].between_exp_n_qual = scatter_info['n_experiments']
+                if scatter_info['n_experiments'] == 1:
+                    results[-1].between_exp_lone_entry = next(
+                        iter(scatter_info['per_experiment']))
+                if scatter_info['scatter'] is not None:
+                    results[-1].between_exp_L_common = scatter_info['L_common']
 
         if logger:
             exp_tag = f" [expanded ±{expansion_used}]" if expansion_used > 0 else ""
@@ -2940,6 +3270,7 @@ def run_exfor_to_endf_sampling_v2(
     generate_multigroup_covariance: bool = False,
     multigroup_rho_min: float = 0.90,
     multigroup_sigma_ratio_max: Optional[float] = None,
+    multigroup_sigma_ratio_per_order: bool = False,
     multigroup_variance_pct_min: float = 67.0,
     multigroup_variance_pct_max: float = 85.0,
     multigroup_variance_ratio_ref: float = 5.0,
@@ -2961,6 +3292,13 @@ def run_exfor_to_endf_sampling_v2(
     near_zero_snr_threshold: float = 1.0,
     near_zero_n_neighbors: int = 3,
     apply_between_exp_floor: bool = True,
+    apply_between_exp_floor_pooled: bool = False,
+    between_exp_pool_min_bins: int = 30,
+    between_exp_floor_only_blind: bool = True,
+    between_exp_floor_max_order: int = 4,
+    between_exp_floor_energy: bool = False,
+    between_exp_floor_energy_window: int = 40,
+    between_exp_floor_energy_clamp: bool = True,
     apply_cov_postprocessing: bool = True,
     apply_positivity_projection: bool = False,
     positivity_check_points: int = 50,
@@ -3183,11 +3521,20 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info(f"  NEAR_ZERO_SNR_THRESHOLD = {near_zero_snr_threshold}")
         _logger.info(f"  NEAR_ZERO_N_NEIGHBORS = {near_zero_n_neighbors}")
     _logger.info(f"  APPLY_BETWEEN_EXP_FLOOR = {apply_between_exp_floor}")
+    _logger.info(f"  APPLY_BETWEEN_EXP_FLOOR_POOLED = {apply_between_exp_floor_pooled}"
+                 f"  (min_bins={between_exp_pool_min_bins}, "
+                 f"only_blind={between_exp_floor_only_blind}, "
+                 f"max_order={between_exp_floor_max_order}, "
+                 f"energy={between_exp_floor_energy}"
+                 + (f"/W{between_exp_floor_energy_window}"
+                    f"{'/rec' if between_exp_floor_energy_clamp else ''}"
+                    if between_exp_floor_energy else "") + ")")
+    _logger.info(f"  RESTORE_MIXTURE_HIGH_ORDER = {RESTORE_MIXTURE_HIGH_ORDER}"
+                 f"{'  (a_5/a_6: bloque entre-modelos analitico + sin trasplante near-zero)' if RESTORE_MIXTURE_HIGH_ORDER else '  (inerte)'}")
     _logger.info(f"  APPLY_COV_POSTPROCESSING = {apply_cov_postprocessing}")
     if apply_cov_postprocessing:
         _dip_str = "None (disabled)" if SMOOTH_DIP_FRACTION is None else f"{SMOOTH_DIP_FRACTION} ({SMOOTH_DIP_FRACTION*100:.0f}%)"
         _spike_str = "None (disabled)" if SMOOTH_SPIKE_FACTOR is None else f"{SMOOTH_SPIKE_FACTOR} ({SMOOTH_SPIKE_FACTOR:.1f}x)"
-        _caps_str = "None (disabled)" if ORDER_REL_STD_CAPS is None else str(ORDER_REL_STD_CAPS)
         _smooth_w = SMOOTH_DIAGONAL_WINDOW or 0
         _logger.info(f"  SMOOTH_MIN_REL_STD = {SMOOTH_MIN_REL_STD} ({SMOOTH_MIN_REL_STD*100:.1f}%)")
         _logger.info(f"  SMOOTH_DIP_FRACTION = {_dip_str}")
@@ -3197,7 +3544,6 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info(f"  MG_SMOOTH_SPIKE_FACTOR = {MG_SMOOTH_SPIKE_FACTOR}")
         _logger.info(f"  MG_SMOOTH_DIP_N_NEIGHBORS = {MG_SMOOTH_DIP_N_NEIGHBORS}")
         _logger.info(f"  SMOOTH_DIAGONAL_WINDOW = {_smooth_w}")
-        _logger.info(f"  ORDER_REL_STD_CAPS = {_caps_str}")
         _logger.info(f"  FORWARD_FILL_REL_STD = {FORWARD_FILL_REL_STD_ENABLED}")
     _logger.info(f"  APPLY_POSITIVITY_PROJECTION = {apply_positivity_projection}")
     if apply_positivity_projection:
@@ -3208,7 +3554,8 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info("  # Multigroup Covariance")
         _logger.info(f"  GENERATE_MULTIGROUP_COVARIANCE = {generate_multigroup_covariance}")
         _logger.info(f"  MULTIGROUP_RHO_MIN = {multigroup_rho_min}")
-        _logger.info(f"  MULTIGROUP_SIGMA_RATIO_MAX = {multigroup_sigma_ratio_max}")
+        _logger.info(f"  MULTIGROUP_SIGMA_RATIO_MAX = {multigroup_sigma_ratio_max}"
+                     f"  (por orden = {multigroup_sigma_ratio_per_order})")
         _logger.info(f"  MF34_COVARIANCE_TYPE = {mf34_covariance_type}")
         _logger.info(f"  MULTIGROUP_VARIANCE_PCT_MIN = {multigroup_variance_pct_min}")
         _logger.info(f"  MULTIGROUP_VARIANCE_PCT_MAX = {multigroup_variance_pct_max}")
@@ -4198,10 +4545,15 @@ def run_exfor_to_endf_sampling_v2(
             )
 
             _snr_thr = near_zero_snr_threshold if regularize_near_zero else 0.0
+            _nz_frozen, _nz_mixstd = (
+                mixture_regularisation_inputs(
+                    nominal_results, energy_indices_kw, max_degree)
+                if RESTORE_MIXTURE_HIGH_ORDER else (None, None))
             cov_kw, corr_kw, _, mc_mean_kw, _ = compute_covariance_from_samples(
                 all_samples=kw_samples, energy_indices=energy_indices_kw,
                 max_order=max_degree, valid_mask=_valid_mask_kw,
                 snr_threshold=_snr_thr, n_neighbors=near_zero_n_neighbors,
+                frozen_mask=_nz_frozen, mixture_abs_std=_nz_mixstd,
                 logger=_logger,
             )
             log_psd_diagnostics(corr_kw, "corr_kw (Pass 1)", _logger)
@@ -4248,11 +4600,13 @@ def run_exfor_to_endf_sampling_v2(
             _mix_blocks, _mix_diag = ({}, {})
             if USE_MIXTURE_COVARIANCE and mixture_by_bin:
                 _mix_blocks, _mix_diag = build_mixture_blocks(
-                    mixture_by_bin, nominal_results, max_degree, logger=_logger)
+                    mixture_by_bin, nominal_results, max_degree, logger=_logger,
+                    restore_frozen_between=RESTORE_MIXTURE_HIGH_ORDER)
             cov_perbin, corr_perbin, _, mc_mean_perbin, _ = compute_covariance_from_samples(
                 all_samples=all_samples_perbin, energy_indices=energy_indices_kw,
                 max_order=max_degree, valid_mask=_valid_mask_kw,
                 snr_threshold=_snr_thr, n_neighbors=near_zero_n_neighbors,
+                frozen_mask=_nz_frozen, mixture_abs_std=_nz_mixstd,
                 logger=_logger,
                 mixture_blocks=_mix_blocks or None,
             )
@@ -4566,7 +4920,8 @@ def run_exfor_to_endf_sampling_v2(
                             for _e, _d in sorted(_mix_diag.items()):
                                 _r = dict(energy_index=_e,
                                           n_models=int(_d.get("n_models", 0)))
-                                for _key in ("within_var", "between_var", "total_var"):
+                                for _key in ("within_var", "between_var",
+                                             "between_var_sampled", "total_var"):
                                     _v = np.atleast_1d(np.asarray(_d.get(_key, [])))
                                     for _l, _x in enumerate(_v, start=1):
                                         _r[f"{_key}_a{_l}"] = float(_x)
@@ -4865,6 +5220,7 @@ def run_exfor_to_endf_sampling_v2(
                     max_order=max_degree,
                     rho_min=multigroup_rho_min,
                     sigma_ratio_max=multigroup_sigma_ratio_max,
+                    sigma_ratio_per_order=multigroup_sigma_ratio_per_order,
                     variance_percentile_min=multigroup_variance_pct_min,
                     variance_percentile_max=multigroup_variance_pct_max,
                     variance_ratio_ref=multigroup_variance_ratio_ref,
@@ -5111,6 +5467,10 @@ def run_exfor_to_endf_sampling_v2(
                                 if SAVE_FINE_MESH_INPUTS else None)
 
             if regularize_near_zero:
+                _fg_frozen, _fg_mixstd = (
+                    mixture_regularisation_inputs(
+                        nominal_results, energy_indices, max_degree)
+                    if RESTORE_MIXTURE_HIGH_ORDER else (None, None))
                 cov_matrix_nominal, _nz_nom_diag = regularize_near_zero_relative_covariance(
                     cov_rel=cov_matrix_nominal,
                     mean_params=nominal_params,
@@ -5118,6 +5478,7 @@ def run_exfor_to_endf_sampling_v2(
                     max_order=max_degree,
                     snr_threshold=near_zero_snr_threshold,
                     n_neighbors=near_zero_n_neighbors,
+                    frozen_mask=_fg_frozen, mixture_abs_std=_fg_mixstd,
                     logger=_logger,
                 )
                 if verbose_diagnostics:
@@ -5140,6 +5501,47 @@ def run_exfor_to_endf_sampling_v2(
                     logger=_logger,
                     apply=apply_between_exp_floor,
                 )
+            # ── el suelo AGRUPADO ────────────────────────────────────────
+            # Se calibra UNA vez sobre todos los bins y se aplica a los ciegos.
+            # `apply=False` deja el diagnostico en el log sin tocar la covarianza,
+            # que es como se mide el impacto antes de encenderlo.
+            _bexp_pool = None
+            if apply_between_exp_floor_pooled or verbose_diagnostics:
+                _sig_pool, _sig_glob, _sig_shape = pool_between_experiment_sigma(
+                    nominal_results=nominal_results,
+                    max_order=max_degree,
+                    min_bins=between_exp_pool_min_bins,
+                    energy_dependent=between_exp_floor_energy,
+                    energy_window=between_exp_floor_energy_window,
+                    energy_clamp=between_exp_floor_energy_clamp,
+                    logger=_logger,
+                )
+                cov_matrix_nominal, _bexp_pool = apply_between_experiment_floor_pooled(
+                    cov_rel=cov_matrix_nominal,
+                    nominal_results=nominal_results,
+                    energy_indices=energy_indices,
+                    max_order=max_degree,
+                    sigma_pool=_sig_pool, sigma_global=_sig_glob,
+                    apply=apply_between_exp_floor_pooled,
+                    only_blind=between_exp_floor_only_blind,
+                    max_floor_order=between_exp_floor_max_order,
+                    energy_shape=_sig_shape,
+                    logger=_logger,
+                )
+                if average_file:
+                    cov_matrix, _ = apply_between_experiment_floor_pooled(
+                        cov_rel=cov_matrix,
+                        nominal_results=nominal_results,
+                        energy_indices=energy_indices,
+                        max_order=max_degree,
+                        sigma_pool=_sig_pool, sigma_global=_sig_glob,
+                        apply=apply_between_exp_floor_pooled,
+                        only_blind=between_exp_floor_only_blind,
+                        max_floor_order=between_exp_floor_max_order,
+                        energy_shape=_sig_shape,
+                        logger=_logger,
+                    )
+
             if verbose_diagnostics:
                 log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-between-exp", _logger, verbose=True)
 
@@ -5186,23 +5588,6 @@ def run_exfor_to_endf_sampling_v2(
                         )
                     if verbose_diagnostics:
                         log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-median", _logger, verbose=True)
-
-                if ORDER_REL_STD_CAPS is not None:
-                    cov_matrix_nominal, _cap_nom = cap_order_relative_uncertainty(
-                        cov_rel=cov_matrix_nominal,
-                        max_order=max_degree,
-                        order_caps=ORDER_REL_STD_CAPS,
-                        logger=_logger,
-                    )
-                    if average_file:
-                        cov_matrix, _cap_avg = cap_order_relative_uncertainty(
-                            cov_rel=cov_matrix,
-                            max_order=max_degree,
-                            order_caps=ORDER_REL_STD_CAPS,
-                            logger=_logger,
-                        )
-                if verbose_diagnostics:
-                    log_rel_std_profile(cov_matrix_nominal, max_degree, "FG post-cap", _logger, verbose=True)
 
                 if FORWARD_FILL_REL_STD_ENABLED:
                     _logger.info("  Applying forward-fill to FG rel_std for absent orders...")
@@ -5433,6 +5818,15 @@ def run_exfor_to_endf_sampling_v2(
                                     else None)
 
                 if regularize_near_zero:
+                    # ⚑ LA GUARDA, PORTADA A LA RAMA MULTIGRUPO (2026-08-22).
+                    # Sin ella el paso destruye 1,59x / 2,06x / 3,62x de la
+                    # sigma de a_4/a_5/a_6 EN LA CINTA QUE SE ENTREGA. Ver
+                    # mixture_regularisation_inputs_grouped.
+                    _mg_frozen, _mg_mixstd = (
+                        mixture_regularisation_inputs_grouped(
+                            nominal_results, valid_indices,
+                            multigroup_result.groups, max_degree)
+                        if RESTORE_MIXTURE_HIGH_ORDER else (None, None))
                     cov_grouped_nominal, _ = regularize_near_zero_relative_covariance(
                         cov_rel=cov_grouped_nominal,
                         mean_params=nom_mean_grouped,
@@ -5440,6 +5834,7 @@ def run_exfor_to_endf_sampling_v2(
                         max_order=max_degree,
                         snr_threshold=near_zero_snr_threshold,
                         n_neighbors=near_zero_n_neighbors,
+                        frozen_mask=_mg_frozen, mixture_abs_std=_mg_mixstd,
                         logger=_logger,
                     )
                     if verbose_diagnostics:
@@ -5511,23 +5906,6 @@ def run_exfor_to_endf_sampling_v2(
                             )
                         if verbose_diagnostics:
                             log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-median", _logger, verbose=True)
-
-                    if ORDER_REL_STD_CAPS is not None:
-                        cov_grouped_nominal, _mg_cap_nom = cap_order_relative_uncertainty(
-                            cov_rel=cov_grouped_nominal,
-                            max_order=max_degree,
-                            order_caps=ORDER_REL_STD_CAPS,
-                            logger=_logger,
-                        )
-                        if average_file:
-                            multigroup_result.cov_grouped, _mg_cap_avg = cap_order_relative_uncertainty(
-                                cov_rel=multigroup_result.cov_grouped,
-                                max_order=max_degree,
-                                order_caps=ORDER_REL_STD_CAPS,
-                                logger=_logger,
-                            )
-                    if verbose_diagnostics:
-                        log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-cap", _logger, verbose=True)
 
                     if FORWARD_FILL_REL_STD_ENABLED:
                         _logger.info("  Applying forward-fill to MG rel_std for absent orders...")
@@ -5602,6 +5980,15 @@ def run_exfor_to_endf_sampling_v2(
                         log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-convert", _logger, verbose=True)
 
                     if regularize_near_zero:
+                        # ⚑ LA GUARDA, PORTADA A LA RAMA MULTIGRUPO (2026-08-22).
+                        # Sin ella el paso destruye 1,59x / 2,06x / 3,62x de la
+                        # sigma de a_4/a_5/a_6 EN LA CINTA QUE SE ENTREGA. Ver
+                        # mixture_regularisation_inputs_grouped.
+                        _mg_frozen, _mg_mixstd = (
+                            mixture_regularisation_inputs_grouped(
+                                nominal_results, valid_indices,
+                                multigroup_result.groups, max_degree)
+                            if RESTORE_MIXTURE_HIGH_ORDER else (None, None))
                         cov_grouped_nominal, _ = regularize_near_zero_relative_covariance(
                             cov_rel=cov_grouped_nominal,
                             mean_params=nom_mean_grouped,
@@ -5609,6 +5996,7 @@ def run_exfor_to_endf_sampling_v2(
                             max_order=max_degree,
                             snr_threshold=near_zero_snr_threshold,
                             n_neighbors=near_zero_n_neighbors,
+                            frozen_mask=_mg_frozen, mixture_abs_std=_mg_mixstd,
                             logger=_logger,
                         )
                         if verbose_diagnostics:
@@ -5681,23 +6069,6 @@ def run_exfor_to_endf_sampling_v2(
                             if verbose_diagnostics:
                                 log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-median", _logger, verbose=True)
 
-                        if ORDER_REL_STD_CAPS is not None:
-                            cov_grouped_nominal, _ = cap_order_relative_uncertainty(
-                                cov_rel=cov_grouped_nominal,
-                                max_order=max_degree,
-                                order_caps=ORDER_REL_STD_CAPS,
-                                logger=_logger,
-                            )
-                            if average_file:
-                                multigroup_result.cov_grouped, _ = cap_order_relative_uncertainty(
-                                    cov_rel=multigroup_result.cov_grouped,
-                                    max_order=max_degree,
-                                    order_caps=ORDER_REL_STD_CAPS,
-                                    logger=_logger,
-                                )
-                        if verbose_diagnostics:
-                            log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-cap", _logger, verbose=True)
-
                         if FORWARD_FILL_REL_STD_ENABLED:
                             _logger.info("  Applying forward-fill to RG rel_std for absent orders...")
                             cov_grouped_nominal = forward_fill_rel_std(cov_grouped_nominal, max_degree, logger=_logger)
@@ -5758,16 +6129,65 @@ def run_exfor_to_endf_sampling_v2(
                 if _po_bins:
                     _po_window = (min(eb.bin_lower_mev for eb in _po_bins) * 1e6,
                                   max(eb.bin_upper_mev for eb in _po_bins) * 1e6)
-                _logger.info("  MF34_PER_ORDER_MESH is ON — choosing a mesh per order")
-                _po_blocks, _po_grids, _po_weights = _per_order_mf34_args(
-                    cov_rel=cov_grouped_nominal,
-                    means=nom_mean_grouped,
-                    edges_ev=np.asarray(multigroup_result.group_boundaries_ev, float),
-                    max_order=max_degree,
-                    window_ev=_po_window,
-                    logger=_logger,
-                    cov_for_mesh=_mg_cov_for_mesh,
-                )
+                if MF34_MESH_SINGLE_STAGE:
+                    # ⚑ UNA SOLA ETAPA. La malla se elige POR ORDEN y DESDE EL
+                    # FINO, con el criterio fisico. Los 660 de
+                    # `find_adaptive_group_boundaries` no participan: se eligieron
+                    # con la rho y la sigma de a_1 y se aplicaban a los seis, y el
+                    # DP no puede deshacer lo que ellos fusionaron.
+                    _ss_bins = [energy_bins[i] for i in energy_indices]
+                    _ss_lo = np.array([eb.bin_lower_mev for eb in _ss_bins])*1e6
+                    _ss_hi = np.array([eb.bin_upper_mev for eb in _ss_bins])*1e6
+                    _ss_sE = np.array([eb.sigma_E_mev for eb in _ss_bins])*1e6
+                    _ss_edges = np.concatenate([_ss_lo, [_ss_hi[-1]]])
+                    # PUERTA: la rejilla tiene que ser contigua y creciente, o el
+                    # colapso mapea bins a grupos equivocados en silencio.
+                    if not np.all(np.diff(_ss_edges) > 0):
+                        raise RuntimeError(
+                            "MF34_MESH_SINGLE_STAGE: los bordes finos no son "
+                            "estrictamente crecientes; no se puede mallar sobre ellos")
+                    if not np.allclose(_ss_lo[1:], _ss_hi[:-1], rtol=0, atol=1e-3):
+                        raise RuntimeError(
+                            "MF34_MESH_SINGLE_STAGE: la rejilla fina tiene huecos; "
+                            "el mapa bin->grupo seria erroneo")
+                    _n_ss = len(_ss_bins)
+                    if cov_matrix_nominal.shape[0] != _n_ss*max_degree:
+                        raise RuntimeError(
+                            f"MF34_MESH_SINGLE_STAGE: la covarianza fina es "
+                            f"{cov_matrix_nominal.shape[0]} y los bins dan "
+                            f"{_n_ss}x{max_degree}; no casan")
+                    _logger.info(
+                        f"  MF34_MESH_SINGLE_STAGE is ON — malla por orden desde "
+                        f"el FINO ({_n_ss} bins), criterio fisico "
+                        f"(res x{MF34_MESH_RES_FACTOR}, k={MF34_MESH_A_CONSISTENCY_K}, "
+                        f"tope sigma {MF34_MESH_SIGMA_RATIO_MAX}), diagonal "
+                        f"'{MF34_MESH_COLLAPSE}'"
+                        + (" con margen plegado" if MF34_MESH_CALIBRATE_MARGIN else ""))
+                    _po_blocks, _po_grids, _po_weights = _per_order_mf34_args(
+                        cov_rel=cov_matrix_nominal,
+                        means=np.asarray(nominal_params, dtype=float),
+                        edges_ev=_ss_edges,
+                        max_order=max_degree,
+                        window_ev=None,
+                        logger=_logger,
+                        physical=dict(res_factor=MF34_MESH_RES_FACTOR,
+                                      a_consistency_k=MF34_MESH_A_CONSISTENCY_K,
+                                      sigma_ratio_max=MF34_MESH_SIGMA_RATIO_MAX),
+                        sigma_E=_ss_sE,
+                        variant=MF34_MESH_COLLAPSE,
+                        calibrate_margin=MF34_MESH_CALIBRATE_MARGIN,
+                    )
+                else:
+                    _logger.info("  MF34_PER_ORDER_MESH is ON — choosing a mesh per order")
+                    _po_blocks, _po_grids, _po_weights = _per_order_mf34_args(
+                        cov_rel=cov_grouped_nominal,
+                        means=nom_mean_grouped,
+                        edges_ev=np.asarray(multigroup_result.group_boundaries_ev, float),
+                        max_order=max_degree,
+                        window_ev=_po_window,
+                        logger=_logger,
+                        cov_for_mesh=_mg_cov_for_mesh,
+                    )
                 np.savez_compressed(
                     output_path / "mf34_per_order_mesh.npz",
                     **{f"e_{l}": _po_grids[l] for l in _po_grids},
@@ -5968,9 +6388,32 @@ def run_exfor_to_endf_sampling_v2(
             t_step = time.time()
             _logger.info("")
             _logger.info("#-- STEP 10b: MF33<->MF34 cross term ---------------------------------------")
-            cross_file = _write_cross_term_endf(mg_nom_file, output_path, _logger)
-            if cross_file is None:
-                _warning_counts['cross_term_endf_failed'] = 1
+            # ⚑ LAS DOS CINTAS, no solo la _mg. Hasta la run 100 esta llamada
+            # pasaba unicamente `mg_nom_file`, asi que NINGUNA run del pipeline
+            # producia la cinta FINA con cruzado y habia que montarla a mano
+            # despues (run 99: run_c_fine.sh c1/c2). El entregable es la fina.
+            #
+            # `drop` en la _mg y `carry` en la fina, que es el par que corrio la
+            # run 99: en la rejilla fina las replicas del MC no mueven a_5/a_6 en
+            # la mayoria de los bins, y `carry` restituye ahi la sigma del
+            # pipeline en vez de declarar el parametro muerto.
+            #
+            # ⚠ La fina va LA SEGUNDA y con `strict=False` a proposito: es una
+            # adicion, y una negativa suya no puede tirar una run de dos dias
+            # cuando la _mg ya esta escrita en disco.
+            cross_targets = [(mg_nom_file, "drop", True)]
+            if nominal_file:
+                cross_targets.append((nominal_file, "carry", False))
+            cross_file = None
+            for _src, _dead, _strict in cross_targets:
+                _out = _write_cross_term_endf(
+                    _src, output_path, _logger,
+                    dead_parameters=_dead, strict=_strict,
+                )
+                if _out is None:
+                    _warning_counts['cross_term_endf_failed'] = 1
+                elif cross_file is None:
+                    cross_file = _out
             _logger.info(f"#-- END STEP 10b (elapsed: {time.time() - t_step:.2f}s) -----------------------------------")
         elif GENERATE_CROSS_TERM_ENDF:
             _logger.warning(
@@ -6090,6 +6533,7 @@ if __name__ == "__main__":
         generate_multigroup_covariance=GENERATE_MULTIGROUP_COVARIANCE,
         multigroup_rho_min=MULTIGROUP_RHO_MIN,
         multigroup_sigma_ratio_max=MULTIGROUP_SIGMA_RATIO_MAX,
+        multigroup_sigma_ratio_per_order=MULTIGROUP_SIGMA_RATIO_PER_ORDER,
         multigroup_variance_pct_min=MULTIGROUP_VARIANCE_PCT_MIN,
         multigroup_variance_pct_max=MULTIGROUP_VARIANCE_PCT_MAX,
         multigroup_variance_ratio_ref=MULTIGROUP_VARIANCE_RATIO_REF,
@@ -6111,6 +6555,13 @@ if __name__ == "__main__":
         near_zero_snr_threshold=NEAR_ZERO_SNR_THRESHOLD,
         near_zero_n_neighbors=NEAR_ZERO_N_NEIGHBORS,
         apply_between_exp_floor=APPLY_BETWEEN_EXP_FLOOR,
+        apply_between_exp_floor_pooled=APPLY_BETWEEN_EXP_FLOOR_POOLED,
+        between_exp_floor_energy=BETWEEN_EXP_FLOOR_ENERGY,
+        between_exp_floor_energy_window=BETWEEN_EXP_FLOOR_ENERGY_WINDOW,
+        between_exp_floor_energy_clamp=BETWEEN_EXP_FLOOR_ENERGY_CLAMP,
+        between_exp_pool_min_bins=BETWEEN_EXP_POOL_MIN_BINS,
+        between_exp_floor_max_order=BETWEEN_EXP_FLOOR_MAX_ORDER,
+        between_exp_floor_only_blind=BETWEEN_EXP_FLOOR_ONLY_BLIND,
         apply_cov_postprocessing=APPLY_COV_POSTPROCESSING,
         apply_positivity_projection=APPLY_POSITIVITY_PROJECTION,
         positivity_check_points=POSITIVITY_CHECK_POINTS,

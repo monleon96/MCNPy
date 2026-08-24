@@ -2955,6 +2955,8 @@ def compute_covariance_from_samples(
     n_neighbors: int = 3,
     logger=None,
     mixture_blocks: Optional[Dict[int, Dict[str, np.ndarray]]] = None,
+    frozen_mask: Optional[np.ndarray] = None,
+    mixture_abs_std: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]], np.ndarray, np.ndarray]:
     """
     Compute relative (fractional) covariance and correlation matrices from MC samples.
@@ -3087,6 +3089,8 @@ def compute_covariance_from_samples(
             max_order=max_order,
             snr_threshold=snr_threshold,
             n_neighbors=n_neighbors,
+            frozen_mask=frozen_mask,
+            mixture_abs_std=mixture_abs_std,
             logger=logger,
         )
 
@@ -3144,6 +3148,8 @@ def regularize_near_zero_relative_covariance(
     max_order: int,
     snr_threshold: float = 1.0,
     n_neighbors: int = 3,
+    frozen_mask: Optional[np.ndarray] = None,
+    mixture_abs_std: Optional[np.ndarray] = None,
     logger=None,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
@@ -3154,6 +3160,44 @@ def regularize_near_zero_relative_covariance(
     replaces those explosive relative stds with interpolated values from
     neighboring bins of the same Legendre order, applied via congruence
     transform to preserve correlations and PSD.
+
+    ⛔ THAT PREMISE STOPPED BEING TRUE WHEN THE MIXTURE LANDED. This function
+    predates the model averaging by ~5 months (`3d3e6a6` vs `dbcd7d9`). It was
+    written when the mean was the MC *sample* mean and a near-zero mean was an
+    accident. Under the mixture the mean is ``p·m``: it shrinks ON PURPOSE when
+    the order probably is not there, and the large relative sigma is then the
+    model-selection uncertainty — information, not an artefact.
+    ``model_averaging`` says so in as many words: "a large relative uncertainty
+    at a near-zero mean is a diagnostic state, not a covariance failure".
+
+    Measured on run 101a, the unguarded version is BACKWARDS:
+
+      * of the flagged parameters, **99.3 % (a_5) and 98.8 % (a_6) are bins the
+        MC actually sampled** — flagged precisely because they carry a real
+        spread against a shrunk mean;
+      * of the donors, **79.8 % (a_5) and 98.0 % (a_6) are FROZEN bins**, whose
+        sigma is c₀ jitter (see ``analytic_between_block``).
+
+    So it took the fake sigma of the bins that were never sampled and
+    transplanted it onto the ones that were: a_5 went 174.7 % → 17.1 %.
+
+    Two arguments fix it, and both are optional so the old behaviour is exactly
+    recoverable by passing neither:
+
+    ``frozen_mask``
+        True where the parameter was frozen to the nominal in the MC. Those are
+        excluded from the DONOR pool — never from the flagging, since their SNR
+        is high by construction and they are never flagged anyway.
+    ``mixture_abs_std``
+        The ABSOLUTE sigma the averaging itself implies, per parameter — passed
+        absolute on purpose, so the same array is correct at every call site
+        whatever ``mean_params`` is relative to. When finite it REPLACES the
+        neighbour median as the target, which removes the donor pool from the
+        answer entirely. The target is then ``min(rel_std, that/|mean|)``: this
+        function may only ever shrink.
+        Growing where the mixture asks for more is a separate, separately
+        measured change (the analytic between-model block) — keeping the two
+        apart is what makes either of them attributable.
 
     Returns regularized cov_rel and diagnostics dict.
     """
@@ -3180,6 +3224,20 @@ def regularize_near_zero_relative_covariance(
 
     # Build scale vector
     scale = np.ones(n_params)
+    n_from_mixture = 0
+    n_donors_excluded = 0
+
+    if frozen_mask is not None:
+        frozen = np.asarray(frozen_mask, dtype=bool)
+        if frozen.shape != (n_params,):
+            raise ValueError(
+                f"frozen_mask has shape {frozen.shape}, expected ({n_params},)")
+        n_donors_excluded = int((frozen & ~flagged & (rel_std > 0)).sum())
+    else:
+        frozen = np.zeros(n_params, dtype=bool)
+
+    def _is_donor(j):
+        return (not flagged[j]) and rel_std[j] > 0 and not frozen[j]
 
     for i in range(n_params):
         if not flagged[i]:
@@ -3191,32 +3249,43 @@ def regularize_near_zero_relative_covariance(
         k = i // max_order
         l = i % max_order
 
-        # Collect rel_std from neighboring bins of the same order l
-        neighbor_stds = []
-        # Walk left
-        count = 0
-        for kk in range(k - 1, -1, -1):
-            j = kk * max_order + l
-            if not flagged[j] and rel_std[j] > 0:
-                neighbor_stds.append(rel_std[j])
-                count += 1
-                if count >= n_neighbors:
-                    break
-        # Walk right
-        count = 0
-        for kk in range(k + 1, n_energies):
-            j = kk * max_order + l
-            if not flagged[j] and rel_std[j] > 0:
-                neighbor_stds.append(rel_std[j])
-                count += 1
-                if count >= n_neighbors:
-                    break
+        # La sigma que el propio promediado implica manda sobre cualquier
+        # vecino: es de ESTE parametro, no de otro bin.
+        target_rel_std = None
+        if mixture_abs_std is not None:
+            _s = float(mixture_abs_std[i])
+            _mu = abs(float(mean_params[i]))
+            if np.isfinite(_s) and _s > 0 and _mu > 1e-30:
+                target_rel_std = min(rel_std[i], _s / _mu)
+                n_from_mixture += 1
 
-        if neighbor_stds:
-            target_rel_std = float(np.median(neighbor_stds))
-        else:
-            # Fallback: 100% relative uncertainty
-            target_rel_std = 1.0
+        if target_rel_std is None:
+            # Collect rel_std from neighboring bins of the same order l
+            neighbor_stds = []
+            # Walk left
+            count = 0
+            for kk in range(k - 1, -1, -1):
+                j = kk * max_order + l
+                if _is_donor(j):
+                    neighbor_stds.append(rel_std[j])
+                    count += 1
+                    if count >= n_neighbors:
+                        break
+            # Walk right
+            count = 0
+            for kk in range(k + 1, n_energies):
+                j = kk * max_order + l
+                if _is_donor(j):
+                    neighbor_stds.append(rel_std[j])
+                    count += 1
+                    if count >= n_neighbors:
+                        break
+
+            if neighbor_stds:
+                target_rel_std = float(np.median(neighbor_stds))
+            else:
+                # Fallback: 100% relative uncertainty
+                target_rel_std = 1.0
 
         scale[i] = target_rel_std / rel_std[i]
 
@@ -3227,11 +3296,17 @@ def regularize_near_zero_relative_covariance(
         "n_regularized": n_flagged,
         "n_total": n_params,
         "max_scale_down": float(np.min(scale[flagged])) if n_flagged > 0 else 1.0,
+        "n_from_mixture": n_from_mixture,
+        "n_donors_excluded": n_donors_excluded,
     }
 
     if logger:
         logger.info(f"  Near-zero regularization: {n_flagged}/{n_params} parameters "
                     f"(SNR < {snr_threshold})")
+        if n_from_mixture or n_donors_excluded:
+            logger.info(
+                f"    objetivo desde la mezcla en {n_from_mixture}/{n_flagged}; "
+                f"{n_donors_excluded} donantes congelados excluidos del vecindario")
         # Report before/after stats
         old_max = float(np.max(rel_std[flagged])) if n_flagged > 0 else 0.0
         new_rel_std = np.sqrt(np.maximum(np.diag(cov_reg), 0.0))
@@ -3500,6 +3575,460 @@ def apply_between_experiment_floor(
     if apply:
         return cov_floored, diagnostics
     return cov_rel, diagnostics
+
+
+HALFNORMAL_MEDIAN = 0.674489750196   # median(|Z|), Z ~ N(0,1)
+
+DCS_MU_GRID = np.linspace(-1.0, 1.0, 201)
+
+
+def _endf_shape_series(a_l: np.ndarray) -> np.ndarray:
+    """Legendre series of ``y(mu)/c_0`` from ENDF ``a_1..a_L``.
+
+    ``endf_normalize_legendre_coeffs`` returns ``a_l = (c_l/c_0)/(2l+1)``, so
+    the series that reconstructs the shape is ``[1, 3 a_1, 5 a_2, ...]`` and
+    ``int y/c_0 dmu = 2``.  ``c_0`` cancels, which is the whole point: the
+    reconstruction is EXACT from what ``between_exp_per_experiment`` already
+    stores, and needs no access to the EXFOR corpus.
+    """
+    a = np.asarray(a_l, dtype=float)
+    l = np.arange(1, len(a) + 1, dtype=float)
+    return np.concatenate([[1.0], (2.0*l + 1.0)*a])
+
+
+def dcs_shape_disagreement(a_e, a_o, mu: np.ndarray = DCS_MU_GRID) -> float:
+    """Median relative shape difference between two experiments, in DCS space.
+
+    ⚑ WHY DCS AND NOT ``a_l``.  The pooled estimator measures
+    ``|a_l(e) - a_l(others)| / |a_l(nominal)|``, and ``|a_l(nominal)|`` swings
+    orders of magnitude with energy.  Any energy trend measured there is
+    confounded with the denominator — the same defect that already bit MF34's
+    relative form, the near-zero regulariser and the sign-change cut.  In DCS
+    space there is no denominator to get wrong.
+
+    ⚑ AND IT IS SHAPE ONLY.  The research pipeline fits each experiment with
+    ``freeze_c0=False``, so a pure normalisation offset cancels in ``a_l`` and
+    therefore in the reconstructed ``y/c_0``.  Measured on run 99 (2026-08-22),
+    the energy trend survives that removal — Spearman rho(E) +0.391 (Cierjacks),
+    +0.181 (Kinney), +0.407 (Pirovano) — while the normalisation-only control is
+    ~0 or negative.  So the trend belongs to MF34 and not to MF33.
+    """
+    from numpy.polynomial.legendre import legval
+    ya = legval(mu, _endf_shape_series(a_e))
+    yb = legval(mu, _endf_shape_series(a_o))
+    ref = 0.5*(np.abs(ya) + np.abs(yb))
+    ok = ref > 0
+    if not ok.any():
+        return float("nan")
+    return float(np.median(np.abs(ya - yb)[ok]/ref[ok]))
+
+
+def _energy_shape_curve(E, v, window: int, clamp: bool):
+    """``(centres, factor)`` — the energy shape of the disagreement, median 1.
+
+    A rolling median with an ADAPTIVE window of ``window`` points, divided by
+    the median of the same sample.  Adaptive and not fixed-width in energy:
+    fixed-width windows leave stretches with 3 points where the median is noise,
+    and the floor would inherit that noise multiplied by ``sqrt(2k)``.
+
+    ⚑ ``clamp`` IS THE CONSERVATIVE HALF, AND IT IS MEASURED, NOT A TASTE.  A
+    median-preserving curve declares LESS than today's constant at low energy.
+    The out-of-sample gate says the constant already OVER-covers there (90.6 %
+    Cierjacks / 88.2 % Kinney) so lowering it is not a statistical error — but
+    the bar for this work is conservatism: under-declaring is inadmissible,
+    over-declaring only wastes.  Flooring the factor at 1 never declares less
+    than what ships today, and on the same gate it is as good or better:
+    dispersion across energy terciles 27.5 -> 7.8 pp (Cierjacks) and
+    20.8 -> 8.1 pp (Kinney), against 12.9 and 7.9 pp unclamped.
+    """
+    E = np.asarray(E, dtype=float)
+    v = np.asarray(v, dtype=float)
+    m = np.isfinite(E) & np.isfinite(v)
+    E, v = E[m], v[m]
+    if len(v) < 3*window:
+        return None
+    i = np.argsort(E)
+    E, v = E[i], v[i]
+    ref = float(np.median(v))
+    if not (ref > 0):
+        return None
+    k = window//2
+    idx = np.arange(k, len(v) - k)
+    med = np.array([np.median(v[j - k:j + k + 1]) for j in idx])
+    fac = med/ref
+    if clamp:
+        fac = np.maximum(fac, 1.0)
+    return E[idx], fac
+
+
+def energy_shape_factor(energy_shape, entry, energy_mev) -> float:
+    """The multiplier on ``sigma_e`` at this bin.  1.0 when nothing applies.
+
+    Flat extrapolation outside the calibrated range — the rolling median has no
+    support there and a linear extrapolation of a noisy tail is the one thing
+    that could make the factor unbounded.  ``None`` is the key of the pooled
+    curve, used when the bin's lone experiment was not calibrated on its own.
+    """
+    if not energy_shape or energy_mev is None:
+        return 1.0
+    E = float(energy_mev)
+    if not np.isfinite(E):
+        return 1.0
+    cur = energy_shape.get(entry)
+    if cur is None:
+        cur = energy_shape.get(None)
+    if cur is None:
+        return 1.0
+    cen, fac = cur
+    return float(np.interp(E, cen, fac))
+
+
+def pool_between_experiment_sigma(
+    nominal_results: List,
+    max_order: int,
+    min_bins: int = 30,
+    energy_dependent: bool = False,
+    energy_window: int = 40,
+    energy_clamp: bool = True,
+    logger=None,
+) -> Tuple[Dict, np.ndarray, Optional[Dict]]:
+    """``sigma_e(entry, l)`` — what ONE experiment alone knows ``a_l`` to.
+
+    Measured where the experiment HAS a companion, so it can be applied where it
+    does not.  Returned in nominal-relative ``a_l`` units, which is the unit the
+    covariance carries at the point the floor is applied
+    (``cov_rel = cov_abs / outer(nominal_params, nominal_params)``).
+
+    THE ESTIMATOR.  In every bin where >= 2 experiments qualify, each qualifying
+    experiment is compared against the weighted mean of the others:
+
+        d = |a_l(e) - mean_{others} a_l| / |a_l(nominal)|
+
+    ``d`` is not ``sigma_e``: with N experiments in the bin the complement mean
+    already averages N-1 of them, so ``Var(d) = sigma_e^2 (1 + 1/(N-1))``.
+    Dividing by ``sqrt(1 + 1/(N-1))`` puts bins with different N on the same
+    scale — for N=2 that factor is ``sqrt(2)``, the familiar one.  Then the
+    per-bin values are pooled by median and converted to a sigma with
+    ``median(|Z|) = 0.6745`` for ``Z ~ N(0,1)``.
+
+    ⚠ THE MEDIAN IS NOT A SIGMA.  Using ``median(|d|)`` directly under-states
+    sigma by a factor 1/0.6745 = 1.48.  The first version of this did exactly
+    that and the out-of-sample gate caught it.
+
+    ⚑ POOLED PER EXPERIMENT, NOT GLOBALLY, and that is a measured choice rather
+    than a stylistic one: calibrating with one experiment and measuring the
+    coverage of another lands anywhere between 29 % and 91 % against a 52 %
+    nominal.  The disagreement is a property of the experiment.
+
+    ⚑ ``energy_dependent`` ADDS THE ENERGY SHAPE, AND ONLY THE SHAPE.  The
+    level per order stays exactly as above; what the extra pass measures is a
+    dimensionless factor of median 1, obtained in DCS space (see
+    ``dcs_shape_disagreement``) and applied identically to every order.  That
+    split is deliberate: the measurement says the disagreement GROWS with
+    energy, it does not say how that growth divides among orders, and the
+    per-order split is still open (design doc §6.2).  Inventing one here would
+    be putting a number where there is no measurement.
+
+    ⚑ WHY IT HAD TO BE MEASURED FIRST.  With a constant, the out-of-sample
+    coverage falls monotonically with energy in both calibrated experiments —
+    90.6 / 79.3 / 63.1 % by energy tercile (Cierjacks) and 88.2 / 78.2 / 67.4 %
+    (Kinney) — i.e. the floor under-declares exactly where the disagreement is
+    largest.  The clamped shape takes the spread across terciles from 27.5 to
+    7.8 pp and from 20.8 to 8.1 pp, and is insensitive to ``energy_window``
+    (7.6-9.9 pp for 20-120 points), which is the signature of structure rather
+    than of fitting noise.
+
+    ⚠ THE GATE IS THE SPREAD ACROSS TERCILES, NOT ITS LEVEL.  The ~80 % here is
+    not §4-bis's 52 %: there the raw ``|A-B|`` is compared against ``sigma_e``,
+    while ``d`` already carries the shrink division and so estimates
+    ``sigma_e`` directly.  The level is a property of the shape of the
+    distribution and does not depend on energy; the slope does.
+
+    ⚠ RESIDUAL, and it is real: after the correction the middle tercile still
+    sits at 75-83 % in BOTH experiments.  The residual is non-monotone and
+    shared, so a rolling median cannot chase it.  That is this estimator's
+    honest limit.
+
+    Returns
+    -------
+    (sigma_pool, sigma_global, energy_shape)
+        ``sigma_pool`` maps ``(entry, l)`` -> sigma for experiments seen in at
+        least ``min_bins`` bins; ``sigma_global`` is the ``(max_order,)``
+        fallback for everyone else.  ``energy_shape`` is ``None`` unless
+        ``energy_dependent``, otherwise maps ``entry -> (centres, factor)`` with
+        ``None`` as the key of the pooled curve; read it with
+        ``energy_shape_factor``.
+    """
+    from scripts.resample_AD import endf_normalize_legendre_coeffs
+
+    per_entry: Dict = {}
+    per_all: Dict = {l: [] for l in range(max_order)}
+    dcs_entry: Dict = {}          # entry -> [(E, d_DCS), ...]
+    dcs_all: List = []
+    for nr in nominal_results:
+        pe = getattr(nr, "between_exp_per_experiment", None)
+        if not pe or len(pe) < 2:
+            continue
+        a_nom = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
+        entries = list(pe.keys())
+        N = len(entries)
+        shrink = np.sqrt(1.0 + 1.0/(N - 1))
+        w = np.array([pe[e][2] for e in entries], float)
+        for i, e in enumerate(entries):
+            a_e = np.asarray(pe[e][0], float)
+            m = np.ones(N, bool); m[i] = False
+            if w[m].sum() <= 0:
+                continue
+            a_o = np.average(np.stack([np.asarray(pe[x][0], float)
+                                       for x in np.asarray(entries)[m]]),
+                             axis=0, weights=w[m])
+            for l in range(min(max_order, len(a_e), len(a_o), len(a_nom))):
+                if abs(a_nom[l]) < 1e-9:
+                    continue
+                d = abs(a_e[l] - a_o[l])/abs(a_nom[l])/shrink
+                per_entry.setdefault((e, l), []).append(d)
+                per_all[l].append(d)
+            if energy_dependent:
+                # el MISMO par (e, complemento), medido donde no hay denominador
+                E_b = getattr(nr, "energy_mev", None)
+                d_dcs = dcs_shape_disagreement(a_e, a_o)
+                if E_b is not None and np.isfinite(d_dcs):
+                    rec = (float(E_b), d_dcs/shrink)
+                    dcs_entry.setdefault(e, []).append(rec)
+                    dcs_all.append(rec)
+
+    sigma_global = np.array(
+        [np.median(per_all[l])/HALFNORMAL_MEDIAN if len(per_all[l]) >= 8 else np.nan
+         for l in range(max_order)])
+    counts: Dict = {}
+    for (e, l), v in per_entry.items():
+        counts[e] = max(counts.get(e, 0), len(v))
+    sigma_pool = {(e, l): float(np.median(v)/HALFNORMAL_MEDIAN)
+                  for (e, l), v in per_entry.items()
+                  if counts.get(e, 0) >= min_bins and len(v) >= 8}
+    energy_shape: Optional[Dict] = None
+    if energy_dependent:
+        energy_shape = {}
+        calibrated = {e for (e, _l) in sigma_pool}
+        for e, rec in dcs_entry.items():
+            if e not in calibrated:
+                continue
+            cur = _energy_shape_curve([r[0] for r in rec], [r[1] for r in rec],
+                                      energy_window, energy_clamp)
+            if cur is not None:
+                energy_shape[e] = cur
+        cur = _energy_shape_curve([r[0] for r in dcs_all], [r[1] for r in dcs_all],
+                                  energy_window, energy_clamp)
+        if cur is not None:
+            energy_shape[None] = cur          # el respaldo agrupado
+        if not energy_shape:
+            energy_shape = None
+
+    if logger:
+        seen = sorted({e for (e, _l) in sigma_pool})
+        logger.info(f"  [Between-exp pool] {len(seen)} experiments calibrated "
+                    f"(>= {min_bins} bins each), global fallback "
+                    + " ".join(f"a_{l+1} {sigma_global[l]:.3f}"
+                               for l in range(max_order)
+                               if np.isfinite(sigma_global[l])))
+        if energy_dependent:
+            if energy_shape is None:
+                logger.info("  [Between-exp pool] energy shape NOT built "
+                            f"(needs >= {3*energy_window} comparisons per "
+                            "experiment); falling back to the constant")
+            else:
+                for e, (cen, fac) in sorted(energy_shape.items(),
+                                            key=lambda kv: str(kv[0])):
+                    logger.info(
+                        f"    energy shape {e if e is not None else 'POOLED':<12} "
+                        f"{len(cen)} centres  {cen[0]:.3f}-{cen[-1]:.3f} MeV  "
+                        f"factor {fac.min():.2f}-{fac.max():.2f} "
+                        f"(median {np.median(fac):.2f}"
+                        + (", clamped at 1" if energy_clamp else "") + ")")
+    return sigma_pool, sigma_global, energy_shape
+
+
+def apply_between_experiment_floor_pooled(
+    cov_rel: np.ndarray,
+    nominal_results: List,
+    energy_indices: List[int],
+    max_order: int,
+    sigma_pool: Dict,
+    sigma_global: np.ndarray,
+    apply: bool = True,
+    only_blind: bool = True,
+    max_floor_order: int = 4,
+    energy_shape: Optional[Dict] = None,
+    logger=None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Floor the declared sigma where the fit could not see any disagreement.
+
+    THE TARGET, derived rather than chosen.  If one experiment alone knows
+    ``a_l`` to ``sigma_e``, then k independent qualifying experiments know it to
+    ``sigma_e / sqrt(k)``.  So the band a bin should declare is
+
+        target(b, l) = sigma_e(entry, l) * f_E(entry, E_b) / sqrt(k_qual(b))
+        scale(b, l)  = max(1, target(b, l) / rel_std(b, l))
+
+    and the covariance is scaled by the congruence ``C' = S C S``, which leaves
+    every correlation and the PSD untouched and — because it is multiplicative —
+    does not depend on what the relative form is relative to.
+
+    ⚑ IT SWITCHES ITSELF OFF as ``1/sqrt(k)``: the moment the fit can see the
+    disagreement on its own, the term vanishes.  No threshold, no
+    discontinuity, and no double counting.  That is the whole difference from
+    ``apply_between_experiment_floor``, which needed >= 2 qualifying experiments
+    to produce anything at all and therefore only ever acted on the bins that
+    already saw the disagreement — 62 % of them — while doing nothing in the
+    38 % that were blind.  It was backwards.
+
+    ``only_blind`` keeps it to ``k_qual <= 1``.  The k >= 2 bins would also be
+    floored in places (their declared band sits below ``sigma_e/sqrt(k)`` in
+    about half of them), but that is a wider claim than "repair the bins that
+    cannot see", so it is off by default and reported instead.
+
+    ⛔ ``max_floor_order`` STOPS AT a_4, AND THAT IS THE POINT.  ``sigma_e`` is
+    calibrated as ``|a_l(A) - a_l(B)| / |a_l_nom|``, so the order that gets
+    inflated most is the one whose ``a_l`` is nearest zero, not the one that is
+    worst known.  a_5 and a_6 are exactly the ones that cross zero, which is why
+    the calibration hands them 0.896 and 0.780 against 0.19-0.29 for a_1-a_3 and
+    why the applied inflation there runs to a median 34x and 40x.
+
+    Measured on run 101a's emitted covariance, propagated to the DCS band
+    (fine grid / multigroup):
+
+      * flooring a_1..a_4 alone gives x1.59 / x1.74 on the band -- the whole
+        effect the design asked for, which was x1.73 measured in DCS space;
+      * adding a_5, a_6 moves that to x1.67 / x1.81, i.e. they are worth ~10 %
+        of the effect;
+      * but they take the l>=5 share of the band variance from 2.0 % to 27 %
+        (p90), and the L>=5 content of Var(mu) from 39.3 % -- BELOW today's
+        48.8 % -- to 47.5 %.
+
+    So a_5 and a_6 buy a tenth of the inflation and pay for it with the whole
+    of the high-order oscillation, which is the JEFF pathology this evaluation
+    exists to avoid.  Set to 6 to restore the old behaviour.
+
+    ⚑ And they are not what the floor is for.  At a_5/a_6 the declared variance
+    is 100 % between-MODEL (``[MIX] between-model share ... a_5 1.000, a_6
+    1.000``): it measures how much the competing Legendre degrees disagree, not
+    how optimistic one experiment's error bars are.  There is no
+    single-experiment sigma there to repair.
+
+    ⚑ ``energy_shape`` IS THE ENERGY DEPENDENCE, AND IT IS A PURE MULTIPLIER.
+    ``f_E`` is 1.0 when the argument is ``None``, so leaving it out reproduces
+    the previous behaviour exactly — the inertness gate is array equality, not
+    a tolerance.  It multiplies the TARGET, not the covariance, so everything
+    the design already guarantees survives untouched: the result is still the
+    congruence ``S C S``, no correlation moves, PSD is preserved, and the
+    ``1/sqrt(k)`` switch-off is unchanged.  Built by
+    ``pool_between_experiment_sigma(energy_dependent=True)``; clamped at 1 by
+    default, so the floor can only ever declare MORE than the constant version,
+    never less.
+
+    ⚠ IT IS THE SAME FACTOR FOR EVERY ORDER.  The measurement is in DCS space
+    and mixes orders by construction; the per-order split is open (§6.2).
+    Spreading one measured number across six orders with an invented rule would
+    be the same mistake the ``a_l`` denominator already caused three times.
+    """
+    n_params = cov_rel.shape[0]
+    rel_std = np.sqrt(np.maximum(np.diag(cov_rel), 0.0))
+    scale = np.ones(n_params)
+    nr_lookup = {nr.energy_index: nr for nr in nominal_results
+                 if nr.has_data and not nr.interpolated}
+
+    n_floored = 0
+    n_blind = 0
+    n_withheld = 0
+    energy_factors: List[float] = []
+    per_order = {l: [] for l in range(max_order)}
+    withheld_order = {l: [] for l in range(max_order)}
+    for k, e_idx in enumerate(energy_indices):
+        nr = nr_lookup.get(e_idx)
+        if nr is None:
+            continue
+        kq = int(getattr(nr, "between_exp_n_qual", 0) or 0)
+        if kq < 1:
+            continue
+        if only_blind and kq > 1:
+            continue
+        if kq <= 1:
+            n_blind += 1
+        entry = getattr(nr, "between_exp_lone_entry", None)
+        f_E = energy_shape_factor(energy_shape, entry,
+                                  getattr(nr, "energy_mev", None))
+        if f_E > 1.0:
+            energy_factors.append(f_E)
+        for l in range(max_order):
+            idx = k*max_order + l
+            if idx >= n_params:
+                break
+            s_e = sigma_pool.get((entry, l), np.nan)
+            if not np.isfinite(s_e):
+                s_e = sigma_global[l] if l < len(sigma_global) else np.nan
+            if not np.isfinite(s_e):
+                continue
+            target = s_e*f_E/np.sqrt(kq)
+            cur = rel_std[idx]
+            if cur > 1e-15 and target > cur:
+                if l >= max_floor_order:
+                    # Se mide y se reporta, pero NO se aplica. Ver el docstring:
+                    # el denominador |a_l| decide el orden, no la fisica.
+                    n_withheld += 1
+                    withheld_order[l].append(target/cur)
+                    continue
+                scale[idx] = target/cur
+                n_floored += 1
+                per_order[l].append(scale[idx])
+
+    cov_floored = cov_rel*np.outer(scale, scale)
+    diagnostics = {
+        'n_blind_bins': n_blind,
+        'n_floored': n_floored,
+        'max_floor_order': int(max_floor_order),
+        'n_withheld': n_withheld,
+        'withheld_per_order': {l: (len(v), float(np.median(v)) if v else 1.0)
+                               for l, v in withheld_order.items()},
+        'median_inflation': float(np.median(scale[scale > 1])) if (scale > 1).any() else 1.0,
+        'max_inflation': float(scale.max()),
+        'per_order': {l: (len(v), float(np.median(v)) if v else 1.0)
+                      for l, v in per_order.items()},
+        'energy_shape': energy_shape is not None,
+        'energy_factor': ((len(energy_factors),
+                           float(np.median(energy_factors)),
+                           float(np.max(energy_factors)))
+                          if energy_factors else (0, 1.0, 1.0)),
+    }
+    if logger:
+        status = "APPLIED" if apply else "NOT APPLIED (diagnostic only)"
+        logger.info(
+            f"  [Between-exp floor POOLED] {status} — {n_blind} blind bins, "
+            f"{n_floored} (E,l) entries floored, median inflation "
+            f"{diagnostics['median_inflation']:.2f}x, max "
+            f"{diagnostics['max_inflation']:.2f}x "
+            f"[hasta l={max_floor_order}]")
+        cnt_E, med_E, max_E = diagnostics['energy_factor']
+        if energy_shape is not None:
+            logger.info(
+                f"  [Between-exp floor POOLED] dependencia en ENERGIA activa: "
+                f"{cnt_E} bins con factor > 1 (median {med_E:.2f}x, max "
+                f"{max_E:.2f}x). Multiplica el objetivo, no la covarianza: "
+                f"sigue siendo la congruencia S C S.")
+        for l in range(max_order):
+            cnt, med = diagnostics['per_order'][l]
+            if cnt:
+                logger.info(f"    l={l+1}: {cnt} floored (median {med:.2f}x)")
+        if n_withheld:
+            logger.info(
+                f"  [Between-exp floor POOLED] RETENIDO en l>{max_floor_order}: "
+                f"{n_withheld} entradas que el criterio habria inflado y NO se "
+                f"aplican (el denominador |a_l| elige el orden, no la fisica; "
+                f"y alli la varianza es 100 % entre-modelos)")
+            for l in range(max_floor_order, max_order):
+                cnt, med = diagnostics['withheld_per_order'][l]
+                if cnt:
+                    logger.info(f"    l={l+1}: {cnt} retenidas (median {med:.2f}x)")
+    return (cov_floored if apply else cov_rel), diagnostics
 
 
 def apply_between_experiment_floor_mg(

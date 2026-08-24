@@ -118,6 +118,7 @@ def find_adaptive_group_boundaries(
     max_order: int,
     rho_min: float = 0.90,
     sigma_ratio_max: Optional[float] = None,
+    sigma_ratio_per_order: bool = False,
     logger=None,
     diagnostics_file: Optional[Path] = None,
 ) -> Tuple[List[List[int]], List[GroupInfo]]:
@@ -127,8 +128,9 @@ def find_adaptive_group_boundaries(
     Algorithm (greedy merging):
     1. Start at i=0
     2. Extend group [i0, i1]: merge if rho >= rho_min AND
-       (if sigma_ratio_max is set) the running group's max(σ)/min(σ) at l=1
-       remains <= sigma_ratio_max
+       (if sigma_ratio_max is set) the running group's max(σ)/min(σ) remains
+       <= sigma_ratio_max -- at l=1 only, or in EVERY order when
+       ``sigma_ratio_per_order`` is set
     3. Finalize group, start next at i1+1
 
     The optional sigma_ratio cap prevents merging strongly correlated bins
@@ -154,9 +156,51 @@ def find_adaptive_group_boundaries(
     rho_min : float
         Minimum l=1 adjacent correlation to allow merging (default 0.90)
     sigma_ratio_max : float, optional
-        Maximum running max(σ)/min(σ) at l=1 across the group being grown.
+        Maximum running max(σ)/min(σ) across the group being grown.
         ``None`` (default) disables the gate, restoring the correlation-only
-        behavior.  Recommended range 3–10 for nuclear-data Legendre fits.
+        behavior.
+
+        ⛔ THE VALUE HAS NO DERIVATION.  It entered on 2026-01-30 (67f65ce) with
+        no recorded justification, and the "recommended range 3-10" this
+        docstring used to assert had no source either.  What it actually bounds
+        is the WORST MEMBER's under-declaration: the group ships one number, so
+        a member whose sigma is ``c`` times the group's smallest is declared up
+        to ``c`` short in sigma (``c^2`` in variance).  That is the reading to
+        argue from, and it makes ``c`` a conservatism budget, not a tuning knob.
+    sigma_ratio_per_order : bool
+        Read the ratio in EVERY order instead of only l=1 (default ``False``,
+        the historical behaviour).
+
+        ⛔ AT l=1 THE CAP PROTECTS NOBODY, and this is measured, not argued.
+        The sigma ratio INSIDE the groups the pipeline ships, per order
+        (run 99, `docs/chi2-mf4/mf34_mesh_frontier.md` §2-bis):
+
+            order     a_1    a_2    a_3    a_4      a_5      a_6
+            p95       4.4    4.7    6.1     46      101       26
+            max       5.0   12.9   17.5   1.9e3   2.0e3    1.2e3
+
+        a_1's maximum is EXACTLY the cap: the gate binds on the one order that
+        satisfies it anyway, while a_4-a_6 run to 2000x -- i.e. those orders are
+        under-declared by up to three orders of magnitude at specific energies,
+        which is the 711x folded error the mesh frontier reports.
+
+        Measured on run 99's emitted covariance, keeping the SAME cap value and
+        changing only where it is read (destroyed = sum of tr(B_S) - u^T B_S u,
+        the DP's own functional):
+
+            l=1 only, cap 5     677 groups   100.0 % destroyed
+            per order, cap 5   1245 groups    43.2 %
+            per order, cap 3   1424 groups    27.8 %
+            per order, cap 2   1575 groups    15.1 %
+            no grouping        1738 groups     0.0 %
+
+        So reading the same number in the right place recovers 57 % of the
+        destroyed variance.  The defect was the PLACE, not the value.
+
+        ⚑ MONOTONE BY CONSTRUCTION, which is what makes it safe: requiring the
+        bound in more orders can only refuse merges, so the mesh can only get
+        FINER and the destroyed variance can only go DOWN.  It cannot
+        under-declare anything the l=1 version declared.
     logger : optional
         Logger for diagnostics
     diagnostics_file : Path, optional
@@ -177,15 +221,21 @@ def find_adaptive_group_boundaries(
         logger.info(f"  Grouping parameters:")
         logger.info(f"    rho_min = {rho_min}")
         if sigma_ratio_max is not None:
-            logger.info(f"    sigma_ratio_max = {sigma_ratio_max}")
+            logger.info(f"    sigma_ratio_max = {sigma_ratio_max}"
+                        + (f" (leido en los {max_order} ordenes)"
+                           if sigma_ratio_per_order else " (leido SOLO en l=1)"))
         else:
             logger.info(f"    sigma_ratio_max = (disabled)")
 
-    # Pre-compute per-bin l=1 sigma for diagnostics
-    sigma_l1_per_bin = np.array([
-        np.sqrt(max(cov_matrix[idx(i, 1, max_order), idx(i, 1, max_order)], 0.0))
-        for i in range(n_fine)
+    # Pre-compute per-bin sigma for every order.  Row 0 is l=1, which is both
+    # the diagnostics column and the historical gate.
+    sigma_per_bin = np.array([
+        [np.sqrt(max(cov_matrix[idx(i, l, max_order), idx(i, l, max_order)], 0.0))
+         for i in range(n_fine)]
+        for l in range(1, max_order + 1)
     ])
+    sigma_l1_per_bin = sigma_per_bin[0]
+    gate_orders = range(max_order) if sigma_ratio_per_order else range(1)
 
     # Pre-compute all adjacent l=1 correlations for diagnostics
     adj_rho = np.array([
@@ -216,10 +266,18 @@ def find_adaptive_group_boundaries(
         while i1 + 1 < n_fine:
             rho = adj_rho[i1]
 
-            # Running group sigma ratio: max/min of all positive l=1 sigmas
-            # in the candidate-extended group [i0 .. i1+1]
+            # Running group sigma ratio: max/min of all positive sigmas in the
+            # candidate-extended group [i0 .. i1+1].  `ratio` stays the l=1
+            # number so the diagnostics CSV keeps meaning what it meant; the
+            # gate uses the worst order among `gate_orders`.
             sigmas_l1 = [s for s in sigma_l1_per_bin[i0:i1 + 2] if s > 0]
             ratio = max(sigmas_l1) / min(sigmas_l1) if len(sigmas_l1) >= 2 else 1.0
+            gate_ratio = 0.0
+            for _l in gate_orders:
+                sl = sigma_per_bin[_l, i0:i1 + 2]
+                sl = sl[sl > 0]
+                if len(sl) >= 2:
+                    gate_ratio = max(gate_ratio, float(sl.max()/sl.min()))
 
             s_i = sigma_l1_per_bin[i1]
             s_j = sigma_l1_per_bin[i1 + 1]
@@ -232,7 +290,7 @@ def find_adaptive_group_boundaries(
             # candidate-extended group keeps σ-heterogeneity bounded.
             merged = rho >= rho_min
             if sigma_ratio_max is not None:
-                merged = merged and (ratio <= sigma_ratio_max)
+                merged = merged and (max(gate_ratio, 1.0) <= sigma_ratio_max)
 
             if diag_fh is not None:
                 diag_fh.write(
@@ -1162,6 +1220,7 @@ def perform_adaptive_multigroup_collapse(
     max_order: int,
     rho_min: float = 0.90,
     sigma_ratio_max: Optional[float] = None,
+    sigma_ratio_per_order: bool = False,
     variance_percentile_min: float = 67.0,
     variance_percentile_max: float = 85.0,
     variance_ratio_ref: float = 5.0,
@@ -1364,6 +1423,7 @@ def perform_adaptive_multigroup_collapse(
                 max_order=max_order,
                 rho_min=rho_min,
                 sigma_ratio_max=sigma_ratio_max,
+                sigma_ratio_per_order=sigma_ratio_per_order,
                 logger=logger,
                 diagnostics_file=_diag_below,
             )
@@ -1403,6 +1463,7 @@ def perform_adaptive_multigroup_collapse(
                 max_order=max_order,
                 rho_min=rho_min,
                 sigma_ratio_max=sigma_ratio_max,
+                sigma_ratio_per_order=sigma_ratio_per_order,
                 logger=logger,
                 diagnostics_file=_diag_above,
             )
@@ -1431,6 +1492,7 @@ def perform_adaptive_multigroup_collapse(
             max_order=max_order,
             rho_min=rho_min,
             sigma_ratio_max=sigma_ratio_max,
+            sigma_ratio_per_order=sigma_ratio_per_order,
             logger=logger,
             diagnostics_file=diagnostics_file,
         )

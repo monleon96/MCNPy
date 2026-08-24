@@ -97,6 +97,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 __all__ = [
+    "physical_solve_order",
     "segment_tables",
     "seg_stats",
     "solve_order",
@@ -104,7 +105,36 @@ __all__ = [
     "per_order_meshes",
     "order_aggregator",
     "collapse_relative_per_order",
+    "folded_variance_ratio",
 ]
+
+
+#: Tolerancia RELATIVA con la que el AVISO de no-cancelacion decide que un
+#: grupo cancela de verdad.
+#:
+#: ⚑ EL DEFECTO ERA LA ASIMETRIA, NO LA MALLA.  Las dos rutas comprueban
+#: ``Var(mean) >= sum_j u_j^2 V_j / (sum_j u_j)^2`` con ``u = w * a`` -- la misma
+#: desigualdad -- pero por caminos aritmeticos distintos: el DP con ``cumsum``
+#: sobre la banda invertida, el colapso con ``W @ rel @ W.T``.  El DP MINIMIZA el
+#: numero de grupos, asi que su optimo se apoya JUSTO sobre la restriccion; con
+#: el DP tolerante (``- 1e-12|vv|``) y el aviso exacto (``- 1e-300``), los
+#: segmentos de la frontera salian marcados por diferencias de ultimo bit.
+#:
+#: Medido sobre la run 103R4 (malla en una etapa, 7 820 parametros, la malla que
+#: escribio la run): los **121** grupos que el log daba por violados
+#: (12/38/48/23 en a_3..a_6) tienen cociente ``indep/own = 1`` a DIEZ cifras y
+#: **ninguno** pasa de 1,001.  No hay ni una cancelacion real: son redondeo.
+#:
+#: ⚠ ARREGLARLO POR EL LADO DEL DP CUESTA Y NO COMPRA NADA.  Exigir el margen
+#: por encima (``g >= vv (1 + 1e-9)``) sube la malla de 7 820 a **8 432**
+#: parametros (+7,8 %, ~52 MiB) para negarse a fusiones cuya ganancia sobre el
+#: promediado independiente es < 1e-9 -- fusiones que no destruyen nada y si
+#: ahorran fichero.  Por eso el DP no se toca (su ``1e-12`` sigue literal, y la
+#: malla es bit a bit la misma) y lo que se alinea es el AVISO.
+#:
+#: ⚑ EL SUELO DEL COLAPSO NO USA ESTA CONSTANTE: sigue siendo exacto
+#: (``max(own, indep)``), que es inerte en el ruido y acota donde haga falta.
+NOCANCEL_REL_MARGIN = 1e-9
 
 
 # --------------------------------------------------------------------------- #
@@ -225,8 +255,144 @@ def _live_runs(live: np.ndarray, lo: int, hi: int,
     return runs
 
 
+# --------------------------------------------------------------------------- #
+# the PHYSICAL criterion -- an alternative to the SNR/destroyed DP above
+# --------------------------------------------------------------------------- #
+def physical_solve_order(B: np.ndarray, a_g: np.ndarray, w: np.ndarray,
+                         sigma_E: np.ndarray, *, res_factor: float = 1.0,
+                         a_consistency_k: Optional[float] = None,
+                         sigma_ratio_max: Optional[float] = None,
+                         band: int = 400):
+    """Fewest groups that the PHYSICS allows, as cuts into this run.
+
+    ⚑ A DIFFERENT QUESTION FROM ``solve_order``.  That one repairs SNR < 1 and
+    then destroys as little as possible; the criterion is a property of OUR
+    Monte Carlo.  This one asks what the DATA permits, and ``destroyed`` stops
+    being the objective and becomes a reported quantity.  Three conditions, and
+    none of them is a knob to tune:
+
+    * **resolution.**  A group may not be wider than ``res_factor`` times the
+      worst ``sigma_E`` it covers.  Wider, and there is structure the experiment
+      DID resolve and merging destroys it; narrower, and the bins are not
+      independent measurements -- the same neutrons enter both -- so what the
+      fit put between them is not information.  ``sigma_E`` comes from the TOF
+      geometry, not from us.
+    * **a_l consistency.**  The file is RELATIVE, so what has to be homogeneous
+      inside a group is not sigma, it is the DENOMINATOR ``a_l``.  A group is
+      admissible while ``a_l`` stays constant within ``k`` sigma of its most
+      precise member.  The sign-change cut is the limiting case of this same
+      rule.
+    * **sigma ratio.**  ``max(sigma)/min(sigma)`` in the group, PER ORDER, on the
+      RELATIVE sigma.  With ``COLLAPSE = max`` under-declaration is impossible by
+      arithmetic, so what this bounds is the OVER-declaration -- the waste -- and
+      the quantity wasted is ``max_j rel_jj / rel_ii``.  Reading it on the
+      absolute sigma, which is what ``B`` carries, bounds the wrong ratio: run 99
+      with ``c = 3`` then over-declares 536x at a_4.  It is a file-size budget,
+      not physics (§J-7).
+
+    Plus the same no-cancellation constraint as ``solve_order``: a segment is
+    admissible only if the merged variance is at least what INDEPENDENT
+    averaging would give, so no SNR gain can come from opposite information
+    cancelling.
+
+    ⚠ THE ACCUMULATES RUN ON THE REVERSED VECTOR and have to be put back, or the
+    constraint lands on the wrong segments and gives the impossible: MORE
+    restriction with FEWER groups (a_2 went 948 -> 20 the first time).
+    ⚠ ``max == min == 0`` is ratio 1, NOT infinity -- a dead bin has to be able
+    to be its own group, or its stretch is unreachable and the whole order costs
+    ``inf``.
+    """
+    n = B.shape[0]
+    if n == 0:
+        return np.array([0], dtype=int)
+    d = np.diag(B).copy()
+    a_g = np.asarray(a_g, float)
+    Bw = B * np.outer(w, w)
+    w2, w2d = w * w, w * w * d
+    # ⚑ LA SIGMA QUE EL TOPE TIENE QUE LEER ES LA RELATIVA.  ``B`` llega
+    # ABSOLUTA (``per_order_meshes`` hace ``cov_rel * outer(m, m)``), y leer el
+    # cociente ahi no acota lo que hay que acotar: con ``COLLAPSE = max`` el
+    # consumidor ve ``R_gg / rel_ii = max_j rel_jj / rel_ii``, un cociente de
+    # varianzas RELATIVAS.  Los dos difieren por el cociente de ``|a_l|`` dentro
+    # del grupo, que es justo lo que la consistencia de a_l deja libre.
+    # Medido en la run 99 con c = 3: leido en absoluta el maximo sobre-declara
+    # 536x (a_4) y 283x (a_1); leido en relativa, 2,88x.  Cuesta 44 parametros
+    # de 9341.  Ver docs/chi2-mf4/pipeline_covariance_to_tape.md §J-7.
+    _aa = np.abs(a_g)
+    s_rel = np.zeros(n)
+    _ok_a = _aa > 0
+    s_rel[_ok_a] = np.sqrt(np.maximum(d[_ok_a], 0.0)) / _aa[_ok_a]
+    OK = np.zeros((n + 1, band), dtype=bool)
+    for j in range(1, n + 1):
+        lo = max(0, j - band)
+        m = j - lo
+        M = Bw[lo:j, lo:j]
+        G = M[::-1, ::-1].cumsum(0).cumsum(1)[::-1, ::-1]
+        g = np.ascontiguousarray(np.diagonal(G))
+        vv = w2d[lo:j][::-1].cumsum()[::-1]
+        # ⚠ EL 1e-12 SE QUEDA COMO ESTA, LITERAL.  Subirlo a NOCANCEL_REL_MARGIN
+        # aflojaria el DP mil veces y MOVERIA la malla; lo que hay que alinear es
+        # el AVISO, que es donde estaba la asimetria. Con esto la malla de la run
+        # 103R4 (7 820 parametros) sigue siendo bit a bit la misma.
+        ok = g >= vv - 1e-12 * np.abs(vv)                      # no-cancellation
+        if sigma_ratio_max is not None:
+            sg = s_rel[lo:j]                       # RELATIVA -- ver arriba
+            mx = np.maximum.accumulate(sg[::-1])[::-1]
+            mn = np.minimum.accumulate(sg[::-1])[::-1]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                rat = np.where(mn > 0, mx / np.where(mn > 0, mn, 1.0),
+                               np.where(mx <= 0, 1.0, np.inf))
+            ok &= rat <= sigma_ratio_max
+        if sigma_E is not None:
+            wid = w[lo:j][::-1].cumsum()[::-1]
+            res = np.minimum.accumulate(np.asarray(sigma_E)[lo:j][::-1])[::-1]
+            lim = res_factor * res
+            # ⛔ UN BIN MAS ANCHO QUE SU PROPIA sigma_E HACIA INADMISIBLE SU
+            # PROPIO SINGLETON, Y ESO RINDE EL TRAMO ENTERO.  Sin esta linea
+            # `f[n]` sale infinito y `physical_solve_order` cae en su rama de
+            # emergencia: TODO el tramo vivo a singletons.  Medido en la run
+            # 103R4: 82 bins por encima de 3,47 MeV son 1,48x mas anchos que su
+            # resolucion (el ultimo, 4,52x), y como a_2 no cambia de signo
+            # NUNCA su unico tramo son los 1738 bins -> el orden entero se
+            # rendia (1738 grupos donde el criterio permite 749).  Tocaba a
+            # 3 636 de los 10 428 parametros.
+            #
+            # ⚑ Y NO ES UNA EXCEPCION AD HOC: es la misma regla que ya lleva el
+            # tope sigma-ratio unas lineas mas arriba ("max == min == 0 es
+            # cociente 1, NO infinito -- un bin muerto tiene que poder ser su
+            # propio grupo").  Un bin que existe en la rejilla hay que
+            # escribirlo; la resolucion decide con quien se JUNTA, no si se
+            # escribe.  Sobre grupos de dos o mas la condicion no se toca.
+            lim[-1] = max(lim[-1], wid[-1])
+            ok &= wid <= lim
+        if a_consistency_k is not None:
+            sabs = np.sqrt(np.maximum(d[lo:j], 0.0))
+            amx = np.maximum.accumulate(a_g[lo:j][::-1])[::-1]
+            amn = np.minimum.accumulate(a_g[lo:j][::-1])[::-1]
+            smn = np.minimum.accumulate(sabs[::-1])[::-1]
+            ok &= (amx - amn) <= a_consistency_k * np.maximum(smn, 1e-300)
+        OK[j, :m] = ok[::-1]
+    # fewest groups subject to admissibility
+    f = np.full(n + 1, np.inf); f[0] = 0.0
+    bk = np.zeros(n + 1, dtype=int)
+    for j in range(1, n + 1):
+        k = min(band, j)
+        I = np.arange(j - 1, j - 1 - k, -1)
+        c = np.where(OK[j, :k], f[I] + 1.0, np.inf)
+        t = int(np.argmin(c)); f[j] = c[t]; bk[j] = I[t]
+    if not np.isfinite(f[n]):
+        # no admissible partition: singletons, which are always admissible
+        return np.arange(n + 1, dtype=int)
+    cuts, j = [], n
+    while j > 0:
+        cuts.append(int(bk[j])); j = int(bk[j])
+    return np.array(sorted(set(cuts + [0, n])), dtype=int)
+
+
 def order_cut_indices(B: np.ndarray, a_g: np.ndarray, w: np.ndarray,
-                      live: np.ndarray, lo: int, hi: int):
+                      live: np.ndarray, lo: int, hi: int,
+                      physical: Optional[dict] = None,
+                      sigma_E: Optional[np.ndarray] = None):
     """Edge indices of order ``l``'s mesh, as indices into the base edge array.
 
     Every base edge outside ``[lo, hi]`` survives, as does every edge bounding a
@@ -251,7 +417,13 @@ def order_cut_indices(B: np.ndarray, a_g: np.ndarray, w: np.ndarray,
     # w > 0, so the sign of the emission weight u = w * a is the sign of a.
     for i0, i1 in _live_runs(live, lo, hi, np.sign(np.asarray(a_g, float))):
         sl = slice(i0, i1)
-        cuts, _ = solve_order(B[sl, sl], a_g[sl], w[sl])
+        if physical is None:
+            cuts, _ = solve_order(B[sl, sl], a_g[sl], w[sl])
+        else:
+            cuts = physical_solve_order(
+                B[sl, sl], a_g[sl], w[sl],
+                None if sigma_E is None else np.asarray(sigma_E)[sl],
+                **physical)
         keep[i0 + cuts] = True
     return np.flatnonzero(keep)
 
@@ -259,7 +431,8 @@ def order_cut_indices(B: np.ndarray, a_g: np.ndarray, w: np.ndarray,
 def per_order_meshes(edges_ev: np.ndarray, cov_rel: np.ndarray,
                      means: np.ndarray, l_max: int,
                      window_ev: Optional[Tuple[float, float]] = None,
-                     logger=None) -> Dict[int, np.ndarray]:
+                     logger=None, physical: Optional[dict] = None,
+                     sigma_E: Optional[np.ndarray] = None) -> Dict[int, np.ndarray]:
     """One mesh per Legendre order, as a subset of ``edges_ev``.
 
     Parameters
@@ -304,7 +477,8 @@ def per_order_meshes(edges_ev: np.ndarray, cov_rel: np.ndarray,
         m_l = means[sel]
         live = m_l != 0.0
         B = cov_rel[np.ix_(sel, sel)] * np.outer(m_l, m_l)   # absolute on live slots
-        idx = order_cut_indices(B, m_l, w, live, lo, hi)
+        idx = order_cut_indices(B, m_l, w, live, lo, hi,
+                                physical=physical, sigma_E=sigma_E)
         meshes[l] = edges_ev[idx]
         if logger is not None:
             logger.info(
@@ -347,12 +521,61 @@ def order_aggregator(edges_base: np.ndarray, edges_new: np.ndarray,
     return W
 
 
+def _group_of(edges_base: np.ndarray, edges_new: np.ndarray) -> np.ndarray:
+    """``gi[i]`` = index in ``edges_new`` of the group base bin ``i`` falls in.
+
+    Same rule as :func:`order_aggregator`, kept in one place so the two can
+    never drift: a base bin belongs to the new group its MIDPOINT lands in.
+    """
+    edges_base = np.asarray(edges_base, dtype=float)
+    edges_new = np.asarray(edges_new, dtype=float)
+    mid = 0.5 * (edges_base[:-1] + edges_base[1:])
+    return np.clip(np.searchsorted(edges_new, mid, side="right") - 1,
+                   0, len(edges_new) - 2)
+
+
+def folded_variance_ratio(fine_rel: np.ndarray, grouped_rel: np.ndarray,
+                          gi: np.ndarray, a: np.ndarray, edges_base: np.ndarray,
+                          sigma_E: np.ndarray, n_centers: int = 400) -> np.ndarray:
+    """``v_mesh / v_fine`` at ``n_centers`` energies, folded with the TOF kernel.
+
+    ⚑ THE CONSUMER DOES NOT READ A BIN.  It reads the cross section at its own
+    resolution, so the quantity that has to survive grouping is the variance of
+    a ``sigma_E``-wide fold, not a diagonal entry.  **Below 1 the mesh
+    UNDER-DECLARES, which is inadmissible; above 1 it only wastes.**  The median
+    is ~1 for any mesh -- the defect of a bad mesh is the tail -- so what is
+    reported and gated is the MINIMUM over the centres.
+    """
+    edges_base = np.asarray(edges_base, dtype=float)
+    w = np.diff(edges_base)
+    E = 0.5 * (edges_base[:-1] + edges_base[1:])
+    c = np.linspace(E.min(), E.max(), n_centers)
+    sE = np.interp(c, E, np.asarray(sigma_E, dtype=float))
+    dd = (E[:, None] - c[None, :]) / np.maximum(sE[None, :], 1e-12)
+    G = w[:, None] * np.exp(-0.5 * dd * dd)
+    tot = G.sum(axis=0)
+    G = np.where(tot > 0, G / np.where(tot > 0, tot, 1.0), 0.0)
+    aa = np.outer(a, a)
+    Cf = fine_rel * aa
+    Cm = grouped_rel[np.ix_(gi, gi)] * aa
+    vf = np.einsum("ik,ik->k", G, Cf @ G)
+    vm = np.einsum("ik,ik->k", G, Cm @ G)
+    out = np.full(len(vf), np.nan)
+    ok = vf > 0
+    out[ok] = vm[ok] / vf[ok]
+    return out
+
+
 def collapse_relative_per_order(
     edges_ev: np.ndarray,
     cov_rel: np.ndarray,
     means: np.ndarray,
     l_max: int,
     meshes: Dict[int, np.ndarray],
+    variant: str = "mean",
+    sigma_E: Optional[np.ndarray] = None,
+    calibrate_margin: bool = False,
+    logger=None,
 ) -> Tuple[Dict[Tuple[int, int], np.ndarray], Dict[int, np.ndarray], Dict[int, np.ndarray]]:
     """Relative blocks ``{(l, l1): array}`` on the per-order meshes.
 
@@ -360,7 +583,31 @@ def collapse_relative_per_order(
     wants, the grids that go with them, and the aggregators, which the caller
     MUST reuse for the cross term.  Handing the cross a mesh the shape block was
     not collapsed with is silently wrong and nothing downstream can detect it.
+
+    ⛔ ``variant="mean"`` (the default, and what has always shipped) IS NOT
+    CONSERVATIVE.  The group's entry is a mean-weighted average, so a bin with a
+    large sigma averaged against small neighbours declares LESS than the fine
+    object does at the resolution the file is read at -- up to 100x less in a_6
+    at specific energies.
+
+    ``variant="max"`` sets the group's relative diagonal to the LARGEST of its
+    members instead.  The file is relative, so the consumer forms
+    ``sigma_abs(i) = sqrt(R_gg) * |a_i|``, and with ``R_gg = max_j B_jj`` that is
+    ``>= sqrt(B_ii) |a_i|`` for EVERY member.  The diagonal cannot come up short
+    anywhere -- that is arithmetic, not an argument.  It is applied as a
+    congruence, so no correlation moves and PSD is preserved.
+
+    ⚠ WHAT ``max`` DOES NOT GIVE YOU is conservatism across group BOUNDARIES: a
+    fold wide enough to span two groups can still see less than the fine object.
+    ``calibrate_margin`` closes that, and closes it EXACTLY: folding is linear
+    in the covariance, so scaling an order's block by ``1/min(ratio)`` puts the
+    minimum at exactly 1 in one step -- no iteration, one scalar per order, and
+    always ``>= 1``, so it is still a floor.  Needs ``sigma_E``.
     """
+    if variant not in ("mean", "max"):
+        raise ValueError(f"variant must be 'mean' or 'max', got {variant!r}")
+    if calibrate_margin and sigma_E is None:
+        raise ValueError("calibrate_margin needs sigma_E")
     W, grids = {}, {}
     for l in range(1, l_max + 1):
         sel = np.arange(len(edges_ev) - 1) * l_max + (l - 1)
@@ -373,6 +620,78 @@ def collapse_relative_per_order(
         for l1 in range(l, l_max + 1):
             fine = cov_rel[np.ix_(rows[l], rows[l1])]
             blocks[(l, l1)] = W[l] @ fine @ W[l1].T
+
+    if variant == "mean" and not calibrate_margin:
+        return blocks, grids, W
+
+    # ── the conservative diagonal, as a per-order congruence ────────────────
+    S: Dict[int, np.ndarray] = {}
+    for l in range(1, l_max + 1):
+        own = blocks[(l, l)]
+        gi = _group_of(edges_ev, meshes[l])
+        d_fine = np.maximum(np.diag(cov_rel[np.ix_(rows[l], rows[l])]), 0.0)
+        s = np.ones(own.shape[0])
+        if variant == "max":
+            target = np.zeros(own.shape[0])
+            np.maximum.at(target, gi, d_fine)
+            # ⛔ EL 1e-300 QUE HABIA AQUI NO ERA UNA GUARDA, ERA EL MECANISMO.
+            # Si un grupo cancela exactamente -- dos bins con rho = -1 --
+            # ``diag(own)`` baja a 0 y ``s`` sube a sqrt(target/1e-300) ~ 4e149,
+            # que multiplica la fila y la columna enteras del grupo.  Medido
+            # sobre el cov_emission de la run 102cp: pares adyacentes con
+            # rho <= -0.999 son 0/0/0 en a_1-a_3 y 46/236/485 en a_4/a_5/a_6, o
+            # sea el 28 % de los pares en a_6.  Hoy no llega a la cinta porque la
+            # etapa 1 promedia el par antes de que el DP lo vea; se vuelve
+            # alcanzable en cuanto la malla se elija sobre el FINO
+            # (``MF34_MESH_SINGLE_STAGE``).
+            #
+            # EL SUELO CORRECTO YA ESTA DEFINIDO EN ESTE FICHERO: es la propia
+            # restriccion de no-cancelacion del DP, ``Var(mean) >= sum_j w_j^2
+            # V_j / (sum_j w_j)^2``, escrita con el MISMO agregador para que no
+            # puedan derivar.  Donde la restriccion se cumple -- que es todo lo
+            # que el DP admite -- ``diag(own) >= indep`` y este suelo es INERTE:
+            # el cambio es bit a bit identico.  Donde se viola, acota ``s`` en
+            # vez de dejarlo ir a 1e149.
+            indep = (W[l] ** 2) @ d_fine
+            _own_d = np.diag(own)
+            # ⚑ EL SUELO SIGUE SIENDO EXACTO: donde `own` se queda por debajo de
+            # `indep`, aunque sea por 1e-16, se usa `indep`. Es inerte ahi y
+            # acota donde hace falta, y no depende de ninguna tolerancia.
+            dg = np.maximum(np.maximum(_own_d, indep), 1e-300)
+            s = np.sqrt(np.maximum(target / dg, 1.0))       # no-deflation guard
+            # ⚑ EL AVISO, EN CAMBIO, LEE LA MISMA TOLERANCIA QUE EL DP.  Con el
+            # umbral exacto marcaba 121 grupos en la run 103R4 y los 121 tenian
+            # cociente 1 a diez cifras: eran el ultimo bit de dos sumas hechas
+            # por caminos distintos, no una malla mal elegida. Y el texto decia
+            # "la malla no los vetó", que es justo la lectura equivocada.
+            # Se reporta ademas la SEVERIDAD, para que una cancelacion de verdad
+            # no pueda esconderse dentro del recuento.
+            viol = _own_d < indep * (1.0 - NOCANCEL_REL_MARGIN) - 1e-300
+            n_cancel = int(viol.sum())
+            if n_cancel and logger is not None:
+                r = indep[viol] / np.maximum(_own_d[viol], 1e-300)
+                logger.warning(
+                    f"    a_{l}: {n_cancel} grupos cancelan por encima de la "
+                    f"tolerancia ({NOCANCEL_REL_MARGIN:g}): indep/own p50 "
+                    f"{np.median(r):.6g} max {r.max():.6g}, "
+                    f"{int((r > 1.001).sum())} por encima de x1.001; "
+                    f"el suelo de no-cancelacion los acota")
+        if calibrate_margin:
+            r = folded_variance_ratio(
+                cov_rel[np.ix_(rows[l], rows[l])], own * np.outer(s, s), gi,
+                means[rows[l]], edges_ev, sigma_E)
+            lo = float(np.nanmin(r)) if np.isfinite(r).any() else 1.0
+            if lo > 0:
+                s = s * np.sqrt(max(1.0 / lo, 1.0))         # never below 1
+        S[l] = s
+        if logger is not None:
+            logger.info(f"    a_{l}: diagonal '{variant}'"
+                        + (", margen plegado" if calibrate_margin else "")
+                        + f" -> sobre-declaracion x{s.min():.3f}-{s.max():.3f} "
+                          f"(mediana {np.median(s):.3f})")
+    for l in range(1, l_max + 1):
+        for l1 in range(l, l_max + 1):
+            blocks[(l, l1)] = S[l][:, None] * blocks[(l, l1)] * S[l1][None, :]
     return blocks, grids, W
 
 

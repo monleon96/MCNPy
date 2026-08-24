@@ -123,6 +123,19 @@ DEAD_BLOCK_PSD_RTOL = 5e-7
 # unrelated numbers here would have made the pair a matter of taste; deriving
 # both from the file's 7 digits keeps it a statement about the object.
 DEAD_BLOCK_CLIP_MASS_MAX = 5e-7
+#
+# ⚑ Y DESDE 2026-08-22 ESTE ES UN AVISO, NO UN RECHAZO. La derivacion de arriba
+# vale para la PEOR direccion (bar 1); aplicar el mismo numero a la SUMA sobre
+# ~1250 autovalores no se sostiene, porque la masa negativa que el formato puede
+# fabricar escala con el numero de direcciones. El rechazo se mueve a la
+# consecuencia: cuanto mueve el recorte una varianza DECLARADA.
+#
+# La barra de abajo NO se deriva del formato -- se fija por lo que mueve el
+# entregable. Declaramos sigmas del 10 al 300 %; una varianza que se mueve un
+# 1 % por el recorte no cambia ninguna conclusion, y una que se mueve mas es un
+# defecto que hay que mirar, no proyectar. Las runs que pasaron miden
+# 6,160e-04 (102a) y 3,419e-05 (101b), o sea 16x y 290x dentro.
+DEAD_BLOCK_D_SHIFT_MAX = 1e-2
 
 
 def shipped_mg_endf(run_dir: Path) -> Path:
@@ -409,7 +422,8 @@ def valid_and_collapsed(run_dir, n_fine, ids, g_shape, widths, n_gs):
 
 def carry_dead_parameters(c34_post, c34_ship, d_mc34, d_tar34,
                           psd_rtol=DEAD_BLOCK_PSD_RTOL,
-                          clip_mass_max=DEAD_BLOCK_CLIP_MASS_MAX):
+                          clip_mass_max=DEAD_BLOCK_CLIP_MASS_MAX,
+                          d_shift_max=DEAD_BLOCK_D_SHIFT_MAX):
     """Put back the shape parameters the diagonal congruence cannot reach.
 
     ``jj = d_tar / d_mc`` is a diagonal congruence, and a congruence cannot give
@@ -491,22 +505,50 @@ def carry_dead_parameters(c34_post, c34_ship, d_mc34, d_tar34,
                     f"is NOT projected away: a real negative direction in the "
                     f"shipped object would be hidden, not fixed. Find out why "
                     f"c34_ship is indefinite there before carrying it.")
-            if mass > clip_mass_max:
-                raise SystemExit(
-                    f"the PSD projection would have to invent "
-                    f"{mass:.3e} of the carried block's variance "
-                    f"({neg.size} negative eigenvalues summing to "
-                    f"{-neg.sum():.6e} against a trace of {tr:.6e}), over the "
-                    f"bar {clip_mass_max:.0e}. The worst eigenvalue is small "
-                    f"but the total is not, which is exactly the case the "
-                    f"ratio bar cannot see. This is a defect in the pipeline's "
-                    f"MF34, not rounding.")
+            over_mass = mass > clip_mass_max
+            # ⚑ BAR 2 PASA DE RECHAZAR A AVISAR, Y EL RECHAZO SE MUEVE A LA
+            # CONSECUENCIA (2026-08-22, Juan).
+            #
+            # Bar 1 aplica el suelo de las 7 cifras a la PEOR direccion y esta
+            # derivado: por Weyl, un bloque cuyo lam_min verdadero es cero
+            # vuelve de la cinta a lam_min ~ -1e-7 lam_max. Bar 2 aplicaba EL
+            # MISMO numero a la SUMA sobre ~1250 autovalores, y esa parte no se
+            # sostiene: si cada autovalor puede moverse hasta ||E||_2 por
+            # redondeo, la masa negativa atribuible al formato escala con
+            # ``n_neg``, no es constante. Con 1247 negativos, 8,4e-07 de masa
+            # total es 6,7e-10 por direccion -- tres ordenes POR DEBAJO del
+            # suelo del formato.
+            #
+            # ⛔ Y NO SE PUEDE DECIDIR MIRANDO LOS AUTOVALORES. "Redondeo
+            # acumulado en 1250 direcciones" y "un defecto real repartido" dan
+            # el mismo espectro. Lo que si distingue las dos cosas es la
+            # CONSECUENCIA: cuanto mueve el recorte a una varianza DECLARADA.
+            # Eso es ``d_shift_rel``, ya se calculaba, y hasta ahora solo se
+            # miraba DESPUES de pasar la barra. Medido en las runs que pasaron:
+            # 6,160e-04 (102a) y 3,419e-05 (101b).
             d0 = np.diag(blk).copy()
             blk = (V * np.maximum(w, 0.0)) @ V.T
             blk = 0.5 * (blk + blk.T)
             info["d_shift_rel"] = float(np.max(
                 np.abs(np.diag(blk) - d0)
                 / np.maximum(np.abs(d0), np.finfo(float).tiny)))
+            if over_mass:
+                print(f"  [WARN] [CROSS] la proyeccion PSD inventa "
+                      f"{mass:.3e} de la varianza del bloque acarreado "
+                      f"({neg.size} autovalores negativos sumando "
+                      f"{-neg.sum():.6e} contra una traza de {tr:.6e}), sobre "
+                      f"el aviso {clip_mass_max:.0e} -- o sea "
+                      f"{mass / max(neg.size, 1):.2e} por direccion. Se juzga "
+                      f"por la consecuencia, abajo.", flush=True)
+            if info["d_shift_rel"] > d_shift_max:
+                raise SystemExit(
+                    f"la proyeccion PSD mueve una varianza DECLARADA un "
+                    f"{info['d_shift_rel']:.3e} relativo, sobre la barra "
+                    f"{d_shift_max:.0e}. Eso ya no es el redondeo de la cinta: "
+                    f"es un defecto real en el MF34 del pipeline, y proyectarlo "
+                    f"lo esconderia en vez de arreglarlo. "
+                    f"(masa negativa {mass:.3e} en {neg.size} direcciones, "
+                    f"traza {tr:.6e}.)")
         c34_post[D] = blk
     return c34_post, dead, orphan, info
 
