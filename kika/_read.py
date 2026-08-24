@@ -16,9 +16,9 @@ still the low road, as ``read_endf`` and ``read_ace`` are.
 
 **The low road stays first-class.** ``read_endf`` and ``read_ace`` are not
 deprecated and are not going away. Two reasons, both concrete. The model does not
-yet cover MF6 or MF12-15 (phase 7) — MF6 is *parsed* but not modelled, MF12-15
-not read at all, and of MF5 only LF=1 is modelled — so a user who needs those
-needs the file itself; and evaluators legitimately work in ENDF's own terms — the Fe-56 chi2
+yet cover MF12-15 (phase 7), which are not read at all; of MF5 only LF=1 is
+modelled, and of MF6 every law but LAW=5 — so a user who needs the rest needs
+the file itself; and evaluators legitimately work in ENDF's own terms — the Fe-56 chi2
 work reads MF33/MF34 structure directly and should keep doing so. What this door
 adds is a *default*, not a monopoly.
 
@@ -210,10 +210,10 @@ def read(path, format: Optional[str] = None, covariances: bool = True):
     -------
     ReactionSuite
         With ``suite.report`` set — what the decode lost, approximated or could
-        not represent. Check it. A partial decode is normal today (MF6 is
-        parsed but not modelled, MF12-15 not read at all, and of MF5 only its
-        tabulated LF=1 reaches the model) and the report is the only thing that
-        says so.
+        not represent. Check it. A partial decode is normal today (MF12-15 are
+        not read at all, of MF5 only its tabulated LF=1 reaches the model, and
+        of MF6 every law but LAW=5) and the report is the only thing that says
+        so.
     """
     if format is None:
         format = sniff_format(path)

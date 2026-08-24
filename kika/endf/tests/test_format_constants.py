@@ -122,6 +122,34 @@ def test_the_seven_digit_limit_is_where_the_loss_starts():
     assert parse_number(format_endf_number(0.12640975)) != 0.12640975
 
 
+@pytest.mark.parametrize("field, decimal", [
+    ("2.427894+7", "24278940.0"),
+    ("2.892336+7", "28923360.0"),
+    ("5.658661+7", "56586610.0"),
+    ("1.100000+8", "110000000.0"),
+    ("4.907887-1", "0.4907887"),
+    ("2.559080-1", "0.255908"),
+    ("2.530000-2", "0.0253"),
+    ("1.000000-5", "0.00001"),
+])
+def test_the_two_spellings_of_one_value_read_as_the_same_double(field, decimal):
+    """ENDF's exponent form and a plain decimal must give the *same* double.
+
+    Both spellings are legal in column 1-11 and the same tapes carry both:
+    C-12's ENDF/B-VIII.1 MF3/MT5 writes its energy grid as ``24278940.0`` and
+    kika writes it back as ``2.427894+7``. If the two decoded to different
+    doubles, a tape read, written and read again would not be its own fixed
+    point -- which is exactly how this was found, as
+    ``test_a_tape_with_mf6_comes_back_with_all_of_it[c12]``.
+
+    They agree only because ``parse_number`` reassembles the field into one
+    decimal string and converts it *once*. ``mantissa * 10 ** exponent`` rounds
+    twice and lands a unit in the last place out: ``2.427894 * 10**7`` is
+    24278940.000000004.
+    """
+    assert parse_number(field) == float(decimal)
+
+
 @pytest.mark.parametrize("value", [
     1.5963e-100, 5.1183e-100, 1.96567e-17, 8.89108e-18, 1.234567e5,
     -3.14159e-1, 1.0e10, 9.999999e9, 2.0e7, 1e-308, 4009.0,

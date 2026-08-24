@@ -229,9 +229,23 @@ def parse_number(text: str) -> Union[float, int, None]:
         match = re.search(r'([-+]?\d*\.\d*)([+-]\d+)', text)
         if match:
             try:
-                mantissa = float(match.group(1))
-                exponent = int(match.group(2))
-                value = mantissa * (10 ** exponent)
+                # Reassembled into one decimal string and converted once, NOT
+                # ``mantissa * 10 ** exponent``. The multiplication rounds
+                # twice -- once into the mantissa, once into the product --
+                # and lands a unit in the last place away from the value the
+                # digits name: ``2.427894 * 10**7`` is 24278940.000000004,
+                # where ``float("2.427894e+7")`` is 24278940.0 exactly.
+                # Python's own decimal-to-double conversion is correctly
+                # rounded, so it gives the nearest double to what the field
+                # says and nothing closer exists.
+                #
+                # A ulp is invisible in a printed cross section and is not
+                # invisible to a fixed point: C-12's ENDF/B-VIII.1 MF3/MT5
+                # writes its grid as ``24278940.0``, kika writes it back as
+                # ``2.427894+7``, and the two used to decode to different
+                # doubles -- which is
+                # ``test_a_tape_with_mf6_comes_back_with_all_of_it[c12]``.
+                value = float(f"{match.group(1)}e{match.group(2)}")
                 if value.is_integer():
                     return int(value)
                 return value
