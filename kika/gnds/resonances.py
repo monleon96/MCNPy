@@ -28,15 +28,22 @@ missing one. :attr:`~kika.nuclear_data.model.resonances.UnresolvedChannel.energi
 was added for it, and the block-level grid is filled only when every curve
 agrees.
 
-**What is not read, and is reported instead:** ``externalRMatrix`` — 7 nodes,
-all in ``n-038_Sr_088.endf.gnds.xml``, the only file in the corpus that carries
-one — and the per-region interpolation of a ``regions1d`` average width, which
-is an *approximation* and not a loss, because the flattened numbers look
-exactly like data and only the rule connecting them is gone.
-``supportsAngularReconstruction`` (65 files) is reported and will stay that
-way: it is a FUDGE capability hint, not a property of the evaluation.
-A ``hardSphereRadius`` on a ``resonanceReaction`` (4 nodes in 3 files) **used
-to be on this list and is read now** — see :meth:`_SuiteReader.readResonanceReactions`.
+**What is not read, and is reported instead:** the per-region interpolation of
+a ``regions1d`` average width, which is an *approximation* and not a loss,
+because the flattened numbers look exactly like data and only the rule
+connecting them is gone. ``supportsAngularReconstruction`` (65 files) is
+reported and will stay that way: it is a FUDGE capability hint, not a property
+of the evaluation.
+
+**Two nodes left that list on 2026-08-24 and are read now**, both of them
+§19.3.4's: a ``hardSphereRadius`` on a ``resonanceReaction`` (4 nodes in 3
+files — see :meth:`_ResonanceReader.readResonanceReactions`) and
+``externalRMatrix`` (7 nodes, all in ``n-038_Sr_088.endf.gnds.xml``, the only
+file in the corpus that carries one — see
+:meth:`_ResonanceReader.readExternalRMatrix`). Both left it for the same reason
+and it is worth stating once: the argument for dropping them was about which
+number the *physics* reads, and a reader that drops what the *file states*
+cannot write the file back.
 """
 from __future__ import annotations
 
@@ -46,7 +53,8 @@ from typing import Callable, List, Optional
 import numpy as np
 
 from kika.nuclear_data.model import (BreitWigner, BreitWignerApproximation,
-                                     Channel, ConversionReport, Regions1d,
+                                     Channel, ConversionReport, ExternalRMatrix,
+                                     PhysicalQuantity, Regions1d,
                                      Resonance, ResonanceParameters,
                                      ResonanceReaction, Resonances,
                                      ResolvedRegion, RMatrix, RMatrixSpinGroup,
@@ -363,16 +371,40 @@ class _ResonanceReader:
             widths=widths,
         )
 
+    def readExternalRMatrix(self, element: Optional[ET.Element],
+                            where: str) -> Optional[ExternalRMatrix]:
+        """§19.3.4's ``externalRMatrix`` → the model node of the same name.
+
+        The terms are read **as the file labels them** rather than onto named
+        fields, which is what lets one reader serve both parametrisations — see
+        :class:`~kika.nuclear_data.model.resonances.ExternalRMatrix` for why the
+        schema's own comment argues for that shape.
+
+        A file that violates the node's invariants — an unknown ``type``, a
+        repeated label, a missing singularity energy — is **reported and
+        dropped**, not repaired. The alternative is guessing which of the two
+        formulas the evaluator meant, and the terms of the two are not
+        interchangeable: SAMMY's is purely real, Froehner's is not.
+        """
+        if element is None:
+            return None
+        terms = []
+        for double in element.findall("double"):
+            terms.append(PhysicalQuantity(
+                value=float(double.attrib["value"]),
+                unit=double.attrib.get("unit", ""),
+                label=double.attrib.get("label"),
+            ))
+        try:
+            return ExternalRMatrix(type=element.attrib.get("type", ""),
+                                   terms=terms)
+        except ValueError as exc:
+            self.unsupported("externalRMatrix", where, str(exc))
+            return None
+
     def readChannel(self, element: ET.Element, path: str) -> Channel:
         label = element.attrib.get("label", "")
         channelSpin = element.attrib.get("channelSpin")
-        if element.find("externalRMatrix") is not None:
-            self.unsupported(
-                "externalRMatrix", f"{path}/channels/channel[@label='{label}']",
-                "§19.3.4's parametrisation of the R-matrix outside the fitted "
-                "range; 7 nodes in the whole library carry one and kika's model "
-                "has no node for it"
-            )
         where = f"{path}/channels/channel[@label='{label}']"
         channelRadius, channelRadiusUnit = self.modelRadius(
             element.find("scatteringRadius"), where)
@@ -385,6 +417,16 @@ class _ResonanceReader:
             channelSpin=None if channelSpin is None else readFraction(channelSpin),
             columnIndex=(int(element.attrib["columnIndex"])
                          if "columnIndex" in element.attrib else None),
+            # ENDF's BND. Zero occurrences in the 558 distributed GNDS
+            # evaluations (measured 2026-08-24), so nothing in the corpus
+            # exercises this line — but the *ENDF* adapter fills the field from
+            # every LRF=7 tape, and until this was read the GNDS writer had no
+            # source for an attribute the model already held. Reading and
+            # writing it is what stops an ENDF -> GNDS conversion dropping it.
+            boundaryConditionValue=_optionalFloat(element,
+                                                  "boundaryConditionValue"),
+            externalRMatrix=self.readExternalRMatrix(
+                element.find("externalRMatrix"), where),
             scatteringRadius=channelRadius,
             hardSphereRadius=hardSphere,
             # One unit for both, as the field's docstring says: they come

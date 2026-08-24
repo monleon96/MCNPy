@@ -247,6 +247,26 @@ def _resonanceReaction(parent: ET.Element, reaction, report: ConversionReport,
                                        f"resonanceReaction/{tag}"))
 
 
+def _externalRMatrix(parent: ET.Element, external) -> None:
+    """§19.3.4's ``externalRMatrix``, written back as the model holds it.
+
+    No report and no guard: the model node validates its own ``type`` and its
+    two required terms at construction, so anything that reaches here is
+    writable. The terms go out **in the model's order**, which is the order the
+    source stated them — ``ExternalRMatrixType`` (``gnds.xsd:942-948``) is an
+    ``xs:sequence`` of ``double`` with no per-label slot, so any order validates
+    and preserving the file's is free.
+    """
+    if external is None:
+        return
+    element = ET.SubElement(parent, "externalRMatrix")
+    _set(element, type=external.type)
+    for term in external.terms:
+        _set(ET.SubElement(element, "double"),
+             label=term.label, value=_number(term.value),
+             unit=term.unit or None)
+
+
 def _spinGroup(parent: ET.Element, group, report: ConversionReport,
                domain) -> None:
     element = ET.SubElement(parent, "spinGroup")
@@ -262,8 +282,17 @@ def _spinGroup(parent: ET.Element, group, report: ConversionReport,
              L=None if channel.L is None else str(channel.L),
              channelSpin=(None if channel.channelSpin is None
                           else formatFraction(channel.channelSpin)),
+             boundaryConditionValue=(None
+                                     if channel.boundaryConditionValue is None
+                                     else _number(channel.boundaryConditionValue)),
              columnIndex=(None if channel.columnIndex is None
                           else str(channel.columnIndex)))
+        # First child of the channel, ahead of both radii: `RML_ChannelType`
+        # (gnds.xsd:915-919) is an `xs:sequence`, so emitting it after them
+        # would produce a file that no longer validates. Same lesson §25.3's
+        # `parameterCovariances` container taught on 2026-08-19, and the same
+        # reason it is written here rather than appended where it was convenient.
+        _externalRMatrix(node, channel.externalRMatrix)
         for tag, value in (("scatteringRadius", channel.scatteringRadius),
                            ("hardSphereRadius", channel.hardSphereRadius)):
             if value is not None:
