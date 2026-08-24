@@ -3,9 +3,28 @@ Combined MF3 (σ) + MF4 (angular) ENDF perturbation pipeline.
 
 Drives the two existing single-physics pipelines independently and then runs
 ONE NJOY ACER pass per sample using the paired (perturbed-ENDF, perturbed-
-PENDF). Project memory establishes that MF33↔MF34 cross-correlations are
-structurally zero, so independent draws are correct; sample i from each
-pipeline is matched by index to form the input pair to NJOY.
+PENDF). Sample i from each pipeline is matched by index to form the input pair.
+
+⚠ THIS PIPELINE ASSUMES THE TWO FAMILIES ARE INDEPENDENT, AND SAYS SO HERE
+RATHER THAN IN A COMMENT NOBODY READS.
+
+That assumption is right for every *released* evaluation — ENDF-6 has a home
+for a magnitude/shape covariance (MF34's a₀ blocks, §34.1) but no released
+library fills it — and it is **wrong for a tape that does**. The Fe-56
+deliverable states ``Cov(sigma, a_l)`` in exactly those blocks. For such a tape
+use :func:`kika.sampling.joint_perturbation.perturb_joint_mf33_mf34`, which
+draws both families from ONE covariance.
+
+⚠ And there is a second, independent defect in the pairing itself, which does
+NOT need a cross term to bite: each pipeline draws a *balanced* Sobol set over
+its own cube, and matching them by replica index correlates the two. Measured
+on the PFNS driver, the mixture came out 18-21 % narrower than independence.
+The joint path is immune by construction — there is no second set to pair — so
+it is fixed there and left here, because changing this function's numbers is a
+decision with its own measurement and not a side effect of adding another one.
+The earlier version of this docstring asserted the cross-correlations were
+"structurally zero"; that was a statement about our own methodology at the
+time, not about the format or about this file's inputs.
 
 Pipeline stages
 ---------------

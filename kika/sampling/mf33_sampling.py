@@ -55,6 +55,7 @@ def load_mf33_covariance(
     *,
     energy_unit: str = "eV",
     logger=None,
+    endf_obj=None,
 ) -> Tuple[CrossSectionCovariance, Dict[int, MF3MT], List[float], List[int]]:
     """Build a CrossSectionCovariance on the MF33 native union grid.
 
@@ -81,8 +82,19 @@ def load_mf33_covariance(
         The MF33 native union grid in ``energy_unit``.
     mts_present : List[int]
         Subset of ``mt_list`` for which MF33 data was available (sorted).
+
+    Notes
+    -----
+    ``endf_obj`` is an already-parsed tape to read MF33 out of instead of
+    parsing ``endf_path`` again. It changes nothing about the result and
+    defaults to ``None``, i.e. today's behaviour. It exists because the joint
+    MF33xMF34 builder needs both files off ONE parse: the Fe-56 deliverable is
+    570 MB and costs ~6 minutes to read, and parsing it twice would also give
+    the two halves of one covariance two independent chances to disagree about
+    what file they came from.
     """
-    endf_obj = parse_endf_file(str(endf_path))
+    if endf_obj is None:
+        endf_obj = parse_endf_file(str(endf_path))
     mf33_file = endf_obj.get_file(33)
     if mf33_file is None or not getattr(mf33_file, "sections", None):
         raise RuntimeError(f"ENDF {endf_path} has no MF33 sections")

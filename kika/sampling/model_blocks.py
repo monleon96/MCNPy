@@ -771,3 +771,158 @@ def parameter_covariance_index(
             "energyRange": None if rowData is None else rowData.incidentEnergyBand,
         }
     return index
+
+
+# ── the MF33 x MF34 joint ─────────────────────────────────────────────────────
+
+def assemble_mf33_mf34_joint(
+    c33: np.ndarray,
+    grid33_ev: np.ndarray,
+    c34: np.ndarray,
+    a_index: Dict[str, Any],
+    cross_by_order: Optional[Dict[int, Tuple[np.ndarray, np.ndarray]]] = None,
+    *,
+    atol: float = 1e-12,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Magnitude block + shape block + the a₀ cross → ONE matrix, and its index.
+
+    The pure half of the joint: it takes matrices and grids and returns a
+    matrix, so it is testable on a 6x6 without a tape, an NJOY or a model.
+    :func:`kika.sampling.joint_mf33_mf34.load_joint_mf33_mf34` is the half that
+    reads a file.
+
+    LAYOUT, and it is chosen rather than invented::
+
+        sigma bin i         ->  i                       (i = 0 .. M0-1)
+        a_l slot            ->  M0 + slot*stride + bin
+
+    The a_l half is **byte for byte the block**
+    :func:`legendre_covariance_blocks` already returns — same key order, same
+    uniform ``stride``, same trailing zero padding. That is the whole point:
+    ``joint[M0:, M0:]`` *is* today's shipped MF34 object, so a draw restricted
+    to it reproduces what ``perturb_ENDF_files`` draws, and "the marginals did
+    not move" is a bit-identity check rather than a tolerance.
+
+    Parameters
+    ----------
+    c33 : (M0, M0)
+        The magnitude self block, **relative**, on ``grid33_ev``.
+    grid33_ev : (M0+1,)
+        Its bin boundaries in eV. Carried into the index because the applier
+        needs them, and because the cross blocks' row grids are checked
+        against them upstream.
+    c34 : (n_a, n_a)
+        The shape block from :func:`legendre_covariance_blocks`.
+    a_index : dict
+        The matching entry from :func:`legendre_covariance_index` — needs
+        ``triplets``, ``stride``, ``widths`` and ``grids``.
+    cross_by_order : {l: (matrix, col_grid_ev)}, optional
+        ``matrix`` is (M0, G_l) = ``Cov(c0, a_l)`` relative, on
+        ``grid33_ev x col_grid_ev``. ``None`` or ``{}`` leaves the cross zero,
+        which is the factorisation every run before this shipped and is what
+        makes "independent draws" a special case of this function rather than a
+        second code path.
+
+        Each order's columns are lifted from its own mesh onto that order's
+        union grid with :func:`_lift_matrix` — the same lift the shape blocks
+        went through, so the cross ends up on exactly the axis of the parameter
+        it correlates with. A column grid that is not a coarsening of the union
+        raises there rather than being interpolated.
+
+    Returns
+    -------
+    matrix, index
+        ``index`` names both halves: ``n_sigma``, ``sigma_grid_ev``,
+        ``sigma_denominator`` / ``a_denominator`` (they are NOT the same
+        quantity — MF33 is relative to File 3 and MF34 to MF4's own a_l), the
+        a_l ``triplets``/``stride``/``widths``/``grids`` verbatim, and
+        ``cross_orders``.
+    """
+    c33 = np.asarray(c33, dtype=float)
+    c34 = np.asarray(c34, dtype=float)
+    grid33_ev = np.asarray(grid33_ev, dtype=float)
+    if c33.ndim != 2 or c33.shape[0] != c33.shape[1]:
+        raise ValueError(f"c33 must be square, got {c33.shape}")
+    if c34.ndim != 2 or c34.shape[0] != c34.shape[1]:
+        raise ValueError(f"c34 must be square, got {c34.shape}")
+    m0 = c33.shape[0]
+    if grid33_ev.size != m0 + 1:
+        raise ValueError(
+            f"grid33_ev has {grid33_ev.size} edges for a {m0}-bin c33; the "
+            f"magnitude grid is what the cross blocks' rows were checked "
+            f"against, so a mismatch here means they are not on one axis"
+        )
+
+    triplets = list(a_index["triplets"])
+    stride = int(a_index["stride"])
+    widths = dict(a_index["widths"])
+    grids = dict(a_index["grids"])
+    n_a = len(triplets) * stride
+    if c34.shape[0] != n_a:
+        raise ValueError(
+            f"c34 is {c34.shape[0]}x{c34.shape[0]} but the index describes "
+            f"{len(triplets)} components x stride {stride} = {n_a} rows"
+        )
+
+    n = m0 + n_a
+    joint = np.zeros((n, n), dtype=float)
+    joint[:m0, :m0] = c33
+    joint[m0:, m0:] = c34
+
+    placed: Dict[int, int] = {}
+    for l, block in sorted((cross_by_order or {}).items()):
+        mat, col_grid = block
+        mat = np.asarray(mat, dtype=float)
+        col_grid = np.asarray(col_grid, dtype=float)
+        slot = next((s for s, t in enumerate(triplets) if int(t[-1]) == int(l)),
+                    None)
+        if slot is None:
+            raise ValueError(
+                f"a cross block is given for order {l}, but the shape half "
+                f"carries no such order (it has {[t[-1] for t in triplets]}). "
+                f"[[0, Cx], [Cx.T, 0]] has a negative eigenvalue for every "
+                f"nonzero Cx, so a cross term whose own marginal is absent is "
+                f"not a covariance"
+            )
+        key = triplets[slot]
+        width = int(widths[key])
+        if mat.shape[0] != m0:
+            raise ValueError(
+                f"cross block for order {l} has {mat.shape[0]} rows against "
+                f"c33's {m0} bins"
+            )
+        if mat.shape[1] != col_grid.size - 1:
+            raise ValueError(
+                f"cross block for order {l} is {mat.shape[1]} columns wide but "
+                f"its column grid has {col_grid.size} edges"
+            )
+        # Same lift the shape blocks went through, applied to the columns only:
+        # the rows are already the magnitude axis and must not be touched.
+        lift = _lift_matrix(col_grid, np.asarray(grids[key], dtype=float))
+        lifted = mat @ lift.T
+        if lifted.shape[1] != width:
+            raise ValueError(
+                f"order {l}'s cross lifted to {lifted.shape[1]} columns but its "
+                f"union grid has {width} bins"
+            )
+        c0 = m0 + slot * stride
+        joint[:m0, c0:c0 + width] = lifted
+        joint[c0:c0 + width, :m0] = lifted.T
+        placed[int(l)] = int(width)
+
+    joint = 0.5 * (joint + joint.T)
+    index = {
+        "n_sigma": m0,
+        "sigma_grid_ev": grid33_ev,
+        "sigma_denominator": "MF3",
+        "a_denominator": "MF4-a_l",
+        "n_a": n_a,
+        "dimension": n,
+        "triplets": triplets,
+        "stride": stride,
+        "widths": widths,
+        "grids": grids,
+        "cross_orders": sorted(placed),
+        "has_cross": bool(placed),
+    }
+    return joint, index

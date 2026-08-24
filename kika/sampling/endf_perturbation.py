@@ -747,6 +747,7 @@ def perturb_ENDF_files(
     energy_ranges: Optional[List[Tuple[float, float]]] = None,
     only_xsdir: bool = False,
     log_file: Optional[str] = None,
+    precomputed: Optional[List[Optional[Dict[str, Any]]]] = None,
 ):
     """
     Perturb ENDF nuclear data files using MF34 angular covariance matrices.
@@ -851,6 +852,24 @@ def perturb_ENDF_files(
     - output_dir/njoy_files/temp/zaid/ : NJOY auxiliary files
     - output_dir/xsdir/ : modified xsdir files (if xsdir_file provided)
     - output_dir/*.log and *.parquet : log and master perturbation files
+    precomputed : list of dict or None, default None
+        One entry per ENDF file (``None`` for a file that should still draw its
+        own). An entry carries ``factors`` (num_samples x n_params),
+        ``param_mapping``, ``energy_grids`` and optionally ``diagnostics``, and
+        makes this function **skip loading the covariance and drawing** — it
+        applies what it was handed and does everything else exactly as before.
+
+        It exists because the MF33↔MF34 joint cannot be drawn here. The Fe-56
+        deliverable states ``Cov(sigma, a_l)`` in MF34's a₀ blocks, so the two
+        families are one multivariate normal; drawing the a_l half in this
+        function and the sigma half in ``perturb_PENDF_files`` and pairing them
+        by replica index gives an ensemble whose cross-correlation is zero (and,
+        with two balanced Sobol sets, marginals 18-21 % too narrow). See
+        :mod:`kika.sampling.joint_mf33_mf34`.
+
+        ``None`` — the default — leaves every existing call unchanged, down to
+        the seed and the drawn bytes.
+
     """
     global _logger
 
@@ -1073,9 +1092,10 @@ def perturb_ENDF_files(
             # Determine which covariance file to use
             cov_file = mf34_cov_files[0] if len(mf34_cov_files) == 1 else mf34_cov_files[i]
             
-            # Load covariance matrix
-            suite = load_mf34_suite(cov_file)
-            if suite is None:
+            # Load covariance matrix -- unless the caller already drew.
+            pre = None if precomputed is None else precomputed[i]
+            suite = None if pre is not None else load_mf34_suite(cov_file)
+            if suite is None and pre is None:
                 _logger.error(f"  [ERROR] [ENDF] File {step_num}: Failed to load covariance matrix from {cov_file}")
                 failed_files_details[file_key] = "Failed to load MF34 covariance matrix"
                 failed_files += 1
@@ -1083,121 +1103,166 @@ def perturb_ENDF_files(
                 _logger.info(f"#-- END STEP {step_num} (elapsed: {step_elapsed:.1f}s) -------------------------------------")
                 continue
 
-            # Resolve positive/negative MT and L semantics against what's
-            # actually in the MF34 file (typically only MT2 has data).
-            available_mts_in_cov, available_ls_in_cov = _mf34_available(suite)
-            mt_resolved, mt_log = resolve_signed_request(
-                list(mt_list or []), available_mts_in_cov, group_map=MT_GROUPS,
-            )
-            for line in mt_log:
-                _logger.info(
-                    f"  [INFO] [ENDF] File {step_num}: "
-                    f"{line.replace('Excluding entries:', 'Excluding MTs:').replace('group expansion', 'composite expansion')}"
-                )
-            requested_mts_missing = (
-                sorted(set(mt_resolved) - set(available_mts_in_cov)) if mt_resolved else []
-            )
-            if requested_mts_missing:
-                _logger.warning(
-                    f"  [WARN] [ENDF] File {step_num}: MTs {requested_mts_missing} "
-                    f"not in MF34 (MF34 has {available_mts_in_cov}); silently dropped."
-                )
-            l_resolved, l_log = resolve_signed_request(
-                list(legendre_coeffs or []), available_ls_in_cov, group_map=None,
-            )
-            for line in l_log:
-                _logger.info(
-                    f"  [INFO] [ENDF] File {step_num}: "
-                    f"{line.replace('Excluding entries:', 'Excluding L:')}"
-                )
-
-            # Assemble the one covariance the file's MF34 sections partition,
-            # filtered to the resolved MTs and Legendre orders. The order filter
-            # is what keeps L=0 out, and on an `_a0cross` tape a0 is the section
-            # carrying the MF33 cross term on the magnitude grid -- so this is
-            # also what keeps two incompatible energy grids from meeting.
-            # `relative=True` reproduces `load_mf34_covariance`, which has always
-            # dropped absolute MF34 sections: the appliers multiply by what comes
-            # back, and an absolute covariance does not describe a factor.
-            blocks = legendre_covariance_blocks(
-                suite, mt=mt_resolved, orders=l_resolved, relative=True,
-            )
-            index = legendre_covariance_index(
-                suite, mt=mt_resolved, orders=l_resolved, relative=True,
-            )
-
-            if not blocks:
-                _logger.warning(f"  [WARN] [ENDF] File {step_num}: No covariance data found for requested MTs {mt_list} and L coefficients {legendre_coeffs}")
-                failed_files_details[file_key] = f"No covariance data for requested MTs {mt_list} and L coefficients {legendre_coeffs}"
-                failed_files += 1
-                step_elapsed = time.time() - step_t0
-                _logger.info(f"#-- END STEP {step_num} (elapsed: {step_elapsed:.1f}s) -------------------------------------")
-                continue
-
-            (block_key, joint), = blocks
-            triplets = index[block_key]["triplets"]
-
-            # Store which MTs and L coefficients will be perturbed
-            summary_data[file_key]['perturbed_mts'] = sorted({mt for _za, mt, _l in triplets})
-            summary_data[file_key]['perturbed_l_coeffs'] = sorted({l for _za, _mt, l in triplets})
-
-            # Create parameter mapping and energy grids
-            param_mapping, energy_grids = _parameter_mapping_from_index(index[block_key])
-
-            # Generate perturbation factors
-            if verbose:
-                _logger.info(f"  [INFO] [ENDF] File {step_num}: Generating {num_samples} perturbation samples...")
-                _logger.info(
-                    f"  [INFO] [ENDF] File {step_num}: joint covariance "
-                    f"{joint.shape[0]}x{joint.shape[0]} over {len(triplets)} "
-                    f"triplet(s), stride {index[block_key]['stride']}"
-                )
-
-            try:
-                samples, diagnostic_results = draw_samples(
-                    blocks,
-                    num_samples,
-                    space=space,
-                    returns="factors",
-                    decomposition_method=decomposition_method,
-                    sampling_method=sampling_method,
-                    seed=seed,
-                    psd_method=psd_method,
-                    # Retain the null directions. Truncating to the retained rank
-                    # is `draw_samples`' default and is the better draw, but it
-                    # changes the QMC dimension and so moves every drawn column
-                    # -- 4218 -> 3603 on the shipped Fe-56 multigroup joint. It
-                    # is turned on in its own commit, against a measurement,
-                    # rather than as a side effect of changing which object the
-                    # covariance arrives in.
-                    null_tol=None,
-                    dtype=np.float32,
-                    verbose=verbose,
-                )
-                factors = samples[block_key]
-
-                _logger.info(f"  [INFO] [ENDF] File {step_num}: Successfully generated perturbation factors: shape {factors.shape}")
-                _logger.info(f">> factors_shape = {factors.shape}")
-
-                # Apply energy range masking if specified
+            if pre is not None:
+                # Factors were drawn elsewhere -- by the joint MF33xMF34 sampler,
+                # which draws both families from ONE covariance and so cannot
+                # hand half a draw back here to be re-drawn. Everything after
+                # this point (masking, application, positivity, the tapes, the
+                # parquet, ACE) is untouched, which is why the seam is here and
+                # not a second copy of the writer.
+                #
+                # The mapping arrives WITH the factors on purpose. The base tape
+                # these are written onto carries no MF34 at all -- covariance
+                # does not travel with a replica -- so there is nothing here to
+                # re-derive a layout from; and re-deriving it from a *different*
+                # file is exactly how a flat vector comes to be indexed by one
+                # layout and drawn under another.
+                factors = np.asarray(pre["factors"])
+                param_mapping = [tuple(x) for x in pre["param_mapping"]]
+                energy_grids = {tuple(k): list(v)
+                                for k, v in pre["energy_grids"].items()}
+                diagnostic_results = pre.get("diagnostics")
+                if factors.ndim != 2 or factors.shape[1] != len(param_mapping):
+                    raise ValueError(
+                        f"precomputed factors are {factors.shape} but the "
+                        f"mapping names {len(param_mapping)} parameters; a "
+                        f"silent mismatch here perturbs the wrong coefficients"
+                    )
+                if factors.shape[0] != num_samples:
+                    raise ValueError(
+                        f"precomputed factors carry {factors.shape[0]} samples, "
+                        f"num_samples is {num_samples}"
+                    )
+                summary_data[file_key]['perturbed_mts'] = sorted(
+                    {mt for _za, mt, _l, _b in param_mapping})
+                summary_data[file_key]['perturbed_l_coeffs'] = sorted(
+                    {l for _za, _mt, l, _b in param_mapping})
+                summary_data[file_key]['sampling_diagnostics'] = diagnostic_results
                 if energy_ranges is not None:
                     factors = _mask_factors_by_energy_range(
                         factors, param_mapping, energy_grids, energy_ranges, space
                     )
-                    n_masked = np.sum(factors[0] == (1.0 if space == "linear" else 0.0))
-                    _logger.info(f"  [INFO] [ENDF] File {step_num}: Energy range filter applied -- {factors.shape[1] - n_masked}/{factors.shape[1]} parameters perturbed")
+                _logger.info(
+                    f"  [INFO] [ENDF] File {step_num}: using precomputed "
+                    f"factors {factors.shape} over order(s) "
+                    f"{summary_data[file_key]['perturbed_l_coeffs']}"
+                )
+            else:
+                # Resolve positive/negative MT and L semantics against what's
+                # actually in the MF34 file (typically only MT2 has data).
+                available_mts_in_cov, available_ls_in_cov = _mf34_available(suite)
+                mt_resolved, mt_log = resolve_signed_request(
+                    list(mt_list or []), available_mts_in_cov, group_map=MT_GROUPS,
+                )
+                for line in mt_log:
+                    _logger.info(
+                        f"  [INFO] [ENDF] File {step_num}: "
+                        f"{line.replace('Excluding entries:', 'Excluding MTs:').replace('group expansion', 'composite expansion')}"
+                    )
+                requested_mts_missing = (
+                    sorted(set(mt_resolved) - set(available_mts_in_cov)) if mt_resolved else []
+                )
+                if requested_mts_missing:
+                    _logger.warning(
+                        f"  [WARN] [ENDF] File {step_num}: MTs {requested_mts_missing} "
+                        f"not in MF34 (MF34 has {available_mts_in_cov}); silently dropped."
+                    )
+                l_resolved, l_log = resolve_signed_request(
+                    list(legendre_coeffs or []), available_ls_in_cov, group_map=None,
+                )
+                for line in l_log:
+                    _logger.info(
+                        f"  [INFO] [ENDF] File {step_num}: "
+                        f"{line.replace('Excluding entries:', 'Excluding L:')}"
+                    )
 
-                # Store diagnostic results in summary data for later reporting
-                if diagnostic_results:
-                    summary_data[file_key]['sampling_diagnostics'] = diagnostic_results
+                # Assemble the one covariance the file's MF34 sections partition,
+                # filtered to the resolved MTs and Legendre orders. The order filter
+                # is what keeps L=0 out, and on an `_a0cross` tape a0 is the section
+                # carrying the MF33 cross term on the magnitude grid -- so this is
+                # also what keeps two incompatible energy grids from meeting.
+                # `relative=True` reproduces `load_mf34_covariance`, which has always
+                # dropped absolute MF34 sections: the appliers multiply by what comes
+                # back, and an absolute covariance does not describe a factor.
+                blocks = legendre_covariance_blocks(
+                    suite, mt=mt_resolved, orders=l_resolved, relative=True,
+                )
+                index = legendre_covariance_index(
+                    suite, mt=mt_resolved, orders=l_resolved, relative=True,
+                )
+
+                if not blocks:
+                    _logger.warning(f"  [WARN] [ENDF] File {step_num}: No covariance data found for requested MTs {mt_list} and L coefficients {legendre_coeffs}")
+                    failed_files_details[file_key] = f"No covariance data for requested MTs {mt_list} and L coefficients {legendre_coeffs}"
+                    failed_files += 1
+                    step_elapsed = time.time() - step_t0
+                    _logger.info(f"#-- END STEP {step_num} (elapsed: {step_elapsed:.1f}s) -------------------------------------")
+                    continue
+
+                (block_key, joint), = blocks
+                triplets = index[block_key]["triplets"]
+
+                # Store which MTs and L coefficients will be perturbed
+                summary_data[file_key]['perturbed_mts'] = sorted({mt for _za, mt, _l in triplets})
+                summary_data[file_key]['perturbed_l_coeffs'] = sorted({l for _za, _mt, l in triplets})
+
+                # Create parameter mapping and energy grids
+                param_mapping, energy_grids = _parameter_mapping_from_index(index[block_key])
+
+                # Generate perturbation factors
+                if verbose:
+                    _logger.info(f"  [INFO] [ENDF] File {step_num}: Generating {num_samples} perturbation samples...")
+                    _logger.info(
+                        f"  [INFO] [ENDF] File {step_num}: joint covariance "
+                        f"{joint.shape[0]}x{joint.shape[0]} over {len(triplets)} "
+                        f"triplet(s), stride {index[block_key]['stride']}"
+                    )
+
+                try:
+                    samples, diagnostic_results = draw_samples(
+                        blocks,
+                        num_samples,
+                        space=space,
+                        returns="factors",
+                        decomposition_method=decomposition_method,
+                        sampling_method=sampling_method,
+                        seed=seed,
+                        psd_method=psd_method,
+                        # Retain the null directions. Truncating to the retained rank
+                        # is `draw_samples`' default and is the better draw, but it
+                        # changes the QMC dimension and so moves every drawn column
+                        # -- 4218 -> 3603 on the shipped Fe-56 multigroup joint. It
+                        # is turned on in its own commit, against a measurement,
+                        # rather than as a side effect of changing which object the
+                        # covariance arrives in.
+                        null_tol=None,
+                        dtype=np.float32,
+                        verbose=verbose,
+                    )
+                    factors = samples[block_key]
+
+                    _logger.info(f"  [INFO] [ENDF] File {step_num}: Successfully generated perturbation factors: shape {factors.shape}")
+                    _logger.info(f">> factors_shape = {factors.shape}")
+
+                    # Apply energy range masking if specified
+                    if energy_ranges is not None:
+                        factors = _mask_factors_by_energy_range(
+                            factors, param_mapping, energy_grids, energy_ranges, space
+                        )
+                        n_masked = np.sum(factors[0] == (1.0 if space == "linear" else 0.0))
+                        _logger.info(f"  [INFO] [ENDF] File {step_num}: Energy range filter applied -- {factors.shape[1] - n_masked}/{factors.shape[1]} parameters perturbed")
+
+                    # Store diagnostic results in summary data for later reporting
+                    if diagnostic_results:
+                        summary_data[file_key]['sampling_diagnostics'] = diagnostic_results
                 
-            except Exception as e:
-                _logger.error(f"  [ERROR] [ENDF] File {step_num}: Failed to generate perturbation factors: {e}")
-                failed_files_details[file_key] = f"Perturbation generation failed: {str(e)}"
-                failed_files += 1
-                step_elapsed = time.time() - step_t0
-                _logger.info(f"#-- END STEP {step_num} (elapsed: {step_elapsed:.1f}s) -------------------------------------")
-                continue
+                except Exception as e:
+                    _logger.error(f"  [ERROR] [ENDF] File {step_num}: Failed to generate perturbation factors: {e}")
+                    failed_files_details[file_key] = f"Perturbation generation failed: {str(e)}"
+                    failed_files += 1
+                    step_elapsed = time.time() - step_t0
+                    _logger.info(f"#-- END STEP {step_num} (elapsed: {step_elapsed:.1f}s) -------------------------------------")
+                    continue
             
             # Store factors and mapping for master file
             all_factors.append(factors)

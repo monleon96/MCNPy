@@ -173,6 +173,7 @@ def perturb_PENDF_files(
     dry_run: bool = False,
     verbose_diagnostics: int = VERBOSE_DIAGNOSTICS,
     log_file: Optional[str] = None,
+    precomputed: Optional[List[Optional[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """Perturb PENDF cross sections directly from MF33 covariance on the native grid.
 
@@ -302,6 +303,8 @@ def perturb_PENDF_files(
 
         try:
             iso_summary = _process_one_isotope(
+                precomputed=(None if precomputed is None
+                             else precomputed[file_idx - 1]),
                 endf_file=endf_file,
                 zaid=zaid,
                 mt_list_for_file=mt_list_for_file,
@@ -399,8 +402,15 @@ def _process_one_isotope(
     dry_run: bool,
     verbose_diagnostics: int,
     metadata_fragments: List[Dict[str, Any]],
+    precomputed: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Stage A then optional Stage B for a single (ENDF, ZAID)."""
+    """Stage A then optional Stage B for a single (ENDF, ZAID).
+
+    ``precomputed`` supplies ``factors``, ``mt_to_param_block`` and
+    ``union_grid`` instead of drawing them, and is how the joint MF33xMF34
+    sampler reuses this whole stage. ``None`` -- the default -- is today's path,
+    unchanged.
+    """
     log = _get_logger()
 
     # --- Stage A.1: cached PENDF via NJOY RECONR ----------------------
@@ -418,100 +428,134 @@ def _process_one_isotope(
     )
     log.info(f"  [INFO] [PENDF] zaid={zaid}: PENDF at {pendf_path}")
 
-    # --- Stage A.2: resolve user MT request (negatives, composites) ---
-    all_mts_in_file = _all_mts_in_mf33(endf_file)
-    mts_requested, mt_log_lines = _resolve_mt_request(
-        list(mt_list_for_file or []), all_mts_in_file,
-    )
-    for line in mt_log_lines:
-        log.info(f"  [INFO] [PENDF] zaid={zaid}: {line}")
-    log.info(
-        f"  [INFO] [PENDF] zaid={zaid}: MTs requested after resolve = {mts_requested}; "
-        f"MF33 contains {all_mts_in_file}"
-    )
-
-    # --- Stage A.3: assemble MF33 covariance on native union grid ----
-    cov, mf3_sections, union_grid, mts_present = load_mf33_covariance(
-        endf_path=endf_file,
-        pendf_path=str(pendf_path),
-        mt_list=mts_requested,
-        energy_unit="eV",
-        logger=log,
-    )
-    log.info(
-        f"  [INFO] [PENDF] zaid={zaid}: MF33 cov assembled — "
-        f"MTs={mts_present}, native bins={len(union_grid) - 1}"
-    )
-
-    # --- Stage A.4: extract per-MT thresholds from PENDF (for pinning) -
-    mt_thresholds: Optional[Dict[int, float]] = None
-    if pin_threshold_bins:
-        mt_thresholds = derive_mt_thresholds(mf3_sections, mts_present)
-
-    # --- Stage A.5: sample perturbation factors -----------------------
-    # The repairs are applied ahead of the draw, as a plan, rather than inside
-    # it -- `draw_relative_factors` runs `generate_samples`' sequence in
-    # `generate_samples`' order and is gated bit-for-bit against it.
-    #
-    # ``cov`` is rebound to the fixed covariance, and that is the one deliberate
-    # behaviour change in this migration. ``generate_samples`` fixed a copy it
-    # kept to itself, so ``extract_mt_param_blocks(cov)`` below read the
-    # *unfixed* carrier -- and under ``autofix='hard'``, which drops whole
-    # reactions, that gave slices for a layout the factors no longer had.
-    # Unreachable from kika (``AUTOFIX`` is None everywhere) and only reachable
-    # from kika-app at 'soft', which drops nothing. The comment below has always
-    # said "from the *fixed* cov"; now it is true.
-    cov, mts_after_fix, fix_info = apply_legacy_autofix(
-        cov, autofix,
-        mt_numbers=mts_present,
-        high_val_thresh=high_val_thresh,
-        accept_tol=accept_tol,
-        verbose=verbose_diagnostics > 0,
-        logger=log,
-    )
-    (block_key, joint), = cross_section_carrier_blocks(cov)
-    (_key, block_index), = cross_section_carrier_index(cov).items()
-    factors, draw_info = draw_relative_factors(
-        joint,
-        num_samples,
-        key=block_key,
-        pairs=block_index["pairs"],
-        stride=block_index["stride"],
-        bins=union_grid,
-        space=space,
-        decomposition_method=decomposition_method,
-        sampling_method=sampling_method,
-        seed=seed,
-        psd_method=psd_method,
-        max_relative_std=max_relative_std,
-        mt_thresholds=mt_thresholds,
-        verbose=verbose_diagnostics > 0,
-        logger=log,
-        label=str(zaid),
-    )
-    log.info(f"  [INFO] [PENDF] zaid={zaid}: sampled factors shape={factors.shape}")
-    log.info(
-        f"  [INFO] [PENDF] zaid={zaid}: conditioning plan = "
-        f"{[s.remedy for s in draw_info['plan'].steps] or ['none']}, "
-        f"{draw_info['n_inert_dropped']} inert bin(s) dropped"
-    )
-
-    if mts_after_fix is not None and list(mts_after_fix) != list(mts_present):
-        # autofix removed some MTs; rebuild mt_to_param_block from the *fixed* cov
+    fix_info = None
+    if precomputed is not None:
+        # Factors were drawn elsewhere -- by the joint MF33xMF34 sampler, which
+        # draws sigma and a_l from ONE covariance. Stages A.2-A.5 (resolve MTs,
+        # assemble MF33, thresholds, draw) are exactly the part that has already
+        # happened, and they cannot be re-run here anyway: the tape this writes
+        # onto is the covariance-free base tape, which has no MF33 at all.
+        #
+        # A.1 (the cached RECONR PENDF) still runs above, and everything from
+        # A.6 down -- masking, the parquet, the per-sample MF3 rewrite, Stage B
+        # and ACE -- is untouched.
+        factors = np.asarray(precomputed["factors"])
+        mt_to_param_block = {int(k): v for k, v in
+                             precomputed["mt_to_param_block"].items()}
+        union_grid = list(precomputed["union_grid"])
+        mts_present = list(mt_to_param_block.keys())
+        draw_info = precomputed.get("diagnostics") or {}
+        n_bins = len(union_grid) - 1
+        want = sum((sl.stop - sl.start) for sl in mt_to_param_block.values())
+        if factors.ndim != 2 or factors.shape[1] != want:
+            raise ValueError(
+                f"precomputed factors are {factors.shape} but the MT blocks "
+                f"name {want} parameters over {n_bins} bins"
+            )
+        if factors.shape[0] != num_samples:
+            raise ValueError(
+                f"precomputed factors carry {factors.shape[0]} samples, "
+                f"num_samples is {num_samples}"
+            )
         log.info(
-            f"  [INFO] [PENDF] zaid={zaid}: autofix dropped MTs "
-            f"{sorted(set(mts_present) - set(mts_after_fix))}"
+            f"  [INFO] [PENDF] zaid={zaid}: using precomputed factors "
+            f"{factors.shape} over MTs {mts_present}, {n_bins} native bins"
         )
-        mts_present = list(mts_after_fix)
+    else:
+        # --- Stage A.2: resolve user MT request (negatives, composites) ---
+        all_mts_in_file = _all_mts_in_mf33(endf_file)
+        mts_requested, mt_log_lines = _resolve_mt_request(
+            list(mt_list_for_file or []), all_mts_in_file,
+        )
+        for line in mt_log_lines:
+            log.info(f"  [INFO] [PENDF] zaid={zaid}: {line}")
+        log.info(
+            f"  [INFO] [PENDF] zaid={zaid}: MTs requested after resolve = {mts_requested}; "
+            f"MF33 contains {all_mts_in_file}"
+        )
 
-    mt_to_param_block = extract_mt_param_blocks(cov)
-    # Restrict to surviving MTs and re-sync mts_present to the MTs that
-    # actually have factor blocks. Cov assembly silently drops blocks that
-    # cannot be made relative (e.g. absolute MF33 with no matching PENDF
-    # MF3 for that MT), so the post-cov MT set can be a strict subset of
-    # the MF33-section MT set returned by ``load_mf33_covariance``.
-    mt_to_param_block = {mt: sl for mt, sl in mt_to_param_block.items() if mt in mts_present}
-    mts_present = list(mt_to_param_block.keys())
+        # --- Stage A.3: assemble MF33 covariance on native union grid ----
+        cov, mf3_sections, union_grid, mts_present = load_mf33_covariance(
+            endf_path=endf_file,
+            pendf_path=str(pendf_path),
+            mt_list=mts_requested,
+            energy_unit="eV",
+            logger=log,
+        )
+        log.info(
+            f"  [INFO] [PENDF] zaid={zaid}: MF33 cov assembled — "
+            f"MTs={mts_present}, native bins={len(union_grid) - 1}"
+        )
+
+        # --- Stage A.4: extract per-MT thresholds from PENDF (for pinning) -
+        mt_thresholds: Optional[Dict[int, float]] = None
+        if pin_threshold_bins:
+            mt_thresholds = derive_mt_thresholds(mf3_sections, mts_present)
+
+        # --- Stage A.5: sample perturbation factors -----------------------
+        # The repairs are applied ahead of the draw, as a plan, rather than inside
+        # it -- `draw_relative_factors` runs `generate_samples`' sequence in
+        # `generate_samples`' order and is gated bit-for-bit against it.
+        #
+        # ``cov`` is rebound to the fixed covariance, and that is the one deliberate
+        # behaviour change in this migration. ``generate_samples`` fixed a copy it
+        # kept to itself, so ``extract_mt_param_blocks(cov)`` below read the
+        # *unfixed* carrier -- and under ``autofix='hard'``, which drops whole
+        # reactions, that gave slices for a layout the factors no longer had.
+        # Unreachable from kika (``AUTOFIX`` is None everywhere) and only reachable
+        # from kika-app at 'soft', which drops nothing. The comment below has always
+        # said "from the *fixed* cov"; now it is true.
+        cov, mts_after_fix, fix_info = apply_legacy_autofix(
+            cov, autofix,
+            mt_numbers=mts_present,
+            high_val_thresh=high_val_thresh,
+            accept_tol=accept_tol,
+            verbose=verbose_diagnostics > 0,
+            logger=log,
+        )
+        (block_key, joint), = cross_section_carrier_blocks(cov)
+        (_key, block_index), = cross_section_carrier_index(cov).items()
+        factors, draw_info = draw_relative_factors(
+            joint,
+            num_samples,
+            key=block_key,
+            pairs=block_index["pairs"],
+            stride=block_index["stride"],
+            bins=union_grid,
+            space=space,
+            decomposition_method=decomposition_method,
+            sampling_method=sampling_method,
+            seed=seed,
+            psd_method=psd_method,
+            max_relative_std=max_relative_std,
+            mt_thresholds=mt_thresholds,
+            verbose=verbose_diagnostics > 0,
+            logger=log,
+            label=str(zaid),
+        )
+        log.info(f"  [INFO] [PENDF] zaid={zaid}: sampled factors shape={factors.shape}")
+        log.info(
+            f"  [INFO] [PENDF] zaid={zaid}: conditioning plan = "
+            f"{[s.remedy for s in draw_info['plan'].steps] or ['none']}, "
+            f"{draw_info['n_inert_dropped']} inert bin(s) dropped"
+        )
+
+        if mts_after_fix is not None and list(mts_after_fix) != list(mts_present):
+            # autofix removed some MTs; rebuild mt_to_param_block from the *fixed* cov
+            log.info(
+                f"  [INFO] [PENDF] zaid={zaid}: autofix dropped MTs "
+                f"{sorted(set(mts_present) - set(mts_after_fix))}"
+            )
+            mts_present = list(mts_after_fix)
+
+        mt_to_param_block = extract_mt_param_blocks(cov)
+        # Restrict to surviving MTs and re-sync mts_present to the MTs that
+        # actually have factor blocks. Cov assembly silently drops blocks that
+        # cannot be made relative (e.g. absolute MF33 with no matching PENDF
+        # MF3 for that MT), so the post-cov MT set can be a strict subset of
+        # the MF33-section MT set returned by ``load_mf33_covariance``.
+        mt_to_param_block = {mt: sl for mt, sl in mt_to_param_block.items() if mt in mts_present}
+        mts_present = list(mt_to_param_block.keys())
 
     # --- Stage A.6: optional energy-range mask on factors -------------
     if energy_ranges:

@@ -145,10 +145,26 @@ FACADE_IMPORTERS = {
 #: there deliberately, since the commit the app pins predates them. If the app
 #: ever calls this writer, restoring those four is a precondition, and the
 #: comment block at ``kika-api.spec:128-153`` is where that is written down.
+#: **The joint MF33xMF34 sampler (2026-08-24) added the sixth.**
+#: ``kika/sampling/joint_mf33_mf34.py`` assembles the ``(sigma, a_1..a_L)``
+#: covariance of the Fe-56 deliverable's ``_a0cross`` tape as ONE block, and it
+#: reads the shape half through ``decodeCovarianceSuite`` for the same reason
+#: ``mf35_sampling.py`` above does: the library's format-agnostic covariance
+#: object is the GNDS one. The import is inside the function, so
+#: ``import kika.sampling`` still does not wake the model.
+#:
+#: **The frozen build was checked and needs nothing**, on ``assemble.py``'s
+#: grounds and not on the adapter being in the spec: kika-app reaches no path in
+#: this module. ``kika-api`` imports six ``kika.sampling`` modules by name --
+#: ``utils``, ``ace_perturbation``, ``endf_perturbation``,
+#: ``ace_perturbation_separate``, ``nubar_perturbation`` and ``mf31_sampling``
+#: -- and this is not one of them (grep for ``joint_mf33_mf34``: zero hits,
+#: 2026-08-24). It is a thesis-pipeline module, not an app path.
 PERMANENT_IMPORTERS = {
     "kika/_read.py",
     "kika/sampling/mf35_sampling.py",
     "kika/sampling/endf_perturbation.py",
+    "kika/sampling/joint_mf33_mf34.py",
     "kika/endf/processing/reconstruct.py",
     "kika/endf/writers/assemble.py",
 }
