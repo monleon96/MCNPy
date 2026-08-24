@@ -129,6 +129,21 @@ KEEP_MF33 = {1: {451}, 3: {4, 16}, 33: {4, 16}}
 #: What the PFNS micro-tape keeps, cut the same verbatim way from
 #: ENDF/B-VIII.1 Cf-252. MF3/MT18 comes along because the fission cross section
 #: is what MT18's spectrum belongs to, and it costs 34 lines.
+#:
+#: **MF4 is dropped, and the MF5 adapter (2026-08-24) made that visible.** The
+#: real Cf-252 states MF4/MT2 and MF4/MT18 — the latter two records, LTT=0/LI=1,
+#: 152 bytes. Without it the fixture is the one shape the distributed library
+#: does not contain: *MF5 present, MF4 absent*, which measured zero times across
+#: ENDF/B-VIII.1's 487 modellable MF5 sections. So this fixture exercises the
+#: adapter's **inference** branch — the isotropic angular half kika supplies
+#: when ENDF states none — and the branch that covers 487 of 487, MF4 and MF5
+#: merged into one `uncorrelated`, has no committed witness and is reached only
+#: under ``--deep`` or by a hand-built test.
+#:
+#: Adding ``4: {18}`` here would fix that for 152 bytes, and it is **left alone
+#: deliberately**: it would also *remove* the only committed witness for the
+#: inference branch, and it changes a fixture shared with `kika/sampling/tests/`
+#: and `kika/cov/tests/`. Its own change, with its own before and after.
 KEEP_PFNS = {1: {451}, 3: {18}, 5: {18, 455}, 35: {18}}
 
 #: What the nu-bar micro-tape keeps, cut the same verbatim way from

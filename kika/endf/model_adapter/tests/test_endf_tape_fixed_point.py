@@ -219,23 +219,56 @@ def test_the_nubars_and_mf31_survive(micro_nubar_tape, tmp_path):
         [(31, 452), (31, 455), (31, 456)]
 
 
-def test_a_tape_with_mf5_comes_back_without_it_and_says_so(micro_pfns_tape, tmp_path):
-    """The blind spot, pinned. This is the test that keeps the report honest.
+def test_a_tape_with_mf5_comes_back_with_it(micro_pfns_tape, tmp_path):
+    """The blind spot this test used to pin, now closed from the other side.
 
-    Cf-252's MF5/MT18 and MF5/MT455 are parsed by kika and decoded by nothing,
-    so the written tape has no MF5 and the fixed point above **passes anyway** —
-    the distributions are absent from both sides. If the report ever stops
-    saying so, this fails and the fixed point does not.
+    Until the MF5 adapter landed, Cf-252's MF5 was parsed by kika and decoded by
+    nothing: the written tape had no MF5 and the fixed point above **passed
+    anyway**, because the distributions were absent from both sides. So the
+    assertions here were the negative ones, and the docstring said as much.
+
+    Now MF5/MT18 round-trips and MF5/MT455 does not, and the difference is the
+    whole point. MT455 is the delayed spectrum: it has no cross section, so it
+    has no MF3 and no reaction to hang a distribution from, and §18.4's
+    ``delayedNeutrons`` — where it does belong — is a separate increment. That
+    is a **declared** loss, and the loop below is what makes it declared rather
+    than silent.
     """
     before, after, report = _fixedPoint(micro_pfns_tape, tmp_path)
     assert _walk(before.reactions) == _walk(after.reactions)
 
-    said = "\n".join(report.losses + report.unsupported)
-    assert "MF5 (energy distributions) is present and parsed by kika" in said
+    sections = {(mf, mt) for mf, mt, _s in encodeTapeSections(before)[0]}
+    assert (5, 18) in sections, "MT18's spectrum survives the round trip"
+    assert (5, 455) not in sections, "MT455's does not, and says so below"
+    assert (35, 18) in sections, "MF35 does survive"
 
-    sections, _report, _mat = encodeTapeSections(before)
-    assert 5 not in {mf for mf, _mt, _s in sections}
-    assert (35, 18) in {(mf, mt) for mf, mt, _s in sections}, "MF35 does survive"
+    said = "\n".join(report.losses + report.unsupported)
+    assert "MF5/MT455 has no MF3/MT455 to hang from" in said
+    assert "MF5/MT455 partial 0 is stored verbatim: LF=5" in said
+
+    # And nothing left over from the old regime: no message may claim MF5 is
+    # undecoded, and none may send the reader to the covariance decoder for it.
+    assert "nothing decodes it into this reactionSuite" not in said
+    assert not [line for line in report.unsupported
+                if "MF5" in line and "decodeCovarianceSuite" in line]
+
+
+def test_the_mf5_section_a_tape_gets_back_is_byte_identical(micro_pfns_tape):
+    """Stronger than the fixed point, and the reason the encoder exists.
+
+    The fixed point compares two models. This compares the section kika writes
+    with the bytes it read, which is the gate the MF4 encoder is held to and is
+    a strictly stronger statement — a model that lost a trailing zero would
+    still be its own fixed point.
+    """
+    from kika.endf import read_endf
+
+    tape = read_endf(str(micro_pfns_tape))
+    suite, _report = decodeReactionSuite(tape)
+    written = {mt: section
+               for mf, mt, section in encodeTapeSections(suite)[0] if mf == 5}
+    assert set(written) == {18}
+    assert str(written[18]) == str(tape.mf[5].mt[18])
 
 
 def test_a_tape_with_mf32_comes_back_without_it_and_says_so(micro_mf32_tape, tmp_path):

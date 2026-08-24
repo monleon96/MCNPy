@@ -15,9 +15,10 @@ editor: that one rewrites the sections it is given inside a tape it already
 read, and cannot produce a tape it was not handed. This door can, which is what
 makes a GNDS file convertible to ENDF at all.
 
-**What it cannot carry, it says.** MF5, MF6, MF7, MF12-15 and MF32 have no
-ENDF → model adapter or no encoder, so a model that never held them writes a
-tape without them, and the returned report names each one. The gate the writer
+**What it cannot carry, it says.** MF6, MF7, MF12-15 and MF32 have no
+ENDF → model adapter or no encoder, and MF5 has one only for its tabulated
+LF=1 — so a model that never held them writes a tape without them, and the
+returned report names each one. The gate the writer
 was built against is a fixed point *inside the model* — read, write, read again,
 compare — and not byte identity against the tape it came from; §2.8 says why,
 and says what that gate cannot see.

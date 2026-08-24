@@ -36,7 +36,7 @@ nothing decodes an ENDF file into them yet, which is phase 3c.
 from __future__ import annotations
 
 from .axes import (Axes, Axis, Grid, angularAxes, crossSectionAxes,
-                   multiplicityAxes)
+                   energyAxes, multiplicityAxes)
 from .enums import (
     ENDF_INT_TO_INTERPOLATION,
     INTERPOLATION_TO_ENDF_INT,
@@ -180,7 +180,7 @@ __all__ = [
     "ENDF_INT_TO_INTERPOLATION", "INTERPOLATION_TO_ENDF_INT",
     # §5
     "Axes", "Axis", "Grid", "angularAxes", "crossSectionAxes",
-    "multiplicityAxes", "Values",
+    "energyAxes", "multiplicityAxes", "Values",
     # §6
     "Function1d", "XYs1d", "Regions1d", "Constant1d", "Polynomial1d",
     "Ys1d", "Legendre", "Gridded1d",

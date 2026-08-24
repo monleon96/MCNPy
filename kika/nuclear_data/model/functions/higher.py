@@ -38,7 +38,9 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional, Sequence, Tuple
 
 from ..axes import Axes
-from ..enums import ENDF_INT_TO_INTERPOLATION, INTERPOLATION_TO_ENDF_INT, Interpolation, InterpolationQualifier
+from ..enums import (ENDF_INT_TO_INTERPOLATION, INTERPOLATION_TO_ENDF_INT,
+                     Interpolation, InterpolationQualifier,
+                     joinEndfTab2Code, splitEndfTab2Code)
 from .base import Function1d
 
 __all__ = [
@@ -120,8 +122,15 @@ class XYs2d(Function2d):
 
     @property
     def endfInterpolationCode(self) -> int:
-        """The ENDF-6 ``INT`` for the outer axis (§3.4.4 adopted ENDF's codes)."""
-        return INTERPOLATION_TO_ENDF_INT[self.interpolation]
+        """The ENDF-6 ``INT`` for the outer axis, **qualifier included**.
+
+        §3.4.4 adopted ENDF's codes, and §0.5.2.1 puts the two-dimensional
+        qualifier in the tens digit of the same number — 21-26 is unit base,
+        which 44 of ENDF/B-VIII.1's 487 LF=1 MF5 sections use. GNDS states it
+        as a second attribute, so writing only ``interpolation`` back would
+        drop a statement the file made.
+        """
+        return joinEndfTab2Code(self.interpolation, self.interpolationQualifier)
 
     def evaluate(self, *args: Any, **kwargs: Any):
         raise NotImplementedError(
@@ -243,9 +252,11 @@ def fromEndfTab2(
 
     if len(pairs) <= 1:
         code = pairs[0][1] if pairs else 2
+        interpolation, qualifier = splitEndfTab2Code(code)
         return XYs2d(
             function1ds=functions,
-            interpolation=ENDF_INT_TO_INTERPOLATION[code],
+            interpolation=interpolation,
+            interpolationQualifier=qualifier,
             axes=axes,
             label=label,
         )
@@ -255,9 +266,11 @@ def fromEndfTab2(
     for order, (nbt, code) in enumerate(pairs):
         if nbt <= previous:
             continue
+        interpolation, qualifier = splitEndfTab2Code(code)
         regions.append(XYs2d(
             function1ds=functions[previous:nbt],
-            interpolation=ENDF_INT_TO_INTERPOLATION[code],
+            interpolation=interpolation,
+            interpolationQualifier=qualifier,
             axes=axes,
             index=order,
         ))
@@ -364,8 +377,11 @@ class XYs3d:
 
     @property
     def endfInterpolationCode(self) -> int:
-        """The ENDF-6 ``INT`` for the outermost axis (§3.4.4 adopted ENDF's codes)."""
-        return INTERPOLATION_TO_ENDF_INT[self.interpolation]
+        """The ENDF-6 ``INT`` for the outermost axis, **qualifier included**.
+
+        :attr:`XYs2d.endfInterpolationCode`'s reason, one dimension up.
+        """
+        return joinEndfTab2Code(self.interpolation, self.interpolationQualifier)
 
     def evaluate(self, *args: Any, **kwargs: Any):
         raise NotImplementedError(

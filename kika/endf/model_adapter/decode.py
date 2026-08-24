@@ -28,6 +28,7 @@ import numpy as np
 
 from kika.nuclear_data.model import (
     EVAL_LABEL,
+    AngularTwoBody,
     Axes,
     ConversionReport,
     CrossSection,
@@ -41,10 +42,13 @@ from kika.nuclear_data.model import (
     PoPs,
     Q,
     RangeQuantity,
+    Isotropic2d,
     Reaction,
     ReactionId,
     ReactionSuite,
     Regions1d,
+    Uncorrelated,
+    XYs2d,
     crossSectionAxes,
 )
 
@@ -60,8 +64,9 @@ SUPPORTED_MF = (1, 2, 3, 4, 5, 6, 31, 32, 33, 34, 35)
 #: (§25.1.1) rather than to the ``reactionSuite``. Kept as a set of its own
 #: because MF5 broke the rule the redirect loop used to assume — that
 #: "supported and not one of 1, 2, 3, 4" meant "covariance". MF5 is neither:
-#: it is reactionSuite content that this adapter does not decode yet. MF6 is the
-#: second of the same kind, added when its parser landed.
+#: it is reactionSuite content, and since the MF5 adapter landed it is decoded
+#: like the four. MF6 is the second of the same kind, added when its parser
+#: landed, and it is still the one waiting for an adapter.
 COVARIANCE_MF = (31, 32, 33, 34, 35)
 
 
@@ -274,6 +279,14 @@ def decodeReactionSuite(endf, report: Optional[ConversionReport] = None):
         for mt in sorted(getattr(mf4, "mt", {})):
             report = _attachAngularDistribution(suite, mf4.mt[mt], mt, report)
 
+    # After MF4, and it has to be: an MT that states both is **one**
+    # `uncorrelated` in GNDS, not two forms, and this pass rewrites what that
+    # one left rather than appending beside it.
+    mf5 = endf.mf.get(5) if hasattr(endf, "mf") else None
+    if mf5 is not None:
+        for mt in sorted(getattr(mf5, "mt", {})):
+            report = _attachEnergyDistribution(suite, mf5.mt[mt], mt, report)
+
     present = set(getattr(endf, "mf", {}))
     for mf in sorted(present - set(SUPPORTED_MF)):
         report.unsupportedNode(
@@ -287,21 +300,14 @@ def decodeReactionSuite(endf, report: Optional[ConversionReport] = None):
             f"reactionSuite. Call decodeCovarianceSuite for it."
         )
 
-    # MF5 is the case that broke the loop above. It is parsed, it is *not* a
-    # covariance file, and it has no decode here yet — so it needs its own
-    # notice. Sending the user to `decodeCovarianceSuite` for it, which is what
-    # the old `- {1,2,3,4}` set did, was simply false.
-    mf5 = endf.mf.get(5) if hasattr(endf, "mf") else None
+    # MF5 is decoded above, one section at a time. What stays here is the part
+    # that is *not* about this reactionSuite: `report_gaps` names the laws
+    # `MF5PartialRaw` kept as bytes, and declaring MF5 supported without saying
+    # which laws only pass through would turn a silent skip into a silent false
+    # claim of coverage. Note what is deliberately absent: no message sends the
+    # user to `decodeCovarianceSuite` for MF5, which is what the old
+    # `- {1,2,3,4}` set did and was simply false.
     if mf5 is not None:
-        report.unsupportedNode(
-            "MF5 (energy distributions) is present and parsed by kika, but "
-            "nothing decodes it into this reactionSuite; the distributions "
-            "are absent from the products below. **The model slots exist** "
-            "since GNDS phase 7b — what is missing is this adapter, the "
-            "ENDF -> model direction, which that phase did not cover and no "
-            "phase is scheduled for. The parsed sections are reachable as "
-            "endf.mf[5] and are what the PFNS perturbation pipeline reads."
-        )
         for mt in sorted(getattr(mf5, "mt", {})):
             for gap in getattr(mf5.mt[mt], "report_gaps", list)():
                 report.unsupportedNode(gap)
@@ -420,3 +426,155 @@ def _attachAngularDistribution(suite: ReactionSuite, mf4mt, mt: int,
         product.distribution = Distribution()
     product.distribution[EVAL_LABEL] = distribution
     return report
+
+
+def _attachEnergyDistribution(suite: ReactionSuite, mf5mt, mt: int,
+                              report: ConversionReport) -> ConversionReport:
+    """Hang one MF5 section on the neutron product of its reaction.
+
+    **MF4 and MF5 are one node, not two.** §18.3's ``uncorrelated`` is the
+    evaluation stating P(mu|E) and P(E'|E) separately, which is exactly what a
+    tape carrying both files does, so this pass *rewrites* what
+    :func:`_attachAngularDistribution` left rather than appending beside it.
+    Three shapes come out of that, and the third is the commonest in the
+    library by two orders of magnitude:
+
+    ==============  ==============  ====================================
+    MF4             MF5             result
+    ==============  ==============  ====================================
+    yes             no              ``angularTwoBody`` — untouched here
+    yes             yes             ``uncorrelated``, both halves stated
+    no              yes             ``uncorrelated``, angular **inferred**
+    ==============  ==============  ====================================
+
+    **The third row is an inference, it is reported as one, and it fires on cut
+    tapes only.** Measured 2026-08-24 over ENDF/B-VIII.1's 595 MF5 sections:
+    **zero** of the 487 modellable ones lack an MF4 sibling. So the row is a
+    rule for trimmed and partial tapes — the committed ``micro_pfns_tape`` is
+    one, its cut having dropped Cf-252's real MF4/MT18 — and not a description
+    of the library. Where it does fire, ENDF says nothing about angle: §5
+    leaves the emission isotropic in the lab by convention, and the GNDS
+    distribution agrees (126 095 ``isotropic2d`` against 406 ``XYs2d`` in the
+    ``uncorrelated/angular`` position). Agreeing with a convention is still not
+    reading a number, so it goes to ``report.approximations``: a loss is
+    visible, an approximation looks like data.
+    """
+    from .energy import decodeMF5MT
+
+    # Decode **before** looking for a reaction. The two questions are
+    # independent — "can kika model this law?" and "is there a product to hang
+    # it on?" — and asking them the other way round made an unmodellable
+    # MT455 come back as "there is no MF3/MT455" with no word about the law,
+    # which is a true sentence that leaves the reader with the wrong idea.
+    energy, provenance, report = decodeMF5MT(mf5mt, report)
+
+    reaction = suite.findReactionByENDF_MT(mt)
+    if reaction is None:
+        # MT455 is this branch's whole population: the delayed spectrum has no
+        # cross section, so it has no MF3 and no reaction. Its GNDS home is
+        # §18.4's `fissionFragmentData/delayedNeutrons`, which `attachNubar`
+        # already builds from MF1/455 and which no decoder fills distributions
+        # into yet. Declared rather than dropped, and the section is not
+        # written back either.
+        report.lost(
+            f"MF5/MT{mt} has no MF3/MT{mt} to hang from; GNDS attaches a "
+            f"distribution to a product of a reaction, and there is no "
+            f"reaction. For MT455 the home is §18.4's delayedNeutrons and not "
+            f"a reaction at all — a separate increment. The section is absent "
+            f"from this reactionSuite and from anything written back from it"
+        )
+        return report
+
+    channel = reaction.outputChannel
+    standing = channel.products.byPid("n")
+    if energy is None and not standing:
+        # A law with no model node, on a channel that has no neutron product
+        # either — nothing read MF4 and no nu-bar built one. The provenance
+        # would have nowhere to live but a **hollow** product: a `<product>`
+        # with no multiplicity and no distribution, which §17.2.1 does not
+        # admit and which would trade one declared loss for an invalid node.
+        # So the section is declared instead, and it is not written back.
+        report.lost(
+            f"MF5/MT{mt} states only laws kika does not model and its reaction "
+            f"has no neutron product to carry the section's provenance; it is "
+            f"absent from this reactionSuite and from anything written back "
+            f"from it. A product holding neither a multiplicity nor a "
+            f"distribution is not a place to put it"
+        )
+        return report
+
+    product = channel.ensureProduct("n")
+
+    # One product, one provenance. MF4's fields are flat in `headerFields` and
+    # MF5's live under its own key, so neither file overwrites the other and
+    # `encodeMF4MT` keeps reading exactly what it wrote.
+    existing = getattr(product, "provenance", None)
+    if existing is not None and getattr(existing, "sourceFormat", None) == "endf":
+        existing.headerFields["mf5"] = provenance.headerFields["mf5"]
+    else:
+        product.provenance = provenance
+
+    if energy is None:
+        # NK>1, or a law with no model node, on a product that exists anyway.
+        # The provenance carries the whole section, so the tape still comes
+        # back; the reactionSuite gains no distribution, and `decodeMF5MT` has
+        # already said why.
+        return report
+
+    if product.distribution is None:
+        product.distribution = Distribution()
+    existingForm = product.distribution.get(EVAL_LABEL)
+
+    angular, frame = _angularHalf(existingForm, mt, report)
+    if angular is None:
+        return report
+
+    product.distribution[EVAL_LABEL] = Uncorrelated(
+        angular=angular, energy=energy, productFrame=frame
+    )
+    # Not two-body: `twoBody` says the kinematics fix E' from mu, and a section
+    # that tabulates P(E'|E) independently is the statement that they do not.
+    channel.genre = "NBody"
+    return report
+
+
+def _angularHalf(existingForm, mt: int, report: ConversionReport):
+    """The ``angular`` child of the ``uncorrelated``, and the product frame."""
+    if existingForm is None:
+        report.approximated(
+            f"MT{mt}: the tape states MF5 and no MF4, so the angular half of "
+            f"§18.3's uncorrelated is not read but inferred — ENDF-6 §5 leaves "
+            f"the emission isotropic in the lab when MF4 is absent, and "
+            f"gnds.xsd makes the angular child mandatory. Written as "
+            f"isotropic2d, which is what 126 095 of the library's 126 501 "
+            f"uncorrelated nodes carry; it is still a convention and not a "
+            f"number the evaluator wrote. Nothing is written back to ENDF for "
+            f"it — no MF4/MT{mt} section is created — so only a GNDS file "
+            f"carries it. Zero of ENDF/B-VIII.1's 487 modellable MF5 sections "
+            f"lack an MF4 sibling (measured 2026-08-24), so this is a trimmed "
+            f"or partial tape"
+        )
+        return Isotropic2d(productFrame=Frame.lab), Frame.lab
+
+    if isinstance(existingForm, Isotropic2d):
+        return existingForm, existingForm.productFrame
+
+    if isinstance(existingForm, AngularTwoBody):
+        angular = existingForm.angular
+        if isinstance(angular, (XYs2d, Isotropic2d)):
+            return angular, existingForm.productFrame
+        report.unsupportedNode(
+            f"MT{mt}: MF4 gave a {type(angular).__name__} and §18.3's "
+            f"uncorrelated/angular admits only isotropic2d, XYs2d, forward or "
+            f"recoil — no regions2d. That is an LTT=3 section on an MT that "
+            f"also states MF5. The angularTwoBody is kept as it was and the "
+            f"MF5 energy distribution is absent from this reactionSuite"
+        )
+        return None, None
+
+    report.unsupportedNode(
+        f"MT{mt}: MF5 arrived on a product already carrying a "
+        f"{type(existingForm).__name__}, which is not a shape MF4 produces; "
+        f"the energy distribution is absent from this reactionSuite"
+    )
+    return None, None
