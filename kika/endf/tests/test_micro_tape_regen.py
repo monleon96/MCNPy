@@ -77,7 +77,7 @@ MF33 = DATA / "micro_fe56_mf33.endf"
 #: MF6 fixtures, keyed by the tape they are cut from. Each carries a law the
 #: rest of the library barely has -- see ``KEEP_MF6`` for what and why.
 MF6_FIXTURES = {"be9": "be9_b81", "li6": "li6_b81", "c12": "c12_b81",
-                "u235": "u235_b81"}
+                "ti50": "ti50_b81", "u235": "u235_b81"}
 
 #: The charged-particle MF6 fixtures, copied **whole** rather than cut. Each is
 #: a complete ENDF/B-VIII.0 evaluation of 7-56 kB; all five together are 138 kB,
@@ -278,15 +278,27 @@ def section_inventory(text: str) -> dict[int, dict[int, int]]:
 #: elastic scattering needs a charged projectile. Its witnesses are the five
 #: whole tapes in ``MF6_CP_FIXTURES``, cut from ENDF/B-VIII.0's charged-particle
 #: sublibraries -- ``docs/library/mf6_witness_hunt.md``.
+#:
+#: **MF3 is kept for every MT MF6 states, and it is not decoration.** GNDS hangs
+#: a distribution on a product of a *reaction*, and a reaction is what MF3
+#: makes: without its sibling section an MF6 section has nowhere to go, and
+#: ``decodeReactionSuite`` says so and drops it. Before these tapes carried MF3
+#: the model adapter could not be exercised on a committed fixture at all.
 KEEP_MF6 = {
     # LAW=7 (both occurrences in the library) and LCT=1, plus LAW=1/2/4.
-    "be9": {1: {451}, 6: {16, 600, 650, 700, 701, 800}},
+    "be9": {1: {451}, 3: {16, 600, 650, 700, 701, 800},
+            6: {16, 600, 650, 700, 701, 800}},
     # LAW=6, and LAW=1/LAW=2 sections small enough to be free.
-    "li6": {1: {451}, 6: {41, 52, 103}},
+    "li6": {1: {451}, 3: {41, 52, 103}, 6: {41, 52, 103}},
     # LCT=3 throughout, and LANG=2 Kalbach-Mann.
-    "c12": {1: {451}, 6: {5}},
+    "c12": {1: {451}, 3: {5}, 6: {5}},
+    # The only LANG=1 NA>0 section small enough to commit: 27 lines, two
+    # products, and the first has NA=0 at one incident energy and NA=4 at the
+    # other. That single section is the whole of the uncorrelated/energyAngular
+    # split, mixed case included, and nothing else offline states NA>0 at all.
+    "ti50": {1: {451}, 3: {17}, 6: {17}},
     # LAW=0, LAW=-5 and LAW=-15 in one 591-record section; LAW=3 in MT800.
-    "u235": {1: {451}, 6: {18, 800}},
+    "u235": {1: {451}, 3: {18, 800}, 6: {18, 800}},
 }
 
 
@@ -629,7 +641,7 @@ def test_regenerate_micro_tapes(fe56_host_tape, cf252_b81_tape, u235_b81_tape, r
 
 @pytest.mark.skipif(not REGEN, reason="set REGEN_MICRO_TAPES=1 to rebuild the fixtures")
 def test_regenerate_mf6_micro_tapes(be9_b81_tape, li6_b81_tape, c12_b81_tape,
-                                    u235_b81_tape, request):
+                                    ti50_b81_tape, u235_b81_tape, request):
     """Rebuild just the MF6 fixtures.
 
     Separate from :func:`test_regenerate_micro_tapes` on purpose. The six older

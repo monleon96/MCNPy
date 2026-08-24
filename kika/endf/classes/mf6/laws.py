@@ -242,20 +242,38 @@ class MF6LawContinuum(MF6Law):
         [0, 1] first.
 
         ENDF-6 has codes for saying which is meant — 11-15 corresponding-point,
-        21-25 unit-base — and the tapes here do not use them: every LAW=1 TAB2
-        measured writes a plain ``INT=2``. So the file does not say, the right
-        answer is a processing convention rather than a reading of the record,
-        and there is nothing on this machine to gate an implementation against.
-        A plausible one would be silently wrong, which is worse than none.
+        21-25 unit-base — and **the tapes do use them**, which corrects what
+        this docstring said until 2026-08-24. Measured over the 402
+        ENDF/B-VIII.1 neutron tapes under 2.5 MB: of 9 604 LAW=1 TAB2 records,
+        5 025 write a plain ``INT=2``, **4 498 write ``INT=22`` (unit base) and
+        81 write ``INT=12`` (corresponding points)** — 229 of the 402 tapes
+        carry at least one. So the file usually *does* say.
+
+        That changes the reason and not the answer. The qualifier is read and
+        re-emitted (``splitEndfTab2Code``, and ``XYs2d.interpolationQualifier``
+        on the model side, so a GNDS file written from a tape carries it), but
+        **kika implements neither rule**: rescaling each node's outgoing range
+        to [0, 1] before interpolating is a processing step this library does
+        not do, and there is nothing here to gate one against. A plausible
+        implementation would be silently wrong, which is worse than none.
 
         Use :meth:`spectrum` at a node, or reconstruct through NJOY.
         """
+        # §0.5.2.1's tens digit: 0 plain, 1 corresponding points, 2 unit base.
+        # Spelled out rather than imported from `kika.nuclear_data.model` --
+        # this is three words in an error message, not a second mapping table.
+        qualifier = {1: "corresponding-point", 2: "unit-base"}.get(
+            (self.tab2_interp[0][1] // 10) if self.tab2_interp else 0, "")
+        says = (f"this record asks for {qualifier} interpolation "
+                f"(INT={self.tab2_interp[0][1]})" if qualifier else
+                "this record writes a plain INT, so it does not say which")
         raise NotImplementedError(
-            "MF6 LAW=1 has no between-node evaluator in kika: the outgoing grid "
-            "changes from node to node, so this is unit-base interpolation (a "
-            "processing convention) and not a reading of the record. Use "
-            "spectrum(k) at an incident node, or go through NJOY. See this "
-            "method's docstring and docs/library/mf6_notes.md."
+            f"MF6 LAW=1 has no between-node evaluator in kika: the outgoing "
+            f"grid changes from node to node, so interpolating at fixed E' "
+            f"smears the end point, and {says}. Neither ENDF's "
+            f"corresponding-point nor its unit-base rule is implemented here. "
+            f"Use spectrum(k) at an incident node, or go through NJOY. See "
+            f"this method's docstring and docs/library/mf6_notes.md."
         )
 
     def report_gaps(self, mt: int, index: int) -> List[str]:

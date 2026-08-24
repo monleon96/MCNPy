@@ -49,6 +49,7 @@ from kika.nuclear_data.model import (
     URR_probabilityTables1d,
     XYs1d,
     crossSectionAxes,
+    pidFromZA,
 )
 
 __all__ = ["decodeAce", "aceStyles", "qValuesByMT",
@@ -176,7 +177,7 @@ def decodeAce(ace, report: Optional[ConversionReport] = None):
     za = int(provenance.zaid) if provenance.zaid is not None else 0
     pops = PoPs()
     if za:
-        pops.add(Nuclide(id=f"ZA{za}", Z=za // 1000, A=za % 1000))
+        pops.add(Nuclide(id=pidFromZA(za), Z=za // 1000, A=za % 1000))
 
     suite = ReactionSuite(
         evaluation=(provenance.comment or "").strip() or "",

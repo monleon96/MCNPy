@@ -14,8 +14,8 @@ has none", while a missing attribute says nothing at all and fails three frames
 away. The list containers even define ``__bool__`` as ``True`` so that
 ``if suite.reactions:`` cannot silently read *empty* as *absent*.
 
-MF5, MF6 and MF12-15 have slots here that phase 7 fills. Filling them
-restructures nothing.
+MF12-15 have slots here that phase 7 fills, and MF5 and MF6 have filled
+theirs. Filling them restructured nothing, which was the claim.
 """
 from __future__ import annotations
 

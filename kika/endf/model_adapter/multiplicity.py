@@ -383,10 +383,20 @@ def nubarNode(suite, mt: int):
     ``reference``, a ``branching1d`` and an ``unspecified`` — and a fission
     neutron carrying one of those would otherwise be returned as the nu-bar and
     die four frames later in :func:`_tab1FromMultiplicity` with a message
-    naming ``NoneType``, which is not the object at fault. No distributed
-    evaluation is known to reach it — U-235's MT18 neutron carries an
-    ``XYs1d`` — but the guard costs a clause and the failure it prevents costs
-    a diagnosis.
+    naming ``NoneType``, which is not the object at fault.
+
+    **And it asks that the multiplicity came from MF1**, which is a second
+    question and was not asked until MF6 made it matter. "The fission channel's
+    neutron has a number on it" is not the same as "the file states a nu-bar":
+    :func:`~kika.endf.model_adapter.energy_angle.decodeMF6MT` puts MF6's
+    ``y(E)`` on every product it builds, and on a tape with MF6/MT18 and no
+    MF1/452 that yield was being returned here and written out as a nu-bar it
+    is not — ENDF/B-VIII.1's U-235 states 0.0158 at thermal for the ``LAW=0``
+    subsection's share against a real nu-bar of 2.414. It failed loudly,
+    because MF6's yield collapses to an ``XYs1d`` where MF1's stays a
+    ``Regions1d``, and that is luck rather than a gate. The provenance is the
+    gate: ``attachNubar`` puts an :class:`EndfProvenance` on the
+    :class:`Multiplicity` it builds and nothing else does.
     """
     if mt not in NUBAR_MT:
         raise ValueError(f"MT{mt} is not a fission multiplicity")
@@ -398,9 +408,11 @@ def nubarNode(suite, mt: int):
     reaction = suite.findReactionByENDF_MT(FISSION_MT)
     if reaction is not None and mt in (452, 456):
         for product in reaction.outputChannel.products:
-            if (product.pid == "n" and product.multiplicity is not None
-                    and product.multiplicity.isEvaluable):
-                return product.multiplicity
+            multiplicity = product.multiplicity
+            if (product.pid == "n" and multiplicity is not None
+                    and multiplicity.isEvaluable
+                    and multiplicity.provenance is not None):
+                return multiplicity
     return None
 
 

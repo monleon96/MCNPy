@@ -321,20 +321,33 @@ class OutputChannel:
         return self.genre == "twoBody"
 
     def ensureProduct(self, pid: str, label: Optional[str] = None) -> Product:
-        """The channel's product with this ``pid``, created if it has none.
+        """The channel's product with this ``pid`` and ``label``, created if absent.
 
         A Python verb on a GNDS noun, and it exists because §17.2.1 puts a
         product's multiplicity and its distribution on **one** node while ENDF
         states them in different files. The ENDF decoder reads MF1's nu-bar and
         MF4's angular distribution in separate passes; each used to append a
         product of its own, so a fissile tape carrying both came out with two
-        neutrons on the fission channel — one holding the multiplicity, one
+        neutrons on the fission channel -- one holding the multiplicity, one
         holding the distribution, and every consumer of ``byPid('n')[0]``
         getting whichever pass ran first.
+
+        **``label`` is part of the question and not only of the answer**, which
+        it was not until MF6 arrived. One channel may legitimately hold two
+        products of the same particle -- ENDF/B-VIII.0's alpha+He4 MT2 lists the
+        elastically scattered He4 and its recoil, and t+Li7's MT24 emits two of
+        them -- and §17.2.1 tells those apart by ``label``, which is why
+        :meth:`Products.byPid` answers with a list. Matching on ``pid`` alone
+        returned the first and quietly ignored the argument, so the second
+        subsection decorated the first product instead of getting its own.
+
+        Called with no ``label`` the two questions coincide, which is what every
+        MF1, MF4 and MF5 caller does.
         """
-        existing = self.products.byPid(pid)
-        if existing:
-            return existing[0]
-        product = Product(pid=pid, label=label if label is not None else pid)
+        wanted = label if label is not None else pid
+        for product in self.products:
+            if (product.label or product.pid) == wanted:
+                return product
+        product = Product(pid=pid, label=wanted)
         self.products.products.append(product)
         return product

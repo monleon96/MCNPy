@@ -168,3 +168,75 @@ def energyAxes() -> Axes:
         Axis(index=1, label="energy_out", unit="eV"),
         Axis(index=0, label="P(energy_out|energy_in)", unit="1/eV"),
     ])
+
+
+#: The axes of one half of a §18.6 ``KalbachMann`` — its ``f``, ``r`` or ``a``.
+#:
+#: Three axes like :func:`angularAxes` and :func:`energyAxes`, and the same
+#: shape for all three halves except the dependent one, which is why this takes
+#: the component rather than there being three near-identical factories.
+#:
+#: The triple is taken verbatim off a FUDGE-distributed node —
+#: ``n-006_C_012.endf.gnds.xml``'s ``KalbachMann`` writes ``f`` with unit
+#: ``1/eV`` and ``r`` with none — rather than derived. ``f`` is a density in
+#: the outgoing energy and carries that axis's reciprocal unit; ``r`` is the
+#: pre-equilibrium fraction and is dimensionless.
+#:
+#: **``a`` has no witness.** The census counted zero ``<a>`` in the library's
+#: 3 730 ``KalbachMann`` nodes, so its unit here is reasoned and not copied: the
+#: Kalbach slope multiplies a cosine, which is dimensionless, so it is too.
+#:
+#: **The caller must share one object across a container and its children**, for
+#: the identity reason written on :func:`angularAxes`.
+_KALBACH_UNITS = {"f": "1/eV", "r": "", "a": ""}
+
+
+def kalbachMannAxes(component: str) -> Axes:
+    try:
+        unit = _KALBACH_UNITS[component]
+    except KeyError:
+        raise ValueError(
+            f"a KalbachMann has the three components f, r and a "
+            f"(gnds.xsd:1806-1811), not {component!r}"
+        ) from None
+    return Axes([
+        Axis(index=2, label="energy_in", unit="eV"),
+        Axis(index=1, label="energy_out", unit="eV"),
+        Axis(index=0, label=component, unit=unit),
+    ])
+
+
+#: The axes of a §18.4 ``energyAngular`` or §18.5 ``angularEnergy`` — the only
+#: **four**-axis container the library contains, because it is the only one
+#: whose function is of three variables.
+#:
+#: Taken verbatim off ``n-026_Fe_056.endf.gnds.xml``'s ``energyAngular``, whose
+#: ``XYs3d`` writes ``energy_in``/``energy_out``/``mu`` at indices 3, 2 and 1
+#: and ``P(energy_out,mu|energy_in)`` in ``1/eV`` at index 0.
+#:
+#: **``outermost`` is the whole difference between the two nodes.** §18.4 nests
+#: P(E'|E) outside P(mu|E,E') and §18.5 the other way round, they share a
+#: complexType exactly, and the axis labels are the only thing in the file that
+#: disagrees — which is why writing one as the other produces a document that
+#: validates and states the wrong physics. Passing the order rather than
+#: defaulting it is what makes that impossible to do by omission.
+#:
+#: **The caller must share one object across a container and its children**, for
+#: the identity reason written on :func:`angularAxes`.
+def energyAngularAxes(outermost: str = "energy_out") -> Axes:
+    if outermost == "energy_out":
+        middle, inner, dependent = "energy_out", "mu", "P(energy_out,mu|energy_in)"
+    elif outermost == "mu":
+        middle, inner, dependent = "mu", "energy_out", "P(mu,energy_out|energy_in)"
+    else:
+        raise ValueError(
+            f"the outer axis of a three-dimensional distribution is either "
+            f"'energy_out' (§18.4 energyAngular) or 'mu' (§18.5 angularEnergy), "
+            f"not {outermost!r}"
+        )
+    return Axes([
+        Axis(index=3, label="energy_in", unit="eV"),
+        Axis(index=2, label=middle, unit="eV" if middle == "energy_out" else ""),
+        Axis(index=1, label=inner, unit="eV" if inner == "energy_out" else ""),
+        Axis(index=0, label=dependent, unit="1/eV"),
+    ])

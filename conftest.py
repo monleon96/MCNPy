@@ -182,6 +182,15 @@ _TAPES: Dict[str, Sequence[str]] = {
     "be9_b81": ("endfb81/n-004_Be_009.endf", "n-004_Be_009.endf"),
     "li6_b81": ("endfb81/n-003_Li_006.endf", "n-003_Li_006.endf"),
     "c12_b81": ("endfb81/n-006_C_012.endf", "n-006_C_012.endf"),
+    # The fourth carrier, and it is the model adapter's rather than the
+    # parser's. Ti-50's MT17 is the smallest section in the library that states
+    # NA>0 -- 27 lines, and one of its two products has NA=0 at the first
+    # incident energy and NA=4 at the second, so a single section carries both
+    # halves of the split that decides between §18.3's uncorrelated and §18.4's
+    # energyAngular *and* the mixed case inside one product. Without it there
+    # is no offline witness for energyAngular at all: every LANG=1 product in
+    # the other four fixtures is NA=0.
+    "ti50_b81": ("endfb81/n-022_Ti_050.endf", "n-022_Ti_050.endf"),
     # LAW=5, charged-particle elastic scattering, which occurs nowhere in any
     # neutron sublibrary: it needs a projectile that is charged. ENDF/B-VIII.0
     # ships those sublibraries next to ``neutrons/`` and they are on the share.
@@ -341,6 +350,7 @@ _NJOY_FIXTURES = frozenset({"njoy_exe"})
 _GNDS_FIXTURES = frozenset({
     "fe56_gnds_tape", "fe56_gnds_cov_tape",
     "gnds_data_dir", "micro_fe56_gnds", "micro_ta182_gnds", "micro_be9_gnds",
+    "micro_sr88_gnds",
     "h2_gnds", "h2_gnds_cov", "h3_gnds", "s36_gnds",
     "gnds_covariance_fixture",
 })
@@ -475,6 +485,7 @@ fe56_b81_tape = _tape_fixture("fe56_b81")
 be9_b81_tape = _tape_fixture("be9_b81")
 li6_b81_tape = _tape_fixture("li6_b81")
 c12_b81_tape = _tape_fixture("c12_b81")
+ti50_b81_tape = _tape_fixture("ti50_b81")
 
 #: The charged-particle carriers: LAW=5's four cells, and LAW=2/LANG=12.
 p_he3_b80_tape = _tape_fixture("p_he3_b80")
@@ -633,6 +644,58 @@ micro_tsl_sch4_tape = _micro_tsl_fixture("sch4")
 micro_tsl_bemetal_elastic_tape = _micro_tsl_fixture("bemetal_elastic")
 micro_tsl_un_elastic_tape = _micro_tsl_fixture("un_elastic")
 micro_tsl_jeff_be_elastic_tape = _micro_tsl_fixture("jeff_be_elastic")
+
+
+#: MF6 micro-tape key -> the laws it is the fixture for. Between them the four
+#: carry every LAW that occurs in a neutron sublibrary; the five
+#: charged-particle tapes beside them carry LAW=5. The cut recipe lives in
+#: ``kika/endf/tests/test_micro_tape_regen.py``.
+#:
+#: Each keeps **MF3 for the same MTs**, which is what lets the model adapter be
+#: exercised on a committed fixture: GNDS hangs a distribution on a product of
+#: a reaction, and MF3 is what makes the reaction.
+MICRO_MF6 = {
+    "be9": "LAW=7 (both in the library), LAW=1/2/3/4, LCT=1",
+    "c12": "LCT=3 throughout; LANG=1 NA=0 x17 and LANG=2 Kalbach-Mann x4",
+    "li6": "LAW=6 phase space (MT41) and LAW=2 LANG=0 (MT52, MT103)",
+    "ti50": "LANG=1 with NA>0 -- the only energyAngular witness offline",
+    "u235": "LAW=0, and the 54 negative-LAW subsections of MT18; JP=11",
+}
+
+#: The charged-particle MF6 fixtures, copied whole. Four LAW=5 cells
+#: (LTP x LIDP) and the only LAW=2 LANG=12 witness, in ``t_li7``.
+MICRO_MF6_CP = {
+    "p_he3": "LAW=5 LTP=1 LIDP=0",
+    "d_h2": "LAW=5 LTP=1 LIDP=1, plus LAW=2 LANG=0",
+    "h3_he4": "LAW=5 LTP=12 LIDP=0",
+    "a_he4": "LAW=5 LTP=12 LIDP=1",
+    "t_li7": "LAW=2 LANG=12, the only witness; LAW=5 LTP=1 LIDP=0",
+}
+
+
+@pytest.fixture(scope="session", params=sorted(MICRO_MF6))
+def micro_mf6_tape(request: pytest.FixtureRequest) -> Path:
+    """Each committed MF6 slice in turn. See :data:`MICRO_MF6`."""
+    path = MICRO_TAPE_DIR / f"micro_{request.param}_mf6.endf"
+    if not path.is_file():  # pragma: no cover - fixtures are committed
+        pytest.fail(f"committed micro-tape is missing: {path}")
+    return path
+
+
+@pytest.fixture(scope="session", params=sorted(MICRO_MF6) + sorted(MICRO_MF6_CP))
+def micro_mf6_any_tape(request: pytest.FixtureRequest) -> Path:
+    """Every committed MF6 tape, neutron and charged-particle alike.
+
+    Separate from :func:`micro_mf6_tape` because the charged-particle five are
+    **whole evaluations** rather than slices: they carry MF4, MF5, MF12-15 and
+    everything else their sublibrary ships, so a test that decodes a whole
+    reactionSuite from one is asking a different question from a test that
+    decodes a four-section cut.
+    """
+    path = MICRO_TAPE_DIR / f"micro_{request.param}_mf6.endf"
+    if not path.is_file():  # pragma: no cover - fixtures are committed
+        pytest.fail(f"committed micro-tape is missing: {path}")
+    return path
 
 
 #: MF32 micro-tape key -> the sub-format it is the fixture for. Kept here so a
@@ -799,6 +862,24 @@ def micro_ta182_gnds() -> Path:
     it is abridged and is not physics. Built by the same script.
     """
     return _gnds_file("micro_ta182.gnds.xml")
+
+
+@pytest.fixture(scope="session")
+def micro_sr88_gnds() -> Path:
+    """Sr-88, trimmed. The **only** §19.3.4 ``externalRMatrix`` witness there is.
+
+    Seven nodes in the 558 distributed neutron evaluations and all seven are in
+    this file, in one ``RMatrix``, all ``type="SAMMY"`` and all carrying the
+    full set of seven terms (measured 2026-08-24). There is no second file to
+    choose instead, which is why the node was *reported and dropped* until this
+    fixture existed: nothing could have gated reading or writing it.
+
+    Same shape as the other trims — ``resonances`` verbatim, the two reactions
+    its ``resonanceReactions`` link to, everything else dropped or truncated —
+    and the same warning: **its cross sections are abridged and are not
+    physics.** Its ``resonances`` subtree is 41 kB of the 5.2 MB source.
+    """
+    return _gnds_file("micro_sr88.gnds.xml")
 
 
 @pytest.fixture(scope="session")

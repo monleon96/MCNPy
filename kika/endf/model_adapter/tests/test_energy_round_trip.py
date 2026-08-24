@@ -35,7 +35,7 @@ def mf5(micro_pfns_tape):
 def _roundTrip(section, mt):
     form, provenance, report = decodeMF5MT(section)
     encoded, report = encodeMF5MT(form, provenance, mt, report)
-    return encoded, form, report
+    return encoded, form, provenance, report
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +51,7 @@ def test_the_fixture_carries_both_paths(mf5):
 
 @pytest.mark.parametrize("mt", [18, 455])
 def test_the_section_encodes_byte_identically_to_the_file(mf5, mt):
-    encoded, _, _ = _roundTrip(mf5.mt[mt], mt)
+    encoded, _, _, _ = _roundTrip(mf5.mt[mt], mt)
     assert str(encoded) == str(mf5.mt[mt])
 
 
@@ -65,7 +65,7 @@ def test_every_mf5_section_of_a_real_tape_encodes_byte_identically(request, tape
     for mt in sorted(endf.mf[5].mt):
         section = endf.mf[5].mt[mt]
         laws.update(p.lf for p in section.partials)
-        encoded, _, _ = _roundTrip(section, mt)
+        encoded, _, _, _ = _roundTrip(section, mt)
         assert str(encoded) == str(section), f"{tape} MT{mt}"
     assert laws, f"{tape} MF5 is empty"
 
@@ -89,7 +89,7 @@ def test_a_weighted_sum_of_tabulated_laws_still_comes_back(u235_tape):
     section = read_endf(str(u235_tape)).mf[5].mt[455]
     assert [p.lf for p in section.partials] == [1] * 8
 
-    encoded, form, report = _roundTrip(section, 455)
+    encoded, form, _, report = _roundTrip(section, 455)
     assert form is None, "one partial of a weighted sum is not the distribution"
     assert any("weightedFunctionals" in line for line in report.unsupported)
     assert str(encoded) == str(section)
@@ -100,7 +100,7 @@ def test_a_weighted_sum_of_tabulated_laws_still_comes_back(u235_tape):
 # ---------------------------------------------------------------------------
 
 def test_an_lf1_reaches_the_model(mf5):
-    _, form, report = _roundTrip(mf5.mt[18], 18)
+    _, form, _, report = _roundTrip(mf5.mt[18], 18)
     assert isinstance(form, (XYs2d, Regions2d))
     assert report.isClean, report.summary()
     assert len(form.function1ds) == len(mf5.mt[18].partials[0].incident_energies)
@@ -110,7 +110,7 @@ def test_the_energy_axes_come_off_the_node_and_are_shared(mf5):
     """``kika/gnds/encode.py:_axesUnlessNested`` decides "this child inherits"
     by object **identity**, so one factory call per region would make every
     nested form look like it carried axes of its own."""
-    _, form, _ = _roundTrip(mf5.mt[18], 18)
+    _, form, _, _ = _roundTrip(mf5.mt[18], 18)
     assert [(a.index, a.label, a.unit) for a in form.axes.axes] == [
         (2, "energy_in", "eV"),
         (1, "energy_out", "eV"),
@@ -128,7 +128,7 @@ def test_nk_greater_than_one_is_declared_and_not_half_read(mf5):
     catch — §18.3's node for a weighted sum is ``weightedFunctionals``, which
     kika does not model. So the whole section stays out of the reactionSuite.
     """
-    _, form, report = _roundTrip(mf5.mt[455], 455)
+    _, form, _, report = _roundTrip(mf5.mt[455], 455)
     assert form is None
     assert any("weightedFunctionals" in line for line in report.unsupported)
 
@@ -211,7 +211,7 @@ def test_mf5_keeps_its_own_header_and_not_mf4s(u235_tape):
     cannot, because on its own there is no MF4 to be contaminated by.
     """
     section = read_endf(str(u235_tape)).mf[5].mt[18]
-    _encoded, provenance, _report = _roundTrip(section, 18)
+    _encoded, _form, provenance, _report = _roundTrip(section, 18)
     block = provenance.headerFields["mf5"]
     assert block["awr"] == section._awr
     assert block["mat"] == section._mat

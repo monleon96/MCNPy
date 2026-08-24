@@ -527,14 +527,25 @@ def _decodeRMatrixLimited(parameters, report: ConversionReport,
         # understands them. Both halves matter — carrying them silently would
         # let a caller believe the model can reason about a background R-matrix
         # it merely copies. There is no tape to hand that exercises either.
+        #
+        # **The model gained a node for two of the four LBK forms on
+        # 2026-08-24** -- `Channel.externalRMatrix`, LBK=2 SAMMY and LBK=3
+        # Froehner -- and this path still does not use it. Two reasons, both in
+        # `docs/library/gnds_endf_conflicts.md` section 6.4: LBK=1 tabulates the
+        # background as two curves and GNDS's `externalRMatrix` has no form for
+        # a table, so migrating gives one field two routes; and there is still
+        # no tape here with KBK>0, which makes the migration untested code
+        # sitting on MF2's byte-exact gates.
         perGroup = {"kbk": group.kbk, "kps": group.kps, "pj": group.pj}
         if group.kbk:
             perGroup["background"] = list(group.background)
             report.unsupportedNode(
                 f"MF2/151 LRF=7 spin group {index} carries {group.kbk} background "
-                f"R-matrix records (LBK); GNDS §19.3 has nodes for these, the "
-                f"model has none, and they are kept verbatim in provenance so "
-                f"the section can still be written back unchanged"
+                f"R-matrix records (LBK); the model has carried §19.3.4's "
+                f"externalRMatrix since 2026-08-24 and this adapter does not "
+                f"fill it yet, so they are kept verbatim in provenance and the "
+                f"section is still written back unchanged "
+                f"(gnds_endf_conflicts.md §6.4)"
             )
         if group.kps:
             perGroup["phase_shift"] = group.phase_shift

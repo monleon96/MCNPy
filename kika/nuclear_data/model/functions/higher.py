@@ -45,7 +45,8 @@ from .base import Function1d
 
 __all__ = [
     "Function2d", "XYs2d", "Regions2d", "XYs3d", "Regions3d",
-    "fromEndfTab2", "toEndfTab2", "NOT_IMPLEMENTED_NODES",
+    "fromEndfTab2", "toEndfTab2", "fromEndfTab3", "toEndfTab3",
+    "NOT_IMPLEMENTED_NODES",
 ]
 
 
@@ -299,6 +300,58 @@ def toEndfTab2(form: Function2d) -> Tuple[List[Function1d], List[Tuple[int, int]
         return functions, pairs
 
     raise TypeError(f"not a two-dimensional form: {type(form).__name__}")
+
+
+
+def fromEndfTab3(
+    function2ds: "Sequence[Function2d]",
+    nbtIntPairs: Sequence[Tuple[int, int]],
+    axes: Optional[Axes] = None,
+    label: Optional[str] = None,
+) -> "XYs3d":
+    """One ENDF TAB2 whose nodes are themselves 2-d → an :class:`XYs3d`.
+
+    The three-dimensional twin of :func:`fromEndfTab2`, and simpler than it by
+    one branch: **there is no ``regions3d`` to return.** ``gnds.xsd`` defines
+    the complexType and declares no element of it, so a file that needed one
+    would not be valid GNDS — see :class:`Regions3d`. An ENDF TAB2 with NR>1 at
+    this level therefore has no legal home, and this raises rather than
+    flattening the regions into one grid, which would silently drop where the
+    interpolation law changes.
+
+    The branch is unreachable on the data measured: every LAW=1 and LAW=7 TAB2
+    in ENDF/B-VIII.1 writes a single plain ``INT=2``. The raise is what says so
+    if that stops being true.
+    """
+    functions = list(function2ds)
+    pairs = [(int(nbt), int(code)) for nbt, code in nbtIntPairs]
+
+    if len(pairs) > 1:
+        raise ValueError(
+            f"this TAB2 declares NR={len(pairs)} interpolation regions over its "
+            f"{len(functions)} two-dimensional nodes, and GNDS has no regions3d "
+            f"to put them in: gnds.xsd defines xData_regions_3d_primary and "
+            f"declares no element of that type, so the node cannot be written. "
+            f"Regions are {pairs}"
+        )
+
+    code = pairs[0][1] if pairs else 2
+    interpolation, qualifier = splitEndfTab2Code(code)
+    return XYs3d(
+        function2ds=functions,
+        interpolation=interpolation,
+        interpolationQualifier=qualifier,
+        axes=axes,
+        label=label,
+    )
+
+
+def toEndfTab3(form: "XYs3d") -> Tuple[List["Function2d"], List[Tuple[int, int]]]:
+    """The inverse: the 2-d node list and the one ``(NBT, INT)`` pair."""
+    if not isinstance(form, XYs3d):
+        raise TypeError(f"not a three-dimensional form: {type(form).__name__}")
+    return list(form.function2ds), [(len(form), form.endfInterpolationCode)]
+
 
 
 # ---------------------------------------------------------------------------

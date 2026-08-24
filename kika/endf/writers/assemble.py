@@ -26,12 +26,15 @@ fixed point is necessary and not sufficient, and it leans on
 :class:`~kika.nuclear_data.model.conversion.ConversionReport` being honest about
 what did not come through.
 
-**Sections come only from what the model has.** MF6 is parsed by kika and
-*not* decoded into the model, and neither are MF5's analytic spectra — LF=5, 7,
-9, 11 and 12 are §18.3's six formulas, which the model has no node for. A tape
-carrying those comes back without them, reported loudly rather than written as
-an empty shell: a tape missing its energy distributions and not saying so is
-worse than one that says so. MF5's LF=1, the tabulated law, does come back.
+**Sections come only from what the model has.** MF5's analytic spectra are
+not in it — LF=5, 7, 9, 11 and 12 are §18.3's six formulas, which the model has
+no node for — and neither is MF7 or MF12-15. A tape carrying those comes back
+without them, reported loudly rather than written as an empty shell: a tape
+missing its energy distributions and not saying so is worse than one that says
+so. MF5's LF=1 does come back, and so does **all of MF6**: what the model does
+not carry there — LAW=5, and any subsection whose LAW is negative — is kept
+verbatim in the reaction's provenance, so the section is re-emitted whole even
+where the distribution never reached a node.
 
 **Two limits that no amount of code removes**, both format facts rather than
 gaps here: a GNDS reaction may have no MT at all (§2.4), and MF13 is reached
@@ -52,9 +55,9 @@ __all__ = ["MF_WRITE_ORDER", "TAPE_ID_MAT", "DEFAULT_TAPE_ID",
 
 #: The MF numbers an encoder exists for, in the order ENDF-6 puts them on the
 #: tape. Ascending, which is also §0.3.2's rule, so the constant is a statement
-#: of *coverage* rather than of order: MF6, MF7, MF12-15 and MF32 are absent
-#: because nothing can write them, not because they sort late.
-MF_WRITE_ORDER = (1, 2, 3, 4, 5, 31, 33, 34, 35)
+#: of *coverage* rather than of order: MF7, MF12-15 and MF32 are absent because
+#: nothing can write them, not because they sort late.
+MF_WRITE_ORDER = (1, 2, 3, 4, 5, 6, 31, 33, 34, 35)
 
 #: The MAT column of a tape identification record. ENDF-6 §0.6.2 fixes it at 1
 #: regardless of the material that follows.
@@ -240,6 +243,56 @@ def _mf5Form(form):
     return form.energy if isinstance(form, Uncorrelated) else None
 
 
+
+def _mf6Sections(suite, mat, report):
+    """MF6 for every reaction whose provenance carries one.
+
+    **The provenance decides, and it has to.** An MF6 section is a list of
+    products in the evaluator's order with the evaluator's ``ZAP``/``AWP``/
+    ``LIP``, its ``JP`` and its ``LCT``, and none of that is recoverable from a
+    channel's products: the model holds the physics and the file holds the
+    bookkeeping. So a suite that never read an MF6 writes none, and one that
+    did writes exactly the section it read.
+
+    Nothing here overlaps :func:`_mf3And4And5Sections`. That one keys on the
+    *product's* provenance (``ltt`` for MF4, ``mf5`` for MF5) and this one on
+    the *reaction's*, and an MT stated in File 6 does not restate its
+    distributions in Files 4 and 5 — except through a negative LAW, which is a
+    pointer rather than a duplicate, and which this adapter deliberately leaves
+    to those two passes.
+    """
+    from kika.nuclear_data.model import EVAL_LABEL
+
+    from ..model_adapter import encodeMF6MT
+
+    sections = []
+    for reaction in suite.reactions:
+        provenance = getattr(reaction, "provenance", None)
+        header = getattr(provenance, "headerFields", None) or {}
+        if "mf6" not in header:
+            continue
+
+        mt = reaction.ENDF_MT
+        if mt is None:
+            report.lost(
+                f"reaction {reaction.label!r} carries an MF6 provenance and no "
+                f"ENDF MT, so there is no section number to write it under "
+                f"(gnds_endf_conflicts.md §2.4)"
+            )
+            continue
+
+        forms = {}
+        for product in reaction.outputChannel.products:
+            form = _evaluatedForm(product, EVAL_LABEL)
+            if form is not None:
+                forms[product.label or product.pid] = form
+
+        section, report = encodeMF6MT(forms, provenance, mt, report)
+        sections.append((6, mt, section))
+
+    return sections, report
+
+
 def _covarianceSections(suite, mat, report):
     """MF31/33/34/35, one section per (MF, row MT) the covariance suite carries."""
     from ..model_adapter import (encodeMF31MT, encodeMF33MT, encodeMF34MT,
@@ -310,7 +363,7 @@ def encodeTapeSections(suite, mat: Optional[int] = None, report=None
 
     sections: List[Tuple[int, int, object]] = []
     for build in (_mf1Sections, _mf2Sections, _mf3And4And5Sections,
-                  _covarianceSections):
+                  _mf6Sections, _covarianceSections):
         built, report = build(suite, mat, report)
         sections.extend(built)
 
