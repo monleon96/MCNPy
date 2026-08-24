@@ -795,6 +795,43 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
         "title":      "χ² — run 103R4, malla en UNA etapa desde el fino (7 820 params), fina + cruzado a_0 (carry)",
         "systematic_block_col": None,
     },
+    # ── SERIE 104: la malla en una etapa CON el arreglo del singleton ─────
+    #
+    # Las tres salen del MISMO codigo y la MISMA covarianza (la de 103R4); lo
+    # unico que cambia entre ellas son los dos parametros del criterio fisico:
+    #   S1  k=10  c=3   5 964 params   <- 103R4 + SOLO el arreglo del singleton
+    #   S2  k= 3  c=3   6 349 params   <- el entregable pre-registrado
+    #   S3  k= 3  c=2   6 888 params   <- variante conservadora
+    # Las tres reprodujeron su prediccion offline EXACTA y no dieron ni un aviso
+    # de no-cancelacion.
+    #
+    # ⛔ NO SE PUNTUA PARA ELEGIR MALLA. Medido en la serie 99 y CONFIRMADO el
+    # 23-ago sobre la pareja 103R2/103R4: la malla 2,4x mas fina puntua un 4,0 %
+    # PEOR en V4 (5,69 -> 5,92) y un 2,4 % MEJOR en V1, y todo el delta viene de
+    # la correlacion. El chi2 discrimina AL REVES del criterio de
+    # conservadurismo. Esto se puntua para REPORTAR el numero del entregable.
+    #
+    # ⚠ Las tres se puntuan por la cinta FINA con cruzado (`_a0cross.endf`,
+    # dead=carry), igual que 103R2 y 103R4, para que la comparacion siga siendo
+    # de una sola variable contra ellas.
+    "predictive_104S1": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_104S1.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — run 104S1, malla 1 etapa + arreglo singleton, k=10 c=3 (5 964 params), fina + cruzado a_0 (carry)",
+        "systematic_block_col": None,
+    },
+    "predictive_104S2": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_104S2.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — run 104S2, malla 1 etapa + arreglo singleton, k=3 c=3 (6 349 params), fina + cruzado a_0 (carry)",
+        "systematic_block_col": None,
+    },
+    "predictive_104S3": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_104S3.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — run 104S3, malla 1 etapa + arreglo singleton, k=3 c=2 (6 888 params), fina + cruzado a_0 (carry)",
+        "systematic_block_col": None,
+    },
     # ── RUN 97: una malla por orden Legendre (roadmap §10.8) ────────────────
     #
     # Candidata frente a `predictive_91_cross`, la misma base contra la que se
