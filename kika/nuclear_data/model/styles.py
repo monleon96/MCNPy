@@ -148,7 +148,7 @@ class AverageProductData(Style):
 
 @_style("MonteCarlo_cdf")
 @dataclass
-class MonteCarlo_cdf(Style):  # noqa: N801 - GNDS node name, see NAMING.md
+class MonteCarlo_cdf(Style):  # noqa: N801 - GNDS node name, see tests/test_gnds_naming.py
     """§9."""
 
 
@@ -160,7 +160,7 @@ class GriddedCrossSection(Style):
 
 @_style("URR_probabilityTables")
 @dataclass
-class URR_probabilityTables(Style):  # noqa: N801 - GNDS node name, see NAMING.md
+class URR_probabilityTables(Style):  # noqa: N801 - GNDS node name, see tests/test_gnds_naming.py
     """§9. Unresolved-region probability tables."""
 
 
@@ -172,7 +172,7 @@ class HeatedMultiGroup(Style):
 
 @_style("SnElasticUpScatter")
 @dataclass
-class SnElasticUpScatter(Style):  # noqa: N801 - GNDS node name, see NAMING.md
+class SnElasticUpScatter(Style):  # noqa: N801 - GNDS node name, see tests/test_gnds_naming.py
     """§9."""
 
 

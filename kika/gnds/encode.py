@@ -614,7 +614,7 @@ class _SuiteWriter:
     @writes("crossSectionForm", "resonancesWithBackground", "reference")
     def crossSection(self, parent: ET.Element, crossSection, where: str) -> None:
         element = ET.SubElement(parent, "crossSection")
-        for label, form in crossSection.forms.items():
+        for label, form in crossSection.items():
             if isinstance(form, ResonancesWithBackground):
                 self.resonancesWithBackground(element, form, label, where)
             elif isinstance(form, Reference):
@@ -738,8 +738,8 @@ class _SuiteWriter:
         which is the file telling the next tool the truth.
         """
         element = ET.SubElement(parent, "distribution")
-        forms = {} if distribution is None else distribution.forms
-        for label, form in forms.items():
+        forms = () if distribution is None else distribution.items()
+        for label, form in forms:
             if isinstance(form, Uncorrelated):
                 self.uncorrelated(element, form, label, where)
             elif isinstance(form, EnergyAngular):

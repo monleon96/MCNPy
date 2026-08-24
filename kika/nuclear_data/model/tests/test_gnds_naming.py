@@ -105,6 +105,12 @@ DIVERGENCES: dict[str, str] = {
                                  "resonanceRegionHref` already makes for `<resonances "
                                  "href=...>`. The GNDS name survives as the prefix",
     "ResonancesWithBackground.resonanceRegionHref": "see AngularTwoBody.recoilHref",
+    "Component": "§9.1 describes a container of style-labelled forms and never "
+                 "names it — every instance is spelled as the quantity it holds. "
+                 "`Component` is FUDGE's name for the *pattern*, and it is a base "
+                 "class, never a node: nothing is written as `<component>`, and "
+                 "`CrossSection` and `Distribution` keep their own GNDS names. It "
+                 "exists because the two hand-written copies had already diverged",
     "ScalarUncertainty": "§2.3.3's scalar uncertainty and §7's functional "
                          "`uncertainty` are different nodes with the same name; the "
                          "scalar one is re-exported under a distinguishing alias",

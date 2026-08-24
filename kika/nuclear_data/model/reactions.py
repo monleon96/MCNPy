@@ -41,7 +41,7 @@ class Reaction:
         return self.id.ENDF_MT
 
     def __repr__(self) -> str:
-        return f"Reaction({self.id}, forms={sorted(self.crossSection.forms)})"
+        return f"Reaction({self.id}, forms={sorted(self.crossSection)})"
 
 
 @dataclass
@@ -72,7 +72,7 @@ class CrossSectionSum(Reaction):
     def __repr__(self) -> str:
         return (
             f"CrossSectionSum({self.id}, {len(self.summands)} summands, "
-            f"forms={sorted(self.crossSection.forms)})"
+            f"forms={sorted(self.crossSection)})"
         )
 
 

@@ -15,13 +15,17 @@ labelled, instead of one silently replacing the other.
 **Naming divergence.** GNDS gives no uniform node name for "a container holding
 several forms"; FUDGE calls it a *component*. The class here takes the name of
 the node it actually is — ``crossSection`` → ``CrossSection`` — and the
-form mapping hangs off it as ``forms``. Recorded in ``NAMING.md``.
+form mapping hangs off it as ``forms``, inherited from
+:class:`~kika.nuclear_data.model.component.Component`, which is where FUDGE's
+name for the *pattern* lives and where the argument for having one is written
+down. Declared in ``tests/test_gnds_naming.py``'s ``DIVERGENCES``.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict, Iterator, Optional
+from dataclasses import dataclass
+from typing import ClassVar, Dict, Optional
 
+from .component import EVAL_LABEL, Component
 from .functions import Function1d, Gridded1d, Regions1d, XYs1d, Ys1d
 
 __all__ = [
@@ -35,9 +39,6 @@ __all__ = [
     "CrossSection",
     "EVAL_LABEL",
 ]
-
-#: §16.1.1: *"For evaluated files, one element must contain the label='eval'."*
-EVAL_LABEL = "eval"
 
 #: Anything that can be a form of a crossSection.
 Form = object
@@ -134,68 +135,26 @@ class ThermalNeutronScatteringLaw1d:
 
 
 @dataclass
-class URR_probabilityTables1d:  # noqa: N801 - GNDS node name, see NAMING.md
+class URR_probabilityTables1d:  # noqa: N801 - GNDS node name, see tests/test_gnds_naming.py
     """§16.1.1. Unresolved-region probability tables, a processed representation."""
 
     href: Optional[str] = None
     label: Optional[str] = None
 
 
-@dataclass
-class CrossSection:
+@dataclass(repr=False)
+class CrossSection(Component):
     """σ(E) for one reaction, in as many representations as the file carries.
 
     Keyed by style label, so ``crossSection['eval']`` is the evaluated form and
     ``crossSection['recon']`` the reconstructed one, exactly as §9.1's example
-    describes.
+    describes. The mapping itself is
+    :class:`~kika.nuclear_data.model.component.Component`; what §16.1.1 adds is
+    that the forms are one-dimensional functions of energy, so this is the one
+    container that can be evaluated at a point.
     """
 
-    forms: Dict[str, object] = field(default_factory=dict)
-
-    def __len__(self) -> int:
-        return len(self.forms)
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self.forms)
-
-    def __bool__(self) -> bool:
-        # A declared slot is *present* even when empty; only `len()` speaks to
-        # content. Without this, `if reaction.crossSection:` would read a
-        # reaction whose forms have not been decoded yet as one that has no
-        # cross section at all.
-        return True
-
-    def __contains__(self, label: str) -> bool:
-        return label in self.forms
-
-    def __getitem__(self, label: str):
-        try:
-            return self.forms[label]
-        except KeyError:
-            raise KeyError(
-                f"this crossSection has no form labelled {label!r}; "
-                f"it has {sorted(self.forms)}"
-            ) from None
-
-    def __setitem__(self, label: str, form: object) -> None:
-        self.forms[label] = form
-
-    def __repr__(self) -> str:
-        if not self.forms:
-            return "CrossSection(no forms decoded)"
-        described = ", ".join(
-            f"{label}={type(form).__name__}" for label, form in sorted(self.forms.items())
-        )
-        return f"CrossSection({described})"
-
-    @property
-    def evaluated(self):
-        """The ``label='eval'`` form §16.1.1 requires of an evaluated file."""
-        return self[EVAL_LABEL]
-
-    @property
-    def hasEvaluated(self) -> bool:
-        return EVAL_LABEL in self.forms
+    gndsNodeName: ClassVar[str] = "crossSection"
 
     def evaluate(self, x, label: str = EVAL_LABEL, outOfRange: str = "zero"):
         """Evaluate one named form.
@@ -213,7 +172,3 @@ class CrossSection:
                 f"without choosing how to turn it into one"
             )
         return form.evaluate(x, outOfRange)
-
-    def __repr__(self) -> str:
-        pairs = ", ".join(f"{k}={type(v).__name__}" for k, v in self.forms.items())
-        return f"CrossSection({pairs})"
