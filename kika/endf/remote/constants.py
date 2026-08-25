@@ -30,10 +30,32 @@ LIBRARY_PATHS = {
     "jeff3.2": "JEFF-3.2",
     "jeff3.1.1": "JEFF-3.1.1",
     "jendl5": "JENDL-5",
-    "jendl4.0": "JENDL-4.0u",
+    "jendl4.0": "JENDL-4.0",
     "tendl2023": "TENDL-2023",
     "tendl2021": "TENDL-2021",
     "cendl3.2": "CENDL-3.2",
+}
+
+# IAEA serves the files under two different naming conventions, and which one a
+# library uses is not derivable from anything else -- it tracks when the release
+# was put online:
+#   "za_mat"  ->  n_092-U-235_9228.zip   (Z zero-padded to 3, MAT to 4)
+#   "mat_za"  ->  n_9228_92-U-235.zip    (MAT zero-padded to 4, Z bare)
+# Anything not listed here defaults to "za_mat".
+LIBRARY_FILENAME_STYLES = {
+    "endfb8.1": "za_mat",
+    "endfb8.0": "mat_za",
+    "endfb7.1": "mat_za",
+    "endfb7.0": "mat_za",
+    "jeff4.0": "za_mat",
+    "jeff3.3": "mat_za",
+    "jeff3.2": "mat_za",
+    "jeff3.1.1": "mat_za",
+    "jendl5": "za_mat",
+    "jendl4.0": "mat_za",
+    "tendl2023": "za_mat",
+    "tendl2021": "za_mat",
+    "cendl3.2": "za_mat",
 }
 
 # Library aliases for flexible naming
@@ -141,6 +163,25 @@ def get_library_path(library: str) -> str:
     """
     canonical = normalize_library_name(library)
     return LIBRARY_PATHS[canonical]
+
+
+def get_library_filename_style(library: str) -> str:
+    """
+    Get the IAEA filename convention used by a library.
+
+    Parameters
+    ----------
+    library : str
+        Library name in any supported format
+
+    Returns
+    -------
+    str
+        Either ``"za_mat"`` (``n_092-U-235_9228.zip``) or ``"mat_za"``
+        (``n_9228_92-U-235.zip``)
+    """
+    canonical = normalize_library_name(library)
+    return LIBRARY_FILENAME_STYLES.get(canonical, "za_mat")
 
 
 def list_available_libraries() -> list[str]:

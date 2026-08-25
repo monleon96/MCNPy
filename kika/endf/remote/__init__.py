@@ -48,18 +48,24 @@ from .exceptions import (
     LibraryNotFoundError,
     NetworkError,
 )
-from .iaea_client import IAEAClient, get_client, parse_isotope
+from .iaea_client import (
+    IAEAClient,
+    get_client,
+    isotope_key,
+    parse_isotope,
+    parse_isotope_state,
+)
 
 
 def _generate_filename(isotope: str | int, library: str, particle: str = "n") -> str:
     """Generate a descriptive filename for an ENDF file."""
-    from kika._constants import ATOMIC_NUMBER_TO_SYMBOL
     from .constants import normalize_library_name
 
-    z, a, symbol = parse_isotope(isotope)
+    _z, a, symbol, isomer = parse_isotope_state(isotope)
     canonical_lib = normalize_library_name(library)
+    state = "m" if isomer else ""
     # e.g., "Fe56_endfb8.1_n.endf"
-    return f"{symbol}{a}_{canonical_lib}_{particle}.endf"
+    return f"{symbol}{a}{state}_{canonical_lib}_{particle}.endf"
 
 
 def download_endf(
@@ -117,12 +123,11 @@ def download_endf(
         # Ensure parent directory exists
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Parse isotope to get ZAID for cache lookup
+    # Parse isotope to get the cache key
     try:
-        z, a, _ = parse_isotope(isotope)
+        zaid = isotope_key(isotope)
     except ValueError as e:
         raise IsotopeNotFoundError(str(isotope), library) from e
-    zaid = z * 1000 + a
 
     # Normalize library name
     try:
@@ -221,12 +226,11 @@ def fetch_endf(
     # Create client with specified timeout
     client = IAEAClient(timeout=timeout)
 
-    # Parse isotope to get ZAID for cache lookup
+    # Parse isotope to get the cache key
     try:
-        z, a, _ = parse_isotope(isotope)
+        zaid = isotope_key(isotope)
     except ValueError as e:
         raise IsotopeNotFoundError(str(isotope), library) from e
-    zaid = z * 1000 + a
 
     # Normalize library name
     try:
@@ -308,4 +312,5 @@ __all__ = [
     # For advanced usage
     "IAEAClient",
     "parse_isotope",
+    "parse_isotope_state",
 ]
