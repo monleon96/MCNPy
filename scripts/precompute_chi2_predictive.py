@@ -5,7 +5,7 @@ Methodology: every evaluation is judged by **what it actually ships**. Its own M
 and its own MF4 are forward-folded through each experiment's TOF energy
 resolution, and the variance budget is that library's own MF34 **and MF33**.
 
-This is the "S1 / final-file predictive" scenario of `docs/mf3_mf33_roadmap.md`.
+This is the "S1 / final-file predictive" scenario of `docs/chi2-mf4/mf3_mf33_roadmap.md`.
 It supersedes three earlier scripts, each of which is a special case of it:
 
     precompute_chi2_library_c0.py    same covariance (MF34+MF33), but no fold

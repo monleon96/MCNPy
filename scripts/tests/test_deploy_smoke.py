@@ -61,6 +61,7 @@ _AUDIT_PROBE = '''
 import sys, importlib
 
 FORBIDDEN = ("/share_snc", "/soft_snc", "/SCRATCH")
+MARKER = {marker!r}
 opened = []
 
 def hook(event, args):
@@ -78,8 +79,16 @@ sys.addaudithook(hook)
 for name in {modules!r}:
     importlib.import_module(name)
 
-print("\\n".join(sorted(set(opened))))
+for path in sorted(set(opened)):
+    print(MARKER + path)
 '''
+
+#: Every finding is prefixed with this, and only prefixed lines are findings.
+#: A script is allowed to print at import time -- ``exfor_to_endf_research``
+#: says so when it forces a config flag off -- and the probe used to hand back
+#: bare stdout, so any such notice came back as "this path was opened on the
+#: shared mount". The message was not a path and nothing had been opened.
+_MARKER = "@@OPENED@@ "
 
 
 def test_no_script_opens_the_shared_mount_at_import_time():
@@ -90,7 +99,8 @@ def test_no_script_opens_the_shared_mount_at_import_time():
     CI. Checked in a subprocess with an audit hook, because by the time this
     process gets here every module is already imported and cached.
     """
-    probe = _AUDIT_PROBE.format(repo=str(REPO_ROOT), modules=MODULES)
+    probe = _AUDIT_PROBE.format(repo=str(REPO_ROOT), modules=MODULES,
+                                marker=_MARKER)
     result = subprocess.run(
         [sys.executable, "-c", probe],
         capture_output=True, text=True, timeout=300, cwd=str(REPO_ROOT),
@@ -98,8 +108,38 @@ def test_no_script_opens_the_shared_mount_at_import_time():
     assert result.returncode == 0, (
         f"importing the scripts failed in a subprocess:\n{result.stderr[-2000:]}"
     )
-    touched = [line for line in result.stdout.splitlines() if line.strip()]
+    touched = [line[len(_MARKER):] for line in result.stdout.splitlines()
+               if line.startswith(_MARKER)]
     assert not touched, (
         "these paths on the shared mount were opened at import time:\n  "
         + "\n  ".join(touched)
     )
+
+
+def test_the_probe_still_catches_a_real_open_and_ignores_a_print():
+    """Both halves, because the fix moved the boundary between them.
+
+    A probe that reported bare stdout said "this path was opened" about an
+    ordinary import-time notice; a probe that filters too hard would report
+    nothing ever, and would look exactly as green. So one module opens a
+    forbidden path and prints, and only the open must come back.
+    """
+    probe = _AUDIT_PROBE.format(repo=str(REPO_ROOT), modules=[],
+                                marker=_MARKER)
+    probe += (
+        'print("an ordinary import-time notice")\n'
+        'try:\n'
+        '    open("/share_snc/does/not/exist")\n'
+        'except OSError:\n'
+        '    pass\n'
+        'for path in sorted(set(opened)):\n'
+        '    print(MARKER + path)\n'
+    )
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                            text=True, timeout=60, cwd=str(REPO_ROOT))
+    assert result.returncode == 0, result.stderr[-2000:]
+    lines = result.stdout.splitlines()
+    assert "an ordinary import-time notice" in lines
+    findings = [line[len(_MARKER):] for line in lines
+                if line.startswith(_MARKER)]
+    assert findings == ["/share_snc/does/not/exist"], result.stdout

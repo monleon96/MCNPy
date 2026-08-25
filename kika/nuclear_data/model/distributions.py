@@ -20,9 +20,10 @@ lives.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Union
+from typing import ClassVar, List, Optional, Union
 
 from .axes import Axes
+from .component import Component
 from .enums import Frame
 from .functions import Function1d, Function2d, Regions2d, XYs2d, XYs3d
 from .quantities import PhysicalQuantity
@@ -426,27 +427,20 @@ NOT_IMPLEMENTED_DISTRIBUTIONS = {
 }
 
 
-@dataclass
-class Distribution:
-    """§18.1.1. A product's distribution, in as many forms as the file carries."""
+@dataclass(repr=False)
+class Distribution(Component):
+    """§18.1.1. A product's distribution, in as many forms as the file carries.
 
-    forms: Dict[str, object] = field(default_factory=dict)
+    The mapping is :class:`~kika.nuclear_data.model.component.Component`, the
+    same one §16.1.1's ``crossSection`` uses, and sharing it is what gives a
+    distribution the ``evaluated`` accessor and the label-naming ``KeyError``
+    that this class used to lack — the absence its callers were working round by
+    reaching into ``.forms`` directly.
 
-    def __getitem__(self, label: str):
-        return self.forms[label]
+    There is no ``evaluate``. §18.1.1's forms are two- and three-dimensional
+    P(E′,mu|E), so "the value at x" is not a question they answer; the
+    :class:`~kika.nuclear_data.model.cross_section_forms.CrossSection` method of
+    that name is about sigma(E) and does not generalise here.
+    """
 
-    def __setitem__(self, label: str, form: object) -> None:
-        self.forms[label] = form
-
-    def __len__(self) -> int:
-        return len(self.forms)
-
-    def __bool__(self) -> bool:
-        # A declared slot is *present* even when empty; only `len()` speaks to
-        # content. Without this, `if reaction.crossSection:` would read a
-        # reaction whose forms have not been decoded yet as one that has no
-        # cross section at all.
-        return True
-
-    def __contains__(self, label: str) -> bool:
-        return label in self.forms
+    gndsNodeName: ClassVar[str] = "distribution"

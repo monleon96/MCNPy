@@ -7,7 +7,7 @@ for a while — ``encodeMF1MT451``, ``encodeMF2MT151``, ``encodeMF3MT``,
 came from. What was missing was never the rendering; it was the **assembly**:
 the order sections go in, the SEND/FEND/MEND/TEND bookkeeping, the tape
 identification record and the MF1/451 directory. That is what this module is.
-``docs/gnds_endf_conflicts.md`` §2.8, and §10 for why the sampling pipeline
+``docs/library/gnds_endf_conflicts.md`` §2.8, and §10 for why the sampling pipeline
 cares.
 
 **The gate is a fixed point inside the model, not byte identity against the
@@ -26,11 +26,12 @@ fixed point is necessary and not sufficient, and it leans on
 :class:`~kika.nuclear_data.model.conversion.ConversionReport` being honest about
 what did not come through.
 
-**Sections come only from what the model has.** MF5 and MF6 are parsed by kika
-and *not* decoded into the model (no ENDF → model adapter for either), so a tape
-that had them comes back without them. That is reported, loudly, rather than
-written as an empty shell: a tape missing its energy distributions and not
-saying so is worse than one that says so.
+**Sections come only from what the model has.** MF6 is parsed by kika and
+*not* decoded into the model, and neither are MF5's analytic spectra — LF=5, 7,
+9, 11 and 12 are §18.3's six formulas, which the model has no node for. A tape
+carrying those comes back without them, reported loudly rather than written as
+an empty shell: a tape missing its energy distributions and not saying so is
+worse than one that says so. MF5's LF=1, the tabulated law, does come back.
 
 **Two limits that no amount of code removes**, both format facts rather than
 gaps here: a GNDS reaction may have no MT at all (§2.4), and MF13 is reached
@@ -51,9 +52,9 @@ __all__ = ["MF_WRITE_ORDER", "TAPE_ID_MAT", "DEFAULT_TAPE_ID",
 
 #: The MF numbers an encoder exists for, in the order ENDF-6 puts them on the
 #: tape. Ascending, which is also §0.3.2's rule, so the constant is a statement
-#: of *coverage* rather than of order: MF5, MF6, MF7, MF12-15 and MF32 are
-#: absent because nothing can write them, not because they sort late.
-MF_WRITE_ORDER = (1, 2, 3, 4, 31, 33, 34, 35)
+#: of *coverage* rather than of order: MF6, MF7, MF12-15 and MF32 are absent
+#: because nothing can write them, not because they sort late.
+MF_WRITE_ORDER = (1, 2, 3, 4, 5, 31, 33, 34, 35)
 
 #: The MAT column of a tape identification record. ENDF-6 §0.6.2 fixes it at 1
 #: regardless of the material that follows.
@@ -137,13 +138,20 @@ def _mf2Sections(suite, mat, report):
     return [(2, 151, section)], report
 
 
-def _mf3And4Sections(suite, mat, report):
-    """MF3 for every reaction with an MT, MF4 for every one that has an angular form."""
+def _mf3And4And5Sections(suite, mat, report):
+    """MF3 for every reaction with an MT, MF4 and MF5 for what states them.
+
+    **The provenance decides which sections are written, not the model's
+    shape.** An `uncorrelated` whose angular half kika *inferred* — the tape
+    said MF5 and no MF4 — has no `ltt` in its provenance, and writing an MF4 for
+    it would put a section on the tape the source never carried. The same rule
+    the MF4 encoder already lives by, applied one level up.
+    """
     from kika.nuclear_data.model import EVAL_LABEL
 
-    from ..model_adapter import encodeMF3MT, encodeMF4MT
+    from ..model_adapter import encodeMF3MT, encodeMF4MT, encodeMF5MT
 
-    mf3, mf4 = [], []
+    mf3, mf4, mf5 = [], [], []
     for reaction in suite.reactions:
         mt = reaction.ENDF_MT
         if mt is None:
@@ -160,14 +168,20 @@ def _mf3And4Sections(suite, mat, report):
         mf3.append((3, mt, section))
 
         product = _neutronProduct(reaction)
-        distribution = _angularForm(product, EVAL_LABEL)
-        if distribution is None:
-            continue
-        section, report = encodeMF4MT(
-            distribution, getattr(product, "provenance", None), mt, report)
-        mf4.append((4, mt, section))
+        form = _evaluatedForm(product, EVAL_LABEL)
+        provenance = getattr(product, "provenance", None)
+        header = getattr(provenance, "headerFields", None) or {}
 
-    return mf3 + mf4, report
+        angular = _mf4Form(form)
+        if angular is not None and "ltt" in header:
+            section, report = encodeMF4MT(angular, provenance, mt, report)
+            mf4.append((4, mt, section))
+
+        if "mf5" in header:
+            section, report = encodeMF5MT(_mf5Form(form), provenance, mt, report)
+            mf5.append((5, mt, section))
+
+    return mf3 + mf4 + mf5, report
 
 
 def _neutronProduct(reaction):
@@ -179,7 +193,7 @@ def _neutronProduct(reaction):
     return None
 
 
-def _angularForm(product, label):
+def _evaluatedForm(product, label):
     """The evaluated distribution of *product*, when it has one."""
     distribution = getattr(product, "distribution", None)
     if distribution is None:
@@ -188,6 +202,42 @@ def _angularForm(product, label):
         return distribution[label]
     except (KeyError, TypeError):
         return None
+
+
+def _mf4Form(form):
+    """The part of *form* MF4 states, in the shape ``encodeMF4MT`` takes.
+
+    An `uncorrelated` is one GNDS node built from two ENDF files, so it is
+    taken apart here rather than in the encoder — `encodeMF4MT` takes what MF4
+    itself carries and would have to learn §18.3 to take anything else.
+
+    **The angular half goes back inside an `angularTwoBody`**, which is not
+    ceremony: §18.3 stores the `XYs2d` directly under `<angular>` while §18.2
+    wraps it, and the encoder dispatches on the wrapper. An `isotropic2d` needs
+    no wrapper — it is a distribution form in its own right.
+    """
+    from kika.nuclear_data.model import AngularTwoBody, Isotropic2d, Uncorrelated
+
+    if isinstance(form, Uncorrelated):
+        if form.angular is None or isinstance(form.angular, Isotropic2d):
+            return form.angular
+        return AngularTwoBody(angular=form.angular,
+                              productFrame=form.productFrame)
+    if isinstance(form, (AngularTwoBody, Isotropic2d)):
+        return form
+    return None
+
+
+def _mf5Form(form):
+    """The part of *form* MF5 states: the energy distribution, or ``None``.
+
+    ``None`` is a real answer and not an absence: a section whose every law
+    kika does not model round-trips out of the provenance alone, and
+    :func:`~kika.endf.model_adapter.energy.encodeMF5MT` requires being told so.
+    """
+    from kika.nuclear_data.model import Uncorrelated
+
+    return form.energy if isinstance(form, Uncorrelated) else None
 
 
 def _covarianceSections(suite, mat, report):
@@ -259,7 +309,7 @@ def encodeTapeSections(suite, mat: Optional[int] = None, report=None
     mat = _mat(suite, mat)
 
     sections: List[Tuple[int, int, object]] = []
-    for build in (_mf1Sections, _mf2Sections, _mf3And4Sections,
+    for build in (_mf1Sections, _mf2Sections, _mf3And4And5Sections,
                   _covarianceSections):
         built, report = build(suite, mat, report)
         sections.extend(built)

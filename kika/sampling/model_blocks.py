@@ -51,7 +51,7 @@ def covariance_suite_blocks(suite, isotope: Any = None, mt: int = 18):
     Legendre orders are components of one distribution, and a file may state the
     covariance *between* two of them — a section whose ``rowData`` and
     ``columnData`` differ. Handing those to a sampler one at a time offers an
-    off-diagonal corner as if it were a covariance (``docs/library-gaps.md`` D8)
+    off-diagonal corner as if it were a covariance (``docs/library/library-gaps.md`` D8)
     and drops the correlation besides. :func:`legendre_covariance_blocks` is the
     MF34 entry point for that reason; this function is not a general enumerator
     and callers should not reach for it by default.
@@ -82,7 +82,7 @@ def _lift_matrix(src_grid: np.ndarray, dst_grid: np.ndarray) -> np.ndarray:
     **A union bin outside the source's span gets an all-zero row.** The union is
     taken over every section mentioning a Legendre order, so it refines any one
     section's grid only when all of them share a range — and real files do not.
-    Assuming otherwise was wrong at both ends (``docs/library-gaps.md`` D9 and
+    Assuming otherwise was wrong at both ends (``docs/library/library-gaps.md`` D9 and
     D10): past the source's last boundary the cursor ran off the end and raised,
     which the shipped ``_a0cross`` tape does; below its first, the cursor sat at
     0 and handed out that section's first bin, which the shipped multigroup tape
@@ -269,7 +269,7 @@ def _endf_mfmt(link) -> Optional[Tuple[int, int]]:
     matched none of this module's filters and — the part that made it worth
     fixing — **did not raise**: ``startswith("34/")`` returned ``False``,
     ``_mf34_entries`` returned ``[]`` and the caller assembled zero blocks.
-    See ``docs/gnds_endf_conflicts.md`` §3.1 and §7.1.
+    See ``docs/library/gnds_endf_conflicts.md`` §3.1 and §7.1.
 
     ``None`` for a link that has no ``ENDF_MFMT`` or whose value is not a pair
     of integers; the callers decide whether that is a skip or an error, because
@@ -620,7 +620,7 @@ def cross_section_covariance_blocks(
     regardless.
 
     What that fill *does* change is everything between the two points, and
-    ``docs/library-gaps.md`` D11 is the entry: on a NaN matrix every eigenvalue
+    ``docs/library/library-gaps.md`` D11 is the entry: on a NaN matrix every eigenvalue
     solver fails, ``_safe_min_eigvalsh`` returns a fabricated ``0.0``, and
     ``autofix`` accepts unconditionally because ``0.0 >= accept_tol`` for any
     negative tolerance. Assembling zeros here makes that analysis start working,

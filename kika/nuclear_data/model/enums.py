@@ -28,6 +28,10 @@ __all__ = [
     "ValueType",
     "ENDF_INT_TO_INTERPOLATION",
     "INTERPOLATION_TO_ENDF_INT",
+    "ENDF_DECADE_TO_QUALIFIER",
+    "QUALIFIER_TO_ENDF_DECADE",
+    "splitEndfTab2Code",
+    "joinEndfTab2Code",
 ]
 
 
@@ -100,3 +104,64 @@ ENDF_INT_TO_INTERPOLATION = {
 
 #: The inverse. Used wherever the model has to hand a code back to ENDF.
 INTERPOLATION_TO_ENDF_INT = {v: k for k, v in ENDF_INT_TO_INTERPOLATION.items()}
+
+
+#: ENDF-6 §0.5.2.1 puts the *qualifier* of a two-dimensional interpolation in
+#: the tens digit of the INT code: 1-6 plain, 11-16 the corresponding-point
+#: scheme, 21-26 the unit-base scheme. GNDS §3.4.5 states the same thing as two
+#: attributes — ``interpolation`` and ``interpolationQualifier`` — so the
+#: conversion is a split and a join and not a lookup.
+#:
+#: **This is not a curiosity.** MF5's TAB2 uses ``INT=22`` in 44 of the 487
+#: LF=1 sections of ENDF/B-VIII.1 (N-15, Mg-24 and 42 others), so a reader that
+#: only knows 1-6 raises ``KeyError`` on them. It is also why the committed
+#: fixture ``micro_fe56.gnds.xml`` carries ``interpolationQualifier="unitbase"``
+#: — the GNDS side of this was already built; only the ENDF mapping was absent.
+ENDF_DECADE_TO_QUALIFIER = {
+    0: None,
+    1: InterpolationQualifier.correspondingPoints,
+    2: InterpolationQualifier.unitBase,
+}
+
+#: The inverse, without the ``None``. ``direct`` and ``correspondingEnergies``
+#: are deliberately absent: GNDS admits them and ENDF has no decade for either,
+#: so :func:`joinEndfTab2Code` refuses rather than picking a near miss.
+QUALIFIER_TO_ENDF_DECADE = {
+    qualifier: decade
+    for decade, qualifier in ENDF_DECADE_TO_QUALIFIER.items()
+    if qualifier is not None
+}
+
+
+def splitEndfTab2Code(code: int):
+    """One ENDF two-dimensional INT → ``(interpolation, qualifier)``."""
+    code = int(code)
+    decade, base = divmod(code, 10)
+    if decade not in ENDF_DECADE_TO_QUALIFIER or base not in ENDF_INT_TO_INTERPOLATION:
+        raise KeyError(
+            f"INT={code} is not an ENDF-6 §0.5.2.1 two-dimensional "
+            f"interpolation code: the units digit must be 1-6 and the tens "
+            f"digit 0 (plain), 1 (corresponding points) or 2 (unit base)"
+        )
+    return ENDF_INT_TO_INTERPOLATION[base], ENDF_DECADE_TO_QUALIFIER[decade]
+
+
+def joinEndfTab2Code(interpolation, qualifier=None) -> int:
+    """The inverse of :func:`splitEndfTab2Code`.
+
+    Raises on a qualifier ENDF cannot write. ``direct`` and
+    ``correspondingEnergies`` are GNDS's and have no decade, and silently
+    dropping one would write a file that states a different interpolation
+    scheme from the one the model holds.
+    """
+    if qualifier is None:
+        return INTERPOLATION_TO_ENDF_INT[Interpolation(interpolation)]
+    qualifier = InterpolationQualifier(qualifier)
+    if qualifier not in QUALIFIER_TO_ENDF_DECADE:
+        raise ValueError(
+            f"interpolationQualifier={qualifier.value!r} has no ENDF-6 "
+            f"§0.5.2.1 decade; only {sorted(q.value for q in QUALIFIER_TO_ENDF_DECADE)} "
+            f"can be written back into an INT code"
+        )
+    return (10 * QUALIFIER_TO_ENDF_DECADE[qualifier]
+            + INTERPOLATION_TO_ENDF_INT[Interpolation(interpolation)])

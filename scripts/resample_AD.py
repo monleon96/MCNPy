@@ -595,6 +595,8 @@ def compute_between_experiment_coeffs(
     ridge_lambda: float = 1e-6,
     min_mu_coverage: float = 1.0,
     max_cond: float = 1e4,
+    freeze_c0: bool = True,
+    min_experiments: int = 2,
 ) -> Optional[Dict]:
     """Compute per-experiment Legendre coefficients and their weighted scatter.
 
@@ -631,6 +633,26 @@ def compute_between_experiment_coeffs(
         (default 1e4).  Experiments whose design matrix exceeds this are
         excluded because the fitted coefficients would be numerically
         unreliable.
+    freeze_c0 : bool
+        ``True`` (default, historical) freezes every per-experiment fit to the
+        pooled ``fixed_c0``.  ``False`` lets each experiment carry its own c0.
+
+        ⚠ WHICH ONE YOU WANT DEPENDS ON WHAT THE SCATTER IS FOR, and the
+        historical default is wrong for MF34.  ``a_l = c_l / c_0``, so freezing
+        c0 to the pooled value pushes each experiment's NORMALISATION offset
+        straight into its ``a_l``: a measurement that is uniformly 5 % high
+        comes out with every a_l 5 % high and is counted as a SHAPE
+        disagreement.  MF34 declares shape; normalisation belongs to MF33.
+        With ``freeze_c0=False`` a pure normalisation offset cancels exactly and
+        the scatter is shape only.  Kept defaulting to True so existing callers
+        are byte-identical.
+    min_experiments : int
+        Minimum qualifying experiments before a result is returned (default 2,
+        historical).  Pass 1 to get the census — ``per_experiment`` and
+        ``n_experiments`` — for bins where a single experiment qualifies.  Those
+        are exactly the bins where the joint fit can see NO disagreement at all,
+        so a floor has to reach them, and it cannot if the estimator refuses to
+        report them.  ``scatter`` is ``None`` when fewer than 2 qualify.
 
     Returns
     -------
@@ -704,7 +726,7 @@ def compute_between_experiment_coeffs(
         try:
             coeffs, _chi2, _dof, _k = _weighted_ridge_fit(
                 mu, y, sigma, degree,
-                fixed_c0=fixed_c0,
+                fixed_c0=(fixed_c0 if freeze_c0 else None),
                 ridge_lambda=ridge_lambda,
             )
             a_l = endf_normalize_legendre_coeffs(coeffs)  # returns a_1..a_L
@@ -713,13 +735,24 @@ def compute_between_experiment_coeffs(
             skipped.append((entry_val, "fit failed"))
             continue
 
-    if len(per_experiment) < 2:
+    if len(per_experiment) < max(1, min_experiments):
         return None
 
     # All experiments were fitted at the same pooled order
     L_common = degree
     if L_common < 1:
         return None
+
+    if len(per_experiment) < 2:
+        # Census only: one qualifying experiment means there is nothing to take
+        # a scatter of.  The caller still needs to know THAT, and who it was.
+        return {
+            'scatter': None,
+            'L_common': L_common,
+            'n_experiments': len(per_experiment),
+            'per_experiment': per_experiment,
+            'skipped_experiments': skipped,
+        }
 
     # Compute weighted scatter for each order l=1..L_common
     scatter = np.zeros(L_common)

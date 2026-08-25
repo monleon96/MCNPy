@@ -76,7 +76,7 @@ def _checkUnits(form: object, expected: Tuple[str, str], what: str) -> None:
     code. ``ScatteringRadius.constant`` is what the other outcome looks like:
     the same field meant 5.444 fm down one path and 0.5444 of a different unit
     down the other, for a year, because nothing asked
-    (``docs/gnds_endf_conflicts.md`` §4.1).
+    (``docs/library/gnds_endf_conflicts.md`` §4.1).
 
     **It raises rather than converting.** kika does not rescale on read
     anywhere — the reconstructor works in ENDF's units throughout — and a
@@ -103,7 +103,7 @@ def _checkUnits(form: object, expected: Tuple[str, str], what: str) -> None:
             f"shortcut returns bare arrays that every consumer reads as "
             f"({expected[0]}, {expected[1]}). kika does not rescale on read, so "
             f"the conversion is yours: reach for the form and its `axes` "
-            f"directly. See docs/gnds_endf_conflicts.md §4.1 for what happens "
+            f"directly. See docs/library/gnds_endf_conflicts.md §4.1 for what happens "
             f"when a unit is assumed instead."
         )
 

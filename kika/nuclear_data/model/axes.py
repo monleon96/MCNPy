@@ -147,3 +147,24 @@ def angularAxes() -> Axes:
         Axis(index=1, label="mu", unit=""),
         Axis(index=0, label="P(mu|energy_in)", unit=""),
     ])
+
+
+#: The axes of a secondary-energy distribution — ENDF MF5, and the ``energy``
+#: half of GNDS §18.3's ``uncorrelated``. Three axes, like
+#: :func:`angularAxes`, and built literally for the same reason.
+#:
+#: **The dependent unit is ``1/eV`` and not the empty string**, which is the one
+#: place this triple is not the angular one with a label swapped: P(E'|E) is a
+#: density in the outgoing energy, so it carries the reciprocal of that axis's
+#: unit. ``mu`` is dimensionless and P(mu|E) with it; ``energy_out`` is not.
+#: Taken verbatim off ``kika/gnds/tests/data/n-001_H_003.endf.gnds.xml``, whose
+#: ``<uncorrelated>/<energy>`` is a FUDGE-distributed node, rather than derived.
+#:
+#: **The caller must share one object across a container and its children**, for
+#: the identity reason written on :func:`angularAxes`.
+def energyAxes() -> Axes:
+    return Axes([
+        Axis(index=2, label="energy_in", unit="eV"),
+        Axis(index=1, label="energy_out", unit="eV"),
+        Axis(index=0, label="P(energy_out|energy_in)", unit="1/eV"),
+    ])

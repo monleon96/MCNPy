@@ -11,7 +11,7 @@ The two halves are deliberate:
 * where `LegendreCovariance.covariance_matrix` produces a matrix, we must equal
   it under `assert_array_equal` -- not `allclose`;
 * where it raises, we must not. That is not a nicety: it raises on the tape the
-  Fe-56 track actually ships (`docs/library-gaps.md` D9).
+  Fe-56 track actually ships (`docs/library/library-gaps.md` D9).
 """
 from __future__ import annotations
 

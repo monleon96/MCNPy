@@ -73,7 +73,7 @@ def test_the_message_says_how_many_components_there_are():
     assert "<mixed> of 2 components" in message
     assert "'eval'" in message, "the section is not named"
     assert "shortRangeSelfScalingVariance" in message, "the reason is not given"
-    assert "docs/gnds_endf_conflicts.md" in message, "nowhere to go"
+    assert "docs/library/gnds_endf_conflicts.md" in message, "nowhere to go"
 
 
 def test_a_sum_is_refused_as_a_sum_and_not_as_a_mixed():

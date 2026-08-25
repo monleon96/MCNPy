@@ -19,7 +19,7 @@ keeping MF1/451, MF3 and MF33 for MT4 and MT16. It exists because the synthetic
 covariance fixture below is one MT wide, so nothing committed could exercise a
 **cross-reaction** assembly, and because the pair it keeps has no MT4×MT16 block
 — which is what makes the carrier's matrix half NaN and pins
-``docs/library-gaps.md`` D11.
+``docs/library/library-gaps.md`` D11.
 
 ``micro_fe56_cov.endf`` — synthetic, written by kika's own MF33/MF34 writers on
 a four-point grid. There is no cheap honest slice of the real MF33: Fe-56
@@ -123,12 +123,27 @@ KEEP = {1: {451}, 2: {151}, 3: {1, 2, 102}, 4: {2}, 34: {2}}
 #:
 #: The pair is also, by luck rather than design, the case that matters: the
 #: evaluation states **no** MT4×MT16 cross block, so the carrier's matrix comes
-#: back 50 % NaN and the fixture pins `docs/library-gaps.md` D11.
+#: back 50 % NaN and the fixture pins `docs/library/library-gaps.md` D11.
 KEEP_MF33 = {1: {451}, 3: {4, 16}, 33: {4, 16}}
 
 #: What the PFNS micro-tape keeps, cut the same verbatim way from
 #: ENDF/B-VIII.1 Cf-252. MF3/MT18 comes along because the fission cross section
 #: is what MT18's spectrum belongs to, and it costs 34 lines.
+#:
+#: **MF4 is dropped, and the MF5 adapter (2026-08-24) made that visible.** The
+#: real Cf-252 states MF4/MT2 and MF4/MT18 — the latter two records, LTT=0/LI=1,
+#: 152 bytes. Without it the fixture is the one shape the distributed library
+#: does not contain: *MF5 present, MF4 absent*, which measured zero times across
+#: ENDF/B-VIII.1's 487 modellable MF5 sections. So this fixture exercises the
+#: adapter's **inference** branch — the isotropic angular half kika supplies
+#: when ENDF states none — and the branch that covers 487 of 487, MF4 and MF5
+#: merged into one `uncorrelated`, has no committed witness and is reached only
+#: under ``--deep`` or by a hand-built test.
+#:
+#: Adding ``4: {18}`` here would fix that for 152 bytes, and it is **left alone
+#: deliberately**: it would also *remove* the only committed witness for the
+#: inference branch, and it changes a fixture shared with `kika/sampling/tests/`
+#: and `kika/cov/tests/`. Its own change, with its own before and after.
 KEEP_PFNS = {1: {451}, 3: {18}, 5: {18, 455}, 35: {18}}
 
 #: What the nu-bar micro-tape keeps, cut the same verbatim way from
@@ -262,7 +277,7 @@ def section_inventory(text: str) -> dict[int, dict[int, int]]:
 #: sublibrary. LAW=5 is on none of them because it cannot be: charged-particle
 #: elastic scattering needs a charged projectile. Its witnesses are the five
 #: whole tapes in ``MF6_CP_FIXTURES``, cut from ENDF/B-VIII.0's charged-particle
-#: sublibraries -- ``docs/mf6_witness_hunt.md``.
+#: sublibraries -- ``docs/library/mf6_witness_hunt.md``.
 KEEP_MF6 = {
     # LAW=7 (both occurrences in the library) and LCT=1, plus LAW=1/2/4.
     "be9": {1: {451}, 6: {16, 600, 650, 700, 701, 800}},
@@ -619,7 +634,7 @@ def test_regenerate_mf6_micro_tapes(be9_b81_tape, li6_b81_tape, c12_b81_tape,
 
     Separate from :func:`test_regenerate_micro_tapes` on purpose. The six older
     fixtures still carry the 80-column MF1/451 that ``update_mf1_directory``
-    wrote before it was fixed (``docs/mf7_tsl_notes.md``), so a full regen
+    wrote before it was fixed (``docs/library/mf7_tsl_notes.md``), so a full regen
     rewrites them — a change worth making, and not worth making *as a side
     effect* of adding a new MF. This test builds the new ones and touches
     nothing else.
@@ -668,7 +683,7 @@ def test_mf33_parses_and_states_no_cross_block():
     The fixture earns its place by being the case the carrier cannot express:
     `CrossSectionCovariance.covariance_matrix` leaves the unstated MT4xMT16
     block as NaN. If a future JEFF revision started stating it, this fixture
-    would stop exercising `docs/library-gaps.md` D11 and would say so here
+    would stop exercising `docs/library/library-gaps.md` D11 and would say so here
     rather than by a distant test quietly passing for a new reason.
     """
     endf = read_endf(str(MF33))

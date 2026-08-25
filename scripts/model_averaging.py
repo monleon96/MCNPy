@@ -1,6 +1,6 @@
 """Information-criterion model averaging over Legendre order — pure numerics.
 
-Phase 1 of ``docs/mf4_research_roadmap.md`` §5. Deliberately free of file I/O,
+Phase 1 of ``docs/chi2-mf4/mf4_research_roadmap.md`` §5. Deliberately free of file I/O,
 global configuration and pipeline imports, so it can be tested in isolation and
 reused by whichever driver ends up consuming it.
 

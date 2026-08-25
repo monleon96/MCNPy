@@ -17,7 +17,10 @@ Do **not** "fix" these to snake_case — the phase 5 reader resolves GNDS nodes 
 introspection on these names, and a rename silently breaks it.
 ``tests/test_gnds_naming.py`` enforces this, because a documented convention
 does not survive contact with a linter or an agent. Local variables and private
-helpers are still PEP 8. See ``NAMING.md``.
+helpers are still PEP 8. The deliberate departures — a class that is not a
+node, a field the spec spells as a child — are listed in that test's
+``DIVERGENCES``, which is the whole of the convention: there is no
+``NAMING.md``, and three modules used to cite one.
 
 **No format imports.** Nothing here may import ``kika.endf`` or ``kika.ace``, at
 runtime or under ``TYPE_CHECKING``. ``kika/tests/test_layering.py`` scans this
@@ -33,7 +36,7 @@ nothing decodes an ENDF file into them yet, which is phase 3c.
 from __future__ import annotations
 
 from .axes import (Axes, Axis, Grid, angularAxes, crossSectionAxes,
-                   multiplicityAxes)
+                   energyAxes, multiplicityAxes)
 from .enums import (
     ENDF_INT_TO_INTERPOLATION,
     INTERPOLATION_TO_ENDF_INT,
@@ -77,6 +80,7 @@ from .covariances import (
     Sum,
     Summand,
 )
+from .component import Component
 from .cross_section_forms import (
     EVAL_LABEL,
     Background,
@@ -176,7 +180,7 @@ __all__ = [
     "ENDF_INT_TO_INTERPOLATION", "INTERPOLATION_TO_ENDF_INT",
     # §5
     "Axes", "Axis", "Grid", "angularAxes", "crossSectionAxes",
-    "multiplicityAxes", "Values",
+    "energyAxes", "multiplicityAxes", "Values",
     # §6
     "Function1d", "XYs1d", "Regions1d", "Constant1d", "Polynomial1d",
     "Ys1d", "Legendre", "Gridded1d",
@@ -197,7 +201,8 @@ __all__ = [
     "Reaction", "CrossSectionSum", "Reactions", "Sums", "OrphanProducts",
     "FissionComponents",
     "Productions", "IncompleteReactions", "ReactionId",
-    "CrossSection", "EVAL_LABEL", "Background", "ResonancesWithBackground", "Reference",
+    "CrossSection", "Component", "EVAL_LABEL", "Background",
+    "ResonancesWithBackground", "Reference",
     "CoulombPlusNuclearElastic", "ThermalNeutronScatteringLaw1d",
     "URR_probabilityTables1d",
     # §17-18 output channels and distributions

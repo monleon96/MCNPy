@@ -30,8 +30,9 @@ four chi^2 variants (V1/V2/V3/V4) on six subsets, and writes:
 
 Subsets:
   - `all`                  — every experiment.
-  - `no_Cierjacks`         — recommended thesis headline (Cierjacks 1978 has
-                             ~61% of points and is a known difficult dataset).
+  - `no_Cierjacks`         — Cierjacks 1978 excluded (aporta ~61% de los puntos
+                             y es un conjunto dificil). NO es el subconjunto
+                             titular: no hay ninguno.
   - `no_KS`                — old default (Kinney 1976 + Smith 1980 excluded).
   - `no_KS_no_Cierjacks`   — both K&S and Cierjacks excluded.
   - `only_KS`              — Kinney + Smith only.
@@ -597,7 +598,7 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
     # `corpus_absorbed.py` runs in the same chain and is not optional.
     # ── RUN 99, PASOS C DEL PLAN: la rejilla fina pasa a ser la referencia ───
     #
-    # Plan: kika-workspace/docs/plan_fine_reference_and_100k.md §C. Tres puntos
+    # Plan: kika-workspace/docs/chi2-mf4/plan_fine_reference_and_100k.md §C. Tres puntos
     # del MISMO objeto (la run 99), que se leen en DOS parejas y cada pareja
     # mueve UNA sola cosa:
     #
@@ -651,6 +652,147 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
         "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_99c2fine.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
         "title":      "χ² analysis — run 99, rejilla FINA 1738 + cruzado a_0, 1307 parámetros de forma restituidos (hilo B): aísla a_5/a_6",
+        "systematic_block_col": None,
+    },
+    # MEDIDO 2026-08-20. Las dos predicciones aciertan: c1/c0 sube V4 +1.2 a
+    # +9.2 %, c2/c1 lo baja 3.3-5.8 % en los SEIS subconjuntos. JEFF y JENDL al
+    # 0.00000 % y V2 identico en los tres, o sea las dos parejas son limpias.
+    # ⚠ EL NETO c2/c0 ES UN EMPATE (-0.51 % en no_Cierjacks, +1 a +3 % en cuatro
+    # de seis): la rejilla fina NO gana al mg en puntuacion. Parte de la ventaja
+    # del mg es `apply_percentile_variance_scaling` re-inflando su diagonal, que
+    # se ve en V1 (+3.5 % y +9.8 % en los dos subconjuntos finos). La referencia
+    # fina se defiende por CORRECCION (2.4 % de sigma=0 contra 37-42 %), no por
+    # chi2, y asi hay que escribirla.
+
+    # ── LAS MALLAS: cuanto se puede AGRUPAR el objeto fino ────────────────
+    #
+    # Los tres son `c2` MAS una malla por orden -- misma cinta de origen, mismo
+    # cruzado, mismo `carry`, mismo `--mag-grid fine`. La UNICA variable contra
+    # `predictive_99c2fine` es el agrupamiento, asi que la pareja m*/c2 mueve una
+    # sola cosa y c2 es su ancla. Cualquier lectura contra `99c0mg` mueve ADEMAS
+    # `apply_percentile_variance_scaling`, que solo vive en el camino multigrupo
+    # del pipeline.
+    #
+    # La malla la fijan dos restricciones derivadas del dato, no elegidas
+    # (`kika-workspace/notebooks/mf34_mesh/`): anchura <= res_factor * sigma_E
+    # (la resolucion TOF del experimento) y a_l constante dentro de k sigmas de
+    # su miembro mas preciso (el fichero MF34 es RELATIVO: lo homogeneo tiene que
+    # ser el DENOMINADOR).
+    #
+    # ⚑ MEDIDO ANTES DE LANZAR. Criterio de aceptacion = CONSERVADURISMO, o sea
+    # que el fichero no declare MENOS varianza de la que el objeto fino tiene a
+    # la resolucion a la que se lee:
+    #
+    #   malla    params   MiB    sub-declara   sobre-declara
+    #   m1k3       7949   773       0.65          1.28
+    #   m2k10      6746   621       0.27          1.97
+    #   m3r2       6006   538       0.34          2.54
+    #   c2 fino   10428  1145       1.00          1.00
+    #   c0 HOY     3960   327       0.01           354
+    #
+    # Ninguna es estrictamente conservadora; la de HOY es con diferencia la peor.
+    # Y quitar el tope de resolucion del todo solo baja a 5582 params (-17 %) a
+    # cambio de 165x en a_5: lo que ata mas alla de la resolucion es la
+    # consistencia de a_l, no la resolucion.
+    #
+    # PREDICCION FIJADA ANTES DE MEDIR: los tres caen dentro de +-2 % de c2. Si
+    # acierta, queda MEDIDO que el chi2 no puede arbitrar la malla -- se sienta
+    # en la mediana del cociente plegado, ~1 en todas -- y §10.8 se cierra con un
+    # negativo medido. El control agresivo ya esta medido y es `c0`.
+    "predictive_99m1k3": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_99m1k3.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run 99, fino + cruzado, malla por orden σ_E×1 k=3 (7949 params): la más fiel",
+        "systematic_block_col": None,
+    },
+    "predictive_99m2k10": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_99m2k10.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run 99, fino + cruzado, malla por orden σ_E×1 k=10 (6746 params): la malla física",
+        "systematic_block_col": None,
+    },
+    "predictive_99m3r2": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_99m3r2.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run 99, fino + cruzado, malla por orden σ_E×2 k=10 (6006 params): agrupa MÁS allá de la resolución",
+        "systematic_block_col": None,
+    },
+
+    # ── RUN 100, LOS MISMOS TRES PUNTOS CON 100 000 MUESTRAS ──────────────
+    #
+    # ⛔ NO LANZAR HASTA QUE LA RUN 100 HAYA TERMINADO. Se lanzan con
+    #   sbatch -J kika-c0-100 run_c_fine.sh c0 /share_snc/snc/JuanMonleon/ENDF_samples/new_test_100_100k
+    #   sbatch -J kika-c1-100 run_c_fine.sh c1 /share_snc/snc/JuanMonleon/ENDF_samples/new_test_100_100k
+    #   sbatch -J kika-c2-100 run_c_fine.sh c2 /share_snc/snc/JuanMonleon/ENDF_samples/new_test_100_100k
+    # El runner deriva el prefijo `100` del nombre del directorio.
+    #
+    # QUE PREGUNTA NUEVA CONTESTAN. Las dos parejas internas (c0/c1 la rejilla,
+    # c1/c2 la restitucion) se repiten como control. La pregunta NUEVA es la
+    # TERCERA pareja, entre runs y sobre el mismo punto:
+    #
+    #   99c2fine  vs  100c2fine   <-  p/n 1.043 -> 0.104
+    #
+    # A 10k, p = 10 428 parametros contra n = 10 000 replicas: el soporte
+    # Marchenko-Pastur de los autovalores de la covarianza muestral es [0, 4.1]
+    # y la ESTRUCTURA DE CORRELACION fina es en buena parte ruido de MC (la
+    # diagonal esta bien, error relativo sqrt(2/n) ~ 1.4 %). A 100k el soporte
+    # es [0.46, 1.75]. Si V4 se mueve entre 99c2fine y 100c2fine, lo que se
+    # mueve es ruido de correlacion, no fisica.
+    #
+    # ⚠ ES LA UNICA COMPARACION DE ESTA TANDA QUE CRUZA DOS RUNS DEL PIPELINE, y
+    # se permite SOLO porque las dos son el mismo punto del mismo objeto con la
+    # misma config salvo N_SAMPLES (verificado en run_metadata.json). No leer
+    # 100c1fine contra 99c0mg ni ninguna otra pareja cruzada: eso mueve la run y
+    # la representacion a la vez, que es §L16/§L18 otra vez.
+    #
+    # ⚑ LO QUE 100k NO ARREGLA: `mc_order_cap` es el soporte angular del bin y
+    # no depende de n, asi que a_5/a_6 siguen muertos en las replicas en los
+    # mismos bins y `carry` (c2) sigue siendo necesario exactamente igual.
+    "predictive_100c0mg": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_100c0mg.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run 100 (100k), mg 660 + cruzado a_0, una rejilla: el ancla",
+        "systematic_block_col": None,
+    },
+    "predictive_100c1fine": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_100c1fine.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run 100 (100k), rejilla FINA 1738 + cruzado a_0, parámetros muertos DROP",
+        "systematic_block_col": None,
+    },
+    "predictive_100c2fine": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_100c2fine.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² analysis — run 100 (100k), rejilla FINA 1738 + cruzado a_0, forma restituida (carry): el entregable candidato",
+        "systematic_block_col": None,
+    },
+    # ── SERIE 103 (22/23-ago): la malla en UNA etapa, contra la de dos ──────
+    #
+    # ⚑ PAREJA DE UNA SOLA VARIABLE. 103R2 y 103R4 salen del MISMO codigo, la
+    # MISMA semilla y la MISMA config salvo `KIKA_MF34_MESH_SINGLE_STAGE`. Las
+    # dos se puntuan por la cinta FINA con cruzado (`_a0cross.endf`, dead=carry),
+    # asi que lo unico que cambia entre las dos es la MALLA: 3 311 parametros
+    # (dos etapas) contra 7 820 (una etapa desde el fino).
+    #
+    # ⛔ Y NO SE PUNTUA PARA ELEGIR MALLA. Medido en la serie 99: el chi2 baja un
+    # 17 % monotono segun se engruesa la malla, y todo el efecto viene de la
+    # correlacion -- discrimina AL REVES del criterio de conservadurismo. Esto se
+    # puntua para REPORTAR el numero del entregable, no para decidir.
+    #
+    # ⚠ 103R4 es ademas el ENSAYO DE MEMORIA: 7 820 parametros es la MF34 mas
+    # fina que se ha puntuado nunca (91_cross fueron 703 grupos / 347 MB), asi
+    # que si el sidecar de ~11 GB o las eigendescomposiciones no caben, se quiere
+    # descubrir aqui y no con el entregable definitivo.
+    "predictive_103R2": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_103R2.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — run 103R2, malla de DOS etapas (3 311 params), fina + cruzado a_0 (carry)",
+        "systematic_block_col": None,
+    },
+    "predictive_103R4": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_103R4.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — run 103R4, malla en UNA etapa desde el fino (7 820 params), fina + cruzado a_0 (carry)",
         "systematic_block_col": None,
     },
     # ── RUN 97: una malla por orden Legendre (roadmap §10.8) ────────────────
@@ -760,7 +902,7 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
     },
     # ── THE ANALYTIC (R2) EVALUATION ─────────────────────────────────────────
     #
-    # `docs/cross_term_two_pass_investigation.md` §10-11. MF33, MF34 and the
+    # `docs/chi2-mf4/cross_term_two_pass_investigation.md` §10-11. MF33, MF34 and the
     # cross block all come from ONE object: the closed-form covariance of the
     # estimator that produced the central values,
     #
@@ -1069,7 +1211,7 @@ LIB_YEAR_OFFSETS = {"JEFF": -0.3, "JENDL": 0.0, "This_work": 0.3}
 # as D + u uᵀ + v vᵀ + Σ_eval, and D is strictly positive.
 # NOTE: an earlier version of this comment called V3 the chapter headline and V4
 # "diagnostic only". That contradicts what the thesis actually ships; see
-# docs/thesis_chi2_review.md before acting on either claim.
+# docs/thesis/thesis_chi2_review.md before acting on either claim.
 # Reported variants. V1 and V3 are DELIBERATELY OMITTED (Juan, 2026-08-03): the
 # two that carry the argument are V2 (rank-2 only — the pure central-value
 # metric, σ_eval excluded) and V4 (rank-2 + dense eval — the only one that sees
@@ -1100,9 +1242,11 @@ VARIANT_LABELS: Dict[str, str] = {
 # V2/V3/V4 are still computed and tabulated for cross-check.
 PRIMARY_VARIANT: str = "V4"
 
-# Subsets — six slices of the dataset. `no_Cierjacks` is the recommended
-# headline because Cierjacks 1978 contributes 61% of all points and is a
-# known difficult dataset for all modern Fe-56 angular evaluations.
+# Subsets — six slices of the dataset, y NINGUNA es la titular (Juan,
+# 2026-08-21). Cierjacks 1978 aporta el 61 % de los puntos y es un conjunto
+# dificil para todas las evaluaciones modernas de Fe-56, asi que se mira aislado
+# y excluido; eso son dos vistas del mismo problema, no una recomendacion de
+# cual reportar.
 SUBSETS: List[Tuple[str, str]] = [
     ("all",                "All experiments"),
     ("no_Cierjacks",       "Excluding Cierjacks 1978"),
@@ -2100,11 +2244,25 @@ def run_methodology(methodology: str, paths: RunPaths) -> Dict:
         f"\n## Headline summary — primary variant **{PRIMARY_VARIANT}** "
         f"({VARIANT_LABELS[PRIMARY_VARIANT]})\n"
     )
+    # ⛔ NO SE RECOMIENDA NINGUN SUBCONJUNTO COMO TITULAR (Juan, 2026-08-21, y
+    # reiterado el 23-ago). Esta linea decia «Recommended thesis headline
+    # subset: no_Cierjacks» y de ahi salia la estrellita en todas las tablas
+    # copiadas a los docs.
+    #
+    # Razon: marcar un subconjunto como titular fija la lectura de TODOS los
+    # deltas que se reportan, y elegir el que mejor sale es la primera critica
+    # que hace un referee. Ademas NINGUN subconjunto es fuera-de-muestra para
+    # las tres evaluaciones a la vez -- JEFF y JENDL ajustaron Kinney <= 2,5 MeV
+    # y Smith 2,5-4 MeV, y este trabajo ajusto TODO EXFOR -- asi que no hay uno
+    # que se gane el papel por construccion.
     headline.append(
-        f"\n**Recommended thesis headline subset: `no_Cierjacks`** — Cierjacks "
-        f"1978 contributes ~61% of all points and is a known difficult dataset "
-        f"shared by all three modern Fe-56 evaluations; reported separately in "
-        f"the `only_Cierjacks` and `Cierjacks 1978` per-experiment tables.\n"
+        f"\n**Los seis subconjuntos se presentan sin destacar ninguno.** No hay "
+        f"un subconjunto titular: ninguno es fuera-de-muestra para las tres "
+        f"evaluaciones a la vez (JEFF y JENDL ajustaron Kinney ≤ 2,5 MeV y Smith "
+        f"2,5–4 MeV; este trabajo ajustó todo EXFOR), asi que destacar uno fija "
+        f"la lectura de los deltas sin justificacion. Cierjacks 1978 aporta el "
+        f"~61 % de los puntos y por eso aparece aislado en `only_Cierjacks` y "
+        f"excluido en `no_Cierjacks`: son dos vistas, no una recomendacion.\n"
     )
     headline.append(
         f"\n**χ²/N per (library × subset) under {PRIMARY_VARIANT}:**\n\n"

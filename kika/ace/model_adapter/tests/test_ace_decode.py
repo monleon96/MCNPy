@@ -198,7 +198,7 @@ def test_the_flat_path_reads_the_same_q_values_this_decoder_does(ace):
     """The gap this decoder recorded, now closed on the flat side too.
 
     ``CrossSection.from_ace`` used to build six ACE metadata keys and no Q at
-    all, with ``ace.q_values`` right there — ``docs/library-gaps.md`` D4. It
+    all, with ``ace.q_values`` right there — ``docs/library/library-gaps.md`` D4. It
     calls ``qValuesByMT`` now, so there is one alignment convention rather than
     two, and this asserts the two paths agree rather than merely that the flat
     one is non-empty. Agreement is the property that matters: a second copy of

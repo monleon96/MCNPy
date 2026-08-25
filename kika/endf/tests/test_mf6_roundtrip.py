@@ -21,7 +21,7 @@ and both are Be-9's MT16**, which is also one of only 29 ``LCT=1`` sections;
 LAW=6 occurs five times, three of them Li-6's MT41; the negative LAWs occur 172
 times and all of them are actinide fission, of which U-235's MT18 is the
 smallest carrier at 591 records; and C-12's MT5 is the readiest ``LCT=3``. The
-census is in ``docs/mf6_notes.md`` in the workspace repo.
+census is in ``docs/library/mf6_notes.md`` in the workspace repo.
 
 **LAW=5 is gated against tapes, and the reason it once was not was wrong.**
 Charged-particle elastic scattering does not occur in a neutron sublibrary —
@@ -33,7 +33,7 @@ alongside ``neutrons/``. The 2026-08-18 sweep looked at ``endfb81/``, which
 *is* neutron-only, and generalised from it. 63 charged-particle tapes carry a
 LAW=5 each, all in MT2; the five whole ones committed here cover both axes it
 splits on and the fifth adds LAW=2/LANG=12. Census in
-``docs/mf6_witness_hunt.md`` in kika-workspace.
+``docs/library/mf6_witness_hunt.md`` in kika-workspace.
 
 **What is still unwitnessed, and stays claimed as such.** ``LTP=2``, ``LTP=14``
 and ``LTP=15`` occur zero times in those 63 tapes, and ``LAW=1``/``LANG=11-15``
@@ -687,7 +687,7 @@ def test_law5_ltp2_roundtrips_through_our_own_emitter():
 def test_law2_lang12_has_a_witness_at_last():
     """The tabulated two-body form, which no neutron tape here carries.
 
-    ``docs/mf6_notes.md`` recorded LANG=0 on 209 623 nodes and LANG=14 on 490
+    ``docs/library/mf6_notes.md`` recorded LANG=0 on 209 623 nodes and LANG=14 on 490
     over all 557 ENDF/B-VIII.1 neutron tapes, and **no LANG=12 at all**. The 63
     charged-particle tapes carry 503 LANG=12 nodes against 1 201 LANG=0; nine
     of them are this fixture's MT50. So ``MF6LawTwoBody.tabulated`` is now read
@@ -804,7 +804,7 @@ def test_splicing_every_section_back_into_a_tape_changes_only_its_send_records(
     **The only difference is the SEND record**, and it is not MF6's. Li-6 leaves
     columns 1-66 of its SEND blank; ``format_endf_send_record`` zero-fills them.
     One line per section, no data on it, shared with every other MF, and already
-    recorded in ``docs/mf7_tsl_notes.md``. ENDF/B-VIII.1's O-16 zero-fills its
+    recorded in ``docs/library/mf7_tsl_notes.md``. ENDF/B-VIII.1's O-16 zero-fills its
     SENDs and splices back **byte-identical**, which is what says the rest of
     the path is exact.
     """
@@ -868,7 +868,7 @@ def test_the_whole_charged_particle_census_holds(request):
     *out of* — that the cells are the only cells, that the identity has no
     exception in 4 710 nodes, and that ``LTP=2/14/15`` and ``LANG=11-15`` are
     empty rather than merely unlooked-at. Without it those numbers live only in
-    ``docs/mf6_witness_hunt.md``, where nothing re-checks them.
+    ``docs/library/mf6_witness_hunt.md``, where nothing re-checks them.
 
     ~21 s over the share, which is why it is ``slow``-marked and skips when the
     share is not there, like :func:`test_endfb81_o16_roundtrip`.

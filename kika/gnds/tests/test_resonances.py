@@ -359,3 +359,81 @@ def test_the_nested_pops_is_announced_instead_of_disappearing(micro_fe56_gnds,
 
     report = kika.write(suite, tmp_path / "out.gnds.xml")
     assert any("nested <PoPs>" in loss for loss in report.losses), report.losses
+
+
+# ---------------------------------------------------------------------------
+# §19.3.3's second radius — read since 2026-08-24
+# ---------------------------------------------------------------------------
+
+def _graftReactionHardSphereRadius(source, tmp_path, value="8.0", unit="fm"):
+    """Put a ``<hardSphereRadius>`` on the first ``<resonanceReaction>``.
+
+    Grafted, not found: four nodes in the whole distributed library carry one
+    (V-51, Ca-40, Cl-35 — measured 2026-08-24 over the 558 neutron
+    evaluations) and the smallest of those files is 5,9 MB, far past what
+    belongs in ``tests/data``. Same argument, and the same technique, as the
+    forms ``test_distributions.py`` grafts in.
+    """
+    tree = ET.parse(source)
+    reaction = tree.getroot().find(".//resonanceReaction")
+    assert reaction is not None, source
+    reaction.append(ET.fromstring(
+        f'<hardSphereRadius><constant1d label="hardSphereRadius" '
+        f'value="{value}" domainMin="1e-5" domainMax="2e7">'
+        f'<axes><axis index="1" label="energy_in" unit="eV"/>'
+        f'<axis index="0" label="radius" unit="{unit}"/></axes>'
+        f'</constant1d></hardSphereRadius>'))
+    path = tmp_path / "grafted-radius.gnds.xml"
+    tree.write(path)
+    return path
+
+
+def test_a_resonance_reactions_hard_sphere_radius_is_read_not_reported(
+        micro_fe56_gnds, tmp_path):
+    """It used to be dropped with a report entry, and the reason was wrong.
+
+    The old message said the *channel's* radius is the one the phase shift
+    uses. That is true, and it is a statement about which radius the physics
+    reads — not about which one the file states. A reader that drops the second
+    cannot write the file back, which is the test §6.4 was failing.
+    """
+    grafted = _graftReactionHardSphereRadius(micro_fe56_gnds, tmp_path)
+    suite, report = readReactionSuite(Document.parse(grafted))
+
+    reaction = suite.resonances.resolved[0].formalism.resonanceReactions[0]
+    assert reaction.hardSphereRadius == 8.0
+    assert reaction.radiusUnit == "fm"
+    assert not [line for line in report.losses if "hardSphereRadius" in line]
+
+
+def test_the_reactions_hard_sphere_radius_survives_a_write(micro_fe56_gnds,
+                                                           tmp_path):
+    """Read is half of it: the point of modelling it was writing it back."""
+    import kika
+
+    grafted = _graftReactionHardSphereRadius(micro_fe56_gnds, tmp_path)
+    suite, _ = readReactionSuite(Document.parse(grafted))
+    written = tmp_path / "out.gnds.xml"
+    kika.write(suite, written)
+
+    reaction = ET.parse(written).getroot().find(".//resonanceReaction")
+    radius = reaction.find("hardSphereRadius/constant1d")
+    assert radius is not None, "the radius did not survive to the output"
+    assert float(radius.attrib["value"]) == 8.0
+    # The schema's order: scatteringRadius, then hardSphereRadius. Fe-56's
+    # resonanceReaction states no scatteringRadius, so this one is first.
+    assert [child.tag for child in reaction] == ["link", "hardSphereRadius"]
+
+
+def test_supports_angular_reconstruction_stays_a_report_entry(ta182):
+    """The one row of §6.4 that closes as won't-fix rather than as work.
+
+    65 files set it and it still gets no node: there is no number under it. It
+    qualifies parameters that are all read, and modelling it would state inside
+    a format-neutral model what one particular reader can do with them.
+    """
+    _suite, report = ta182
+    said = "\n".join(report.losses)
+    if "supportsAngularReconstruction" not in said:
+        pytest.skip("this fixture does not set the attribute")
+    assert "FUDGE's capability and not the evaluation's" in said

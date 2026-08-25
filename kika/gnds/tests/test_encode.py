@@ -605,7 +605,7 @@ def test_a_suite_holding_a_mixed_can_be_written_at_all(gnds_data_dir, tmp_path):
 
 
 #: The schema errors an **ENDF-decoded** suite still has, by kind. Measured
-#: 2026-08-17 at twelve and written down in `docs/library-gaps.md` D20; seven
+#: 2026-08-17 at twelve and written down in `docs/library/library-gaps.md` D20; seven
 #: since the MF4 angular `axes`, the single-region containers and the evaluated
 #: style's domain landed. None of them is the deliberate empty
 #: `<distribution/>` the GNDS fixtures produce -- these are gaps in the
@@ -1624,3 +1624,70 @@ def test_writing_does_not_edit_the_suite_it_was_given(h2_gnds, tmp_path):
         assert entry.attrib["path"] == f"Covariances/{stem}.gnds-covar.xml"
         assert entry.attrib["checksum"] == sha1(
             (tmp_path / "Covariances" / f"{stem}.gnds-covar.xml").read_bytes())
+
+
+# ---------------------------------------------------------------------------
+# MF5 → the model → GNDS. The direction that had nothing in it until the
+# energy adapter landed.
+# ---------------------------------------------------------------------------
+
+def test_a_pfns_tape_writes_an_uncorrelated_with_both_halves(micro_pfns_tape,
+                                                             tmp_path):
+    """§18.3's node is an ``xs:sequence``, so a half-filled one is *invalid*.
+
+    Until MF5 was decoded, a tape's energy distribution reached the model
+    nowhere and this element was simply absent from every ENDF-written GNDS
+    file. Now it is there, and the assertion worth making is the schema's own:
+    both children present, the energy axes stated on the container and nowhere
+    else, and the child ``XYs1d`` positional rather than self-describing.
+    """
+    written, _report = _write(
+        kika.read(micro_pfns_tape, covariances=False), tmp_path)
+    root = ET.parse(written).getroot()
+
+    nodes = list(root.iter("uncorrelated"))
+    assert len(nodes) == 1, "Cf-252's MT18 and nothing else"
+    angular, energy = list(nodes[0])
+    assert angular.tag == "angular" and energy.tag == "energy"
+    assert [child.tag for child in angular] == ["isotropic2d"]
+
+    xys2d = energy[0]
+    assert xys2d.tag == "XYs2d"
+    assert [(a.attrib["index"], a.attrib["label"], a.attrib.get("unit", ""))
+            for a in xys2d.find("axes")] == [
+        ("2", "energy_in", "eV"),
+        ("1", "energy_out", "eV"),
+        ("0", "P(energy_out|energy_in)", "1/eV"),
+    ]
+
+    children = list(xys2d.find("function1ds"))
+    assert children, "the TAB2 nodes are the children"
+    for child in children:
+        assert child.tag == "XYs1d"
+        assert "outerDomainValue" in child.attrib
+        # §5.1.1 has no slot for a child's own axes, and `index` is positional
+        # information the container already carries.
+        assert child.find("axes") is None
+        assert "index" not in child.attrib
+
+
+def test_the_mf35_href_now_resolves_to_something(micro_pfns_tape, tmp_path):
+    """A gain nothing else would notice if it regressed.
+
+    ``energyDistributionHref`` (``model_adapter/covariances.py``) points an
+    MF35 covariance at ``…/product[@label='n']/distribution``. On every PFNS
+    tape that xPath resolved to an element with no forms in it, because MF5
+    was the thing that would have filled it. It is worth one assertion that it
+    lands on a real distribution now.
+    """
+    from kika.endf.model_adapter.covariances import energyDistributionHref
+
+    written, _report = _write(
+        kika.read(micro_pfns_tape, covariances=False), tmp_path)
+    root = ET.parse(written).getroot()
+
+    href = energyDistributionHref(18)
+    assert href.startswith("/reactionSuite/")
+    found = root.find("." + href[len("/reactionSuite"):])
+    assert found is not None, f"{href} resolves to nothing"
+    assert [child.tag for child in found] == ["uncorrelated"]

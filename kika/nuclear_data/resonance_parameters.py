@@ -121,7 +121,7 @@ class ResonanceParameters:
         four width columns; an R-Matrix-Limited spin group has one width per
         *channel*, five of them for Fe-57 in JEFF-4.0. There is nothing to
         project into, so the range is omitted — but loudly, which is the half of
-        ``docs/library-gaps.md`` D3 that is fixed. The model keeps the region;
+        ``docs/library/library-gaps.md`` D3 that is fixed. The model keeps the region;
         ask ``kika.endf.model_adapter.decodeMF2MT151`` for it.
 
         Returns a *list* because MF2 may contain multiple isotopes and energy

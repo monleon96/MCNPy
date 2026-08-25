@@ -64,7 +64,7 @@ ENDF_METADATA: dict[str, dict[str, str]] = {
         "tab_interpolation": LIST,
         # Added by phase 3d, deliberately, and the only two keys this contract
         # has ever gained. They are what lets `to_endf` write an LTT=3 section
-        # back byte for byte -- `docs/library-gaps.md` D2. `nm` is the
+        # back byte for byte -- `docs/library/library-gaps.md` D2. `nm` is the
         # evaluation's declared highest Legendre order, which had nowhere to
         # live; `legendre_orders` is each energy's own NL, without which a
         # trailing zero the evaluator wrote is indistinguishable from the
@@ -80,7 +80,7 @@ ENDF_METADATA: dict[str, dict[str, str]] = {
         "abundance": NUMBER,
     },
     "NuclideInfo": {
-        # Added when `docs/library-gaps.md` M2 was fixed, and the two keys are
+        # Added when `docs/library/library-gaps.md` M2 was fixed, and the two keys are
         # the whole of what made `to_endf` possible. MF1/451's NWD descriptive
         # records -- up to 700 lines of an evaluator's comment block, parsed
         # into nothing else -- and its NXC directory had no home in the fields
@@ -125,7 +125,7 @@ ACE_METADATA: dict[str, dict[str, str]] = {
         "awr": NUMBER,
         "ace_comment": STR,
         "ace_date": STR,
-        # Gained when `docs/library-gaps.md` D4 was fixed. ACE's LQR block
+        # Gained when `docs/library/library-gaps.md` D4 was fixed. ACE's LQR block
         # carries one QI per reaction and `from_ace` had never read it, so
         # callers were passing `to_endf(qi=...)` by hand for a number that was
         # in the file. Present only for an MT that has an LQR entry — the
@@ -260,7 +260,7 @@ def test_ace_carries_qi_but_not_qm_or_lr(ace_objects):
     ``from_ace`` reads it. QM and LR are the two ENDF header fields ACE has no
     counterpart for, so those are what the refusal is about.
 
-    The distinction is the whole of ``docs/library-gaps.md`` D4: "ACE has no Q
+    The distinction is the whole of ``docs/library/library-gaps.md`` D4: "ACE has no Q
     values" was written down, believed, and made callers hand-supply a number
     the file already held.
     """

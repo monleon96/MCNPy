@@ -6,7 +6,7 @@ against the flat path:
     str(encodeMF1MT451(*decodeMF1MT451(s)))  ==  str(s)
 
 **Why this gate is available from the first commit.** ``NuclideInfo.to_endf``
-(``docs/library-gaps.md`` M2) already passes exactly this comparison on six real
+(``docs/library/library-gaps.md`` M2) already passes exactly this comparison on six real
 evaluations, so the model-side encoder has a working reference and a gate that
 was proved reachable before it was written. What M2 did *not* close is the
 model→MF1 direction: the façade builds the section from its flat fields by

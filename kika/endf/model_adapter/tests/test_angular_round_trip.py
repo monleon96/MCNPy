@@ -139,7 +139,7 @@ def test_the_flat_path_now_round_trips_mf4_too(mf4):
     had no home for NM, and it trimmed trailing zero coefficients so NL dropped
     on 70 of this tape's 3960 energies -- 141 differing lines. The façade reads
     through this decoder and keeps both in ``metadata``, so the flat path is now
-    byte-exact as well. See ``docs/library-gaps.md`` D2.
+    byte-exact as well. See ``docs/library/library-gaps.md`` D2.
     """
     assert str(AngularDistribution.from_endf(mf4).to_endf()) == str(mf4)
 

@@ -17,7 +17,7 @@ def _endf_mfmt_of(data) -> Optional[Tuple[int, int]]:
     attribute with a comma and every distributed covariance file writes one;
     kika's ENDF adapter writes a slash. Parsing only the slash made this
     module's MF34 filter return an empty result — **without raising** — for any
-    suite decoded from GNDS. See ``docs/gnds_endf_conflicts.md`` §3.1 and §7.1.
+    suite decoded from GNDS. See ``docs/library/gnds_endf_conflicts.md`` §3.1 and §7.1.
 
     Duck-typed, like everything else this module reads off a suite, so it works
     on a real ``DataLink`` and on anything that quacks like one.
@@ -2193,7 +2193,7 @@ class LegendreCovariance:
         Legendre order, so it is a refinement of any one section's grid only
         when all of them share a range -- and real files do not. This method
         assumed otherwise until 2026-08-11 and was wrong at both ends
-        (``docs/library-gaps.md`` D9 and D10):
+        (``docs/library/library-gaps.md`` D9 and D10):
 
         * **above** the source's last boundary the cursor ran past the end and
           raised ``IndexError``. The shipped Fe-56 ``_a0cross`` tape does this:

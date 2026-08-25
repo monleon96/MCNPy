@@ -1,6 +1,6 @@
 """``NuclideInfo`` can write MF1/451 back, which it could not before.
 
-``docs/library-gaps.md`` M2. Two of the four format-agnostic classes could be
+``docs/library/library-gaps.md`` M2. Two of the four format-agnostic classes could be
 read into and not written out, so the one way to change an evaluation's header
 was to mutate the ``MF1MT451`` dataclass in place — bypassing the canonical
 layer for exactly the case it exists for.

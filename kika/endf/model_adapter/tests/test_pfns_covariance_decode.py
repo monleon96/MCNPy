@@ -11,12 +11,14 @@ the data is, exactly as it would for MF34. So the slice is asserted, and so is
 the fact that the bands keep their own orders instead of being flattened
 together.
 
-**The report.** Adding 5 to ``SUPPORTED_MF`` converts a silent skip into a
-silent *claim of coverage* unless something says which MF5 laws were only
-passed through. Two tests below pin that: MF5 must be declared undecoded, its
-verbatim partials must be named one by one, and the covariance redirect must
-not claim MF5 belongs to the covarianceSuite — which is what the old
-``- {1,2,3,4}`` branch said, and which was false.
+**The report.** MF5's LF=1 is decoded now, and the six analytic spectra of
+§18.3 still are not — so "MF5 is supported" is a *claim of coverage* unless
+something says which laws only passed through. The tests below pin that: the
+verbatim partials must be named one by one, MT455's refusal must say what it
+refused, and the covariance redirect must not claim MF5 belongs to the
+covarianceSuite — which is what the old ``- {1,2,3,4}`` branch said, and which
+was false. What must **not** survive is the older blanket notice saying nothing
+decodes MF5 at all: a false honesty notice is worse than none.
 """
 from __future__ import annotations
 
@@ -154,8 +156,9 @@ def test_report_declares_mf5_partials_it_did_not_decode(micro_pfns_tape):
     suite = kika.read(str(micro_pfns_tape))
     messages = unsupported(suite)
 
-    assert any("MF5 (energy distributions) is present and parsed" in m
-               for m in messages)
+    # The blanket "nothing decodes MF5" notice is gone: MT18 is decoded.
+    assert not any("nothing decodes it into this reactionSuite" in m
+                   for m in messages)
     verbatim = [m for m in messages if "stored verbatim" in m]
     assert len(verbatim) == 6
     for index in range(6):
@@ -188,13 +191,24 @@ def test_report_is_clean_apart_from_the_declared_gaps(micro_pfns_tape):
     suite = kika.read(str(micro_pfns_tape))
     report = suite.report
 
-    assert report.losses == [], report.losses
-    assert report.approximations == [], report.approximations
     assert report.warnings == [], report.warnings
+
+    # One loss and one approximation, and both are about what the tape does
+    # **not** state. MT455 is the delayed spectrum: no cross section, so no MF3
+    # and no reaction to hang a distribution from. MT18 has no MF4, so the
+    # angular half of its uncorrelated is kika's inference and not the file's.
+    assert len(report.losses) == 1, report.losses
+    assert "MF5/MT455 has no MF3/MT455 to hang from" in report.losses[0]
+    assert len(report.approximations) == 1, report.approximations
+    assert "not read but inferred" in report.approximations[0]
 
     messages = unsupported(suite)
     assert len(messages) == 7, messages
     assert all(m.startswith("MF5") for m in messages), messages
+    # Six verbatim partials plus the one refusal that says why MT455 as a whole
+    # stayed out — the count is the same as before the adapter landed, and it
+    # is the same seven only by arithmetic, so the content is asserted too.
+    assert sum("weightedFunctionals" in m for m in messages) == 1
 
     # And the MF35 redirect really was acted on rather than left standing.
     assert not any("covarianceSuite" in m for m in messages)
