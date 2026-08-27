@@ -84,6 +84,11 @@ def convergence_analysis(
     has_sigma = y_sigma is not None
     if has_sigma:
         y_sigma = np.asarray(y_sigma, dtype=float)
+        # (sigma * y)**2 is per-sample, so square it once here and merely
+        # re-index it per bootstrap replicate below instead of re-multiplying
+        # and re-squaring the whole (n_bootstrap x n) resample at every
+        # sample count. Element-for-element the same products.
+        abs_err_sq = (y_sigma * y_val) ** 2
 
     rng = np.random.default_rng(random_seed)
     alpha = 1.0 - ci_level
@@ -140,9 +145,7 @@ def convergence_analysis(
             nd_unc_pct = (np.sqrt(var_nd) / abs_mean * 100.0) if abs_mean > 0 else 0.0
 
             # Bootstrap decomposition
-            sig_bs = sig_sub[idx]
-            abs_err_bs = sig_bs * y_bs
-            var_within_bs = (abs_err_bs**2).mean(axis=1)
+            var_within_bs = abs_err_sq[:n][idx].mean(axis=1)
             var_nd_bs = np.maximum(bs_var - var_within_bs, 0.0)
             std_nd_bs = np.sqrt(var_nd_bs)
             bs_nd_unc_pct = np.where(

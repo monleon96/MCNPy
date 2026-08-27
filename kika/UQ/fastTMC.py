@@ -269,17 +269,20 @@ def _values_only_analysis(
     std_obs = np.sqrt(var_observed)
     pct_obs = std_obs / mean_tally * 100.0 if mean_tally != 0 else 0.0
 
-    # Bootstrap for CIs on mean and observed uncertainty
+    # Bootstrap for CIs on mean and observed uncertainty (vectorized, see
+    # _bootstrap_analysis — same RNG stream as the old per-replicate loop)
     rng = np.random.default_rng(random_seed)
     bs_mean = np.empty(n_bootstrap)
     bs_obs = np.empty(n_bootstrap)
 
-    for i in range(n_bootstrap):
-        idx = rng.integers(0, N, N)
+    for start, block in _bootstrap_blocks(n_bootstrap, N):
+        stop = start + block
+        idx = rng.integers(0, N, size=(block, N))
         y_bs = y[idx]
-        bs_mean[i] = y_bs.mean()
-        std_obs_bs = np.std(y_bs, ddof=1)
-        bs_obs[i] = std_obs_bs / y_bs.mean() * 100.0 if y_bs.mean() != 0 else 0.0
+        means = y_bs.mean(axis=1)
+        bs_mean[start:stop] = means
+        std_obs_bs = np.sqrt(y_bs.var(axis=1, ddof=1))
+        bs_obs[start:stop] = np.where(means != 0, std_obs_bs / means * 100.0, 0.0)
 
     alpha = 1 - ci_level
     lo, hi = 100 * (alpha / 2), 100 * (1 - alpha / 2)
@@ -435,6 +438,29 @@ def _print_summary(mean_tally: float, pct_obs: float, pct_stat: float, pct_nuc: 
         print(f"    Statistical/Observed ratio: {stat_to_obs_ratio*100:.1f}%")
 
 
+# Cap on the number of (replicate x sample) floats held in memory at once by
+# the vectorized bootstrap. 4e6 elements is ~32 MB per intermediate array,
+# which keeps peak usage bounded for large N or large n_bootstrap while still
+# letting the common case (N ~ 500, n_bootstrap ~ 1000) run in a single block.
+_BOOTSTRAP_BLOCK_ELEMENTS = 4_000_000
+
+
+def _bootstrap_blocks(n_bootstrap: int, n_samples: int):
+    """Yield block sizes that partition ``n_bootstrap`` replicates.
+
+    Drawing the resampling indices block-by-block consumes the RNG stream in
+    exactly the same order as drawing them one replicate at a time, so the
+    blocked/vectorized bootstrap reproduces the old per-replicate loop
+    bit-for-bit for any given ``random_seed``.
+    """
+    per_block = max(1, _BOOTSTRAP_BLOCK_ELEMENTS // max(n_samples, 1))
+    done = 0
+    while done < n_bootstrap:
+        block = min(per_block, n_bootstrap - done)
+        yield done, block
+        done += block
+
+
 def _bootstrap_analysis(
     y: np.ndarray,
     sig: np.ndarray,
@@ -442,35 +468,44 @@ def _bootstrap_analysis(
     random_seed: Optional[int],
     verbose: bool
 ) -> Dict[str, np.ndarray]:
-    """Perform bootstrap analysis for confidence intervals."""
+    """Perform bootstrap analysis for confidence intervals.
+
+    Vectorized over bootstrap replicates: each block resamples ``block x N``
+    indices in one draw instead of looping in Python. Same numbers, roughly
+    an order of magnitude faster — which matters because a Fast TMC run calls
+    this once per tally, and a full MCNP tally set is hundreds of tallies.
+    """
     rng = np.random.default_rng(random_seed)
     N = len(y)
-    
+
     bs_mean = np.empty(n_bootstrap)
     bs_nuc = np.empty(n_bootstrap)
     bs_obs = np.empty(n_bootstrap)
-    
-    for i in range(n_bootstrap):
-        # Bootstrap resample
-        idx = rng.integers(0, N, N)
+
+    # (sig * y)**2 is a per-sample quantity, so it can be squared once here
+    # and merely re-indexed per replicate instead of re-multiplied and
+    # re-squared over the whole (block x N) resample. Element-for-element the
+    # same products, so the bootstrap draws stay bit-identical.
+    abs_err_sq = (sig * y) ** 2
+
+    for start, block in _bootstrap_blocks(n_bootstrap, N):
+        stop = start + block
+        idx = rng.integers(0, N, size=(block, N))
         y_bs = y[idx]
-        sig_bs = sig[idx]
-        
-        # Mean for this bootstrap sample
-        bs_mean[i] = y_bs.mean()
-        
-        # Observed (total) uncertainty for this bootstrap sample
-        std_obs_bs = np.std(y_bs, ddof=1)
-        bs_obs[i] = std_obs_bs / y_bs.mean() * 100.0
-        
-        # Nuclear data uncertainty for this bootstrap sample
-        abs_err_bs = sig_bs * y_bs
-        var_within_bs = np.mean(abs_err_bs**2)
-        var_obs_bs = np.var(y_bs, ddof=1)
-        var_nuc_bs = max(var_obs_bs - var_within_bs, 0.0)
-        std_nuc_bs = np.sqrt(var_nuc_bs)
-        bs_nuc[i] = std_nuc_bs / y_bs.mean() * 100.0
-    
+
+        # Mean for each bootstrap replicate
+        means = y_bs.mean(axis=1)
+        bs_mean[start:stop] = means
+
+        # Observed (total) uncertainty for each replicate
+        var_obs_bs = y_bs.var(axis=1, ddof=1)
+        bs_obs[start:stop] = np.sqrt(var_obs_bs) / means * 100.0
+
+        # Nuclear data uncertainty for each replicate
+        var_within_bs = abs_err_sq[idx].mean(axis=1)
+        var_nuc_bs = np.maximum(var_obs_bs - var_within_bs, 0.0)
+        bs_nuc[start:stop] = np.sqrt(var_nuc_bs) / means * 100.0
+
     return {
         'mean_tally': bs_mean,
         'percent_unc_nuclear_data': bs_nuc,
