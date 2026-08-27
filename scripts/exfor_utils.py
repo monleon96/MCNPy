@@ -1763,6 +1763,8 @@ def precompute_overlap_weights(
     default_flight_path_m: float = 27.037,
     default_time_resolution_ns: float = 5.0,
     default_delta_t_is_fwhm: bool = True,
+    default_rel_sigma_E: Optional[float] = None,
+    quarantined_as_box: bool = True,
     logger=None,
 ) -> Dict[int, List[Tuple[Dict, float]]]:
     """Compute overlap weights from ALL datasets across all bins.
@@ -1788,6 +1790,9 @@ def precompute_overlap_weights(
         Default flight path in meters for experiments not in the cache.
     default_time_resolution_ns : float
         Default time resolution in nanoseconds for experiments not in the cache.
+    default_rel_sigma_E : float, optional
+        Relative sigma_E for experiments EXFOR says nothing about, in place of
+        the (L, delta_t) default. See scripts/tof_parameters.py.
 
     Returns
     -------
@@ -1843,6 +1848,8 @@ def precompute_overlap_weights(
                     subentry_id, tof_params_cache,
                     default_flight_path_m, default_time_resolution_ns,
                     default_delta_t_is_fwhm=default_delta_t_is_fwhm,
+                    default_rel_sigma_E=default_rel_sigma_E,
+                    quarantined_as_box=quarantined_as_box,
                 )
                 ds_sigma_E = compute_sigma_E(exfor_energy, tof_params)
                 ds_tof_source = tof_params.source
@@ -1889,25 +1896,31 @@ def precompute_overlap_weights(
     # experimental point spreads across bins — so a silent fallback to the
     # pipeline default is worth naming rather than assuming.
     if logger is not None and _conv_seen:
-        from_file = sorted(
-            s for s, p in _conv_seen.items() if p.source == "file"
-        )
-        defaulted = sorted(
-            s for s, p in _conv_seen.items() if p.source != "file"
-        )
+        by_source: Dict[str, List[str]] = {}
+        for s, p in sorted(_conv_seen.items()):
+            by_source.setdefault(p.source, []).append(s)
         conv = "FWHM" if default_delta_t_is_fwhm else "sigma"
         logger.info(
             f"  TOF convention: delta_t read as {conv} by default; "
-            f"{len(from_file)} subentry(ies) had file parameters, "
-            f"{len(defaulted)} fell back to L={default_flight_path_m} m, "
-            f"dt={default_time_resolution_ns} ns"
+            f"sigma_E channels: "
+            + ", ".join(f"{k}={len(v)}" for k, v in sorted(by_source.items()))
         )
-        if defaulted:
+        # Only the two genuine no-information channels are a warning. Before
+        # 2026-08-26 this block counted every non-"file" subentry as a
+        # fallback, which silently lumped the declared EN-RSL* ones in with
+        # the ones nothing is known about.
+        blind = sorted(by_source.get("default", []) + by_source.get("default_rel", []))
+        if blind:
+            how = (
+                f"sigma_E = {100 * default_rel_sigma_E:.2f}% of E"
+                if default_rel_sigma_E is not None
+                else f"L={default_flight_path_m} m, dt={default_time_resolution_ns} ns "
+                     f"({conv})"
+            )
             logger.warning(
-                f"  [TOF] No per-experiment parameters for: "
-                f"{', '.join(defaulted[:12])}"
-                f"{' ...' if len(defaulted) > 12 else ''} — these inherit the "
-                f"global delta_t and its {conv} reading."
+                f"  [TOF] No documented incident-energy width for "
+                f"{len(blind)} subentry(ies): {', '.join(blind[:12])}"
+                f"{' ...' if len(blind) > 12 else ''} — these fall back to {how}."
             )
 
     return overlap_weights

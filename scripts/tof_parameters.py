@@ -47,7 +47,11 @@ class TOFParameters:
         Time resolution in nanoseconds.  See ``delta_t_is_fwhm``.
     source : str
         Source of parameters: "exfor_rsl" (declared EN-RSL* resolution from
-        EXFOR), "file" (curated L/δt from JSON) or "default" (fallback values)
+        EXFOR), "curated_spread" (an incident-energy spread curated from the
+        entry's own BIB text), "file" (curated L/δt from JSON), "exfor_rsl_box"
+        (a quarantined EN-RSL* width read as a uniform box, see
+        ``get_tof_parameters``), "default_rel" (relative fallback) or "default"
+        (L/δt fallback values)
     delta_t_is_fwhm : bool
         Whether ``time_resolution_ns`` is a FWHM (the usual way pulse widths and
         detector timing are quoted) or already a standard deviation.  The two
@@ -63,14 +67,39 @@ class TOFParameters:
         TOF formula entirely — the declared incident spread is the quantity the
         fold needs, and for many experiments it is not of TOF origin at all
         (thesis_chi2_review.md §12b).
+    energy_sigma_mev : Optional[float]
+        Incident-energy resolution given directly as a standard deviation in
+        MeV.  Takes precedence over every other channel, ``energy_fwhm_mev``
+        included.  It exists because two of the channels do not produce a
+        FWHM at all: a *covered range* or *source spread* is a box, whose
+        sigma is W/sqrt(12), not W/2.3548.  Encoding those as an "equivalent
+        FWHM" would hide the shape assumption inside a number; this keeps it
+        where it is made.
+    rel_sigma_E : Optional[float]
+        Incident-energy resolution as a *fraction* of the incident energy:
+        sigma_E = rel_sigma_E * E.  Used by the relative fallback, where the
+        width is unknown but the class of experiment is not.  Ranks below
+        ``energy_sigma_mev`` and ``energy_fwhm_mev``.
     """
     flight_path_m: float
     time_resolution_ns: float
-    source: str  # "exfor_rsl", "file" or "default"
+    source: str  # see the `source` attribute above
     delta_t_is_fwhm: bool = True
     energy_fwhm_mev: Optional[float] = None
+    energy_sigma_mev: Optional[float] = None
+    rel_sigma_E: Optional[float] = None
 
     def __repr__(self) -> str:
+        if self.rel_sigma_E is not None:
+            return (
+                f"TOFParameters(sigma_E={100 * self.rel_sigma_E:.2f}% of E, "
+                f"source={self.source})"
+            )
+        if self.energy_sigma_mev is not None:
+            return (
+                f"TOFParameters(sigma_E={1e3 * self.energy_sigma_mev:.1f}keV, "
+                f"source={self.source})"
+            )
         if self.energy_fwhm_mev is not None:
             return (
                 f"TOFParameters(FWHM_E={1e3 * self.energy_fwhm_mev:.1f}keV, "
@@ -95,6 +124,12 @@ def load_tof_parameters_file(filepath: str) -> Dict[str, Dict[str, Any]]:
             "energy_resolution": {          # declared EXFOR EN-RSL* (preferred)
                 "fwhm_mev": <float>,        # convention-resolved FWHM
                 "review_required": <bool>,  # quarantined when true
+                ...
+            },
+            "energy_spread": {              # curated from the entry's BIB text
+                "full_width_mev": <float>,  # the quoted width
+                "shape": "box" | "fwhm",    # how to read it (default "box")
+                "ref": <str>,               # the BIB line it came from
                 ...
             },
             "tof": {                        # curated (L, delta_t) fallback
@@ -135,6 +170,19 @@ def load_tof_parameters_file(filepath: str) -> Dict[str, Dict[str, Any]]:
     return data
 
 
+# Median relative sigma_E of the 50 datasets in the 0.847-4 MeV Fe-56 corpus
+# that DO declare an EN-RSL* (measured 2026-08-26; IQR 1.08-1.90%, p5-p95
+# 0.33-2.89%). It is the empirical answer to "how wide is a scattering
+# experiment of this era that bothers to say", and therefore the defensible
+# stand-in for one that says nothing. See `default_rel_sigma_E` below.
+CORPUS_MEDIAN_REL_SIGMA_E = 0.0131
+
+
+def _box_sigma_mev(full_width_mev: float) -> float:
+    """sigma of a uniform distribution of full width ``full_width_mev``."""
+    return float(full_width_mev) / np.sqrt(12.0)
+
+
 def get_tof_parameters(
     subentry: str,
     tof_params_cache: Dict[str, Dict[str, Any]],
@@ -142,15 +190,45 @@ def get_tof_parameters(
     default_time_resolution_ns: float = 5.0,
     default_delta_t_is_fwhm: bool = True,
     use_declared_resolution: bool = True,
+    default_rel_sigma_E: Optional[float] = None,
+    quarantined_as_box: bool = True,
 ) -> TOFParameters:
     """
     Get TOF parameters for a subentry with fallback to defaults.
 
-    Precedence (thesis_chi2_review.md §12f): declared EXFOR resolution
-    (``declared_energy_resolution`` block, source="exfor_rsl") → curated
-    (L, δt) pair (``energy_resolution_input``, source="file") → defaults.
-    Declared blocks flagged ``review_required`` (suspect widths, §12e) are
-    quarantined and fall through to the next level.
+    Precedence (thesis_chi2_review.md §12f, extended 2026-08-26):
+
+      1. declared EXFOR resolution, not quarantined  → source="exfor_rsl"
+      2. curated ``energy_spread`` from the entry's BIB text
+                                                     → source="curated_spread"
+      3. curated (L, δt) pair                        → source="file"
+      4. quarantined declared width, read as a box   → source="exfor_rsl_box"
+      5. relative default, if one was asked for      → source="default_rel"
+      6. (L, δt) defaults                            → source="default"
+
+    Levels 4 and 5 are the 2026-08-26 change.  Before it, a quarantined
+    ``review_required`` width and a subentry EXFOR says nothing about both
+    landed on the ORELA-like (27.037 m, 5 ns) default, whose sigma_E is
+    0.2-0.4% of E — 6x to 31x *narrower* than what those experiments declare,
+    and 3-6x narrower than the corpus median of the ones that do declare.
+    Sub-declaring the resolution is the one direction this evaluation treats
+    as inadmissible, so both now resolve conservatively instead:
+
+      - A quarantined width was quarantined precisely because it looks like a
+        covered *range* or a source *spread* rather than a Gaussian FWHM
+        (§12e).  Read as what it looks like — a uniform box — it gives
+        sigma = W/sqrt(12).  That is smaller than reading it as a FWHM
+        (W/2.3548) and far larger than discarding it, so it neither trusts a
+        suspect number as a resolution function nor throws it away.
+      - ``default_rel_sigma_E`` replaces the ORELA station with a fraction of
+        the incident energy.  ``CORPUS_MEDIAN_REL_SIGMA_E`` is the measured
+        value for this corpus.  Left at None the old (L, δt) default stands,
+        so callers that have not opted in are bit-identical.
+
+    Level 4 sits *below* the curated (L, δt) pair on purpose: where a
+    quarantined width and a curated pair coexist, the pair still wins, so
+    this change can only affect subentries that would otherwise have hit the
+    default.
 
     Parameters
     ----------
@@ -165,6 +243,14 @@ def get_tof_parameters(
     use_declared_resolution : bool
         If False, ignore ``declared_energy_resolution`` blocks (pre-§12f
         behaviour, for comparison runs).
+    default_rel_sigma_E : float, optional
+        When set, subentries with no information at all get
+        ``sigma_E = default_rel_sigma_E * E`` instead of the (L, δt) default.
+        None (the default) keeps the pre-2026-08-26 behaviour.
+    quarantined_as_box : bool
+        When True (the default), a ``review_required`` declared width that
+        would otherwise fall through to the defaults is read as a uniform box.
+        Set False to restore the pre-2026-08-26 fall-through.
 
     Returns
     -------
@@ -178,8 +264,8 @@ def get_tof_parameters(
         # Highest precedence: resolution declared in EXFOR itself (EN-RSL*),
         # already convention-resolved to a FWHM by the extraction script
         # (myworkspace/EXFOR/extract_en_rsl_resolutions.py).
+        decl = entry_data.get("energy_resolution") or {}
         if use_declared_resolution:
-            decl = entry_data.get("energy_resolution") or {}
             fwhm = decl.get("fwhm_mev")
             if fwhm is not None and not decl.get("review_required"):
                 return TOFParameters(
@@ -189,6 +275,25 @@ def get_tof_parameters(
                     delta_t_is_fwhm=default_delta_t_is_fwhm,
                     energy_fwhm_mev=float(fwhm),
                 )
+
+        # Curated incident-energy spread, read from the entry's own BIB text
+        # (INC-SPECT / INC-SOURCE / METHOD) rather than from an EN-RSL* column.
+        # `shape` says how the quoted width is to be read: "box" for a covered
+        # range or a source spectrum, "fwhm" for a resolution function.
+        spread = entry_data.get("energy_spread") or {}
+        width = spread.get("full_width_mev")
+        if width is not None:
+            shape = str(spread.get("shape", "box")).lower()
+            sigma = (
+                float(width) / 2.3548 if shape == "fwhm" else _box_sigma_mev(width)
+            )
+            return TOFParameters(
+                flight_path_m=default_flight_path_m,
+                time_resolution_ns=default_time_resolution_ns,
+                source="curated_spread",
+                delta_t_is_fwhm=default_delta_t_is_fwhm,
+                energy_sigma_mev=sigma,
+            )
 
         # Curated (L, delta_t) channel
         tof = entry_data.get("tof") or {}
@@ -210,7 +315,28 @@ def get_tof_parameters(
                 ),
             )
 
-    # Fallback to defaults
+        # Quarantined declared width, read as a uniform box rather than
+        # discarded in favour of a narrower default.
+        if quarantined_as_box and use_declared_resolution:
+            fwhm = decl.get("fwhm_mev")
+            if fwhm is not None and decl.get("review_required"):
+                return TOFParameters(
+                    flight_path_m=default_flight_path_m,
+                    time_resolution_ns=default_time_resolution_ns,
+                    source="exfor_rsl_box",
+                    delta_t_is_fwhm=default_delta_t_is_fwhm,
+                    energy_sigma_mev=_box_sigma_mev(float(fwhm)),
+                )
+
+    # Fallback: nothing is known about this subentry's incident-energy spread.
+    if default_rel_sigma_E is not None:
+        return TOFParameters(
+            flight_path_m=default_flight_path_m,
+            time_resolution_ns=default_time_resolution_ns,
+            source="default_rel",
+            delta_t_is_fwhm=default_delta_t_is_fwhm,
+            rel_sigma_E=abs(float(default_rel_sigma_E)),
+        )
     return TOFParameters(
         flight_path_m=default_flight_path_m,
         time_resolution_ns=default_time_resolution_ns,
@@ -227,8 +353,10 @@ def compute_sigma_E(
     """
     Compute energy resolution σE from TOF parameters.
 
-    If ``tof_params.energy_fwhm_mev`` is set (declared EXFOR resolution),
-    returns ``energy_fwhm_mev / 2.3548`` directly.  Otherwise delegates to
+    Channel precedence: ``energy_sigma_mev`` (already a sigma) →
+    ``rel_sigma_E`` (a fraction of E) → ``energy_fwhm_mev`` (declared EXFOR
+    resolution, returns ``energy_fwhm_mev / 2.3548``) → the TOF formula.
+    Otherwise delegates to
     :func:`kika.utils.energy_folding.tof_energy_resolution`, using the
     convention recorded on ``tof_params.delta_t_is_fwhm``, then applies a
     floor.
@@ -257,7 +385,18 @@ def compute_sigma_E(
     if energy_mev <= 0:
         return min_sigma_E_kev / 1000.0  # Return minimum in MeV
 
-    if tof_params.energy_fwhm_mev is not None:
+    if tof_params.energy_sigma_mev is not None:
+        # Width already resolved to a standard deviation by the caller: a
+        # curated BIB spread or a quarantined EN-RSL* width read as a box.
+        # The shape assumption was made where the number was chosen, so
+        # nothing is converted here.
+        sigma_E_mev = tof_params.energy_sigma_mev
+    elif tof_params.rel_sigma_E is not None:
+        # Relative fallback: nothing is known about this experiment's width,
+        # so it is assumed to behave like the corpus median of the ones that
+        # declare theirs.
+        sigma_E_mev = tof_params.rel_sigma_E * energy_mev
+    elif tof_params.energy_fwhm_mev is not None:
         # Declared incident-energy resolution (EN-RSL*): energy-independent
         # FWHM straight from EXFOR; the TOF formula does not apply (§12b).
         sigma_E_mev = tof_params.energy_fwhm_mev / 2.3548
@@ -417,6 +556,7 @@ def summarize_tof_parameters(
     n_from_file = 0
     n_default = 0
     n_exfor_rsl = 0
+    n_by_source: Dict[str, int] = {}
     flight_paths = []
     time_resolutions = []
 
@@ -428,13 +568,21 @@ def summarize_tof_parameters(
             default_time_resolution_ns=default_time_resolution_ns,
         )
 
-        if params.source == "exfor_rsl":
-            n_exfor_rsl += 1
-            continue  # no (L, δt) pair to aggregate for declared widths
+        if params.source in ("exfor_rsl", "exfor_rsl_box", "curated_spread",
+                             "default_rel"):
+            # Width channels: there is no (L, δt) pair to aggregate. The box
+            # and relative channels are counted separately from the clean
+            # declared ones so a run cannot report "declared" coverage it
+            # does not have.
+            n_by_source[params.source] = n_by_source.get(params.source, 0) + 1
+            if params.source == "exfor_rsl":
+                n_exfor_rsl += 1
+            continue
         elif params.source == "file":
             n_from_file += 1
         else:
             n_default += 1
+        n_by_source[params.source] = n_by_source.get(params.source, 0) + 1
 
         flight_paths.append(params.flight_path_m)
         time_resolutions.append(params.time_resolution_ns)
@@ -443,6 +591,7 @@ def summarize_tof_parameters(
         'n_from_file': n_from_file,
         'n_default': n_default,
         'n_exfor_rsl': n_exfor_rsl,
+        'n_by_source': n_by_source,
         'flight_paths': flight_paths,
         'time_resolutions': time_resolutions,
         'mean_flight_path_m': np.mean(flight_paths) if flight_paths else 0.0,

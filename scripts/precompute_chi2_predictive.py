@@ -124,6 +124,7 @@ from scripts.tof_parameters import (
     load_tof_parameters_file,
     get_tof_parameters,
     compute_sigma_E,
+    CORPUS_MEDIAN_REL_SIGMA_E,
 )
 
 
@@ -189,6 +190,11 @@ DEFAULT_TIME_RESOLUTION_NS = 5.0
 # Must match DELTA_T_IS_FWHM in exfor_to_endf_sampling_v2.py, or this chi2 folds
 # over a different kernel than the fit used. From run 82 delta_t is a FWHM.
 DELTA_T_IS_FWHM            = True
+# 2026-08-26: must match DEFAULT_REL_SIGMA_E in exfor_to_endf_research.py for
+# the same reason. sigma_E for subentries EXFOR documents no width for, as a
+# fraction of E, in place of the ORELA-like (L, delta_t) default.
+DEFAULT_REL_SIGMA_E        = CORPUS_MEDIAN_REL_SIGMA_E
+QUARANTINED_AS_BOX         = True   # read a review_required EN-RSL* width as a box
 
 E_MIN_MEV = 0.85
 E_MAX_MEV = 4.0
@@ -418,6 +424,8 @@ def build_rows_at_energy(
             default_flight_path_m=DEFAULT_FLIGHT_PATH_M,
             default_time_resolution_ns=DEFAULT_TIME_RESOLUTION_NS,
             default_delta_t_is_fwhm=DELTA_T_IS_FWHM,
+            default_rel_sigma_E=DEFAULT_REL_SIGMA_E,
+            quarantined_as_box=QUARANTINED_AS_BOX,
         )
         sigma_E_mev = compute_sigma_E(e_mev, tof)
         sample_e_ev, weights = _resolution_window(e_mev, sigma_E_mev)

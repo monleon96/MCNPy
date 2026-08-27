@@ -242,7 +242,7 @@ def _parse_x4data_json(jx5z: Dict[str, Any]) -> Dict[str, Any]:
     -------
     Dict[str, Any]
         Extracted data with keys: 'energies', 'angles', 'values', 'uncertainties',
-        'energy_unit', 'angle_unit', 'xs_unit', 'angle_type'
+        'energy_unit', 'angle_unit', 'xs_unit', 'angle_type', 'angle_header'
     """
     x4data = jx5z.get("x4data", [])
 
@@ -256,6 +256,7 @@ def _parse_x4data_json(jx5z: Dict[str, Any]) -> Dict[str, Any]:
         "xs_unit": "B/SR",
         "uncertainty_unit": "",  # Track uncertainty unit for PER-CENT detection
         "angle_type": "ANG",  # 'ANG' or 'COS'
+        "angle_header": "",   # raw EXFOR column header, e.g. 'ANG' or 'ANG-CM'
         "uncertainty_components": [],  # All dy columns surfaced (DATA-ERR, ERR-1, ERR-S, ERR-T, ...)
     }
 
@@ -278,11 +279,13 @@ def _parse_x4data_json(jx5z: Dict[str, Any]) -> Dict[str, Any]:
             result["angles"] = dat0
             result["angle_unit"] = units
             result["angle_type"] = "ANG"
+            result["angle_header"] = var.get("header", "")
         elif fam == "COS":
             # Angle as cosine
             result["angles"] = dat0
             result["angle_unit"] = units
             result["angle_type"] = "COS"
+            result["angle_header"] = var.get("header", "")
         elif cvar == "dy" or fam in ("dData", "DATA-ERR"):
             header = var.get("header", "")
             if_comm = bool(var.get("ifComm", False))
@@ -337,7 +340,7 @@ def _parse_c5data_json(jx5z: Dict[str, Any]) -> Dict[str, Any]:
     -------
     Dict[str, Any]
         Extracted data with keys: 'energies', 'angles', 'values', 'uncertainties',
-        'energy_unit', 'angle_unit', 'xs_unit', 'angle_type', 'is_corrected',
+        'energy_unit', 'angle_unit', 'xs_unit', 'angle_type', 'is_cm', 'is_corrected',
         'correction_notes'
     """
     c5data = jx5z.get("c5data", {})
@@ -351,6 +354,7 @@ def _parse_c5data_json(jx5z: Dict[str, Any]) -> Dict[str, Any]:
         "angle_unit": "ADEG",
         "xs_unit": "B/SR",
         "angle_type": "ANG",
+        "is_cm": False,
         "is_corrected": False,
         "correction_notes": [],
     }
@@ -387,6 +391,13 @@ def _parse_c5data_json(jx5z: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 result["angle_type"] = "ANG"
                 result["angle_unit"] = x2_data.get("units", "ADEG")
+            # X4Pro normally converts a CM-quoted angle to the lab frame and
+            # leaves ifCM False. It does NOT when the cross section itself is
+            # CM (header DATA-CM): both stay in the centre of mass and ifCM
+            # says so. Reading it is the only way to tell those apart -- the
+            # reaction code does not, and neither does the c5 header, which
+            # reads "ANG" either way.
+            result["is_cm"] = bool(x2_data.get("ifCM", False))
 
     # Check if corrections were applied
     auto_corr_notes = jx5z.get("autoCorrNotes", [])
@@ -784,6 +795,7 @@ class X4ProDatabase:
         energy_unit = parsed["energy_unit"]
         xs_unit = parsed["xs_unit"]
         angle_type = parsed["angle_type"]
+        angles_are_cm = parsed["is_cm"] and len(angles) > 0
 
         # Check x4data for PER-CENT uncertainties - c5data may have incorrect conversion
         # The X4Pro database sometimes incorrectly processes PER-CENT uncertainties in c5data
@@ -829,6 +841,9 @@ class X4ProDatabase:
             if x4_parsed["angles"]:
                 angles = np.array(x4_parsed["angles"], dtype=float)
                 angle_type = x4_parsed["angle_type"]
+                # Raw x4data is untouched by X4Pro's frame conversion, so a
+                # CM-quoted column arrives in CM.
+                angles_are_cm = x4_parsed.get("angle_header", "").endswith("-CM")
 
         # Ensure uncertainties array is initialized
         if len(uncertainties) == 0 and len(values) > 0:
@@ -841,9 +856,17 @@ class X4ProDatabase:
         else:
             angle_unit = parsed["angle_unit"]
 
-        # Determine frame from reacode
+        # Determine the frame. X4Pro's own ifCM flag on the c5 angle variable
+        # is authoritative and comes first: before 2026-08-26 the frame was
+        # read from the reaction code alone, which silently labelled Becker
+        # 1966 (11511009, DATA-CM vs COS-CM) as lab and sent already-CM data
+        # through a second lab->CM transform.
         reacode = metadata.get("reacode", "")
-        angle_frame = FRAME_CM if ",DA/DA,," in reacode or angle_type == "COS" else FRAME_LAB
+        angle_frame = (
+            FRAME_CM
+            if angles_are_cm or ",DA/DA,," in reacode or angle_type == "COS"
+            else FRAME_LAB
+        )
 
         return X4ProDataset(
             dataset_id=dataset_id,
