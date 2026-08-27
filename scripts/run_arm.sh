@@ -138,6 +138,23 @@ case "$ARM" in
   R6) FL=(1 1 1 1 1 10 3); TAG=todo         ; SERIE=103 ;;
   S1) FL=(1 1 0 1 0 10 3); TAG=fixsingleton ; SERIE=104 ;;
   S2) FL=(1 1 0 1 0  3 3); TAG=k3c3         ; SERIE=104 ;;
+  # ⚑ T1 (26-ago): EXACTAMENTE los flags de S2, el entregable. La UNICA variable
+  #   es sigma_E de entrada -- el JSON corregido (Smith 5.25 m, Perey 200.191 m,
+  #   Salnikov como caja, Cox corroborado) mas los dos canales nuevos del
+  #   resolver (cuarentena como caja, default relativo 1.31 % de E) y el marco
+  #   CM de Becker. Se compara contra 104S2 y contra nada mas.
+  T1) FL=(1 1 0 1 0  3 3); TAG=sigmaEfix    ; SERIE=105 ;;
+  # ⚑ T2 (27-ago): los flags de T1 — o sea los de S2 — y DOS arreglos aguas
+  #   arriba del ajuste, ninguno de ellos una perilla de covarianza:
+  #     1. se rechazan los candidatos Legendre imposibles (|a_l| > 1) antes de
+  #        pesarlos por AIC. En la 105T1, 2 bins (1,558 y 1,560 MeV) metian un
+  #        componente con |a_1| > 1 que volteaba avg_a_1 y dejaba
+  #        sigma(a_1) = 1,667, mas que el rango fisico del coeficiente entero.
+  #     2. la sintesis de DATA-ERR de Gkatis 27673002, que corria con sigma 1 %
+  #        plana porque la guarda era `is None` y el cargador JSON pone `[]`.
+  #   Se compara contra 105T1: los dos mueven el CENTRAL, asi que T2 tampoco
+  #   tiene puerta de inercia. Su puerta dura es la del RANGO FISICO.
+  T2) FL=(1 1 0 1 0  3 3); TAG=admisible    ; SERIE=106 ;;
   S3) FL=(1 1 0 1 0  3 2); TAG=k3c2         ; SERIE=104 ;;
   *)  echo "⛔ KIKA_ARM='$ARM' no es R1..R6 ni S1..S3"; exit 1 ;;
 esac
@@ -222,11 +239,60 @@ if not hasattr(pom, "physical_solve_order"):
 #   correria el codigo viejo y saldria con la malla de la 103 sin avisar.
 if "lim[-1] = max(lim[-1], wid[-1])" not in (here / "per_order_mesh.py").read_text():
     faltan.append("singleton exento de la resolucion (serie 104)")
+# ⚑ LOS CUATRO CAMBIOS DE sigma_E (26-ago). Sin testigo, T1 correria con los
+#   inputs viejos y saldria identico a 104S2 -- que es justo el resultado que
+#   la comparacion quiere poder creer.
+import scripts.tof_parameters as tp
+if not hasattr(tp, "CORPUS_MEDIAN_REL_SIGMA_E"):
+    faltan.append("default relativo (CORPUS_MEDIAN_REL_SIGMA_E)")
+if "quarantined_as_box" not in inspect.signature(tp.get_tof_parameters).parameters:
+    faltan.append("canal caja para anchos en cuarentena (quarantined_as_box)")
+_tof = tp.load_tof_parameters_file(
+    "/share_snc/snc/JuanMonleon/EXFOR/exfor_tof_parameters.json")
+if (_tof.get("10886002", {}).get("tof") or {}).get("flight_path_m") != 5.25:
+    faltan.append("camino de vuelo de Smith 1980 en exfor_tof_parameters.json (5.25 m)")
+if "13511004" not in _tof or "40372004" not in _tof:
+    faltan.append("entradas nuevas de Perey 13511004 / Salnikov 40372004")
+# El marco de Becker vive en la LIBRERIA, no en scripts/: va por wheel y por
+# eso se comprueba importando, no leyendo el fuente ([[cluster-venv-is-not-inspectable]]).
+try:
+    from kika.exfor.database import _parse_c5data_json as _pc5
+    if _pc5({"c5data": {"x2": {"fam": "ANG", "x2": [30.0], "ifCM": True}}}).get("is_cm") is not True:
+        raise RuntimeError("is_cm no se propaga")
+except Exception as _e:
+    faltan.append(f"marco CM de X4Pro en el kika INSTALADO ({_e}); "
+                  f"pip install --force-reinstall "
+                  f"/share_snc/snc/JuanMonleon/EXFOR/kika_dist/kika_nd-0.2.10-py3-none-any.whl")
+
+# ⚑ EL RECHAZO DE CANDIDATOS IMPOSIBLES (27-ago). Sin testigo, un brazo correria
+#   con el codigo viejo y volveria a embarcar sigma(a_1) = 1,667 sobre un
+#   coeficiente acotado en [-1, 1], que es justo lo que se va a rehacer.
+if not hasattr(er, "admissible_degrees"):
+    faltan.append("filtro de candidatos imposibles (admissible_degrees)")
+elif not er.REJECT_INADMISSIBLE_DEGREES:
+    faltan.append("REJECT_INADMISSIBLE_DEGREES esta APAGADO")
+else:
+    # que ademas FUNCIONE, no solo que exista: un candidato que afirma <mu> = 1,4
+    _c0 = 0.25
+    _probe = {2: {"coeffs": [_c0, 1.4 * 3 * _c0, 0.2 * 5 * _c0]},
+              3: {"coeffs": [_c0, 0.3 * 3 * _c0, 0.2 * 5 * _c0, 0.1 * 7 * _c0]}}
+    _keep, _drop = er.admissible_degrees(_probe, [2, 3])
+    if _keep != [3] or 2 not in _drop:
+        faltan.append(f"admissible_degrees no filtra (keep={_keep}, drop={list(_drop)})")
+
+# ⚑ EL ARREGLO DE GKATIS (27-ago): la sintesis de DATA-ERR estaba guardada por
+#   `is None`, y `[]` no es `None`, asi que 27673002 corria con sigma = 1 % plana.
+import inspect as _insp
+import scripts.uncertainty_manifest as _um
+if "if uncertainty_components is None:" in _insp.getsource(_um.apply_manifest_to_exfor):
+    faltan.append("arreglo de Gkatis en uncertainty_manifest.py (la guarda sigue en `is None`)")
+
 if faltan:
     for f in faltan:
         print(f"[preflight] ⛔ falta: {f}")
     sys.exit(1)
-print("[preflight] los cuatro cambios de hoy estan presentes")
+print("[preflight] presentes: los cuatro cambios de sigma_E (26-ago) + el filtro de "
+      "candidatos imposibles y el arreglo de Gkatis (27-ago)")
 
 # 2. QUE LOS CINCO FLAGS SE LEAN DEL ENTORNO. Si alguno fuera constante, dos
 #    brazos correrian lo mismo y la comparacion saldria plana SIN avisar.
@@ -238,6 +304,17 @@ for tok in ("KIKA_RESTORE_MIXTURE_HIGH_ORDER", "KIKA_BETWEEN_EXP_FLOOR_POOLED",
     if tok not in src:
         print(f"[preflight] ⛔ {tok} no se lee del entorno."); sys.exit(1)
 print("[preflight] los siete flags son leibles por entorno")
+
+# 2b. Los dos canales de sigma_E NO son de entorno: son constantes de modulo, y
+#     es su VALOR el que decide la run. Se afirman aqui para que queden en el
+#     log junto a los flags, y para que apagarlos por error no pase inadvertido.
+if er.DEFAULT_REL_SIGMA_E is None or er.QUARANTINED_AS_BOX is not True:
+    print(f"[preflight] ⛔ canales sigma_E apagados: "
+          f"DEFAULT_REL_SIGMA_E={er.DEFAULT_REL_SIGMA_E} "
+          f"QUARANTINED_AS_BOX={er.QUARANTINED_AS_BOX}")
+    sys.exit(1)
+print(f"[preflight] sigma_E: default_rel={100*er.DEFAULT_REL_SIGMA_E:.2f}% de E, "
+      f"cuarentena como caja=ON")
 
 # 3. MEMORIA. Misma formula MEDIDA que la run 100 (751 B por pareja).
 def reserva_mb():
@@ -300,7 +377,8 @@ cfg = json.loads((out / "run_metadata.json").read_text())["config"]
 
 esperado = {"R1": (False, False), "R2": (True, True), "R3": (True, True),
             "R4": (True, True), "R5": (True, True), "R6": (True, True),
-            "S1": (True, True), "S2": (True, True), "S3": (True, True)}[arm]
+            "S1": (True, True), "S2": (True, True), "S3": (True, True),
+            "T1": (True, True), "T2": (True, True)}[arm]
 for k, want in (("RESTORE_MIXTURE_HIGH_ORDER", esperado[0]),
                 ("APPLY_BETWEEN_EXP_FLOOR_POOLED", esperado[1]),
                 ("BASE_SEED", 42)):
@@ -326,8 +404,23 @@ if arm == "R1":
             print("     El sospechoso numero uno es el refactor de splice, que en")
             print("     los injertos anteriores se dejaba fuera a proposito.")
             bad += 1
+elif arm in ("T1", "T2"):
+    # ── T1/T2 MUEVEN EL CENTRAL A PROPOSITO, y por eso NO tienen puerta de inercia.
+    #   sigma_E no es una perilla de covarianza: entra en el AJUSTE. El marco CM
+    #   de Becker reetiqueta los 14 puntos de 11511009 que caen en el bin 1700,
+    #   asi que `nominal_fits.parquet` y `mf34_mean_perbin.npy` TIENEN que
+    #   diferir de 102a. Compararlos byte a byte es una puerta que T1 esta
+    #   obligado a fallar.
+    # ⛔ 26-ago-2026: eso fue exactamente lo que paso. La run termino BIEN a las
+    #   9h35, escribio la cinta de 598 MB y reprodujo la prediccion, y esta
+    #   puerta la marco "⛔ con fallos" -> `exit 1` -> el chi2 que estaba
+    #   encolado con `--dependency=afterok` se quedo en DependencyNeverSatisfied
+    #   para siempre. Una puerta que el brazo no puede pasar no es una puerta.
+    #   La de VERDAD para T1 es la de mas abajo: que se mueva SOLO lo predicho.
+    print("\n  ⚑ T1 mueve el central A PROPOSITO (sigma_E entra en el ajuste):")
+    print("    sin puerta de inercia contra 102a. La puerta de T1 es la de abajo.")
 else:
-    # ── R2..R6: el central no se mueve. Ningun cambio de covarianza puede. ──
+    # ── R2..R6, S1..S3: el central no se mueve. Ningun cambio de covarianza puede. ──
     for name in ("nominal_fits.parquet", "mf34_mean_perbin.npy"):
         pa, pb = out / name, r102a / name
         if pa.exists() and pb.exists():
@@ -347,7 +440,7 @@ if log:
             "[Between-exp floor POOLED]", "retenidas", "floored (median",
             "[CROSS] cross-term ENDF", "proyeccion PSD", "varianza DECLARADA",
             "no-cancelacion", "sobre-declaracion", "agrupamiento en UNA etapa",
-            "entradas del agrupamiento", "[AVG] model-averaged")
+            "entradas del agrupamiento", "[AVG] model-averaged", "[ADMIS]")
     vistos = []
     for l in txt:
         t = l.strip()
@@ -357,6 +450,75 @@ if log:
         print("   ", t[:210])
     if len(vistos) > 60:
         print(f"    ... y {len(vistos)-60} lineas mas, en {log[-1].name}")
+
+# ── LA PUERTA DEL RANGO FISICO ──────────────────────────────────────────────
+# Es la red que la cadena no tenia: todos los guardianes vigilaban el
+# denominador (SNR) o la malla (tope sigma-ratio, cambio de signo, anchura), y
+# ninguno miraba si la sigma declarada cabe en el rango que el coeficiente puede
+# tomar. La 105T1 embarco sigma(a_1) = 1,667 sobre |a_1| <= 1 sin que saltara
+# nada. Ahora `build_mixture_blocks` lo comprueba y lo dice en el log; aqui se
+# convierte en rojo del brazo.
+if log:
+    _admis = [l.strip() for l in txt if "[ADMIS]" in l]
+    _viol = [l for l in _admis if "RANGO FISICO VIOLADO" in l]
+    _sin = [l for l in _admis if "NINGUN candidato admisible" in l and " 0 bin(s) con" not in l]
+    if _viol:
+        print("\n  ⛔ RANGO FISICO VIOLADO en la mezcla — la cinta declara una sigma")
+        print("     que no cabe en |a_l| <= 1. NO se embarca asi.")
+        for l in _viol[:5]:
+            print("    ", l[:200])
+        bad += 1
+    elif any("rango fisico:" in l for l in _admis):
+        print("\n  ✅ rango fisico: la mezcla cumple between_var <= 1 - abar^2 "
+              "y sigma(a_l) <= 1")
+    else:
+        print("\n  ⚠ no encuentro la linea [ADMIS] del rango fisico en el log:")
+        print("    ¿corrio este brazo con el codigo del 27-ago?")
+        bad += 1
+    if _sin:
+        print(f"  ⚠ {len(_sin)} aviso(s) de bins sin NINGUN candidato admisible "
+              f"— hay que mirarlos a mano (no suman fallo).")
+
+# ── T2: contra 105T1, y a proposito NO es pasa/no-pasa por conteo ───────────
+# Lo que T2 cambia son DOS cosas aguas arriba del ajuste, y sus alcances se
+# predijeron con precisiones distintas:
+#   * el filtro de imposibles: EXACTO, 2 bins (1,558 y 1,560 MeV);
+#   * Gkatis: Gkatis aparece en 98 de los 1738 bins (76 solo-Gkatis, donde el
+#     central se mueve, y 22 compartidos, donde cambian los pesos GLS).
+# La suma es una COTA, no un numero: por eso esto informa y no suspende. La
+# puerta dura de T2 es la del RANGO FISICO de mas arriba, que si es exacta.
+# ⛔ No repetir el error del 26-ago: una puerta que el brazo no puede pasar
+#    bloquea la cadena entera.
+if arm == "T2":
+    ref = out.parent / "new_test_105T1_sigmaEfix"
+    print("\n  ⚑ T2 vs 105T1 — filtro de imposibles + Gkatis (informativo)")
+    if not ref.exists():
+        print(f"  ⚠ no encuentro la referencia {ref}")
+    else:
+        import pandas as pd
+        a_, b_ = (pd.read_parquet(d / "nominal_fits.parquet") for d in (out, ref))
+        E = b_.energy_mev.to_numpy()
+        cols = [f"c_{l}" for l in range(7)] + [f"avg_a_{l}" for l in range(1, 7)]
+        moved = np.zeros(len(E), dtype=bool)
+        for c in cols:
+            if c in a_ and c in b_:
+                x, y = a_[c].to_numpy(float), b_[c].to_numpy(float)
+                moved |= ~np.isclose(x, y, rtol=1e-9, atol=1e-12)
+        idx = np.flatnonzero(moved)
+        print(f"  centrales movidos: {len(idx)} de {len(E)} bins "
+              f"(cota esperada ~100: 2 del filtro + hasta 98 de Gkatis)")
+        for lab, lo_, hi_ in (("1,558/1,560 (filtro)", 1.5575, 1.5605),):
+            n = int(moved[(E >= lo_) & (E <= hi_)].sum())
+            print(f"    de ellos en {lab}: {n} (se esperan 2)")
+        if len(idx) > 140:
+            print("    ⚠ mas de 140 bins movidos: mas de lo que las dos causas "
+                  "explican. Mirar antes de embarcar.")
+        # lo que este brazo existe para arreglar
+        for L in (1,):
+            sa = np.load(out / "mf34_std_perbin.npy").reshape(-1, 6).T
+            sb = np.load(ref / "mf34_std_perbin.npy").reshape(-1, 6).T
+            print(f"  sigma por bin de a_{L}: max {sa[L-1].max():.4f} "
+                  f"(105T1: {sb[L-1].max():.4f})")
 
 fino_cross = out / "26-Fe-56g_nominal_a0cross.endf"
 print(f"\n  cinta cruzada FINA: {'✅ ESCRITA' if fino_cross.exists() else '⛔ NO escrita'}"
@@ -390,6 +552,96 @@ if mesh.exists():
             print("     Sospechoso 1: el arreglo del singleton no llego a este job.")
             print("     Sospechoso 2: la covarianza difiere de la de 103R4.")
             bad += 1
+
+# ── T1: LA COMPARACION QUE DECIDE SI HAY QUE RE-MUESTREAR ───────────────────
+# T1 lleva los flags de S2 y difiere de el en UNA cosa: los inputs de sigma_E.
+# Asi que este bloque no es una puerta pasa/no-pasa sino la MEDIDA que Juan
+# necesita para decidir si el UQ del PWR900 hay que rehacerlo. La prediccion
+# offline (26-ago, sobre la rejilla de 104S2):
+#   * centrales invariantes salvo UN bin -- el 1700 (E=3.2086 MeV), donde
+#     Becker 11511009 aporta 14 puntos que cambian 2.1 % de mediana al leerse
+#     en CM. El ajuste nominal usa bordes duros y NO ve sigma_E por experimento.
+#   * covarianza: los datasets cuyo sigma_E cambia se llevan <= 2 % del peso
+#     por debajo de 3.06 MeV y ~19 % por encima. Y por encima de 3.06 MeV vive
+#     el 0.24 % de la varianza MF34 embarcada.
+# Si la medida contradice la prediccion, la prediccion estaba mal y hay que
+# mirar por que ANTES de tocar el PWR900.
+if arm == "T1":
+    ref = out.parent / "new_test_104S2_k3c3"
+    print(f"\n  ⚑ T1 vs 104S2 -- la UNICA variable es sigma_E de entrada")
+    if not ref.exists():
+        print(f"  ⛔ no encuentro la referencia {ref}"); bad += 1
+    else:
+        import pandas as pd
+        a_, b_ = (pd.read_parquet(d / "nominal_fits.parquet") for d in (out, ref))
+        E = b_.energy_mev.to_numpy()
+        # 1. centrales
+        cols = [f"c_{l}" for l in range(7)] + [f"avg_a_{l}" for l in range(1, 7)]
+        moved = np.zeros(len(E), dtype=bool)
+        for c in cols:
+            if c in a_ and c in b_:
+                x, y = a_[c].to_numpy(float), b_[c].to_numpy(float)
+                moved |= ~np.isclose(x, y, rtol=1e-9, atol=1e-12)
+        idx = np.flatnonzero(moved)
+        print(f"  centrales: {len(idx)} de {len(E)} bins se mueven")
+        if len(idx):
+            print(f"    bins: {idx[:12].tolist()}{' ...' if len(idx) > 12 else ''}")
+            print(f"    E MeV: {np.round(E[idx][:12], 4).tolist()}")
+        # ⚑ ESTA es la puerta de T1, y es MAS FUERTE que la de inercia: no pide
+        #   que el central no se mueva, pide que se mueva EXACTAMENTE donde la
+        #   prediccion offline dijo. Un bin de mas significa que sigma_E se ha
+        #   colado en algo que no es el marco CM de Becker, y eso hay que
+        #   mirarlo antes de creerse nada de esta run.
+        PRED = {1700}
+        got = set(idx.tolist())
+        print("    (prediccion: SOLO el bin 1700, E=3.2086, por el marco CM de Becker)")
+        if got == PRED:
+            print("  ✅ se mueve EXACTAMENTE lo predicho: 1 bin, el 1700")
+        else:
+            print(f"  ⛔ el central NO se mueve como se predijo:"
+                  f" sobran {sorted(got - PRED)[:12]}, faltan {sorted(PRED - got)}")
+            bad += 1
+
+        # 2. covarianza MF34, separada por el corte de Cierjacks
+        sa = np.load(out / "mf34_std_perbin.npy").reshape(6, -1)
+        sb = np.load(ref / "mf34_std_perbin.npy").reshape(6, -1)
+        if sa.shape != sb.shape:
+            print(f"  ⚠ formas distintas {sa.shape} vs {sb.shape}: la malla cambio, "
+                  f"comparacion por bin no aplicable")
+        else:
+            rel = np.abs(sa - sb) / np.maximum(np.abs(sb), 1e-30)
+            for lab, m in (("<= 3.06 MeV", E <= 3.06), ("> 3.06 MeV", E > 3.06)):
+                r = rel[:, m]
+                print(f"  sigma MF34 {lab:11s}: max |d| {100*r.max():7.2f} %   "
+                      f"p99 {100*np.percentile(r, 99):6.2f} %   "
+                      f"mediana {100*np.median(r):5.2f} %")
+            v = sb ** 2
+            print(f"  peso: el tramo > 3.06 MeV es el {100*v[:, E>3.06].sum()/v.sum():.2f} % "
+                  f"de la varianza MF34 total")
+            print()
+            print("  --- LECTURA PARA EL UQ DEL PWR900 ---")
+            # ⚑ EL MAXIMO SIN PONDERAR NO ES LA PREGUNTA, y el 26-ago estuvo a
+            #   punto de costar una decision equivocada: salio 18.05 % contra una
+            #   prediccion de "< 1 %", pero eran 5 bins de a_6 (2.357-2.362 MeV)
+            #   cuyo peso en la varianza MF34 es 0.0000 %. La prediccion hablaba
+            #   de PESO ("los datasets que cambian se llevan <= 2 %"), asi que un
+            #   max sobre 10 428 parametros contestaba a otra pregunta. a_6 se
+            #   lleva ~0.5 % de la varianza de la DCS: un 18 % ahi no mueve nada.
+            #   Lo que decide si hay que re-muestrear es el PESO, no el maximo.
+            big = rel > 0.01
+            w_mov = 100 * v[big].sum() / v.sum()
+            worst = 100 * rel[:, E <= 3.06].max()
+            n_ord = sorted(int(l) + 1 for l in np.flatnonzero(big.any(axis=1)))
+            print(f"  max sin ponderar, <= 3.06 MeV : {worst:.2f} %   "
+                  f"({int(big.sum())} de {rel.size} parametros pasan del 1 %, "
+                  f"ordenes {n_ord})")
+            print(f"  PESO en varianza MF34 de todo lo que se mueve > 1 % : {w_mov:.4f} %")
+            if w_mov < 0.1:
+                print(f"  ✅ lo que se mueve pesa {w_mov:.4f} % de la varianza MF34 "
+                      f"declarada. NO justifica re-muestrear el PWR900.")
+            else:
+                print(f"  ⚠ lo que se mueve pesa {w_mov:.4f} % de la varianza MF34.")
+                print("     Por encima del 0.1 % hay que mirar por que antes de decidir.")
 
 print(f"\n  brazo {arm}: {'⛔ con fallos' if bad else '✅ puertas en verde'}")
 sys.exit(1 if bad else 0)

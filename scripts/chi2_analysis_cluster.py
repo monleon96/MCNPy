@@ -826,6 +826,35 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
         "title":      "χ² — run 104S2, malla 1 etapa + arreglo singleton, k=3 c=3 (6 349 params), fina + cruzado a_0 (carry)",
         "systematic_block_col": None,
     },
+    # ── RUN 105T1: 104S2 con los sigma_E de entrada corregidos ─────────────
+    # MISMOS flags que 104S2. La UNICA variable son los inputs de sigma_E:
+    # el JSON corregido (Smith 5.25 m, Perey 200.191 m, Salnikov como caja,
+    # Cox corroborado), los dos canales nuevos del resolver (cuarentena como
+    # caja, default relativo 1.31 % de E) y el marco CM de Becker 11511009.
+    # Se lee CONTRA predictive_104S2 y contra nada mas.
+    "predictive_105T1": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_105T1.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — run 105T1, flags de 104S2 con sigma_E de entrada corregida (Smith 5.25 m, cuarentena como caja, default 1.31 % de E, Becker en CM)",
+        "systematic_block_col": None,
+    },
+    # ── RUN 106T2: 105T1 + los dos arreglos aguas arriba del ajuste ────────
+    # 1. Se rechazan los candidatos Legendre IMPOSIBLES (|a_l| > 1) antes de
+    #    pesarlos por AIC. a_l = <P_l(mu)> con |P_l| <= 1, asi que un ajuste que
+    #    afirma |a_1| > 1 no es una hipotesis rival sino un artefacto de minimos
+    #    cuadrados sin restriccion en un bin con n_eff ~ 1. En 105T1 contaminaba
+    #    2 bins (1,558 y 1,560 MeV): volteaba avg_a_1 contra todos sus vecinos y
+    #    dejaba sigma(a_1) = 1,667, mas que el rango fisico del coeficiente.
+    # 2. La sintesis de DATA-ERR de Gkatis 27673002, que corria con sigma 1 %
+    #    plana porque la guarda era `is None` y el cargador JSON pone `[]`.
+    # ⚠ Los DOS mueven el central, asi que esto NO es una comparacion de una
+    #   sola variable contra 104S2. Se lee contra predictive_105T1.
+    "predictive_106T2": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_106T2.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — run 106T2, 105T1 + rechazo de candidatos Legendre imposibles (|a_l| > 1) y sintesis DATA-ERR de Gkatis 27673002",
+        "systematic_block_col": None,
+    },
     "predictive_104S3": {
         "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_104S3.parquet",
         "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",

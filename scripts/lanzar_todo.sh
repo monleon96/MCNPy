@@ -46,12 +46,19 @@ ARMS=("$@")
 # ⚑ POR DEFECTO, LA SERIE 104 (23-ago). La 103 esta cerrada y sus directorios
 #   tienen cinta, asi que relanzar R1..R6 muere en la guarda de "ya tiene una
 #   cinta" -- que es lo correcto, pero no es lo que se quiere por defecto.
-[ ${#ARMS[@]} -eq 0 ] && ARMS=(S2 S1 S3)
+# ⚑ 26-ago: por defecto SOLO T1. La serie 104 esta cerrada y sus directorios
+#   tienen cinta, asi que relanzarlos muere en la guarda -- correcto, pero no
+#   es lo que se quiere. T1 es el unico brazo pendiente.
+# ⚑ 27-ago: por defecto SOLO T2, el re-run con el filtro de candidatos
+#   imposibles y el arreglo de Gkatis. T1 ya tiene cinta y moriria en la guarda.
+[ ${#ARMS[@]} -eq 0 ] && ARMS=(T2)
 
 declare -A DESC=(
   [S1]="R4 + arreglo del singleton — UNA variable, 5964 params predichos"
   [S2]="k=3 c=3 — EL ENTREGABLE, 6349 params predichos, ~441 MiB"
   [S3]="k=3 c=2 — variante conservadora, 6888 params predichos, ~519 MiB"
+  [T1]="sigma_E corregida — flags de S2, la UNICA variable son los inputs"
+  [T2]="filtro de candidatos imposibles (|a_l|>1) + Gkatis — re-run del entregable"
   [R1]="inercia — byte a byte contra 102a (LA puerta dura)"
   [R2]="base    — RESTORE + suelo, codigo nuevo (referencia de R3/R5/R6)"
   [R3]="sig-ratio por orden"
@@ -61,10 +68,10 @@ declare -A DESC=(
 )
 declare -A PART=( [R1]=xlarge [R2]=xlarge [R4]=xlarge
                   [R3]=par_IB [R5]=par_IB [R6]=par_IB
-                  [S1]=par_IB [S2]=xlarge [S3]=par_IB )
+                  [S1]=par_IB [S2]=xlarge [S3]=par_IB [T1]=xlarge [T2]=xlarge )
 declare -A CPUS=( [R1]=24 [R2]=24 [R4]=24
                   [R3]=40 [R5]=40 [R6]=40
-                  [S1]=40 [S2]=24 [S3]=40 )
+                  [S1]=40 [S2]=24 [S3]=40 [T1]=24 [T2]=24 )
 # ⚑ S2, QUE ES EL ENTREGABLE, VA SOLO A `xlarge`. Es la cola donde los tres
 #   brazos de anoche entraron sin esperar; en `par_IB` el sexto se quedo 6 h en
 #   cola y para cuando entro su directorio ya tenia cerrojo. S1 y S3 son
@@ -80,12 +87,12 @@ declare -A CPUS=( [R1]=24 [R2]=24 [R4]=24
 
 echo "Sandbox : $(pwd)"
 echo "Salidas : /share_snc/snc/JuanMonleon/ENDF_samples/new_test_<103|104><ARM>_<tag>"
-echo "Reparto : xlarge/24 -> S2    par_IB/40 -> S1 S3   (topes: 4+4 jobs, par_IB <= 250 G)"
+echo "Reparto : xlarge/24 -> T2 (topes: 4+4 jobs, par_IB <= 250 G)"
 echo
 declare -A IDS
 for A in "${ARMS[@]}"; do
   P=${PART[$A]}; C=${CPUS[$A]}
-  if [ -z "$P" ]; then echo "  ⛔ '$A' no es R1..R6 ni S1..S3"; continue; fi
+  if [ -z "$P" ]; then echo "  ⛔ '$A' no es R1..R6, S1..S3, T1 ni T2"; continue; fi
   CMD=(sbatch --parsable --job-name="k-$A" -p "$P" --cpus-per-task="$C"
        --export=ALL,KIKA_ARM="$A" run_arm.sh)
   if [ -n "$DRY" ]; then

@@ -47,7 +47,7 @@ import subprocess
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Any, Union
+from typing import List, Dict, Tuple, Optional, Any, Union, Sequence
 from multiprocessing import Pool
 from dataclasses import dataclass, field
 
@@ -150,6 +150,7 @@ from scripts.tof_parameters import (
     get_tof_parameters,
     compute_sigma_E,
     summarize_tof_parameters,
+    CORPUS_MEDIAN_REL_SIGMA_E,
 )
 
 from scripts.resample_AD import (
@@ -455,6 +456,24 @@ DEGREE_WEIGHT_FLOOR = float(os.environ.get("KIKA_DEGREE_WEIGHT_FLOOR", "0.01"))
 MC_CAP_FROM_SUPPORT_ONLY = _env_flag("KIKA_MC_CAP_FROM_SUPPORT_ONLY", True)
                                                  # True: the MC order cap comes from angular support.
                                                  # False: v2's min(winner degree, support).
+REJECT_INADMISSIBLE_DEGREES = _env_flag("KIKA_REJECT_INADMISSIBLE_DEGREES", True)
+                                                 # ⚑ 27-ago-2026. Un candidato con |a_l| > 1 NO es una
+                                                 # hipotesis rival: a_l = <P_l(mu)> y |P_l| <= 1, asi que
+                                                 # |a_l| <= 1 siempre. Lo que lo produce es minimos
+                                                 # cuadrados sin restriccion en un bin con n_eff ~ 1.
+                                                 # Dejarlo entrar en la mezcla AIC contamina las DOS
+                                                 # cosas: el central que va a MF4 y la varianza
+                                                 # entre-modelos que va a MF34. Medido en la 105T1: 2
+                                                 # bins de 1738 (1,558 y 1,560 MeV) con between_var =
+                                                 # 2,61 y 2,78 contra la cota fisica 1 - abar^2 = 0,98,
+                                                 # y avg_a_1 volteado a -0,12 con TODOS los vecinos en
+                                                 # +0,28..+0,50. De ahi salia sigma(a_1) = 1,67, mayor
+                                                 # que el rango fisico entero del coeficiente.
+                                                 # docs/chi2-mf4/relative_peaks_absolute_check.md
+INADMISSIBLE_A_TOL = float(os.environ.get("KIKA_INADMISSIBLE_A_TOL", "1e-6"))
+                                                 # Holgura numerica sobre |a_l| <= 1. NO es una perilla:
+                                                 # el limite es exacto y solo absorbe el ruido de coma
+                                                 # flotante del ajuste.
 WRITE_AVERAGING_DIAGNOSTICS = True               # Extra averaged-central columns in nominal_fits.parquet
 USE_MIXTURE_COVARIANCE = _env_flag("KIKA_USE_MIXTURE_COVARIANCE", True)
 SHIP_MIXTURE_MEAN = _env_flag("KIKA_SHIP_MIXTURE_MEAN", True)
@@ -516,6 +535,24 @@ KW_MC_MIN_WEIGHT = 1e-3                          # Overlap-weight threshold
 KW_MIN_POINTS_REF = None                         # Quality-penalty threshold (set to max_order+1 at runtime)
 DELTA_T_NS = 5.0                                 # Default TOF time resolution
 FLIGHT_PATH_M = 27.037                           # Default flight path
+QUARANTINED_AS_BOX = True                        # 2026-08-26. A declared EN-RSL* flagged review_required
+                                                 # (width > 10% of E, read as a covered range rather than
+                                                 # a resolution function) used to fall through to the
+                                                 # (L, DELTA_T_NS) default, which is 6-31x NARROWER than
+                                                 # what the experiment declares. It is now read as a
+                                                 # uniform box, sigma = W/sqrt(12). Applies only where the
+                                                 # entry has no curated (L, dt) pair, so it can never
+                                                 # override a curated value. Set False for runs <= 104.
+DEFAULT_REL_SIGMA_E = CORPUS_MEDIAN_REL_SIGMA_E  # 2026-08-26. When EXFOR documents NO incident-energy
+                                                 # width for a subentry, use sigma_E = this fraction of E
+                                                 # instead of the (L, DELTA_T_NS) pair above. The old
+                                                 # behaviour applied an ORELA-like 27 m station to Van de
+                                                 # Graaffs, cascades and nuclear emulsions, giving
+                                                 # 0.2-0.4% of E - 3-6x narrower than the median of the 50
+                                                 # datasets in this corpus that DO declare a width (1.31%,
+                                                 # IQR 1.08-1.90%). Under-declaring the resolution is the
+                                                 # one direction this evaluation treats as inadmissible.
+                                                 # Set to None to restore runs <= 104.
 DELTA_T_IS_FWHM = True                           # Treat DELTA_T_NS and the per-subentry values in
                                                  # TOF_PARAMETERS_FILE as FWHM, so sigma_E = FWHM/2.3548.
                                                  # CHANGES RESULTS: sigma_E sets how far each point
@@ -1412,6 +1449,47 @@ def build_mixture_blocks(mixture_by_bin, nominal_results, max_degree, logger=Non
             wv = np.vstack([d['within_var'] for d in diag.values()])
             bv = np.vstack([d['between_var'] for d in diag.values()])
             frac = bv / np.maximum(wv + bv, 1e-300)
+
+            # ── LA RED QUE FALTABA: el RANGO FISICO del numerador ───────────
+            # Todos los guardianes de la cadena vigilan el DENOMINADOR
+            # (regularize_near_zero, SNR) o la MALLA (tope sigma-ratio,
+            # cambio de signo, anchura de resolucion). Ninguno miraba si la
+            # sigma que se declara cabe en el rango que el coeficiente puede
+            # tomar. Por eso la 105T1 embarco sigma(a_1) = 1,667 sobre un
+            # coeficiente acotado en [-1, 1] sin que saltara nada.
+            #
+            # Dos cotas, las dos exactas, ninguna ajustable:
+            #   |a_l| = |<P_l(mu)>| <= 1                    => sigma(a_l) <= 1
+            #   between_var = sum w_k a_k^2 - abar^2 <= 1 - abar^2
+            # La segunda es mas fina y es la que delata un COMPONENTE imposible
+            # dentro de la mezcla: si se cumple |a_k| <= 1 para todo k, se
+            # cumple sola.
+            mus = np.vstack([blocks[k]['mean'] for k in diag])
+            tv = np.vstack([d['total_var'] for d in diag.values()])
+            cap = np.maximum(1.0 - mus ** 2, 0.0)
+            bad_b = bv > cap
+            bad_s = tv > 1.0
+            if bad_b.any() or bad_s.any():
+                keys = list(diag)
+                logger.warning(
+                    f"  [ADMIS] ⛔ RANGO FISICO VIOLADO: {int(bad_b.sum())} celda(s) "
+                    f"con between_var > 1 - abar^2 (=> algun componente tiene "
+                    f"|a_l| > 1) y {int(bad_s.sum())} con sigma(a_l) > 1, sobre "
+                    f"{bv.size} celdas."
+                )
+                ii, jj = np.where(bad_b)
+                for n in np.argsort(-(bv[ii, jj] / np.maximum(cap[ii, jj], 1e-300)))[:10]:
+                    i, j = int(ii[n]), int(jj[n])
+                    logger.warning(
+                        f"    [ADMIS] bin {keys[i]} a_{j+1}: between_var "
+                        f"{bv[i, j]:.4g} > cota {cap[i, j]:.4g} "
+                        f"(abar {mus[i, j]:+.4g}, exceso x{bv[i, j]/max(cap[i, j], 1e-300):.2f})"
+                    )
+            else:
+                logger.info(
+                    f"  [ADMIS] ✅ rango fisico: las {bv.size} celdas cumplen "
+                    f"between_var <= 1 - abar^2 y sigma(a_l) <= 1"
+                )
             logger.info(
                 "  [MIX] between-model share of the variance, median by order: "
                 + ", ".join(f"a_{l+1} {np.nanmedian(frac[:, l]):.3f}"
@@ -2129,6 +2207,55 @@ def data_space_chi2(
     return float(np.sum(w[ok] * r * r) / np.sum(w[ok]))
 
 
+def admissible_degrees(
+    all_degrees_info: Optional[Dict[int, Dict]],
+    degrees: Sequence[int],
+    tol: float = INADMISSIBLE_A_TOL,
+) -> Tuple[List[int], Dict[int, Tuple[int, float]]]:
+    """Los grados candidatos cuyo ajuste es FISICAMENTE POSIBLE.
+
+    ``a_l = <P_l(mu)>`` y ``|P_l(mu)| <= 1`` en ``mu in [-1, 1]``, luego
+    ``|a_l| <= 1`` para CUALQUIER distribucion angular admisible.  Un ajuste por
+    minimos cuadrados sin restriccion no sabe eso, y en un bin con poca
+    informacion efectiva puede devolver ``|a_1| > 1``.
+
+    ⚑ POR QUE SE FILTRA AQUI Y NO MAS ABAJO.  ``degree_weights`` es el unico
+    punto por el que pasan las dos ramas: el central promediado que acaba en MF4
+    (``compute_averaging_diagnostics``) y la covarianza de la mezcla que acaba en
+    MF34 (``build_mixture_blocks``).  Filtrar aqui las mantiene consistentes, que
+    es el invariante que el docstring de ``build_mixture_blocks`` ya promete.
+    Filtrar solo en la covarianza dejaria un central corrupto en el fichero.
+
+    ⚑ ESTO NO REDUCE UNA INCERTIDUMBRE.  Excluye un modelo que afirma
+    ``<mu> > 1``.  No es un rival mas conservador, es imposible.  La barra de
+    «sub-declarar es inaceptable» queda intacta.
+
+    Devuelve ``(grados_admisibles, {grado: (l_peor, a_peor)})``.
+    """
+    kept: List[int] = []
+    rejected: Dict[int, Tuple[int, float]] = {}
+    for d in degrees:
+        info = (all_degrees_info or {}).get(d)
+        if not info:
+            continue
+        c = np.asarray(info.get('coeffs', ()), dtype=float)
+        # c0 <= 0 es una seccion eficaz integrada no positiva: imposible, y
+        # ademas hace estallar la normalizacion.
+        if c.size < 1 or not np.isfinite(c).all() or not (float(c[0]) > 0.0):
+            rejected[d] = (0, float(c[0]) if c.size else float('nan'))
+            continue
+        a = endf_normalize_legendre_coeffs(c, include_a0=False)
+        if a.size == 0:
+            kept.append(d)
+            continue
+        j = int(np.argmax(np.abs(a)))
+        if abs(float(a[j])) > 1.0 + tol:
+            rejected[d] = (j + 1, float(a[j]))
+        else:
+            kept.append(d)
+    return kept, rejected
+
+
 def compute_averaging_diagnostics(
     all_degrees_info: Optional[Dict[int, Dict]],
     degree_weights: Optional[Dict[int, float]],
@@ -2479,6 +2606,10 @@ def perform_nominal_fits(
     gate_expanded_1 = 0
     gate_expanded_2 = 0
     gate_failed = 0
+    # ⚑ candidatos rechazados por imposibles (|a_l| > 1). El bucle es SERIE, asi
+    #   que acumular en una lista local basta y no hace falta nada compartido.
+    _inadmissible_log: List[Tuple[float, List[int], int, float]] = []
+    _inadmissible_all_log: List[Tuple[float, List[int]]] = []
 
     for bin_idx, bin_info in enumerate(energy_bins):
         exfor_df, experiments_info, kernel_weights, diagnostics, floor_stats = filter_exfor_with_energy_bin(
@@ -2665,6 +2796,25 @@ def perform_nominal_fits(
 
         if all_degrees_info and len(all_degrees_info) > 1:
             _degrees = sorted(all_degrees_info.keys())
+            # ── los candidatos imposibles salen ANTES de pesarse ─────────────
+            # Se filtra antes de `ic_weights` a proposito: si se filtrase
+            # despues habria que renormalizar unos pesos que ya se calcularon
+            # con el candidato dentro, y el reparto no seria el mismo que si
+            # nunca hubiera estado. Ver `admissible_degrees`.
+            if REJECT_INADMISSIBLE_DEGREES:
+                _ok, _bad = admissible_degrees(all_degrees_info, _degrees)
+                if _bad and _ok:
+                    _degrees = _ok
+                    _worst = max(_bad.items(), key=lambda kv: abs(kv[1][1]))
+                    _inadmissible_log.append(
+                        (float(bin_info.energy_mev), sorted(_bad),
+                         int(_worst[1][0]), float(_worst[1][1])))
+                elif _bad and not _ok:
+                    # ⛔ Ni uno solo admisible. NO se filtra: quedarse sin
+                    # candidatos es peor que quedarse con los malos, y hay que
+                    # verlo en el log en vez de que pase callando.
+                    _inadmissible_all_log.append(
+                        (float(bin_info.energy_mev), sorted(_bad)))
             _scores = [all_degrees_info[d]['aicc'] for d in _degrees]
             _w = ic_weights(_scores, floor=DEGREE_WEIGHT_FLOOR)
             degree_weights = {
@@ -2904,6 +3054,29 @@ def perform_nominal_fits(
         _log_band_capping_summary(results, max_band_scale, logger)
         _log_between_exp_summary(results, logger)
         _log_experiment_bias_summary(results, logger)
+
+    # ── candidatos imposibles: SIEMPRE se dice, aunque sean cero ─────────────
+    # Se imprime incluso con 0 para que el log distinga «no habia ninguno» de
+    # «el filtro no corrio», que es justo lo que no se pudo distinguir cuando
+    # apareció el defecto.
+    if logger and REJECT_INADMISSIBLE_DEGREES:
+        logger.info(
+            f"  [ADMIS] candidatos imposibles (|a_l| > 1) descartados en "
+            f"{len(_inadmissible_log)} bin(s); {len(_inadmissible_all_log)} bin(s) "
+            f"con NINGUN candidato admisible (se dejan sin filtrar)"
+        )
+        for e_mev, degs, l_bad, a_bad in _inadmissible_log[:20]:
+            logger.info(
+                f"    [ADMIS] E={e_mev:.4f} MeV: fuera el/los grado(s) {degs} "
+                f"(peor a_{l_bad} = {a_bad:+.4f})"
+            )
+        if len(_inadmissible_log) > 20:
+            logger.info(f"    [ADMIS] ... y {len(_inadmissible_log) - 20} bin(s) mas")
+        for e_mev, degs in _inadmissible_all_log:
+            logger.warning(
+                f"    [ADMIS] ⛔ E={e_mev:.4f} MeV: los {len(degs)} candidatos son "
+                f"imposibles ({degs}). NO se filtra — mirar este bin a mano."
+            )
 
     return results
 
@@ -3505,6 +3678,10 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info(f"  KW_MIN_POINTS_REF = {KW_MIN_POINTS_REF}")
     _logger.info(f"  DELTA_T_NS = {DELTA_T_NS}")
     _logger.info(f"  FLIGHT_PATH_M = {FLIGHT_PATH_M}")
+    _logger.info(f"  DEFAULT_REL_SIGMA_E = {DEFAULT_REL_SIGMA_E}"
+                 + (f" ({100 * DEFAULT_REL_SIGMA_E:.2f}% of E for subentries with no"
+                    f" documented width)" if DEFAULT_REL_SIGMA_E is not None
+                    else " (off; the (L, delta_t) default applies)"))
     _logger.info(
         f"  DELTA_T_IS_FWHM = {DELTA_T_IS_FWHM}"
         f"  (sigma_E{'  = FWHM/2.3548' if DELTA_T_IS_FWHM else ' taken directly; pre-82 behaviour'})"
@@ -4159,6 +4336,8 @@ def run_exfor_to_endf_sampling_v2(
             default_flight_path_m=FLIGHT_PATH_M,
             default_time_resolution_ns=DELTA_T_NS,
             default_delta_t_is_fwhm=DELTA_T_IS_FWHM,
+            default_rel_sigma_E=DEFAULT_REL_SIGMA_E,
+            quarantined_as_box=QUARANTINED_AS_BOX,
             logger=_logger,
         )
 
@@ -4492,6 +4671,8 @@ def run_exfor_to_endf_sampling_v2(
                                 default_flight_path_m=FLIGHT_PATH_M,
                                 default_time_resolution_ns=DELTA_T_NS,
                                 default_delta_t_is_fwhm=DELTA_T_IS_FWHM,
+                                default_rel_sigma_E=DEFAULT_REL_SIGMA_E,
+                                quarantined_as_box=QUARANTINED_AS_BOX,
                             )
                             _cmp_df = pd.DataFrame({
                                 "campaign": _cmp_camp,

@@ -54,7 +54,11 @@ def read_exfor(filepath: str) -> "ExforAngularDistribution":
     # scripts/uncertainty_manifest.py. The kika library returns the raw
     # ExforAngularDistribution; the pipeline (e.g. build_exfor_cache_from_objects)
     # calls apply_manifest_to_exfor() before building the cache.
-    ad._raw_uncertainty_components = []  # JSON path: no raw columns; resolver synthesizes
+    # JSON path: no raw EXFOR columns. The pipeline resolver treats an empty
+    # list the same as None and synthesizes a DATA-ERR component from the
+    # per-point uncertainty_stat -- see apply_manifest_to_exfor in
+    # scripts/uncertainty_manifest.py.
+    ad._raw_uncertainty_components = []
     ad.sigma_sys_scalar_relative = 0.0
     ad.sigma_sys_indep_relative = 0.0
     ad.uncertainty_manifest_flag = "default"

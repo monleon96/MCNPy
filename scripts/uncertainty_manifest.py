@@ -751,13 +751,39 @@ def apply_manifest_to_exfor(
     values_arr = np.asarray(values, dtype=float)
 
     # Build synthetic components for the JSON path (no raw column structure).
-    if uncertainty_components is None:
-        uncertainty_components = [{
-            "header": "DATA-ERR",
-            "kind": "per_point",
-            "values": existing_stat,
-            "unit": "B/SR",
-        }]
+    # ⚠ Two conditions, and both are load-bearing.
+    #
+    # (1) The emptiness test is falsy, NOT ``is None``. ``kika/exfor/io.py``
+    #     (the JSON loader) sets ``_raw_uncertainty_components = []``, and the
+    #     database loader also yields ``[]`` for a dataset with no
+    #     ``cvar=='dy'`` columns. Both mean "no raw columns"; ``[] is not
+    #     None``, so an ``is None`` test skipped the synthesis and every
+    #     ``column:`` lookup in the manifest resolved to zeros. For a
+    #     ``derive_stat_only`` entry that cascades: σ_total = 0 → σ_sys capped
+    #     to 0 → σ_stat pinned at the 1 % floor. It silently destroyed Gkatis
+    #     27673002's real 3.4-26 % per-point uncertainties (found 2026-08-27;
+    #     the resolver had been logging "capped on 1016/1016 rows" every run).
+    #
+    # (2) ``existing_stat`` must contain something. A dataset that declares NO
+    #     per-point uncertainty at all (13511004 Perey 1991, 20482005, 10332004,
+    #     11638003) has nothing to synthesize FROM: building a DATA-ERR column
+    #     of zeros would make ``column: best_available`` "succeed" with σ = 0
+    #     and trigger the very cascade above, replacing the defaults block's
+    #     5 % σ_sys with 1 % σ_stat ⊕ 0. Those datasets must keep falling
+    #     through to the defaults, which is what the ``is None`` test did for
+    #     them by accident. Pinned by test_manifest_json_path_components.py.
+    if not uncertainty_components:
+        if np.any(np.asarray(existing_stat, dtype=float) != 0.0):
+            uncertainty_components = [{
+                "header": "DATA-ERR",
+                "kind": "per_point",
+                "values": existing_stat,
+                "unit": "B/SR",
+            }]
+        else:
+            # Nothing to synthesize from. Normalise to a list rather than
+            # leaving ``None`` here: ``_find_component`` iterates it.
+            uncertainty_components = []
 
     res = resolve_for_dataset(
         dataset_id=dataset_id,

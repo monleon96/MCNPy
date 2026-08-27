@@ -2,7 +2,7 @@
 
 #SBATCH -n 1
 #SBATCH -N 1
-#SBATCH --cpus-per-task=40
+#SBATCH --cpus-per-task=8
 # 2026-08-17: 24 -> 40. par_IB has them free.
 # ⚠ THIS BUYS MEMORY, NOT SPEED, AND THAT IS NOT AN OVERSIGHT.
 # `precompute_chi2_predictive.py:109` pins OMP/OPENBLAS/MKL/BLIS/VECLIB/NUMEXPR
@@ -16,7 +16,7 @@
 # ("JEFF and JENDL at 0.00000 %", "V2 identical to four decimals"). Do not do it
 # on a run whose job is to certify invariance.
 #SBATCH -t 0-12:00:00
-#SBATCH -p par_IB
+#SBATCH -p xlarge
 # 2026-08-12: moved off `xlarge` to `par_IB`, and --mem removed so the job takes
 # the partition default instead of reserving a fixed 300G. Previous header:
 #   #SBATCH --mem=300G
@@ -26,7 +26,28 @@
 # 2026-08-14, run 95: its MF34 is finer than anything scored so far (896 groups
 # / 485 MB tape vs 91_cross's 703 / 347 MB), so this is the likeliest job yet to
 # need it. Uncomment if it is OOM-killed:
-##SBATCH --mem=300G
+# ⛔ 2026-08-23: DESCOMENTADO Y EXPLICITO. La run 100 murio por OOM a las 6h24
+#    porque su `--mem` era un COMENTARIO y no una directiva, y este trabajo es
+#    justo el que mas memoria pide de todos los que se han puntuado: 103R4 son
+#    7 820 parametros de MF34 contra los 703 grupos de 91_cross. Un implicito
+#    aqui es repetir el mismo fallo a sabiendas.
+#SBATCH --mem=300G
+#
+# ⛔⛔ Y POR ESO ESTE TRABAJO VUELVE A `xlarge`. `par_IB` TIENE UN TOPE DE 250 GB
+#    (Juan, 23-ago-2026), asi que un `--mem=300G` ahi no entra: o lo rechaza el
+#    scheduler o se queda encolado para siempre. `xlarge` es ademas donde este
+#    job corria historicamente con 300G (ver la cabecera anterior mas abajo).
+#    Si alguna vez hay que volver a par_IB, el techo es --mem=250G, y entonces
+#    103R4 (7 820 parametros) es justo el que puede no caber.
+#
+# ⚑ Y POR ESO BAJAN LOS CPUS DE 40 A 8. Los 40 se eligieron en par_IB para
+#    comprar la memoria por defecto de la particion (4 G/cpu). Con `--mem`
+#    explicito ya no compran nada, y este fichero ya tiene verificado arriba que
+#    NADA de la cadena usa los nucleos extra: precompute_chi2_predictive.py fija
+#    OMP/OPENBLAS/MKL/BLIS/VECLIB/NUMEXPR a 1 hilo ANTES de cargar numpy y ni
+#    precompute, ni chi2_analysis_cluster, ni eval_covariance usan
+#    multiprocessing. Dejar 40 nucleos parados por job compite con los brazos de
+#    la serie 104 en la misma cola. Subirlo otra vez es una linea.
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=juan-antonio.monleondelalluvia@asnr.fr
 #SBATCH --job-name=kika-chi2
@@ -322,19 +343,19 @@ export KIKA_UNCERTAINTY_MANIFEST_PATH=/share_snc/snc/JuanMonleon/EXFOR/uncertain
 
 R98=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_98_meshraw
 
-# ⛔ DESACTIVADO 2026-08-19 21:20. Lanzarlo tal cual vuelve a morir en segundos
-# (job 8518595): nuestra ruta de plegado NO PUEDE LEER el MF34 de la 98.
+# ⛔ SIGUE DESACTIVADO, PERO YA NO POR EL LECTOR. 2026-08-20.
 #
-#   Loading This work ... MF34: not available (block 1 (L=1,2) sits on a grid of
-#   700 edges while block 0 has 692 -- §L18's four-grid problem)
+# El bloqueo de §0 esta RESUELTO: `mf34_cross_reader.py` exigia UNA rejilla para
+# toda la familia y ahora exige UNA REJILLA POR ORDEN, que es el invariante que
+# el plegado necesita de verdad. Verificado sobre la cinta de la run 99:
+#   per_order_mesh True, {1:690, 2:699, 3:694, 4:693, 5:699, 6:703}, seis
+#   bloques cruzados, cada uno en la malla de SU orden.
+# La equivalencia esta fijada en scripts/tests/test_mf34_cross_reader.py
+# (plegar la cinta mallada da Sigma_eval identico a plegar su gemela en una
+# sola rejilla, self y cruzado).
 #
-# La cinta es ENDF-6 legal; el formato declara las rejillas dentro de cada
-# (L, L1) precisamente para esto. Es el fold el que exige UNA rejilla junto a
-# los bloques a_0, y por eso las runs 91/94/96 -- sin malla por orden -- si se
-# puntuaban.
-#
-# Y aunque se arreglara cuadrando la malla sobre la union (~10 lineas), el
-# numero quedaria obsoleto: la decision pendiente sobre a_5/a_6 no cambia la
+# Lo que sigue en pie es la OTRA razon, que no es de codigo: el numero
+# quedaria obsoleto. La decision pendiente sobre a_5/a_6 no cambia la
 # representacion, CAMBIA LA COVARIANZA. Recuperar los bloques propios donde hoy
 # hay ceros mete incertidumbre real en el 36.6 % de las casillas y el chi2 TIENE
 # que moverse. Puntuar antes de eso es gastar 1.5 h y 11 GB en un objeto que
@@ -357,7 +378,133 @@ R98=/share_snc/snc/JuanMonleon/ENDF_samples/new_test_98_meshraw
 # KIKA_CHI2_RUN_ID=98raw \
 #     python chi2_analysis_cluster.py || exit 1
 
-echo "run_chi.sh no tiene ningun trabajo activo: ver docs/handoff_2026-08-20.md §0"
+# ===========================================================================
+# TRABAJO ACTIVO (2026-08-23): puntuar la serie 103 — la malla, y el ensayo
+# de memoria.  Uso:   sbatch run_chi.sh R2      |      sbatch run_chi.sh R4
+# ===========================================================================
+# ⚑ PAREJA DE UNA SOLA VARIABLE. 103R2 y 103R4 salen del MISMO codigo, la MISMA
+#   semilla y la MISMA config salvo `KIKA_MF34_MESH_SINGLE_STAGE`. Las dos se
+#   puntuan por la cinta FINA con cruzado (`_a0cross.endf`, dead=carry), asi que
+#   entre las dos SOLO cambia la malla: 3 311 parametros contra 7 820.
+#
+# ⛔ NO SE PUNTUA PARA ELEGIR MALLA. En la serie 99 el chi2 baja un 17 % monotono
+#   segun se engruesa la malla, y todo viene de la correlacion: discrimina AL
+#   REVES del criterio de conservadurismo. Esto es para REPORTAR el numero.
+#
+# ⚠ EL PASO 1 NO EXISTE AQUI, Y ES DELIBERADO. Las dos runs YA escribieron su
+#   cinta fina con cruzado (`26-Fe-56g_nominal_a0cross.endf`, 366 y 753 MiB), asi
+#   que reconstruirla con `run_c_fine.sh c2` costaria ~4 h y otros 750 MB en un
+#   share al 93 % para producir el mismo fichero.
+#
+# ⚠⚠ `cd` A `newcode/scripts`, NO a `EXFOR/scripts`. `precompute_chi2_predictive.py`
+#   DIFIERE entre los dos sandboxes y el bueno es el de newcode (en sync con WSL).
+#   `chi2_analysis_cluster.py` es identico en los dos y lleva los dos registros.
+#
+# ⚠ MEMORIA: 103R4 son 7 820 parametros, la MF34 mas fina puntuada nunca
+#   (91_cross: 703 grupos / 347 MB). Si algo revienta por memoria se quiere
+#   descubrir aqui y no con el entregable. Si muere, descomentar el --mem=300G
+#   de la cabecera y relanzar SOLO ese brazo.
+#
+# ⚠ DISCO: cada uno deja un sidecar de ~11 GB. BORRARLO en cuanto se lea el
+#   parquet (la linea esta impresa al final).
+
+# ⚠ SIN LLAVES EN EL MENSAJE. `${1:?...}` termina en el PRIMER `}` sin
+#   escapar, asi que un "{R2|R4}" dentro cerraba la expansion antes de
+#   tiempo y el `}` sobrante se pegaba al valor: el job 8548706 murio con
+#   «'R4}' no es R2 ni R4».
+# 2026-08-23 (noche): anadidos los tres brazos de la serie 104. Misma cinta
+# (`_a0cross.endf`, dead=carry) y mismo camino que 103R2/103R4, asi que las
+# cinco son comparables de una sola variable.
+CHIARM="${1:?falta el brazo. Uso: sbatch run_chi.sh T2   -- brazos validos: R2 R4 S1 S2 S3 T1 T2}"
+case "$CHIARM" in
+  R2) CHIDIR=new_test_103R2_base         ; CHITAG=103R2 ;;
+  R4) CHIDIR=new_test_103R4_malla1etapa  ; CHITAG=103R4 ;;
+  S1) CHIDIR=new_test_104S1_fixsingleton ; CHITAG=104S1 ;;
+  S2) CHIDIR=new_test_104S2_k3c3         ; CHITAG=104S2 ;;
+  S3) CHIDIR=new_test_104S3_k3c2         ; CHITAG=104S3 ;;
+  # 26-ago: mismos flags que S2, sigma_E de entrada corregida. Misma cinta
+  # (`_a0cross.endf`, dead=carry) y mismo camino, asi que 105T1 y 104S2 son
+  # comparables de UNA sola variable.
+  T1) CHIDIR=new_test_105T1_sigmaEfix     ; CHITAG=105T1 ;;
+  # 27-ago: T1 + el rechazo de candidatos Legendre imposibles (|a_l| > 1)
+  # antes de la mezcla AIC y el arreglo de la sintesis DATA-ERR de Gkatis.
+  # Los dos mueven el CENTRAL, asi que 106T2 NO es comparable de una sola
+  # variable contra 104S2: se lee contra 105T1.
+  T2) CHIDIR=new_test_106T2_admisible     ; CHITAG=106T2 ;;
+  *)  echo "⛔ '$CHIARM' no es R2, R4, S1, S2, S3, T1 ni T2"; exit 2 ;;
+esac
+CHIRUN=/share_snc/snc/JuanMonleon/ENDF_samples/$CHIDIR
+CHIENDF=26-Fe-56g_nominal_a0cross.endf
+
+# ── ESPERA A QUE LA RUN SUELTE LA CINTA ────────────────────────────────────
+# S2 seguia ESCRIBIENDO su cinta fina cuando se encolo esto. Dos condiciones,
+# y hacen falta las dos:
+#   `.lock` presente  -> hay un pipeline vivo escribiendo en ese directorio
+#   tamano creciendo  -> la cinta esta a medias, y el `-s` de abajo la daria
+#                        por buena. El 21 y el 22 de agosto una puerta comparo
+#                        un fichero a medio escribir justo por no tener esto.
+# Para R2/R4/S1/S3, cuyas cintas ya estan cerradas, esto pasa en 90 s.
+CHIWAIT=0
+while [ -d "$CHIRUN/.lock" ] || [ ! -s "$CHIRUN/$CHIENDF" ]; do
+  if [ "$CHIWAIT" -ge 25200 ]; then
+    echo "⛔ 7 h esperando $CHIRUN/$CHIENDF -- la run que la escribe ha muerto?"; exit 1
+  fi
+  [ $((CHIWAIT % 600)) -eq 0 ] && echo "  ... esperando la cinta de $CHIARM (${CHIWAIT}s)"
+  sleep 60; CHIWAIT=$((CHIWAIT + 60))
+done
+CHISZ1=$(stat -c%s "$CHIRUN/$CHIENDF"); sleep 90
+CHISZ2=$(stat -c%s "$CHIRUN/$CHIENDF")
+[ "$CHISZ1" = "$CHISZ2" ] || { echo "⛔ $CHIENDF sigue creciendo ($CHISZ1 -> $CHISZ2)"; exit 1; }
+echo "  cinta estable en $CHISZ2 bytes tras ${CHIWAIT}s de espera"
+
+cd /share_snc/snc/JuanMonleon/EXFOR/newcode/ || exit 1
+cd scripts || exit 1
+
+echo "=========================================================="
+echo "  brazo   : $CHIARM      tag: $CHITAG"
+echo "  run-dir : $CHIRUN"
+echo "  cinta   : $CHIENDF"
+echo "=========================================================="
+
+# ── PUERTAS BARATAS, ANTES DE GASTAR EL PRECOMPUTE ──────────────────────────
+# Las runs 85 y 89 murieron DESPUES de su precompute por no tener registrada la
+# metodologia. Estas tres comprobaciones cuestan segundos.
+[ -s "$CHIRUN/$CHIENDF" ] || { echo "⛔ no existe $CHIRUN/$CHIENDF"; exit 1; }
+grep -q "\"predictive_${CHITAG}\"" chi2_analysis_cluster.py \
+  || { echo "⛔ 'predictive_${CHITAG}' no esta registrada en chi2_analysis_cluster.py"; exit 1; }
+python -c "import sys; sys.path.insert(0, '..'); import scripts.exfor_utils as e; \
+print('  scripts ->', e.__file__); sys.exit(0 if '/newcode/' in e.__file__ else 1)" \
+  || { echo "⛔ el paquete scripts NO resuelve dentro de newcode/"; exit 1; }
+FREE_GB=$(df -BG --output=avail /share_snc 2>/dev/null | tail -1 | tr -dc '0-9')
+echo "  disco libre: ${FREE_GB:-?} G   (el sidecar son ~11 GB)"
+[ -z "$FREE_GB" ] || [ "$FREE_GB" -ge 50 ] || { echo "⛔ menos de 50 G libres"; exit 1; }
+ls -la "$CHIRUN/$CHIENDF"
+
+echo
+echo "--- PASO 1: precompute_chi2_predictive ($CHITAG) ---"
+KIKA_THIS_WORK_DIR=$CHIRUN \
+KIKA_THIS_WORK_ENDF=$CHIENDF \
+KIKA_MF33_MF34_CROSS_FROM_FILE=1 \
+KIKA_RUN_TAG=$CHITAG \
+    python -u precompute_chi2_predictive.py || exit 1
+
+echo
+echo "--- PASO 2: chi2_analysis_cluster ($CHITAG) ---"
+KIKA_CHI2_METHODOLOGIES=predictive_$CHITAG \
+KIKA_CHI2_RUN_ID=$CHITAG \
+    python -u chi2_analysis_cluster.py || exit 1
+
+echo
+echo "=========================================================="
+echo "  ✅ $CHITAG LISTO"
+echo "  informe : /share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive/run_${CHITAG}/"
+echo "  parquet : /share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_${CHITAG}.parquet"
+echo "  ⚑ BORRAR el sidecar en cuanto se lea el parquet:"
+echo "    rm /share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_${CHITAG}.parquet.eval_cov.npz"
+echo "=========================================================="
+
+# --- ANTES (2026-08-20): sin trabajo activo ---------------------------------
+# echo "run_chi.sh no tiene ningun trabajo activo: ver docs/handoff_2026-08-20.md §0"
 
 # --- YA HECHO: reconstruir el cruzado de la 98 (90 s). Descomentar si hace ---
 # --- falta rehacerlo tras tocar build_group_cross.py ------------------------
