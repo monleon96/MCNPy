@@ -4,8 +4,19 @@ NJOY reprocessing module for generating ACE files from existing perturbed ENDF f
 This module provides functionality to process already-generated perturbed ENDF files
 through NJOY to create ACE files at new temperatures without regenerating the ENDF files.
 It maintains the same directory structure as the original perturbation workflow.
+
+⚠ THIS IS THE MF4/MF34 ROUTE ONLY. It re-runs RECONR on the perturbed ENDF, so
+it only carries a perturbation that lives *in the ENDF tape*. A set whose
+cross sections were perturbed through the PENDF (``perturb_PENDF_files``, and
+the MF33 half of ``perturb_combined_files``) keeps that perturbation in
+``output_dir/pendf/``, and reconstructing from the ENDF instead would quietly
+produce unperturbed cross sections. Those sets are reprocessed by re-running
+stage B — ``pendf_perturbation._stage_b_run_njoy_for_pair`` — against the
+stored PENDF. ``scripts/reprocess_ace.py`` picks the route from what is on
+disk and drives either one.
 """
 import os
+import re
 from typing import List, Union, Optional, Dict, Tuple, Any
 from multiprocessing import Pool
 from datetime import datetime
@@ -44,7 +55,7 @@ def _construct_endf_file_paths(
     output_dir : str
         Base output directory containing the endf/ subdirectory
     zaid : int
-        ZAID of the isotope (e.g., 260560 for Fe-56)
+        ENDF ZAID of the isotope, Z*1000+A (26056 for Fe-56)
     num_samples : int
         Number of samples to process (generates paths for samples 1 to num_samples)
     base_filename : str
@@ -114,6 +125,82 @@ def _construct_endf_file_paths(
     return constructed_files
 
 
+#: Boltzmann constant in MeV/K — the units NJOY writes kT with on the ACE
+#: header's first line.
+_K_BOLTZMANN_MEV = 8.617333262e-11
+#: Two ACE temperatures are the same one when they agree to this many kelvin.
+_TEMP_TOL_K = 1.0
+#: An ACE file is `<zaid>.<ext>` (current layout, e.g. `26056.06c`) or
+#: `<zaid*10>_<lib>_<NNNN>.<ext>` (legacy, e.g. `260560_40_0001.06c`). Neither
+#: ends in `.ace`, which is what the first version of this check looked for —
+#: so it never matched anything and `skip_existing` silently never skipped.
+_ACE_NAME_RE = re.compile(r"^\d+(?:_\d+_\d{4})?\.\d{2}[a-z]$")
+
+
+def _ace_temperature_K(ace_path: str) -> Optional[float]:
+    """Kelvin from an ACE file's header, or None when it cannot be read.
+
+    ACE 1.0 carries `zaid.ext awr kT date` on line 1; ACE 2.0 moves that to
+    line 2 behind a version token. Only those two lines are read — this runs
+    once per sample per temperature and must not pay for the XSS array.
+    """
+    try:
+        with open(ace_path, "r", errors="ignore") as fh:
+            first = fh.readline()
+            second = fh.readline()
+    except OSError:
+        return None
+
+    parts = first.split()
+    if parts and parts[0][:1].isdigit() and "." in parts[0] and len(parts) >= 3:
+        token = parts[2]
+    elif parts and parts[0].startswith("2."):
+        second_parts = second.split()
+        if len(second_parts) < 2:
+            return None
+        token = second_parts[1]
+    else:
+        return None
+
+    try:
+        return float(token) / _K_BOLTZMANN_MEV
+    except ValueError:
+        return None
+
+
+def _sample_ace_files(output_dir: str, zaid: int, sample_index: int) -> List[str]:
+    """Every ACE file belonging to one sample, across both on-disk layouts.
+
+    Current layout keeps all temperatures of a sample together in
+    ``ace/<NNNN>/``; the pre-2026-05 one split them as
+    ``ace/<temp>/<zaid>/<NNNN>/``. Sets built by either are still around, so
+    both are looked at.
+    """
+    sample_str = f"{sample_index+1:04d}"
+    dirs = [os.path.join(output_dir, "ace", sample_str)]
+
+    ace_root = os.path.join(output_dir, "ace")
+    try:
+        for temp_entry in os.listdir(ace_root):
+            legacy = os.path.join(ace_root, temp_entry, str(zaid), sample_str)
+            if os.path.isdir(legacy):
+                dirs.append(legacy)
+    except OSError:
+        pass
+
+    found = []
+    for d in dirs:
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for n in names:
+            path = os.path.join(d, n)
+            if (_ACE_NAME_RE.match(n) or n.endswith(".ace")) and os.path.isfile(path):
+                found.append(path)
+    return found
+
+
 def _ace_file_exists(
     output_dir: str,
     zaid: int,
@@ -121,46 +208,38 @@ def _ace_file_exists(
     temperature: float,
     endf_file: str
 ) -> bool:
-    """
-    Check if an ACE file already exists for the given sample and temperature.
-    
+    """Does this sample already have an ACE **at this temperature**?
+
+    The temperature is read out of the ACE header rather than inferred from
+    the file name or the directory, because an extension is a label the writer
+    chooses: a set processed at the wrong temperature and stamped with the
+    right extension looks correct from a listing. Reading kT is what makes
+    ``skip_existing`` mean "already done at this temperature" instead of
+    "a file with roughly that name is there".
+
     Parameters
     ----------
     output_dir : str
         Base output directory
     zaid : int
-        ZAID of the isotope
+        ENDF ZAID of the isotope (26056 for Fe-56 — Z*1000+A, not Z*10000+A*10)
     sample_index : int
         Sample index (0-based)
     temperature : float
         Temperature in Kelvin
     endf_file : str
-        Path to the ENDF file (used to determine base filename)
-        
+        Unused; kept so the signature stays stable for existing callers.
+
     Returns
     -------
     bool
-        True if ACE file exists, False otherwise
+        True when an ACE at that temperature is already on disk.
     """
-    # Format temperature string (same as in _process_njoy_for_sample)
-    temp_str = str(temperature).rstrip('0').rstrip('.') if '.' in str(temperature) else str(temperature)
-    
-    # Format sample string (1-based, 4-digit zero-padded)
-    sample_str = f"{sample_index+1:04d}"
-    
-    # Build expected ACE directory path
-    ace_sample_dir = os.path.join(output_dir, "ace", temp_str, str(zaid), sample_str)
-    
-    if not os.path.exists(ace_sample_dir):
-        return False
-    
-    # Check if any .ace file exists in this directory
-    # Use os.listdir instead of glob for efficiency
-    try:
-        files = os.listdir(ace_sample_dir)
-        return any(f.endswith('.ace') for f in files)
-    except OSError:
-        return False
+    for path in _sample_ace_files(output_dir, zaid, sample_index):
+        temp_K = _ace_temperature_K(path)
+        if temp_K is not None and abs(temp_K - float(temperature)) <= _TEMP_TOL_K:
+            return True
+    return False
 
 
 def _process_sample_worker(args):
@@ -171,7 +250,7 @@ def _process_sample_worker(args):
     ----------
     args : tuple
         Tuple of (endf_file, zaid, sample_index, temperatures, output_dir, njoy_exe,
-                  library_name, njoy_version, xsdir_file, skip_existing)
+                  library_name, njoy_version, xsdir_file, skip_existing, extensions)
         
     Returns
     -------
@@ -180,7 +259,7 @@ def _process_sample_worker(args):
         processed temperatures, errors, and warnings
     """
     (endf_file, zaid, sample_index, temperatures, output_dir, njoy_exe,
-     library_name, njoy_version, xsdir_file, skip_existing) = args
+     library_name, njoy_version, xsdir_file, skip_existing, extensions) = args
     
     logger = _get_logger()
     sample_str = f"{sample_index+1:04d}"
@@ -218,6 +297,7 @@ def _process_sample_worker(args):
             njoy_version=njoy_version,
             output_dir=output_dir,
             xsdir_file=xsdir_file,
+            extensions=extensions,
         )
         
         # Add skipped temperatures to result
@@ -250,6 +330,7 @@ def reprocess_endf_to_ace(
     nprocs: int = 1,
     skip_existing: bool = False,
     verbose: bool = True,
+    extensions: Optional[List[str]] = None,
 ):
     """
     Reprocess existing perturbed ENDF files to generate ACE files at new temperatures.
@@ -265,7 +346,9 @@ def reprocess_endf_to_ace(
         Base output directory containing the endf/ subdirectory with perturbed ENDF files.
         Expected structure: output_dir/endf/{zaid}/{sample_num:04d}/{base_filename}_{sample_num:04d}.{ext}
     zaid : int
-        ZAID of the isotope to process (e.g., 260560 for Fe-56)
+        ENDF ZAID of the isotope, Z*1000+A — 26056 for Fe-56. This is the key
+        the endf/ and ace/ trees are built on; 260560 (Z*10000+A*10) is the
+        ACE *file name* stem and will not find anything here.
     num_samples : int
         Number of samples to process (processes samples 1 to num_samples)
     base_filename : str
@@ -282,10 +365,19 @@ def reprocess_endf_to_ace(
     nprocs : int, default 1
         Number of parallel processes for sample processing
     skip_existing : bool, default False
-        If True, skip processing samples that already have ACE files at the requested
-        temperatures. If False, always regenerate ACE files.
+        If True, skip samples whose ACE at the requested temperature is already
+        on disk — judged by the kT in the ACE header, not by the file name.
+        If False, always regenerate ACE files.
     verbose : bool, default True
         Enable verbose logging output
+    extensions : list of str, optional
+        ACE extension per temperature (e.g. ``['06c']``). When given, the ACE
+        is written as ``<ZAID>.<ext>`` in the per-sample directory, which is
+        the naming a set built with ``extensions=`` already uses — so a
+        reprocessing run overwrites in place and every xsdir line and MCNP
+        input stays valid. When None, the legacy
+        ``<ZAID*10>_<lib>_<NNNN>.<ext>`` naming is produced instead. Pass
+        whatever the set already carries.
         
     Notes
     -----
@@ -476,7 +568,7 @@ def reprocess_endf_to_ace(
         
         worker_args.append((
             endf_file, file_zaid, sample_index, temperatures, output_dir, njoy_exe,
-            library_name, njoy_version, sample_xsdir, skip_existing
+            library_name, njoy_version, sample_xsdir, skip_existing, extensions
         ))
     
     
