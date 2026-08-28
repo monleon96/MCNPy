@@ -190,3 +190,105 @@ def test_cross_rejects_cross_pair():
             _shape_cov(), SHAPE_GRID, MAX_ORDER, ZA, AWR, MAT, MT,
             ltt=1, mt1=4, cross_cov=_cross(), cross_energy_grid_ev=CROSS_GRID,
         )
+
+
+# ---------------------------------------------------------------------------
+# Declared-null (0, L1) pairs — added 2026-08-28.
+#
+# MF34 stores no NSS field: parse_mf34_mt derives the count from NL, so a
+# (0, L1) pair cannot be OMITTED while a_L1 keeps its own variance block. The
+# only way a file can say "no cross term for this order" is to write the pair
+# null, and a null block does not need the dense rectangle — one interval
+# spanning the same range asserts the same zero. That is what ``None`` means.
+# ---------------------------------------------------------------------------
+
+
+def test_null_cross_pair_still_emits_the_pair():
+    """``None`` writes the pair, not nothing: NSS is derived from NL."""
+    cross = _cross()
+    cross[2] = None
+    mf34 = create_mf34_from_covariance(
+        _shape_cov(), SHAPE_GRID, MAX_ORDER, ZA, AWR, MAT, MT,
+        ltt=1, cross_cov=cross, cross_energy_grid_ev=CROSS_GRID,
+    )
+    pairs = [(ss.l, ss.l1, ss.records[0].lb)
+             for ss in mf34._subsections[0].sub_subsections]
+    assert pairs == [(0, 0, 5), (0, 1, 6), (0, 2, 6), (1, 1, 5), (1, 2, 6), (2, 2, 5)]
+    assert mf34._subsections[0].nl == MAX_ORDER + 1
+
+
+def test_null_cross_pair_is_one_interval_and_zero():
+    cross = _cross()
+    cross[2] = None
+    mf34 = create_mf34_from_covariance(
+        _shape_cov(), SHAPE_GRID, MAX_ORDER, ZA, AWR, MAT, MT,
+        ltt=1, cross_cov=cross, cross_energy_grid_ev=CROSS_GRID,
+    )
+    live, null = _find(mf34, 0, 1), _find(mf34, 0, 2)
+    assert len(live.row_energies) == N0 + 1 and len(live.col_energies) == N + 1
+    # One row interval and one column interval, spanning the same range.
+    assert list(null.row_energies) == [CROSS_GRID[0], CROSS_GRID[-1]]
+    assert list(null.col_energies) == [SHAPE_GRID[0], SHAPE_GRID[-1]]
+    assert np.asarray(null.rect_matrix, dtype=float).ravel().tolist() == [0.0]
+
+
+def test_null_cross_pair_leaves_the_other_blocks_byte_identical(tmp_path):
+    """Nulling a_2's cross must not perturb a_1's cross or any shape block."""
+    from kika.endf.writers.mf34_writer import write_mf34_to_file  # noqa: F401
+    ref = create_mf34_from_covariance(
+        _shape_cov(), SHAPE_GRID, MAX_ORDER, ZA, AWR, MAT, MT,
+        ltt=1, cross_cov=_cross(), cross_energy_grid_ev=CROSS_GRID,
+    )
+    cross = _cross()
+    cross[2] = None
+    got = create_mf34_from_covariance(
+        _shape_cov(), SHAPE_GRID, MAX_ORDER, ZA, AWR, MAT, MT,
+        ltt=1, cross_cov=cross, cross_energy_grid_ev=CROSS_GRID,
+    )
+    for l, l1 in [(0, 1), (1, 1), (1, 2), (2, 2)]:
+        a, b = _find(ref, l, l1), _find(got, l, l1)
+        np.testing.assert_array_equal(np.asarray(a.matrix, dtype=float),
+                                      np.asarray(b.matrix, dtype=float))
+
+
+def test_null_cross_pair_round_trips_through_the_parser():
+    """The pair survives the text round trip, still null, still one interval."""
+    cross = _cross()
+    cross[2] = None
+    mf34 = create_mf34_from_covariance(
+        _shape_cov(), SHAPE_GRID, MAX_ORDER, ZA, AWR, MAT, MT,
+        ltt=1, cross_cov=cross, cross_energy_grid_ev=CROSS_GRID,
+    )
+    parsed = parse_mf34_mt(str(mf34).split("\n"), mt=MT)
+    got = [(ss.l, ss.l1) for ss in parsed.subsections[0].sub_subsections]
+    assert got == [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)]
+    null = _find(parsed, 0, 2)
+    assert int(null.lb) == 6
+    assert len(null.row_energies) == 2 and len(null.col_energies) == 2
+    assert not np.any(np.asarray(null.rect_matrix, dtype=float))
+    # ... and the live pair is untouched by the null one next to it.
+    live = _find(parsed, 0, 1)
+    np.testing.assert_allclose(
+        np.asarray(live.rect_matrix, dtype=float).reshape(N0, N),
+        _cross()[1], rtol=1e-6, atol=0.0)
+
+
+def test_null_cross_pair_is_much_smaller_on_the_wire():
+    """The point of the null form: it stops being a dense rectangle of zeros."""
+    dense = _cross()
+    dense[2] = np.zeros((N0, N))
+    a = create_mf34_from_covariance(
+        _shape_cov(), SHAPE_GRID, MAX_ORDER, ZA, AWR, MAT, MT,
+        ltt=1, cross_cov=dense, cross_energy_grid_ev=CROSS_GRID,
+    )
+    nulled = _cross()
+    nulled[2] = None
+    b = create_mf34_from_covariance(
+        _shape_cov(), SHAPE_GRID, MAX_ORDER, ZA, AWR, MAT, MT,
+        ltt=1, cross_cov=nulled, cross_energy_grid_ev=CROSS_GRID,
+    )
+    assert len(str(b)) < len(str(a))
+    # Both assert the same zero, so a consumer cannot tell them apart.
+    for sec in (parse_mf34_mt(str(a).split("\n"), mt=MT),
+                parse_mf34_mt(str(b).split("\n"), mt=MT)):
+        assert not np.any(np.asarray(_find(sec, 0, 2).rect_matrix, dtype=float))

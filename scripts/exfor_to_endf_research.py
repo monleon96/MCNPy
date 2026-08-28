@@ -268,6 +268,28 @@ if STOP_AFTER_NOMINAL_FITS:
 COMPUTE_MF33_MF34_CROSS = True           # Measure Cov(c0, a_l) and save the .npy sidecars.
                                          # Diagnostic; the shipped tape is built from the replicas.
 CROSS_ENDF_SUFFIX = "_a0cross"           # Filename suffix for the cross tape
+# ⚑ WHICH ORDERS GET A CROSS BLOCK WITH DATA (added 2026-08-28, Juan).
+#
+# `None` = decide from this run's own mf34_mixture_diagnostics.csv: an order
+# ships a cross block only where the MC replicas actually sampled the variance
+# the tape declares for it. Above `mc_order_cap` the MC freezes a_l in every
+# replica and the sigma that reaches the file is the ANALYTIC between-model
+# term of the AIC mixture. `cx_post = cx_mc * outer(j33, j34)` would rescale a
+# correlation measured on the within-model spread onto that substituted sigma,
+# asserting that model-selection uncertainty couples to the MF33 magnitude the
+# way data noise does. Nothing measured that.
+#
+# On run 104S2 the median MC-sampled fraction of the declared variance is
+# a_1..a_4 = 1.0000 and a_5 = 0.0170, a_6 = 0.0001, so the rule drops exactly
+# a_5 and a_6 and the 0.5 bar sits in the middle of a four-decade gap.
+# The dropped pairs are still WRITTEN -- MF34 derives NSS from NL and cannot
+# omit one -- but null over a single interval, which is ~84 MB of the
+# deliverable's 598 MB that stops being ASCII zeros.
+#
+# Set to "all" to reproduce the pre-2026-08-28 object, or to an explicit list
+# like "1,2,3,4".
+CROSS_ORDERS = None
+CROSS_MIN_SAMPLED_FRAC = 0.5             # bar for the CROSS_ORDERS = None rule
 CROSS_MAG_GRID = "fine"                  # Magnitude axis: "fine" (the analysis mesh, shipped) or
                                          # "group" (the adaptive MF33 grid). Only "fine" makes the
                                          # fold a congruence, so only "fine" certifies PSD.
@@ -922,6 +944,21 @@ def _preflight_products():
             problems.append(f"CROSS_NULL_FILL must be 'zero' or 'ship', not {CROSS_NULL_FILL!r}")
         if CROSS_MAG_GRID == "fine" and CROSS_NULL_FILL != "zero":
             problems.append("CROSS_MAG_GRID='fine' requires CROSS_NULL_FILL='zero'")
+        if not (0.0 <= CROSS_MIN_SAMPLED_FRAC <= 1.0):
+            problems.append(
+                f"CROSS_MIN_SAMPLED_FRAC must be a fraction in [0, 1], not "
+                f"{CROSS_MIN_SAMPLED_FRAC!r}")
+        if CROSS_ORDERS is not None:
+            _co = str(CROSS_ORDERS).strip().lower()
+            if _co != "all":
+                try:
+                    _bad = [int(x) for x in _co.split(",") if x.strip()]
+                except ValueError:
+                    _bad = None
+                if not _bad or any(not 1 <= l <= 6 for l in _bad):
+                    problems.append(
+                        f"CROSS_ORDERS must be None, 'all', or a comma-separated "
+                        f"list of orders 1..6, not {CROSS_ORDERS!r}")
         if MF34_PER_ORDER_MESH and CROSS_NULL_FILL != "zero":
             # The cross step collapses shape and cross onto the per-order meshes
             # with one U, in relative space. `--null-fill ship` writes the FILE's
@@ -2085,6 +2122,8 @@ def _write_cross_term_endf(mg_endf, output_path, logger,
     logger.info(f"  dead parameters : {dead_parameters}")
     logger.info(f"  magnitude grid  : {CROSS_MAG_GRID}")
     logger.info(f"  null fill       : {CROSS_NULL_FILL}")
+    logger.info(f"  cross orders    : "
+                f"{CROSS_ORDERS if CROSS_ORDERS is not None else f'auto (f_sampled >= {CROSS_MIN_SAMPLED_FRAC:g})'}")
     logger.info(f"  output          : {out_path}")
 
     import contextlib
@@ -2099,6 +2138,8 @@ def _write_cross_term_endf(mg_endf, output_path, logger,
                 mag_grid=CROSS_MAG_GRID,
                 null_fill=CROSS_NULL_FILL,
                 dead_parameters=dead_parameters,
+                cross_orders=CROSS_ORDERS,
+                cross_min_sampled_frac=CROSS_MIN_SAMPLED_FRAC,
                 cache=Path(output_path) / ".group_cross_cache",
             )
     except BaseException as e:

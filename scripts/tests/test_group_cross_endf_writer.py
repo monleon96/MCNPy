@@ -818,3 +818,163 @@ def test_one_sign_per_coarse_group_makes_the_collapse_a_contraction():
     R = rng.normal(size=(N_GS, N_GS)); R = (R + R.T) / 2
     R /= np.abs(R).max()
     assert np.abs(U @ R @ U.T).max() <= 1.0 + 1e-12
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Dropping the cross term above the MC order cap (2026-08-28)
+#
+# `cx_post = cx_mc * outer(j33, j34)` rescales the MC's own correlation onto the
+# DECLARED sigmas. Above `mc_order_cap` the MC freezes a_l in every replica and
+# the sigma that reaches the tape is the analytic between-model term of the AIC
+# mixture, which the replicas never sampled — so the rescale would assert a
+# coupling nothing measured. Those orders' (0, L1) pairs go out null.
+#
+# They cannot be OMITTED: MF34 stores no NSS field, the count is derived from
+# NL, so removing a pair while a_L1 keeps its variance block desynchronises the
+# parser. Null over one interval is the format's way of saying it.
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def _write_with_orders(tmp_path, name, cross_orders, cx_post=None):
+    a_nom_group, a_flat, c34_post, cx = _inputs()
+    if cx_post is not None:
+        cx = cx_post
+    src = _source_endf(tmp_path)
+    out = tmp_path / name
+    write_consistent_mf34(out, src, c34_post, cx, a_nom_group,
+                          SHAPE_EV, MAG_EV, _rel_ship(),
+                          cross_orders=cross_orders)
+    return out
+
+
+def test_dropped_orders_keep_their_pair_and_declare_zero(tmp_path):
+    from scripts.mf34_cross_reader import read_mf34_split
+
+    a_nom_group, a_flat, c34_post, cx_post = _inputs()
+    keep = [1, 2, 3, 4]
+    cx = cx_post.reshape(N_GM, N_GS, L_MAX).copy()
+    cx[:, :, 4:] = 0.0                      # the caller masks BEFORE the write
+    out = _write_with_orders(tmp_path, "dropped.endf", keep,
+                             cx.reshape(N_GM, N_GS * L_MAX))
+
+    blocks = _read_blocks(out)
+    for l1 in range(1, L_MAX + 1):
+        assert (0, l1) in blocks, f"(0,{l1}) must still exist: NSS follows NL"
+
+    res = read_mf34_split(out, isotope=int(ZA), mt=MT, l_max=L_MAX,
+                          mf33_grid_ev=MAG_EV)
+    assert [b["l"] for b in res.cross] == keep
+    assert res.info["null_cross_orders"] == [5, 6]
+
+
+def test_dropping_orders_does_not_touch_the_ones_that_stay(tmp_path):
+    """The kept blocks must be identical to what the all-orders write produced."""
+    a_nom_group, a_flat, c34_post, cx_post = _inputs()
+    cx = cx_post.reshape(N_GM, N_GS, L_MAX).copy()
+    cx[:, :, 4:] = 0.0
+    flat = cx.reshape(N_GM, N_GS * L_MAX)
+
+    full = _write_with_orders(tmp_path, "full.endf", None, flat)
+    part = _write_with_orders(tmp_path, "part.endf", [1, 2, 3, 4], flat)
+
+    a, b = _read_blocks(full), _read_blocks(part)
+    for key in a:
+        if key in ((0, 5), (0, 6)):
+            continue
+        np.testing.assert_array_equal(a[key][0], b[key][0], err_msg=str(key))
+
+
+def test_the_dropped_pairs_stop_being_a_dense_rectangle(tmp_path):
+    a_nom_group, a_flat, c34_post, cx_post = _inputs()
+    cx = cx_post.reshape(N_GM, N_GS, L_MAX).copy()
+    cx[:, :, 4:] = 0.0
+    flat = cx.reshape(N_GM, N_GS * L_MAX)
+    full = _write_with_orders(tmp_path, "size_full.endf", None, flat)
+    part = _write_with_orders(tmp_path, "size_part.endf", [1, 2, 3, 4], flat)
+    assert part.stat().st_size < full.stat().st_size
+
+
+def test_a_nonzero_block_on_a_dropped_order_is_refused(tmp_path):
+    """The PSD tables are taken against `cx_post`; the write must not disagree.
+
+    Masking at write time only would leave every diagnostic describing an
+    object with a cross term the tape does not carry — which is exactly the
+    "a joint was certified that is not the joint being shipped" failure this
+    whole step exists to prevent.
+    """
+    with pytest.raises(SystemExit, match="not in cross_orders"):
+        _write_with_orders(tmp_path, "bad.endf", [1, 2, 3, 4])
+
+
+def test_cross_orders_none_is_byte_identical_to_before(tmp_path):
+    """The knob is opt-in at this level: `None` must not move a single byte."""
+    a_nom_group, a_flat, c34_post, cx_post = _inputs()
+    src = _source_endf(tmp_path)
+    ref = tmp_path / "ref.endf"
+    write_consistent_mf34(ref, src, c34_post, cx_post, a_nom_group,
+                          SHAPE_EV, MAG_EV, _rel_ship())
+    got = _write_with_orders(tmp_path, "got.endf", None)
+    assert ref.read_bytes() == got.read_bytes()
+
+
+# ── which orders the run's own diagnostics say may carry a cross block ────────
+
+
+def _diag_csv(tmp_path, frac_by_order):
+    """A minimal mf34_mixture_diagnostics.csv with a chosen sampled fraction."""
+    import pandas as pd
+
+    n = 21
+    cols = {"energy_index": np.arange(n)}
+    for l, f in frac_by_order.items():
+        total = np.full(n, 1.0)
+        within = np.full(n, 0.25 * f)
+        cols[f"within_var_a{l}"] = within
+        cols[f"between_var_sampled_a{l}"] = total * f - within
+        cols[f"between_var_a{l}"] = total - within
+        cols[f"total_var_a{l}"] = total
+    d = tmp_path / "mf34_mixture_diagnostics.csv"
+    pd.DataFrame(cols).to_csv(d, index=False)
+    return tmp_path
+
+
+def test_the_sampled_fraction_is_read_per_order(tmp_path):
+    from scripts.build_group_cross import mc_sampled_variance_fraction
+
+    want = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 0.02, 6: 0.0}
+    got = mc_sampled_variance_fraction(_diag_csv(tmp_path, want))
+    for l, f in want.items():
+        assert got[l] == pytest.approx(f, abs=1e-12)
+
+
+def test_orders_below_the_bar_are_dropped(tmp_path):
+    from scripts.build_group_cross import resolve_cross_orders
+
+    d = _diag_csv(tmp_path, {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 0.02, 6: 0.0})
+    keep, frac, why = resolve_cross_orders(d, None, 0.5)
+    assert keep == [1, 2, 3, 4]
+    # ⚑ NOT A TUNING KNOB. The gap on the real object is four decades wide, so
+    # every bar in it gives the same answer; a rule that moved with the bar
+    # would be a choice about the result rather than a reading of the run.
+    for bar in (0.05, 0.1, 0.25, 0.5, 0.75, 0.9):
+        assert resolve_cross_orders(d, None, bar)[0] == [1, 2, 3, 4]
+
+
+def test_explicit_orders_override_the_measurement(tmp_path):
+    from scripts.build_group_cross import resolve_cross_orders
+
+    d = _diag_csv(tmp_path, {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 0.02, 6: 0.0})
+    assert resolve_cross_orders(d, "all", 0.5)[0] == [1, 2, 3, 4, 5, 6]
+    assert resolve_cross_orders(d, "1,3", 0.5)[0] == [1, 3]
+    with pytest.raises(SystemExit, match="out of range"):
+        resolve_cross_orders(d, "0,7", 0.5)
+
+
+def test_a_run_without_the_diagnostics_refuses_rather_than_guessing(tmp_path):
+    """Silently shipping the old object would be the worst of the three."""
+    from scripts.build_group_cross import resolve_cross_orders
+
+    with pytest.raises(SystemExit, match="mf34_mixture_diagnostics"):
+        resolve_cross_orders(tmp_path, None, 0.5)
+    # ... but an explicit answer still works, which is how an old run is redone.
+    assert resolve_cross_orders(tmp_path, "all", 0.5)[0] == [1, 2, 3, 4, 5, 6]

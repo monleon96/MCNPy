@@ -373,6 +373,7 @@ def read_mf34_split(
                  else np.asarray(mf33_grid_ev, dtype=float))
 
     cross: List[Dict] = []
+    null_orders: List[int] = []
     row_ref = None
     for ss in a0:
         l_r, l_c = int(ss.l or 0), int(ss.l1 or 0)
@@ -395,6 +396,20 @@ def read_mf34_split(
             continue
 
         row, col, mat = _a0_block_from(ss, l1)
+
+        # ⚑ A DECLARED-NULL (0, L1) PAIR, and it is accepted on ANY grid --
+        # exactly the concession `_self_block_is_null` already makes for the
+        # (0, 0) block, for the same reason. MF34 stores no NSS field (the
+        # count is derived from NL), so a pair cannot be omitted while a_L1
+        # keeps its own variance block: writing it null over one interval is
+        # the format's only way to say "no cross term for this order", and it
+        # costs 1 value instead of N0 x N_L1. The grid guards below exist to
+        # catch a cross block collapsed onto the wrong mesh; a block that is
+        # identically zero cannot be on the wrong mesh, so skipping them here
+        # weakens nothing. The order is REPORTED, never inferred by absence.
+        if not np.any(mat):
+            null_orders.append(l1)
+            continue
 
         if l1 not in order_grid:
             raise ValueError(
@@ -460,9 +475,20 @@ def read_mf34_split(
         })
 
     cross.sort(key=lambda b: b["l"])
+    null_orders.sort()
+    if require_cross and not cross:
+        raise ValueError(
+            f"{path} carries a_0 blocks for orders {null_orders}, but every "
+            f"one of them is declared null, so there is no cross term to read. "
+            f"The caller asked for one; scoring a silent zero would "
+            f"misattribute the result."
+        )
     info.update(
         n_orders=len(cross),
         orders=[b["l"] for b in cross],
+        # Orders whose (0, L1) pair exists and declares zero. Distinct from an
+        # order missing from `orders` because it sits above `l_max`.
+        null_cross_orders=null_orders,
         n_mag_bins=(0 if row_ref is None else int(row_ref.size - 1)),
         # The widest mesh, kept under the old name because callers print it.
         # `shape_bins_by_order` is the honest description once the meshes

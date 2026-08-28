@@ -229,6 +229,11 @@ if not hasattr(er, "mixture_regularisation_inputs_grouped"):
     faltan.append("guarda multigrupo (mixture_regularisation_inputs_grouped)")
 if not hasattr(bgc, "DEAD_BLOCK_D_SHIFT_MAX"):
     faltan.append("rechazo PSD por consecuencia (DEAD_BLOCK_D_SHIFT_MAX)")
+# ⚑ EL CRUZADO SOLO EN LOS ORDENES QUE EL MC MUESTREO (28-ago). Sin el testigo,
+#   un brazo escribiria los bloques (0,5)/(0,6) como antes -- 84 MB de cinta que
+#   reescalan una correlacion medida sobre la sigma analitica que la sustituye.
+if not hasattr(bgc, "resolve_cross_orders"):
+    faltan.append("cruzado limitado a los ordenes muestreados (resolve_cross_orders)")
 if "indep = (W[l] ** 2) @ d_fine" not in (here / "per_order_mesh.py").read_text():
     faltan.append("suelo de no-cancelacion en el colapso")
 if 'str(MAX_SAMPLE_ORDER)' not in (here / "exfor_to_endf_research.py").read_text():

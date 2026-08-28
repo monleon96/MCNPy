@@ -972,7 +972,8 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
                           null_fill="zero",
                           cross_emin_ev=None, cross_emax_ev=None,
                           mf33_file_grid=None,
-                          order_grids_ev=None, base_valid_width=None):
+                          order_grids_ev=None, base_valid_width=None,
+                          cross_orders=None):
     """Write the _mg tape whose MF34 is the joint that was just diagnosed.
 
     `cx_post` is Cauchy-Schwarz-compatible with `c34_post`, not with the MF34
@@ -989,6 +990,15 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
         The shipped RELATIVE MF34 on the base shape grid, used only where a_l is
         exactly zero and the absolute round trip is 0/0. Pass the same array the
         diagnosis used, never a re-mapping.
+    cross_orders : sequence of int, optional
+        Orders whose (0, L1) pair carries data. Every other pair is still
+        written -- MF34 derives NSS from NL and cannot omit one -- but null over
+        a single interval, which asserts the same zero for a few bytes instead
+        of a dense (n_mag x n_shape_l1) rectangle. ``None`` keeps all of them.
+        ⚠ ``cx_post`` must ALREADY be zero on the dropped orders: the caller
+        masks it before the PSD diagnostics, so that the tables describe the
+        object that ships. This argument only decides how those zeros are
+        WRITTEN, and the assertion below is what keeps the two in step.
     """
     from kika.endf.writers.mf34_writer import (
         create_mf34_from_covariance, write_mf34_to_file,
@@ -1079,6 +1089,21 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
         cross_grid = g_file
 
     cross_cov = {l1: cx_win[:, :, l1 - 1] for l1 in range(1, L_MAX + 1)}
+    _null_orders = ([] if cross_orders is None
+                    else [l for l in range(1, L_MAX + 1)
+                          if l not in set(int(x) for x in cross_orders)])
+    for l1 in _null_orders:
+        blk = cross_cov[l1]
+        if np.abs(blk).max() > 0.0:
+            raise SystemExit(
+                f"a_{l1} is not in cross_orders but its cross block is not "
+                f"zero (max |cx_rel| = {np.abs(blk).max():.6g}). The PSD tables "
+                f"were taken against a DIFFERENT object than the one about to "
+                f"be written -- mask cx_post before the diagnostics, not here.")
+        cross_cov[l1] = None
+    if _null_orders:
+        print(f"    (0, L1) pairs written NULL over one interval: "
+              + ", ".join(f"a_{l}" for l in _null_orders))
     shape_arg = np.asarray(shape_ev, float)
 
     # ── a mesh per Legendre order, as one congruence at the point of emission ──
@@ -1178,7 +1203,9 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
             for l1 in range(l, L_MAX + 1):
                 blocks_rel[(l, l1)] = (
                     U[l] @ c34_rel[np.ix_(rows_of[l], rows_of[l1])] @ U[l1].T)
-        cross_cov = {l1: cross_cov[l1] @ U[l1].T for l1 in range(1, L_MAX + 1)}
+        cross_cov = {l1: (None if cross_cov[l1] is None
+                          else cross_cov[l1] @ U[l1].T)
+                     for l1 in range(1, L_MAX + 1)}
 
         before = float(np.abs(c34_rel).max())
         worst = max(float(np.abs(b).max()) for b in blocks_rel.values())
@@ -1268,9 +1295,88 @@ def write_consistent_mf34(out_path: Path, source_endf: Path, c34_post, cx_post,
           f"source {source_endf.stat().st_size})")
 
 
+def mc_sampled_variance_fraction(run_dir, l_max=L_MAX):
+    """``{l: median fraction of the DECLARED a_l variance the MC sampled}``.
+
+    ⚑ WHY THIS DECIDES WHICH ORDERS GET A CROSS BLOCK.
+
+    The cross term ships as ``cx_post = cx_mc * outer(j33, j34)``: the MC's own
+    correlation, rescaled onto the DECLARED sigmas. That is sound only while the
+    declared sigma is the sigma the replicas explored. Above ``mc_order_cap``
+    the MC freezes a_l to its nominal in every replica and the variance that
+    takes its place in the file is the ANALYTIC between-model term of the AIC
+    mixture -- a quantity the replicas never sampled. Rescaling a measured
+    correlation onto it asserts that the model-selection uncertainty couples to
+    the MF33 magnitude the same way the data noise does, which nothing measured.
+
+    The run already writes the number that settles it, per bin and per order:
+
+        f_sampled = (within_var + between_var_sampled) / total_var
+
+    where ``total_var = within + between`` is what the tape declares and
+    ``between_var_sampled`` is the part of the between-model term the replicas
+    did reach. On run 104S2 the medians separate by two to four orders of
+    magnitude -- a_1..a_4 at 1.0000, a_5 at 0.0170, a_6 at 0.0001 -- so the
+    threshold is not a tuning knob: anything in [0.05, 0.9] gives one answer.
+
+    Returns ``{}`` when the run wrote no ``mf34_mixture_diagnostics.csv``; the
+    caller must then be told which orders to ship rather than guessing.
+    """
+    path = Path(run_dir) / "mf34_mixture_diagnostics.csv"
+    if not path.exists():
+        return {}
+    cols = ["energy_index"] + [f"{p}_a{l}" for l in range(1, l_max + 1)
+                               for p in ("within_var", "between_var_sampled",
+                                         "total_var")]
+    d = pd.read_csv(path, usecols=cols)
+    out = {}
+    for l in range(1, l_max + 1):
+        t = d[f"total_var_a{l}"].to_numpy(float)
+        w = d[f"within_var_a{l}"].to_numpy(float)
+        b = d[f"between_var_sampled_a{l}"].to_numpy(float)
+        ok = t > 0
+        if not ok.any():
+            out[l] = 0.0
+            continue
+        out[l] = float(np.median((w[ok] + b[ok]) / t[ok]))
+    return out
+
+
+def resolve_cross_orders(run_dir, explicit, min_frac, l_max=L_MAX):
+    """``(orders_to_ship, fractions, why)`` -- which (0, L1) pairs carry data.
+
+    ``explicit`` is a comma-separated list, ``"all"``, or ``None`` (decide from
+    the run's own mixture diagnostics). The orders NOT returned are still
+    written, as null pairs: MF34 stores no NSS field -- the count is derived
+    from NL -- so a pair cannot be omitted while a_L1 keeps its variance block.
+    """
+    frac = mc_sampled_variance_fraction(run_dir, l_max)
+    if explicit is not None and str(explicit).strip().lower() == "all":
+        return list(range(1, l_max + 1)), frac, "--cross-orders all"
+    if explicit is not None:
+        try:
+            want = sorted({int(x) for x in str(explicit).split(",") if x.strip()})
+        except ValueError:
+            raise SystemExit(f"--cross-orders not parseable: {explicit!r}")
+        bad = [l for l in want if not 1 <= l <= l_max]
+        if bad:
+            raise SystemExit(f"--cross-orders out of range 1..{l_max}: {bad}")
+        return want, frac, f"--cross-orders {explicit}"
+    if not frac:
+        raise SystemExit(
+            "this run has no mf34_mixture_diagnostics.csv, so the MC-sampled "
+            "fraction of the declared variance cannot be measured and the "
+            "cross orders cannot be decided from the run itself. Pass "
+            "--cross-orders explicitly (use 'all' to reproduce the pre-2026-08-28 "
+            "object, which wrote a cross block for every order).")
+    keep = [l for l in range(1, l_max + 1) if frac.get(l, 0.0) >= min_frac]
+    return keep, frac, f"f_sampled >= {min_frac:g}"
+
+
 def build_cross_and_write_endf(run_dir, source_endf, out_endf, *,
                                mag_grid="fine", null_fill="zero", cache=None,
-                               dead_parameters="drop"):
+                               dead_parameters="drop", cross_orders=None,
+                               cross_min_sampled_frac=None):
     """Build the joint and write the cross-term ENDF. Library entry point.
 
     Goes through ``main`` on a constructed argv so the pipeline runs the exact
@@ -1282,6 +1388,10 @@ def build_cross_and_write_endf(run_dir, source_endf, out_endf, *,
             "--mag-grid", str(mag_grid),
             "--null-fill", str(null_fill),
             "--dead-parameters", str(dead_parameters)]
+    if cross_orders is not None:
+        argv += ["--cross-orders", str(cross_orders)]
+    if cross_min_sampled_frac is not None:
+        argv += ["--cross-min-sampled-frac", str(cross_min_sampled_frac)]
     if cache is not None:
         argv += ["--cache", str(cache)]
     rc = main(argv)
@@ -1385,6 +1495,24 @@ def main(argv=None):
         "--write-null-mask", metavar="OUT.npz",
         help="Emit the (n_shape_groups, L_MAX) mask of slots the MC never "
              "populated, with the shape grid and a_nom_group. Works in --check.",
+    )
+    ap.add_argument(
+        "--cross-orders", default=None,
+        help="Which Legendre orders get a (0, L1) cross block WITH DATA: a "
+             "comma-separated list, or 'all'. Default: decide from the run's "
+             "own mf34_mixture_diagnostics.csv -- an order ships only where the "
+             "MC replicas actually sampled the variance the tape declares "
+             "(see --cross-min-sampled-frac). The remaining pairs are still "
+             "written, null over one interval, because MF34 derives NSS from "
+             "NL and cannot omit a pair while a_L1 keeps its variance block. "
+             "'all' reproduces the pre-2026-08-28 object.",
+    )
+    ap.add_argument(
+        "--cross-min-sampled-frac", type=float, default=0.5,
+        help="Bar for the default --cross-orders rule: median over bins of "
+             "(within_var + between_var_sampled) / total_var per order. On the "
+             "104S2 deliverable a_1..a_4 sit at 1.0000 and a_5/a_6 at "
+             "0.0170/0.0001, so the bar is a cliff, not a tuning knob.",
     )
     ap.add_argument("--cross-emin-ev", type=float, default=None,
                     help="Clip the cross block's magnitude axis (default: the whole grid)")
@@ -1554,6 +1682,36 @@ def main(argv=None):
     c33_post = c33_mc * np.outer(j33, j33)
     c34_post = c34_mc * np.outer(j34, j34)
     cx_post = cx_mc * np.outer(j33, j34)
+
+    # ── which orders may carry a cross block at all ───────────────────────────
+    #
+    # ⚑ APPLIED HERE, BEFORE THE DIAGNOSTICS, ON PURPOSE. sigma_max(K), lam_min
+    # and every row of the two tables below must be taken against the object
+    # that ships. Zeroing cross columns is NOT a congruence and carries no PSD
+    # guarantee of its own -- it only ever REDUCES ||W33 Cx W34||, but W34 and
+    # the column mask do not commute, so that is an expectation, not a bound.
+    # The gate measures it; nothing here asserts it.
+    _cross_orders, _frac, _why = resolve_cross_orders(
+        run_dir, args.cross_orders, args.cross_min_sampled_frac)
+    _dropped = [l for l in range(1, L_MAX + 1) if l not in _cross_orders]
+    print(f"\n  cross orders: {_cross_orders} ({_why})")
+    if _frac:
+        print("    MC-sampled fraction of the declared variance, median by "
+              "order: " + "  ".join(f"a_{l} {_frac.get(l, float('nan')):.4f}"
+                                    for l in range(1, L_MAX + 1)))
+    if _dropped:
+        _cxm = cx_post.reshape(n_gm, n_gs, L_MAX)
+        _before = float(np.abs(cx_post).max())
+        _nz = {l: int((np.abs(_cxm[:, :, l - 1]) > 0).sum()) for l in _dropped}
+        _cxm[:, :, [l - 1 for l in _dropped]] = 0.0
+        print(f"    a_" + ", a_".join(str(l) for l in _dropped)
+              + f": cross block DROPPED (was {sum(_nz.values()):,d} nonzero "
+                f"entries; per order {_nz}). The MC froze these orders above "
+                f"mc_order_cap, so the sigma the tape declares for them is the "
+                f"analytic between-model term the replicas never sampled, and "
+                f"rescaling a measured correlation onto it asserts a coupling "
+                f"nothing measured.")
+        print(f"    max |cx_post|: {_before:.4g} -> {float(np.abs(cx_post).max()):.4g}")
 
     # ── the parameters the congruence cannot reach ────────────────────────────
     #
@@ -2245,6 +2403,7 @@ def main(argv=None):
             mf33_file_grid=(mf33_file_grid_ev(source_endf, cache)
                             if _fine_mag else None),
             order_grids_ev=_order_grids, base_valid_width=_valid_width,
+            cross_orders=_cross_orders,
         )
     return 0
 

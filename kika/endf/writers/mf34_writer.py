@@ -276,7 +276,15 @@ def _normalize_cross_cov(
             raise ValueError(
                 f"cross_cov keys must be exactly 1..{max_order}, got {keys}"
             )
-        blocks = {l1: np.asarray(cross_cov[l1], dtype=float)
+        # ⚑ ``None`` = DECLARED NULL, and it is not the same as an array of
+        # zeros. MF34 stores no NSS field: the count is derived from NL, so a
+        # (0, L1) sub-subsection cannot be omitted while a_L1 keeps its own
+        # variance block. The only way to say "no cross term here" is to write
+        # the pair null -- and a null block does not need the full rectangle,
+        # exactly as the (0, 0) self block does not. One interval spanning the
+        # same range asserts the same zero for a few bytes instead of N0 x N1.
+        blocks = {l1: (None if cross_cov[l1] is None
+                       else np.asarray(cross_cov[l1], dtype=float))
                   for l1 in range(1, max_order + 1)}
     else:
         if isinstance(n_shape, dict):
@@ -298,6 +306,8 @@ def _normalize_cross_cov(
 
     big_per_order: Dict[int, int] = {}
     for l1, blk in blocks.items():
+        if blk is None:
+            continue
         if blk.shape != (n0, _cols(l1)):
             raise ValueError(
                 f"cross_cov[{l1}] shape {blk.shape} doesn't match expected "
@@ -501,7 +511,11 @@ def _create_mf34_with_cross(
     coarse magnitude grid, with a null (zeros) (0, 0) block and LB=6 (0, L1)
     cross blocks.  The full upper triangle (including the zero (0, 0)) is
     emitted, which is NSS = NL*(NL+1)/2 for NL = max_order + 1 — the count the
-    format defines for a section whose first coefficient is a_0.
+    format defines for a section whose first coefficient is a_0.  ``cross_cov``
+    may map an order to ``None``, which writes that (0, L1) pair null over one
+    interval: the pair still exists (it has to — NSS is derived from NL, not
+    stored), but it declares no covariance and costs a few bytes instead of a
+    dense N0 x N_L1 rectangle of zeros.
     """
     if int(ltt or 1) != 1:
         raise ValueError(
@@ -586,7 +600,14 @@ def _create_mf34_with_cross(
             else:
                 sub_matrix = blocks[l1]
 
-            if l == l1:
+            if l == 0 and l1 >= 1 and sub_matrix is None:
+                # Declared null on one interval spanning the block's own range.
+                records = [_make_lb6_record(
+                    np.zeros((1, 1), dtype=float),
+                    [float(row_grid[0]), float(row_grid[-1])],
+                    [float(col_grid[0]), float(col_grid[-1])],
+                )]
+            elif l == l1:
                 records = [_make_lb5_record(sub_matrix, row_grid)]
             else:
                 records = [_make_lb6_record(sub_matrix, row_grid, col_grid)]
