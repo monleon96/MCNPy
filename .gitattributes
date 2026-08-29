@@ -1,0 +1,6 @@
+# Los fixtures GNDS llevan el sha1 de su hermano declarado DENTRO del fichero
+# (`externalFile/@checksum`, §8.3), asi que una conversion de finales de linea
+# al sacarlos del repo falsifica el digest: con core.autocrlf=true en Windows el
+# lector calcula el sha1 de la copia CRLF y avisa de que los dos no se
+# escribieron juntos. Se sacan byte a byte en todas las plataformas.
+kika/gnds/tests/data/**/*.xml -text

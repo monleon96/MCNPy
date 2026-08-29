@@ -173,15 +173,25 @@ def _importers(adapter: str, root: Path | None = None) -> list[str]:
         relative = path.relative_to(root)
         if "model_adapter" in relative.parts or "tests" in relative.parts:
             continue
-        tree = ast.parse(path.read_text(errors="replace"), filename=str(path))
+        # ``ALLOWED_IMPORTERS`` spells its paths with forward slashes, so the
+        # entries have to as well: ``str(WindowsPath)`` uses backslashes and
+        # every comparison against the allowlist would be a miss, which reads
+        # as "nothing imports the adapter" rather than as a broken test.
+        posix = relative.as_posix()
+        # Python source is UTF-8 by definition (PEP 3120); ``read_text`` without
+        # it uses the locale encoding, which on Windows is cp1252 and raises a
+        # SyntaxError on the first non-Latin-1 identifier in the tree.
+        tree = ast.parse(
+            path.read_text(encoding="utf-8", errors="replace"), filename=str(path)
+        )
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 if _resolves_to(node, relative, adapter):
-                    found.append(f"{relative}:{node.lineno}")
+                    found.append(f"{posix}:{node.lineno}")
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     if alias.name.startswith(adapter):
-                        found.append(f"{relative}:{node.lineno}")
+                        found.append(f"{posix}:{node.lineno}")
     return found
 
 
