@@ -174,6 +174,11 @@ class X4ProDataset:
     # the uncertainty manifest resolver to derive sigma_stat and sigma_sys.
     uncertainty_components: List[Dict[str, Any]] = field(default_factory=list)
 
+    # The author's own declared incident-energy resolution (EXFOR EN-RSL*),
+    # normalised to a FWHM. None when the dataset declares none — which is the
+    # majority: see _read_declared_resolution.
+    energy_resolution: Optional[Dict[str, Any]] = None
+
 
 def _zaid_to_target_pattern(zaid: int) -> str:
     """
@@ -222,6 +227,215 @@ def _parse_target_from_db(target_str: str) -> Tuple[str, int]:
     return ("Unknown", 0)
 
 
+# --- Declared incident-energy resolution (EXFOR EN-RSL*) --------------------
+#
+# EXFOR lets an author declare the incident-energy resolution of their own
+# measurement.  It is the experiment's own number, so it beats anything curated
+# externally, and it is far more widely available: 25% of elastic angular
+# datasets carry one.
+#
+# What the value *means* is specified, and the specification is uncomfortable.
+# LEXFOR (IAEA-NDS-0208, "Resolution / Incident-Projectile Energy Resolution")
+# says the resolution "is usually defined as full-width at half-maximum (FWHM),
+# but may be given in other representations such as standard deviation", and
+# asks for the shape to be given in free text under INC-SPECT.  EXFOR
+# Dictionary 24 then codes three headings:
+#
+#     EN-RSL-FW   full width
+#     EN-RSL-HW   half width
+#     EN-RSL      unspecified
+#
+# `-FW` and `-HW` are exact against each other — LEXFOR's worked example gives
+# FW = 2 MeV and HW = 1 MeV for one curve — and Dictionary 24 spells the ratio
+# variants `EN-RSL-DN`/`-NM` as "(FWHM)", which is what fixes "full width" as
+# meaning FWHM.  The bare heading is the problem: it is three quarters of the
+# corpus, and the INC-SPECT escape hatch is not used in practice (measured over
+# the full X4Pro: of 2283 bare-EN-RSL angular subentries, 13 have free text
+# that says anything about the incident-energy convention).
+#
+# So a bare EN-RSL is normalised to a FWHM — LEXFOR's "usually" — and flagged
+# `convention="unspecified"` so a caller can say out loud that it assumed.
+# Nothing here silently decides what it cannot know.
+
+#: EXFOR headings holding a declared incident-energy resolution.
+_RESOLUTION_HEADINGS = ("EN-RSL",)
+
+#: Headings whose value is a half width, i.e. half of the FWHM (Dictionary 24).
+_HALF_WIDTH_HEADINGS = ("EN-RSL-HW",)
+
+
+def _is_resolution_header(header: Any) -> bool:
+    """Whether an x4data column holds a declared incident-energy resolution."""
+    return str(header or "").upper().startswith(_RESOLUTION_HEADINGS)
+
+
+def _read_declared_resolution(var: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Read one EN-RSL* column into a normalised record, or None.
+
+    X4Pro carries both the value as compiled (``com0``/``dat0``, in ``units``)
+    and the same value converted to a base unit (``com1``/``dat1``, in
+    ``basicUnits``).  The converted form is used: it saves reimplementing
+    Dictionary 25's factor table, and it is what X4Pro itself considers this
+    number to be.  ``basicUnits`` collapses every absolute energy unit to EV
+    and leaves the two relative forms alone, so it doubles as the discriminator
+    between the three kinds of width EXFOR allows.
+
+    Returns a dict with:
+
+    ``heading``
+        The raw EXFOR heading, for display.
+    ``convention``
+        ``"full_width"`` (EN-RSL-FW), ``"half_width"`` (EN-RSL-HW) or
+        ``"unspecified"`` (bare EN-RSL).
+    ``kind``
+        ``"absolute"`` (``fwhm_ev``/``fwhm_ev_values``), ``"relative"``
+        (``fwhm_fraction``, of the incident energy) or ``"per_flight_path"``
+        (``fwhm_ns_per_m``, a reciprocal velocity).
+    ``assumed_fwhm``
+        True when the heading declined to say, so the caller can label it.
+
+    Half widths are doubled here, so every ``fwhm_*`` field means a full width
+    at half maximum regardless of which heading it came from.  The FWHM→sigma
+    step is deliberately *not* done here: :data:`kika._constants.FWHM_TO_SIGMA`
+    is the single definition of it and the folding code owns that conversion.
+    """
+    header = str(var.get("header", "") or "").upper()
+    basic = str(var.get("basicUnits", "") or "").upper()
+
+    # Prefer the converted value; fall back to the raw one only when the units
+    # were already the base ones, so an unconverted number is never mistaken
+    # for a converted one. (`dat1eq` — 4 angular columns — is an expression
+    # rather than a value, and is skipped.)
+    converted = True
+    if var.get("ifComm"):
+        value, values = var.get("com1"), None
+        if value is None and str(var.get("units", "")).upper() == basic:
+            value, converted = var.get("com0"), False
+    else:
+        value, values = None, var.get("dat1")
+        if values is None and str(var.get("units", "")).upper() == basic:
+            values, converted = var.get("dat0"), False
+
+    if value is None and not values:
+        return None
+
+    if header.startswith(_HALF_WIDTH_HEADINGS):
+        convention = "half_width"
+    elif header.startswith("EN-RSL-FW"):
+        convention = "full_width"
+    elif header == "EN-RSL":
+        convention = "unspecified"
+    else:
+        # EN-RSL-DN / -NM belong to a REACTION ratio's numerator or
+        # denominator, not to this dataset's own incident beam.
+        return None
+
+    # LEXFOR's example fixes HW = FW/2, so a half width doubles to a FWHM.
+    scale = 2.0 if convention == "half_width" else 1.0
+
+    record: Dict[str, Any] = {
+        "heading": header,
+        "convention": convention,
+        "assumed_fwhm": convention == "unspecified",
+        "units": var.get("units"),
+    }
+
+    if basic == "PER-CENT":
+        record["kind"] = "relative"
+        record["fwhm_fraction"] = (
+            float(value) * scale / 100.0 if value is not None else None
+        )
+        if values:
+            record["fwhm_fraction_values"] = [
+                float(v) * scale / 100.0 for v in values if v is not None
+            ]
+    elif basic == "EV" or (converted and basic in ("NSEC/M", "MICROSEC/M")):
+        # Electron-volts — and, for a reciprocal velocity, *also* electron-volts
+        # whenever the converted value is what we are holding. X4Pro leaves
+        # `basicUnits` reading NSEC/M there but has already applied the LEXFOR
+        # relation itself: subentry 21142005 declares 0.06 ns/m at 14.2 MeV and
+        # stores com1 = 88804.7, which is 2.766e-2 * 14.2^1.5 * 0.06 MeV in eV.
+        # Reading that as a timing spread gives a resolution of several GeV.
+        record["kind"] = "absolute"
+        record["fwhm_ev"] = float(value) * scale if value is not None else None
+        if values:
+            record["fwhm_ev_values"] = [
+                float(v) * scale for v in values if v is not None
+            ]
+    elif basic in ("NSEC/M", "MICROSEC/M"):
+        # The raw column, in the unit as compiled: a timing spread per metre of
+        # flight path, which only becomes a width once an energy is supplied.
+        per_m = float(value) * scale if value is not None else None
+        if basic == "MICROSEC/M" and per_m is not None:
+            per_m *= 1000.0
+        record["kind"] = "per_flight_path"
+        record["fwhm_ns_per_m"] = per_m
+    else:
+        # An unrecognised base unit is worse than no resolution at all: it
+        # would be read as electron-volts and fold the evaluation to a width
+        # off by orders of magnitude.
+        return None
+
+    return record
+
+
+def declared_resolution_fwhm_ev(
+    resolution: Optional[Dict[str, Any]],
+    energy_ev: float,
+) -> Optional[float]:
+    r"""The declared resolution as a FWHM in eV at one incident energy.
+
+    Resolves the three forms EXFOR allows onto a single number, which is what
+    a folding kernel needs.  For the reciprocal-velocity form LEXFOR gives, at
+    the non-relativistic limit,
+
+    .. math:: \Delta E = 2.766\times10^{-2}\, E^{3/2}\, |\Delta\tau|
+
+    with :math:`\Delta E`, :math:`E` in MeV and :math:`\Delta\tau` in ns/m
+    (cf. Schillebeeckx et al., *Nucl. Data Sheets* **113** (2012) 3054, §II.B).
+    The relation converts a width to a width, so it carries the convention
+    through unchanged: a FWHM in time gives a FWHM in energy.
+
+    Returns None when there is nothing to compute from, so a caller can fall
+    back rather than fold to a fabricated width.
+    """
+    if not resolution or not energy_ev or energy_ev <= 0:
+        return None
+
+    kind = resolution.get("kind")
+
+    if kind == "absolute":
+        width = resolution.get("fwhm_ev")
+        if width is None:
+            values = resolution.get("fwhm_ev_values") or []
+            # A per-point column has no single width; the median is the
+            # honest summary for a caller that wants one number.
+            if not values:
+                return None
+            ordered = sorted(values)
+            width = ordered[len(ordered) // 2]
+        return float(width) if width and width > 0 else None
+
+    if kind == "relative":
+        frac = resolution.get("fwhm_fraction")
+        if frac is None:
+            values = resolution.get("fwhm_fraction_values") or []
+            if not values:
+                return None
+            ordered = sorted(values)
+            frac = ordered[len(ordered) // 2]
+        return float(frac) * energy_ev if frac and frac > 0 else None
+
+    if kind == "per_flight_path":
+        ns_per_m = resolution.get("fwhm_ns_per_m")
+        if not ns_per_m or ns_per_m <= 0:
+            return None
+        e_mev = energy_ev / 1e6
+        return 2.766e-2 * (e_mev ** 1.5) * float(ns_per_m) * 1e6
+
+    return None
+
+
 def _parse_x4data_json(jx5z: Dict[str, Any]) -> Dict[str, Any]:
     """
     Parse the x4data array from the JSON structure.
@@ -257,6 +471,9 @@ def _parse_x4data_json(jx5z: Dict[str, Any]) -> Dict[str, Any]:
         "uncertainty_unit": "",  # Track uncertainty unit for PER-CENT detection
         "angle_type": "ANG",  # 'ANG' or 'COS'
         "uncertainty_components": [],  # All dy columns surfaced (DATA-ERR, ERR-1, ERR-S, ERR-T, ...)
+        # The author's own declared incident-energy resolution (EN-RSL*), or
+        # None. See _read_declared_resolution.
+        "energy_resolution": None,
     }
 
     for var in x4data:
@@ -269,10 +486,18 @@ def _parse_x4data_json(jx5z: Dict[str, Any]) -> Dict[str, Any]:
             # Cross section values
             result["values"] = dat0
             result["xs_unit"] = units
-        elif fam == "EN":
-            # Energy values
+        elif fam == "EN" and not cvar.startswith("d"):
+            # Incident energy itself. The cvar guard matters: EXFOR's declared
+            # resolution (EN-RSL*) is also fam="EN", as cvar="dx1", and without
+            # it that column fell through to here and overwrote the energies
+            # with resolution widths — plus energy_unit with the resolution's.
             result["energies"] = dat0
             result["energy_unit"] = units
+        elif fam == "EN" and _is_resolution_header(var.get("header", "")):
+            # Declared incident-energy resolution. See _read_declared_resolution.
+            declared = _read_declared_resolution(var)
+            if declared is not None:
+                result["energy_resolution"] = declared
         elif fam == "ANG":
             # Angle in degrees
             result["angles"] = dat0
@@ -868,6 +1093,10 @@ class X4ProDatabase:
             correction_notes=correction_notes,
             raw_json=jx5z,
             uncertainty_components=x4_parsed.get("uncertainty_components", []),
+            # Always from x4data: c5data carries the corrected measurement, not
+            # the beam's declared resolution, so there is no c5 equivalent to
+            # prefer here the way there is for values and uncertainties.
+            energy_resolution=x4_parsed.get("energy_resolution"),
         )
 
     def query_angular_distributions(
@@ -1109,19 +1338,35 @@ class X4ProDatabase:
 
         # Get TOF parameters from metadata file
         tof_params = _get_tof_params_for_experiment(dataset.dataset_id)
+        energy_resolution_input = {
+            "distance": {
+                "value": tof_params["flight_path_m"],
+                "unit": "m",
+            },
+            "time_resolution": {
+                "value": tof_params["time_resolution_ns"],
+                "unit": "ns",
+            },
+            "source": tof_params.get("source", "default"),
+        }
+
+        # The experiment's own declared resolution outranks anything curated
+        # externally, and covers far more of the corpus. It is *added* rather
+        # than substituted: it is a width, not a (L, dt) pair, so a consumer
+        # that can only fold from a flight path still has something to use.
+        # `source` says which of the two is the authoritative one.
+        declared = dataset.energy_resolution
+        if declared is not None:
+            energy_resolution_input["declared"] = declared
+            energy_resolution_input["source"] = {
+                "full_width": "exfor_rsl_fw",
+                "half_width": "exfor_rsl_hw",
+                "unspecified": "exfor_rsl_assumed",
+            }.get(declared.get("convention"), "exfor_rsl_assumed")
+
         method = {
             "type": "TOF",
-            "energy_resolution_input": {
-                "distance": {
-                    "value": tof_params["flight_path_m"],
-                    "unit": "m",
-                },
-                "time_resolution": {
-                    "value": tof_params["time_resolution_ns"],
-                    "unit": "ns",
-                },
-                "source": tof_params.get("source", "default"),
-            },
+            "energy_resolution_input": energy_resolution_input,
         }
 
         ad = ExforAngularDistribution(
