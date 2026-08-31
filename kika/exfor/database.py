@@ -379,6 +379,34 @@ def _read_declared_resolution(var: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return record
 
 
+def _declared_fwhm_over_energy(
+    resolution: Optional[Dict[str, Any]],
+    energies_ev: Any,
+) -> Optional[float]:
+    """Median of FWHM(E)/E over a dataset's incident energies, or None.
+
+    See the call site in :meth:`X4ProDatabase._convert_to_exfor_object` for why
+    the median rather than the extremes.
+    """
+    if resolution is None or energies_ev is None:
+        return None
+    try:
+        values = [float(e) for e in energies_ev if e and float(e) > 0]
+    except TypeError:
+        return None
+    if not values:
+        return None
+    ratios = []
+    for energy in values:
+        width = declared_resolution_fwhm_ev(resolution, energy)
+        if width and width > 0:
+            ratios.append(width / energy)
+    if not ratios:
+        return None
+    ratios.sort()
+    return ratios[len(ratios) // 2]
+
+
 def declared_resolution_fwhm_ev(
     resolution: Optional[Dict[str, Any]],
     energy_ev: float,
@@ -1357,6 +1385,22 @@ class X4ProDatabase:
         # `source` says which of the two is the authoritative one.
         declared = dataset.energy_resolution
         if declared is not None:
+            declared = dict(declared)
+            # How wide the declared width is relative to the energy it belongs
+            # to. A fact, not a policy: EXFOR occasionally carries a covered
+            # energy *range* or a source spread under EN-RSL rather than a
+            # resolution function, and the signature is a width comparable to
+            # the incident energy itself. Reported as the median over the
+            # dataset's energies — a per-point column has a different ratio at
+            # every point, and the lowest energy alone flags a perfectly
+            # ordinary constant width. Consumers pick their own threshold: an
+            # unattended evaluation may want to salvage the number, an
+            # interactive plot to refuse it and say why. Over the full X4Pro,
+            # 12 of 2914 angular datasets exceed 1.0 and two more exceed 0.5,
+            # against a median of 0.014.
+            ratio = _declared_fwhm_over_energy(declared, dataset.energies_ev)
+            if ratio is not None:
+                declared["fwhm_over_energy"] = ratio
             energy_resolution_input["declared"] = declared
             energy_resolution_input["source"] = {
                 "full_width": "exfor_rsl_fw",
