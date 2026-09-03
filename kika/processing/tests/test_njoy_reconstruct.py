@@ -116,3 +116,44 @@ def test_fe56_streaming(njoy_exe: Path, fe56_host_tape: Path) -> None:
     assert saw_result_last, "'result' must be the terminal event"
     assert pendf_path_seen is not None, "Expected a pendf_path event before result"
     _assert_reasonable_xs(result_payload, expected_mts=(1, 2, 102))
+
+
+# ---------------------------------------------------------------------------
+# Header scan (no NJOY needed)
+# ---------------------------------------------------------------------------
+
+def _record(mat: int, mf: int, mt: int, text: str = "") -> str:
+    """One 80-column ENDF record: 66 columns of payload, then MAT/MF/MT/NS."""
+    return f"{text:<66}{mat:4d}{mf:2d}{mt:3d}{1:5d}\n"
+
+
+def test_mat_from_tape_header_reads_first_material(tmp_path: Path) -> None:
+    from kika.processing.njoy_reconstruct import _mat_from_tape_header
+
+    tape = tmp_path / "n-026_Fe_056.endf"
+    tape.write_text(
+        _record(7777, 0, 0, "tape identification line")
+        + _record(2631, 1, 451, " 2.605600+4 5.545443+1          1          0          0          1")
+        + _record(2631, 1, 451, " 0.000000+0 1.000000+0          0          0          0          6"),
+        encoding="utf-8",
+    )
+    assert _mat_from_tape_header(tape) == 2631
+
+
+def test_mat_from_tape_header_ignores_tape_id_without_mf1(tmp_path: Path) -> None:
+    from kika.processing.njoy_reconstruct import _mat_from_tape_header
+
+    tape = tmp_path / "odd.endf"
+    # A TPID line with a positive MAT must not be mistaken for the material.
+    tape.write_text(
+        _record(9999, 0, 0, "tape identification line")
+        + "not an ENDF record at all\n",
+        encoding="utf-8",
+    )
+    assert _mat_from_tape_header(tape) is None
+
+
+def test_mat_from_tape_header_missing_file(tmp_path: Path) -> None:
+    from kika.processing.njoy_reconstruct import _mat_from_tape_header
+
+    assert _mat_from_tape_header(tmp_path / "nope.endf") is None
