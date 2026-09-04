@@ -63,6 +63,9 @@ from kika.exfor.database import (
     X4ProDatabase,
     X4ProDataset,
     read_exfor_from_database,
+    parse_reacode_fields,
+    exfor_quantity,
+    canonical_unit_factor,
 )
 
 # Transform functions
@@ -121,6 +124,9 @@ __all__ = [
     "ExforExperiment",
     # Database API
     "X4ProDatabase",
+    "parse_reacode_fields",
+    "exfor_quantity",
+    "canonical_unit_factor",
     "X4ProDataset",
     "read_exfor_from_database",
     # Transforms

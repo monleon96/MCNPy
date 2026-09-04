@@ -21,8 +21,9 @@ import json
 import os
 import sqlite3
 import re
+import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -723,6 +724,117 @@ def _convert_units(
     return values * (from_factor / to_factor)
 
 
+# ---------------------------------------------------------------------------
+# Reaction-code fields and canonical units for the general loader
+# ---------------------------------------------------------------------------
+
+# ``SF1(SF2,SF3)SF4,SF5,SF6,SF7,SF8,SF9`` — the first reaction inside a code.
+# Ratios and sums wrap each reaction in parentheses, so the search is anchored
+# at the first ``TARGET(PROJ,PROCESS)`` rather than at the start of the string.
+_REACODE_HEAD_RE = re.compile(r"(?P<target>[A-Z0-9\-+*]+)\((?P<projectile>[^,()]*),(?P<process>[^()]*)\)")
+
+_REACODE_EMPTY: Dict[str, str] = {
+    "target": "", "projectile": "", "process": "", "product": "",
+    "sf5": "", "sf6": "", "sf7": "", "sf8": "", "sf9": "",
+}
+
+
+def parse_reacode_fields(reacode: Optional[str]) -> Dict[str, str]:
+    """
+    Split an EXFOR reaction code into its subfields.
+
+    ``26-FE-56(N,EL)26-FE-56,,DA`` gives target ``26-FE-56``, projectile
+    ``N``, process ``EL``, product ``26-FE-56`` and SF6 ``DA``. SF6 is the
+    quantity as EXFOR names it (``SIG``, ``DA``, ``TRN``, ``RI`` …), which is
+    finer than X4Pro's ``quant1``: X4Pro files a transmission measurement
+    under ``CS`` even though it is dimensionless, and only SF6 says ``TRN``.
+
+    For a ratio or sum of reactions the fields of the *first* reaction are
+    returned. Unknown or empty codes give empty strings throughout.
+    """
+    out = dict(_REACODE_EMPTY)
+    if not reacode:
+        return out
+    text = reacode.strip().upper()
+    m = _REACODE_HEAD_RE.search(text)
+    if not m:
+        return out
+    out["target"] = m.group("target")
+    out["projectile"] = m.group("projectile").strip()
+    out["process"] = m.group("process").strip()
+    rest = text[m.end():]
+    # Inside a ratio/sum the first reaction ends at its closing parenthesis.
+    close = rest.find(")")
+    if close != -1:
+        rest = rest[:close]
+    parts = [p.strip() for p in rest.split(",")]
+    for key, value in zip(("product", "sf5", "sf6", "sf7", "sf8", "sf9"), parts):
+        out[key] = value
+    return out
+
+
+def exfor_quantity(reacode: Optional[str], fallback: Optional[str] = None) -> str:
+    """SF6 of ``reacode`` (``SIG``, ``DA``, ``TRN`` …), or ``fallback`` when absent."""
+    sf6 = parse_reacode_fields(reacode)["sf6"]
+    return sf6 or (fallback or "")
+
+
+# Energy units -> MeV. EXFOR spells millielectronvolts "MILLI-EV".
+_ENERGY_UNIT_TO_MEV: Dict[str, float] = {
+    "EV": 1e-6,
+    "MILLI-EV": 1e-9,
+    "MICRO-EV": 1e-12,
+    "KEV": 1e-3,
+    "MEV": 1.0,
+    "GEV": 1e3,
+}
+
+# Barn prefixes as EXFOR writes them (Dictionary 25): MB is millibarn.
+_BARN_PREFIX_FACTOR: Dict[str, float] = {
+    "": 1.0,
+    "M": 1e-3, "MILLI-": 1e-3,
+    "MU": 1e-6, "MICRO-": 1e-6, "U": 1e-6,
+    "N": 1e-9, "NANO-": 1e-9,
+    "P": 1e-12, "PICO-": 1e-12,
+    "K": 1e3, "KILO-": 1e3,
+}
+_BARN_RE = re.compile(r"^(P|N|MU|U|M|K|MILLI-|MICRO-|NANO-|PICO-|KILO-)?B$")
+
+
+def canonical_unit_factor(unit: Optional[str]) -> Tuple[Optional[float], Optional[str]]:
+    """
+    Multiplier and label that bring ``unit`` to the canonical unit its family
+    uses in KIKA: energies to ``MeV``, cross sections to ``b`` (with ``/sr``
+    and ``/MeV`` denominators converted alongside).
+
+    ``("MB/SR")`` gives ``(1e-3, "b/sr")``; ``("KEV")`` gives ``(1e-3, "MeV")``;
+    ``("B/KEV")`` gives ``(1e3, "b/MeV")``. Units outside those two families
+    (``NO-DIM``, ``PART/FIS``, ``ADEG`` …) return ``(None, None)`` and are left
+    exactly as stored.
+    """
+    if not unit:
+        return None, None
+    u = unit.strip().upper()
+    if u in _ENERGY_UNIT_TO_MEV:
+        return _ENERGY_UNIT_TO_MEV[u], "MeV"
+    parts = u.split("/")
+    m = _BARN_RE.match(parts[0])
+    if not m:
+        return None, None
+    factor = _BARN_PREFIX_FACTOR[m.group(1) or ""]
+    label = ["b"]
+    for denominator in parts[1:]:
+        if denominator == "SR":
+            label.append("sr")
+        elif denominator in _ENERGY_UNIT_TO_MEV:
+            # x per keV is 1e3 x per MeV.
+            factor /= _ENERGY_UNIT_TO_MEV[denominator]
+            label.append("MeV")
+        else:
+            return None, None
+    return factor, "/".join(label)
+
+
 class X4ProDatabase:
     """
     Interface to X4Pro SQLite database (full 2025 version).
@@ -750,11 +862,35 @@ class X4ProDatabase:
     >>> print(f"Found {len(datasets)} datasets for Fe-56")
     """
 
-    def __init__(self, db_path: str = None):
-        """Initialize database connection."""
+    def __init__(self, db_path: str = None, energy_cache_path: Optional[str] = None):
+        """
+        Initialize database connection.
+
+        Parameters
+        ----------
+        db_path : str, optional
+            Path to the X4Pro SQLite file (else the configured/env path).
+        energy_cache_path : str, optional
+            JSON file where the per-dataset incident-energy ranges are kept
+            between processes. Reading a range means parsing the dataset's
+            JSON blob, which is what makes a cold search slow; with the file
+            in place only datasets never seen before touch the database.
+        """
         from kika.exfor.config import get_db_path
         self.db_path = get_db_path(db_path)
         self._conn: Optional[sqlite3.Connection] = None
+        self._energy_cache_path = energy_cache_path
+        # One row per dataset from x4pro_ds, loaded once by load_catalogue().
+        # The table has no index on target/author/quantity, so every SQL
+        # filter is a full scan (seconds on a 4.8 GB file); in memory the same
+        # filter is milliseconds. Guarded by a lock so a background warm-up
+        # and a first search do not both load it.
+        self._catalogue: Optional[pd.DataFrame] = None
+        self._catalogue_lock = threading.Lock()
+        # dataset_id -> (e_min, e_max) in MeV. The range lives only inside the
+        # per-dataset JSON blob, so it is parsed once and remembered.
+        self._energy_range_cache: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
+        self._load_energy_cache()
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get or create database connection."""
@@ -912,6 +1048,226 @@ class X4ProDatabase:
         cursor = conn.execute(query, params)
         return [row[0] for row in cursor.fetchall()]
 
+    # =========================================================================
+    # In-memory catalogue and bulk search
+    # =========================================================================
+
+    _CATALOGUE_SQL = (
+        "SELECT DatasetID AS dataset_id, year1 AS year, author1 AS author, "
+        "Targ1 AS target, Proj AS projectile, MF AS mf, MT AS mt, ndat, "
+        "quant1 AS quant, reacode FROM x4pro_ds"
+    )
+
+    def load_catalogue(self, force: bool = False) -> pd.DataFrame:
+        """
+        The whole ``x4pro_ds`` table as a DataFrame, loaded once and kept.
+
+        Columns: ``dataset_id, year, author, target, projectile, mf, mt, ndat,
+        quant, reacode``. The repetitive text columns are categoricals, so the
+        ~187k rows of the full database take a few tens of MB.
+
+        Reads through its own short-lived connection so it can run on a
+        background thread while the main connection serves other queries
+        (``sqlite3`` connections are bound to the thread that opened them).
+        """
+        with self._catalogue_lock:
+            if self._catalogue is not None and not force:
+                return self._catalogue
+            if self.db_path is None or not os.path.exists(self.db_path):
+                raise FileNotFoundError(f"X4Pro database not found at: {self.db_path}")
+            conn = sqlite3.connect(self.db_path)
+            try:
+                df = pd.read_sql_query(self._CATALOGUE_SQL, conn)
+            finally:
+                conn.close()
+            for col in ("author", "target", "projectile", "quant"):
+                df[col] = df[col].fillna("").astype("category")
+            for col in ("year", "mf", "mt", "ndat"):
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            df["dataset_id"] = df["dataset_id"].astype(str)
+            df["reacode"] = df["reacode"].fillna("")
+            self._catalogue = df
+            return df
+
+    @property
+    def catalogue_loaded(self) -> bool:
+        """Whether load_catalogue() has already run."""
+        return self._catalogue is not None
+
+    @staticmethod
+    def _category_mask(series: pd.Series, predicate) -> pd.Series:
+        """Row mask from a predicate evaluated once per distinct category value."""
+        cats = series.cat.categories
+        keep = [c for c in cats if predicate(str(c))]
+        return series.isin(keep)
+
+    def search_datasets(
+        self,
+        targets: Optional[Iterable[str]] = None,
+        projectile: Optional[str] = "N",
+        quantities: Optional[Iterable[str]] = None,
+        mts: Optional[Iterable[int]] = None,
+        year_min: Optional[int] = None,
+        year_max: Optional[int] = None,
+        author: Optional[str] = None,
+        entry_prefix: Optional[str] = None,
+        energy_min_mev: Optional[float] = None,
+        energy_max_mev: Optional[float] = None,
+        include_energy_range: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """
+        Every dataset matching the filters, with metadata, in one call.
+
+        Matching follows ``query_dataset_ids``: targets and quantities are
+        case-insensitive substrings of ``Targ1``/``quant1`` (so ``CS`` also
+        matches ``CSP``), the projectile is compared in both cases, the author
+        is a substring, MTs are exact. Lists are ORed within a filter and
+        ANDed across filters.
+
+        The energy window is applied to each dataset's incident-energy range
+        (MeV, from the JSON, cached): a dataset is kept when its range overlaps
+        the window; datasets with no energy information are dropped by an
+        energy filter and kept otherwise.
+
+        Returns
+        -------
+        List[Dict[str, Any]]
+            Sorted by dataset id. Keys: ``dataset_id, year, author, target,
+            projectile, mf, mt, ndat, quant, reacode, e_min, e_max, sf5, sf6``.
+        """
+        df = self.load_catalogue()
+        mask = pd.Series(True, index=df.index)
+
+        target_list = [t for t in (targets or []) if t]
+        if target_list:
+            needles = [t.upper() for t in target_list]
+            mask &= self._category_mask(df["target"], lambda v: any(n in v.upper() for n in needles))
+
+        if projectile:
+            wanted = {projectile.lower(), projectile.upper()}
+            mask &= df["projectile"].isin(list(wanted))
+
+        quantity_list = [q for q in (quantities or []) if q]
+        if quantity_list:
+            needles = [q.upper() for q in quantity_list]
+            mask &= self._category_mask(df["quant"], lambda v: any(n in v.upper() for n in needles))
+
+        mt_list = [int(m) for m in (mts or []) if m is not None]
+        if mt_list:
+            mask &= df["mt"].isin(mt_list)
+
+        if year_min is not None:
+            mask &= df["year"] >= year_min
+        if year_max is not None:
+            mask &= df["year"] <= year_max
+
+        if author:
+            needle = author.upper()
+            mask &= self._category_mask(df["author"], lambda v: needle in v.upper())
+
+        if entry_prefix:
+            prefix = entry_prefix.strip().upper()
+            mask &= df["dataset_id"].str.upper().str.startswith(prefix)
+
+        hits = df[mask].sort_values("dataset_id")
+        if hits.empty:
+            return []
+
+        ids = hits["dataset_id"].tolist()
+        want_energy = include_energy_range or energy_min_mev is not None or energy_max_mev is not None
+        ranges = self.energy_ranges(ids) if want_energy else {}
+
+        results: List[Dict[str, Any]] = []
+        for row in hits.itertuples(index=False):
+            e_min, e_max = ranges.get(row.dataset_id, (None, None))
+            if energy_min_mev is not None or energy_max_mev is not None:
+                if e_min is None and e_max is None:
+                    continue
+                if energy_min_mev is not None and e_max is not None and e_max < energy_min_mev:
+                    continue
+                if energy_max_mev is not None and e_min is not None and e_min > energy_max_mev:
+                    continue
+            fields = parse_reacode_fields(row.reacode)
+            results.append({
+                "dataset_id": row.dataset_id,
+                "year": int(row.year) if pd.notna(row.year) else None,
+                "author": str(row.author),
+                "target": str(row.target),
+                "projectile": str(row.projectile),
+                "mf": int(row.mf) if pd.notna(row.mf) else None,
+                "mt": int(row.mt) if pd.notna(row.mt) else None,
+                "ndat": int(row.ndat) if pd.notna(row.ndat) else 0,
+                "quant": str(row.quant),
+                "reacode": row.reacode,
+                "e_min": e_min,
+                "e_max": e_max,
+                "sf5": fields["sf5"],
+                "sf6": fields["sf6"],
+            })
+        return results
+
+    def energy_ranges(
+        self, dataset_ids: Iterable[str]
+    ) -> Dict[str, Tuple[Optional[float], Optional[float]]]:
+        """
+        Incident-energy range (MeV) of each dataset, fetched in bulk and cached.
+
+        Only the ids not yet in the cache touch the database, in ``IN (...)``
+        chunks under SQLite's default parameter limit. Ids without a JSON row
+        or without an energy column are cached as ``(None, None)``.
+        """
+        ids = list(dict.fromkeys(dataset_ids))
+        cache = self._energy_range_cache
+        missing = [i for i in ids if i not in cache]
+        if missing:
+            conn = self._get_connection()
+            chunk_size = 500
+            for start in range(0, len(missing), chunk_size):
+                chunk = missing[start:start + chunk_size]
+                placeholders = ",".join("?" * len(chunk))
+                cursor = conn.execute(
+                    f"SELECT DatasetID, jx5z FROM x4pro_x5z WHERE DatasetID IN ({placeholders})",
+                    chunk,
+                )
+                for ds_id, blob in cursor.fetchall():
+                    try:
+                        cache[ds_id] = self._extract_energy_range(json.loads(blob))
+                    except Exception:
+                        cache[ds_id] = (None, None)
+            for i in missing:
+                cache.setdefault(i, (None, None))
+            self._save_energy_cache()
+        return {i: cache[i] for i in ids}
+
+    def _load_energy_cache(self) -> None:
+        """Seed the range cache from ``energy_cache_path`` when the file exists."""
+        path = self._energy_cache_path
+        if not path or not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+            for ds_id, pair in raw.items():
+                if isinstance(pair, list) and len(pair) == 2:
+                    self._energy_range_cache[str(ds_id)] = (pair[0], pair[1])
+        except Exception:
+            # A corrupt cache costs a re-parse, nothing more.
+            self._energy_range_cache = {}
+
+    def _save_energy_cache(self) -> None:
+        """Write the range cache to ``energy_cache_path`` (atomically), if set."""
+        path = self._energy_cache_path
+        if not path:
+            return
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({k: [v[0], v[1]] for k, v in self._energy_range_cache.items()}, fh)
+            os.replace(tmp, path)
+        except Exception:
+            pass
+
     def get_dataset_json(self, dataset_id: str) -> Optional[Dict[str, Any]]:
         """
         Get the raw JSON data for a dataset.
@@ -970,14 +1326,8 @@ class X4ProDatabase:
         if row is None:
             return None
 
-        # Extract energy range from JSON data
-        e_min, e_max = None, None
-        try:
-            jx5z = self.get_dataset_json(dataset_id)
-            if jx5z:
-                e_min, e_max = self._extract_energy_range(jx5z)
-        except Exception:
-            pass  # Energy extraction failed, continue without energy
+        # Energy range from the JSON blob, through the shared cache.
+        e_min, e_max = self.energy_ranges([dataset_id])[dataset_id]
 
         return {
             "dataset_id": row["DatasetID"],
@@ -2085,6 +2435,9 @@ class X4ProDatabase:
         units = {}
         ind_vars = []
         dep_var = "value"
+        # Unit of the y error as stored; c5 errors are absolute in the units
+        # of y, x4 errors may be PER-CENT.
+        error_unit: Optional[str] = None
 
         # Try c5data first
         if isinstance(c5data, dict):
@@ -2103,6 +2456,13 @@ class X4ProDatabase:
                     columns[var_name] = x_data.get(key, [])
                     units[var_name] = x_data.get("units", "")
                     ind_vars.append(var_name)
+                    # dx{i}: the resolution/uncertainty of that variable,
+                    # already in its units. Kept apart from the y error so
+                    # a client never mistakes one for the other.
+                    dx = x_data.get(f"dx{i}")
+                    if isinstance(dx, list) and dx:
+                        columns[f"{var_name}_error"] = dx
+                        units[f"{var_name}_error"] = x_data.get("units", "")
 
         # Fallback to x4data
         if not columns.get("value"):
@@ -2122,7 +2482,12 @@ class X4ProDatabase:
                     if var_name not in ind_vars:
                         ind_vars.append(var_name)
                 elif cvar == "dy":
-                    columns["error"] = dat0
+                    # Several dy columns may exist (ERR-T, ERR-S, ERR-1 …);
+                    # the first one with a data array is the total error.
+                    # Constant errors live in com0 and have no dat0.
+                    if isinstance(dat0, list) and dat0 and "error" not in columns:
+                        columns["error"] = dat0
+                        error_unit = unit
 
         # Ensure all arrays have the same length
         if columns:
@@ -2145,7 +2510,44 @@ class X4ProDatabase:
         if "error" not in df.columns and "value" in df.columns:
             df["error"] = 0.0
 
+        # Percent errors (x4data only) become absolute in the units of y.
+        if error_unit and _is_percent_unit(error_unit) and "value" in df.columns:
+            df["error"] = pd.to_numeric(df["error"], errors="coerce").abs() \
+                * pd.to_numeric(df["value"], errors="coerce").abs() / 100.0
+
+        df, units = self._normalize_general_units(df, units)
         return df, units, ind_vars, dep_var
+
+    @staticmethod
+    def _normalize_general_units(
+        df: pd.DataFrame, units: Dict[str, str]
+    ) -> Tuple[pd.DataFrame, Dict[str, str]]:
+        """
+        Bring every column the general loader knows the family of to KIKA's
+        canonical unit: energies to MeV, cross sections to b, b/sr or b/MeV.
+
+        The database keeps whatever the compiler wrote (c5 energies in eV,
+        x4 energies in the paper's MeV or keV, cross sections in mb or b), so
+        two datasets of the same quantity rarely share units as stored. The
+        error column follows the value column. Columns in other families
+        (NO-DIM transmissions, PART/FIS yields, ADEG angles …) keep their
+        values and unit strings untouched.
+        """
+        out_units = dict(units)
+        for column, unit in units.items():
+            if column not in df.columns:
+                continue
+            factor, label = canonical_unit_factor(unit)
+            if factor is None:
+                continue
+            if factor != 1.0:
+                df[column] = pd.to_numeric(df[column], errors="coerce") * factor
+            out_units[column] = label
+            if column == "value" and "error" in df.columns:
+                if factor != 1.0:
+                    df["error"] = pd.to_numeric(df["error"], errors="coerce") * factor
+                out_units["error"] = label
+        return df, out_units
 
     def _extract_energy_range(
         self, jx5z: Optional[Dict[str, Any]]
@@ -2206,6 +2608,21 @@ class X4ProDatabase:
         Dict[str, int]
             Statistics including total datasets, angular distributions, etc.
         """
+        # Once the catalogue is in memory the counts are free; before that,
+        # the three LIKE scans below each read the whole table.
+        if self._catalogue is not None:
+            df = self._catalogue
+            is_da = self._category_mask(df["quant"], lambda v: "DA" in v.upper())
+            is_cs = self._category_mask(df["quant"], lambda v: "CS" in v.upper())
+            return {
+                "total_datasets": int(len(df)),
+                "total_metadata": int(len(df)),
+                "angular_distributions": int(is_da.sum()),
+                "elastic_scattering": int((is_da & (df["mt"] == 2)).sum()),
+                "cross_sections": int(is_cs.sum()),
+                "unique_targets": int(df["target"].nunique()),
+            }
+
         conn = self._get_connection()
 
         stats = {}
@@ -2253,9 +2670,15 @@ class X4ProDatabase:
         >>> print(targets[:5])
         ['Ag-0', 'Ag-107', 'Ag-109', 'Al-27', 'Am-241']
         """
-        conn = self._get_connection()
         proj_lower = projectile.lower()
 
+        if self._catalogue is not None:
+            df = self._catalogue
+            mask = df["projectile"].isin([proj_lower, projectile.upper()])
+            mask &= self._category_mask(df["quant"], lambda v: "DA" in v.upper())
+            return sorted(t for t in df.loc[mask, "target"].unique().tolist() if t)
+
+        conn = self._get_connection()
         cursor = conn.execute(
             """SELECT DISTINCT Targ1 FROM x4pro_ds
                WHERE (Proj = ? OR Proj = ?) AND quant1 LIKE '%DA%'""",
