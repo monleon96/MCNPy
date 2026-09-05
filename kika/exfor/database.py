@@ -21,8 +21,9 @@ import json
 import os
 import sqlite3
 import re
+import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -174,6 +175,11 @@ class X4ProDataset:
     # the uncertainty manifest resolver to derive sigma_stat and sigma_sys.
     uncertainty_components: List[Dict[str, Any]] = field(default_factory=list)
 
+    # The author's own declared incident-energy resolution (EXFOR EN-RSL*),
+    # normalised to a FWHM. None when the dataset declares none — which is the
+    # majority: see _read_declared_resolution.
+    energy_resolution: Optional[Dict[str, Any]] = None
+
 
 def _zaid_to_target_pattern(zaid: int) -> str:
     """
@@ -222,6 +228,243 @@ def _parse_target_from_db(target_str: str) -> Tuple[str, int]:
     return ("Unknown", 0)
 
 
+# --- Declared incident-energy resolution (EXFOR EN-RSL*) --------------------
+#
+# EXFOR lets an author declare the incident-energy resolution of their own
+# measurement.  It is the experiment's own number, so it beats anything curated
+# externally, and it is far more widely available: 25% of elastic angular
+# datasets carry one.
+#
+# What the value *means* is specified, and the specification is uncomfortable.
+# LEXFOR (IAEA-NDS-0208, "Resolution / Incident-Projectile Energy Resolution")
+# says the resolution "is usually defined as full-width at half-maximum (FWHM),
+# but may be given in other representations such as standard deviation", and
+# asks for the shape to be given in free text under INC-SPECT.  EXFOR
+# Dictionary 24 then codes three headings:
+#
+#     EN-RSL-FW   full width
+#     EN-RSL-HW   half width
+#     EN-RSL      unspecified
+#
+# `-FW` and `-HW` are exact against each other — LEXFOR's worked example gives
+# FW = 2 MeV and HW = 1 MeV for one curve — and Dictionary 24 spells the ratio
+# variants `EN-RSL-DN`/`-NM` as "(FWHM)", which is what fixes "full width" as
+# meaning FWHM.  The bare heading is the problem: it is three quarters of the
+# corpus, and the INC-SPECT escape hatch is not used in practice (measured over
+# the full X4Pro: of 2283 bare-EN-RSL angular subentries, 13 have free text
+# that says anything about the incident-energy convention).
+#
+# So a bare EN-RSL is normalised to a FWHM — LEXFOR's "usually" — and flagged
+# `convention="unspecified"` so a caller can say out loud that it assumed.
+# Nothing here silently decides what it cannot know.
+
+#: EXFOR headings holding a declared incident-energy resolution.
+_RESOLUTION_HEADINGS = ("EN-RSL",)
+
+#: Headings whose value is a half width, i.e. half of the FWHM (Dictionary 24).
+_HALF_WIDTH_HEADINGS = ("EN-RSL-HW",)
+
+
+def _is_resolution_header(header: Any) -> bool:
+    """Whether an x4data column holds a declared incident-energy resolution."""
+    return str(header or "").upper().startswith(_RESOLUTION_HEADINGS)
+
+
+def _read_declared_resolution(var: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Read one EN-RSL* column into a normalised record, or None.
+
+    X4Pro carries both the value as compiled (``com0``/``dat0``, in ``units``)
+    and the same value converted to a base unit (``com1``/``dat1``, in
+    ``basicUnits``).  The converted form is used: it saves reimplementing
+    Dictionary 25's factor table, and it is what X4Pro itself considers this
+    number to be.  ``basicUnits`` collapses every absolute energy unit to EV
+    and leaves the two relative forms alone, so it doubles as the discriminator
+    between the three kinds of width EXFOR allows.
+
+    Returns a dict with:
+
+    ``heading``
+        The raw EXFOR heading, for display.
+    ``convention``
+        ``"full_width"`` (EN-RSL-FW), ``"half_width"`` (EN-RSL-HW) or
+        ``"unspecified"`` (bare EN-RSL).
+    ``kind``
+        ``"absolute"`` (``fwhm_ev``/``fwhm_ev_values``), ``"relative"``
+        (``fwhm_fraction``, of the incident energy) or ``"per_flight_path"``
+        (``fwhm_ns_per_m``, a reciprocal velocity).
+    ``assumed_fwhm``
+        True when the heading declined to say, so the caller can label it.
+
+    Half widths are doubled here, so every ``fwhm_*`` field means a full width
+    at half maximum regardless of which heading it came from.  The FWHM→sigma
+    step is deliberately *not* done here: :data:`kika._constants.FWHM_TO_SIGMA`
+    is the single definition of it and the folding code owns that conversion.
+    """
+    header = str(var.get("header", "") or "").upper()
+    basic = str(var.get("basicUnits", "") or "").upper()
+
+    # Prefer the converted value; fall back to the raw one only when the units
+    # were already the base ones, so an unconverted number is never mistaken
+    # for a converted one. (`dat1eq` — 4 angular columns — is an expression
+    # rather than a value, and is skipped.)
+    converted = True
+    if var.get("ifComm"):
+        value, values = var.get("com1"), None
+        if value is None and str(var.get("units", "")).upper() == basic:
+            value, converted = var.get("com0"), False
+    else:
+        value, values = None, var.get("dat1")
+        if values is None and str(var.get("units", "")).upper() == basic:
+            values, converted = var.get("dat0"), False
+
+    if value is None and not values:
+        return None
+
+    if header.startswith(_HALF_WIDTH_HEADINGS):
+        convention = "half_width"
+    elif header.startswith("EN-RSL-FW"):
+        convention = "full_width"
+    elif header == "EN-RSL":
+        convention = "unspecified"
+    else:
+        # EN-RSL-DN / -NM belong to a REACTION ratio's numerator or
+        # denominator, not to this dataset's own incident beam.
+        return None
+
+    # LEXFOR's example fixes HW = FW/2, so a half width doubles to a FWHM.
+    scale = 2.0 if convention == "half_width" else 1.0
+
+    record: Dict[str, Any] = {
+        "heading": header,
+        "convention": convention,
+        "assumed_fwhm": convention == "unspecified",
+        "units": var.get("units"),
+    }
+
+    if basic == "PER-CENT":
+        record["kind"] = "relative"
+        record["fwhm_fraction"] = (
+            float(value) * scale / 100.0 if value is not None else None
+        )
+        if values:
+            record["fwhm_fraction_values"] = [
+                float(v) * scale / 100.0 for v in values if v is not None
+            ]
+    elif basic == "EV" or (converted and basic in ("NSEC/M", "MICROSEC/M")):
+        # Electron-volts — and, for a reciprocal velocity, *also* electron-volts
+        # whenever the converted value is what we are holding. X4Pro leaves
+        # `basicUnits` reading NSEC/M there but has already applied the LEXFOR
+        # relation itself: subentry 21142005 declares 0.06 ns/m at 14.2 MeV and
+        # stores com1 = 88804.7, which is 2.766e-2 * 14.2^1.5 * 0.06 MeV in eV.
+        # Reading that as a timing spread gives a resolution of several GeV.
+        record["kind"] = "absolute"
+        record["fwhm_ev"] = float(value) * scale if value is not None else None
+        if values:
+            record["fwhm_ev_values"] = [
+                float(v) * scale for v in values if v is not None
+            ]
+    elif basic in ("NSEC/M", "MICROSEC/M"):
+        # The raw column, in the unit as compiled: a timing spread per metre of
+        # flight path, which only becomes a width once an energy is supplied.
+        per_m = float(value) * scale if value is not None else None
+        if basic == "MICROSEC/M" and per_m is not None:
+            per_m *= 1000.0
+        record["kind"] = "per_flight_path"
+        record["fwhm_ns_per_m"] = per_m
+    else:
+        # An unrecognised base unit is worse than no resolution at all: it
+        # would be read as electron-volts and fold the evaluation to a width
+        # off by orders of magnitude.
+        return None
+
+    return record
+
+
+def _declared_fwhm_over_energy(
+    resolution: Optional[Dict[str, Any]],
+    energies_ev: Any,
+) -> Optional[float]:
+    """Median of FWHM(E)/E over a dataset's incident energies, or None.
+
+    See the call site in :meth:`X4ProDatabase._convert_to_exfor_object` for why
+    the median rather than the extremes.
+    """
+    if resolution is None or energies_ev is None:
+        return None
+    try:
+        values = [float(e) for e in energies_ev if e and float(e) > 0]
+    except TypeError:
+        return None
+    if not values:
+        return None
+    ratios = []
+    for energy in values:
+        width = declared_resolution_fwhm_ev(resolution, energy)
+        if width and width > 0:
+            ratios.append(width / energy)
+    if not ratios:
+        return None
+    ratios.sort()
+    return ratios[len(ratios) // 2]
+
+
+def declared_resolution_fwhm_ev(
+    resolution: Optional[Dict[str, Any]],
+    energy_ev: float,
+) -> Optional[float]:
+    r"""The declared resolution as a FWHM in eV at one incident energy.
+
+    Resolves the three forms EXFOR allows onto a single number, which is what
+    a folding kernel needs.  For the reciprocal-velocity form LEXFOR gives, at
+    the non-relativistic limit,
+
+    .. math:: \Delta E = 2.766\times10^{-2}\, E^{3/2}\, |\Delta\tau|
+
+    with :math:`\Delta E`, :math:`E` in MeV and :math:`\Delta\tau` in ns/m
+    (cf. Schillebeeckx et al., *Nucl. Data Sheets* **113** (2012) 3054, §II.B).
+    The relation converts a width to a width, so it carries the convention
+    through unchanged: a FWHM in time gives a FWHM in energy.
+
+    Returns None when there is nothing to compute from, so a caller can fall
+    back rather than fold to a fabricated width.
+    """
+    if not resolution or not energy_ev or energy_ev <= 0:
+        return None
+
+    kind = resolution.get("kind")
+
+    if kind == "absolute":
+        width = resolution.get("fwhm_ev")
+        if width is None:
+            values = resolution.get("fwhm_ev_values") or []
+            # A per-point column has no single width; the median is the
+            # honest summary for a caller that wants one number.
+            if not values:
+                return None
+            ordered = sorted(values)
+            width = ordered[len(ordered) // 2]
+        return float(width) if width and width > 0 else None
+
+    if kind == "relative":
+        frac = resolution.get("fwhm_fraction")
+        if frac is None:
+            values = resolution.get("fwhm_fraction_values") or []
+            if not values:
+                return None
+            ordered = sorted(values)
+            frac = ordered[len(ordered) // 2]
+        return float(frac) * energy_ev if frac and frac > 0 else None
+
+    if kind == "per_flight_path":
+        ns_per_m = resolution.get("fwhm_ns_per_m")
+        if not ns_per_m or ns_per_m <= 0:
+            return None
+        e_mev = energy_ev / 1e6
+        return 2.766e-2 * (e_mev ** 1.5) * float(ns_per_m) * 1e6
+
+    return None
+
+
 def _parse_x4data_json(jx5z: Dict[str, Any]) -> Dict[str, Any]:
     """
     Parse the x4data array from the JSON structure.
@@ -257,6 +500,9 @@ def _parse_x4data_json(jx5z: Dict[str, Any]) -> Dict[str, Any]:
         "uncertainty_unit": "",  # Track uncertainty unit for PER-CENT detection
         "angle_type": "ANG",  # 'ANG' or 'COS'
         "uncertainty_components": [],  # All dy columns surfaced (DATA-ERR, ERR-1, ERR-S, ERR-T, ...)
+        # The author's own declared incident-energy resolution (EN-RSL*), or
+        # None. See _read_declared_resolution.
+        "energy_resolution": None,
     }
 
     for var in x4data:
@@ -269,10 +515,18 @@ def _parse_x4data_json(jx5z: Dict[str, Any]) -> Dict[str, Any]:
             # Cross section values
             result["values"] = dat0
             result["xs_unit"] = units
-        elif fam == "EN":
-            # Energy values
+        elif fam == "EN" and not cvar.startswith("d"):
+            # Incident energy itself. The cvar guard matters: EXFOR's declared
+            # resolution (EN-RSL*) is also fam="EN", as cvar="dx1", and without
+            # it that column fell through to here and overwrote the energies
+            # with resolution widths — plus energy_unit with the resolution's.
             result["energies"] = dat0
             result["energy_unit"] = units
+        elif fam == "EN" and _is_resolution_header(var.get("header", "")):
+            # Declared incident-energy resolution. See _read_declared_resolution.
+            declared = _read_declared_resolution(var)
+            if declared is not None:
+                result["energy_resolution"] = declared
         elif fam == "ANG":
             # Angle in degrees
             result["angles"] = dat0
@@ -470,6 +724,117 @@ def _convert_units(
     return values * (from_factor / to_factor)
 
 
+# ---------------------------------------------------------------------------
+# Reaction-code fields and canonical units for the general loader
+# ---------------------------------------------------------------------------
+
+# ``SF1(SF2,SF3)SF4,SF5,SF6,SF7,SF8,SF9`` — the first reaction inside a code.
+# Ratios and sums wrap each reaction in parentheses, so the search is anchored
+# at the first ``TARGET(PROJ,PROCESS)`` rather than at the start of the string.
+_REACODE_HEAD_RE = re.compile(r"(?P<target>[A-Z0-9\-+*]+)\((?P<projectile>[^,()]*),(?P<process>[^()]*)\)")
+
+_REACODE_EMPTY: Dict[str, str] = {
+    "target": "", "projectile": "", "process": "", "product": "",
+    "sf5": "", "sf6": "", "sf7": "", "sf8": "", "sf9": "",
+}
+
+
+def parse_reacode_fields(reacode: Optional[str]) -> Dict[str, str]:
+    """
+    Split an EXFOR reaction code into its subfields.
+
+    ``26-FE-56(N,EL)26-FE-56,,DA`` gives target ``26-FE-56``, projectile
+    ``N``, process ``EL``, product ``26-FE-56`` and SF6 ``DA``. SF6 is the
+    quantity as EXFOR names it (``SIG``, ``DA``, ``TRN``, ``RI`` …), which is
+    finer than X4Pro's ``quant1``: X4Pro files a transmission measurement
+    under ``CS`` even though it is dimensionless, and only SF6 says ``TRN``.
+
+    For a ratio or sum of reactions the fields of the *first* reaction are
+    returned. Unknown or empty codes give empty strings throughout.
+    """
+    out = dict(_REACODE_EMPTY)
+    if not reacode:
+        return out
+    text = reacode.strip().upper()
+    m = _REACODE_HEAD_RE.search(text)
+    if not m:
+        return out
+    out["target"] = m.group("target")
+    out["projectile"] = m.group("projectile").strip()
+    out["process"] = m.group("process").strip()
+    rest = text[m.end():]
+    # Inside a ratio/sum the first reaction ends at its closing parenthesis.
+    close = rest.find(")")
+    if close != -1:
+        rest = rest[:close]
+    parts = [p.strip() for p in rest.split(",")]
+    for key, value in zip(("product", "sf5", "sf6", "sf7", "sf8", "sf9"), parts):
+        out[key] = value
+    return out
+
+
+def exfor_quantity(reacode: Optional[str], fallback: Optional[str] = None) -> str:
+    """SF6 of ``reacode`` (``SIG``, ``DA``, ``TRN`` …), or ``fallback`` when absent."""
+    sf6 = parse_reacode_fields(reacode)["sf6"]
+    return sf6 or (fallback or "")
+
+
+# Energy units -> MeV. EXFOR spells millielectronvolts "MILLI-EV".
+_ENERGY_UNIT_TO_MEV: Dict[str, float] = {
+    "EV": 1e-6,
+    "MILLI-EV": 1e-9,
+    "MICRO-EV": 1e-12,
+    "KEV": 1e-3,
+    "MEV": 1.0,
+    "GEV": 1e3,
+}
+
+# Barn prefixes as EXFOR writes them (Dictionary 25): MB is millibarn.
+_BARN_PREFIX_FACTOR: Dict[str, float] = {
+    "": 1.0,
+    "M": 1e-3, "MILLI-": 1e-3,
+    "MU": 1e-6, "MICRO-": 1e-6, "U": 1e-6,
+    "N": 1e-9, "NANO-": 1e-9,
+    "P": 1e-12, "PICO-": 1e-12,
+    "K": 1e3, "KILO-": 1e3,
+}
+_BARN_RE = re.compile(r"^(P|N|MU|U|M|K|MILLI-|MICRO-|NANO-|PICO-|KILO-)?B$")
+
+
+def canonical_unit_factor(unit: Optional[str]) -> Tuple[Optional[float], Optional[str]]:
+    """
+    Multiplier and label that bring ``unit`` to the canonical unit its family
+    uses in KIKA: energies to ``MeV``, cross sections to ``b`` (with ``/sr``
+    and ``/MeV`` denominators converted alongside).
+
+    ``("MB/SR")`` gives ``(1e-3, "b/sr")``; ``("KEV")`` gives ``(1e-3, "MeV")``;
+    ``("B/KEV")`` gives ``(1e3, "b/MeV")``. Units outside those two families
+    (``NO-DIM``, ``PART/FIS``, ``ADEG`` …) return ``(None, None)`` and are left
+    exactly as stored.
+    """
+    if not unit:
+        return None, None
+    u = unit.strip().upper()
+    if u in _ENERGY_UNIT_TO_MEV:
+        return _ENERGY_UNIT_TO_MEV[u], "MeV"
+    parts = u.split("/")
+    m = _BARN_RE.match(parts[0])
+    if not m:
+        return None, None
+    factor = _BARN_PREFIX_FACTOR[m.group(1) or ""]
+    label = ["b"]
+    for denominator in parts[1:]:
+        if denominator == "SR":
+            label.append("sr")
+        elif denominator in _ENERGY_UNIT_TO_MEV:
+            # x per keV is 1e3 x per MeV.
+            factor /= _ENERGY_UNIT_TO_MEV[denominator]
+            label.append("MeV")
+        else:
+            return None, None
+    return factor, "/".join(label)
+
+
 class X4ProDatabase:
     """
     Interface to X4Pro SQLite database (full 2025 version).
@@ -497,11 +862,35 @@ class X4ProDatabase:
     >>> print(f"Found {len(datasets)} datasets for Fe-56")
     """
 
-    def __init__(self, db_path: str = None):
-        """Initialize database connection."""
+    def __init__(self, db_path: str = None, energy_cache_path: Optional[str] = None):
+        """
+        Initialize database connection.
+
+        Parameters
+        ----------
+        db_path : str, optional
+            Path to the X4Pro SQLite file (else the configured/env path).
+        energy_cache_path : str, optional
+            JSON file where the per-dataset incident-energy ranges are kept
+            between processes. Reading a range means parsing the dataset's
+            JSON blob, which is what makes a cold search slow; with the file
+            in place only datasets never seen before touch the database.
+        """
         from kika.exfor.config import get_db_path
         self.db_path = get_db_path(db_path)
         self._conn: Optional[sqlite3.Connection] = None
+        self._energy_cache_path = energy_cache_path
+        # One row per dataset from x4pro_ds, loaded once by load_catalogue().
+        # The table has no index on target/author/quantity, so every SQL
+        # filter is a full scan (seconds on a 4.8 GB file); in memory the same
+        # filter is milliseconds. Guarded by a lock so a background warm-up
+        # and a first search do not both load it.
+        self._catalogue: Optional[pd.DataFrame] = None
+        self._catalogue_lock = threading.Lock()
+        # dataset_id -> (e_min, e_max) in MeV. The range lives only inside the
+        # per-dataset JSON blob, so it is parsed once and remembered.
+        self._energy_range_cache: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
+        self._load_energy_cache()
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get or create database connection."""
@@ -659,6 +1048,226 @@ class X4ProDatabase:
         cursor = conn.execute(query, params)
         return [row[0] for row in cursor.fetchall()]
 
+    # =========================================================================
+    # In-memory catalogue and bulk search
+    # =========================================================================
+
+    _CATALOGUE_SQL = (
+        "SELECT DatasetID AS dataset_id, year1 AS year, author1 AS author, "
+        "Targ1 AS target, Proj AS projectile, MF AS mf, MT AS mt, ndat, "
+        "quant1 AS quant, reacode FROM x4pro_ds"
+    )
+
+    def load_catalogue(self, force: bool = False) -> pd.DataFrame:
+        """
+        The whole ``x4pro_ds`` table as a DataFrame, loaded once and kept.
+
+        Columns: ``dataset_id, year, author, target, projectile, mf, mt, ndat,
+        quant, reacode``. The repetitive text columns are categoricals, so the
+        ~187k rows of the full database take a few tens of MB.
+
+        Reads through its own short-lived connection so it can run on a
+        background thread while the main connection serves other queries
+        (``sqlite3`` connections are bound to the thread that opened them).
+        """
+        with self._catalogue_lock:
+            if self._catalogue is not None and not force:
+                return self._catalogue
+            if self.db_path is None or not os.path.exists(self.db_path):
+                raise FileNotFoundError(f"X4Pro database not found at: {self.db_path}")
+            conn = sqlite3.connect(self.db_path)
+            try:
+                df = pd.read_sql_query(self._CATALOGUE_SQL, conn)
+            finally:
+                conn.close()
+            for col in ("author", "target", "projectile", "quant"):
+                df[col] = df[col].fillna("").astype("category")
+            for col in ("year", "mf", "mt", "ndat"):
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            df["dataset_id"] = df["dataset_id"].astype(str)
+            df["reacode"] = df["reacode"].fillna("")
+            self._catalogue = df
+            return df
+
+    @property
+    def catalogue_loaded(self) -> bool:
+        """Whether load_catalogue() has already run."""
+        return self._catalogue is not None
+
+    @staticmethod
+    def _category_mask(series: pd.Series, predicate) -> pd.Series:
+        """Row mask from a predicate evaluated once per distinct category value."""
+        cats = series.cat.categories
+        keep = [c for c in cats if predicate(str(c))]
+        return series.isin(keep)
+
+    def search_datasets(
+        self,
+        targets: Optional[Iterable[str]] = None,
+        projectile: Optional[str] = "N",
+        quantities: Optional[Iterable[str]] = None,
+        mts: Optional[Iterable[int]] = None,
+        year_min: Optional[int] = None,
+        year_max: Optional[int] = None,
+        author: Optional[str] = None,
+        entry_prefix: Optional[str] = None,
+        energy_min_mev: Optional[float] = None,
+        energy_max_mev: Optional[float] = None,
+        include_energy_range: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """
+        Every dataset matching the filters, with metadata, in one call.
+
+        Matching follows ``query_dataset_ids``: targets and quantities are
+        case-insensitive substrings of ``Targ1``/``quant1`` (so ``CS`` also
+        matches ``CSP``), the projectile is compared in both cases, the author
+        is a substring, MTs are exact. Lists are ORed within a filter and
+        ANDed across filters.
+
+        The energy window is applied to each dataset's incident-energy range
+        (MeV, from the JSON, cached): a dataset is kept when its range overlaps
+        the window; datasets with no energy information are dropped by an
+        energy filter and kept otherwise.
+
+        Returns
+        -------
+        List[Dict[str, Any]]
+            Sorted by dataset id. Keys: ``dataset_id, year, author, target,
+            projectile, mf, mt, ndat, quant, reacode, e_min, e_max, sf5, sf6``.
+        """
+        df = self.load_catalogue()
+        mask = pd.Series(True, index=df.index)
+
+        target_list = [t for t in (targets or []) if t]
+        if target_list:
+            needles = [t.upper() for t in target_list]
+            mask &= self._category_mask(df["target"], lambda v: any(n in v.upper() for n in needles))
+
+        if projectile:
+            wanted = {projectile.lower(), projectile.upper()}
+            mask &= df["projectile"].isin(list(wanted))
+
+        quantity_list = [q for q in (quantities or []) if q]
+        if quantity_list:
+            needles = [q.upper() for q in quantity_list]
+            mask &= self._category_mask(df["quant"], lambda v: any(n in v.upper() for n in needles))
+
+        mt_list = [int(m) for m in (mts or []) if m is not None]
+        if mt_list:
+            mask &= df["mt"].isin(mt_list)
+
+        if year_min is not None:
+            mask &= df["year"] >= year_min
+        if year_max is not None:
+            mask &= df["year"] <= year_max
+
+        if author:
+            needle = author.upper()
+            mask &= self._category_mask(df["author"], lambda v: needle in v.upper())
+
+        if entry_prefix:
+            prefix = entry_prefix.strip().upper()
+            mask &= df["dataset_id"].str.upper().str.startswith(prefix)
+
+        hits = df[mask].sort_values("dataset_id")
+        if hits.empty:
+            return []
+
+        ids = hits["dataset_id"].tolist()
+        want_energy = include_energy_range or energy_min_mev is not None or energy_max_mev is not None
+        ranges = self.energy_ranges(ids) if want_energy else {}
+
+        results: List[Dict[str, Any]] = []
+        for row in hits.itertuples(index=False):
+            e_min, e_max = ranges.get(row.dataset_id, (None, None))
+            if energy_min_mev is not None or energy_max_mev is not None:
+                if e_min is None and e_max is None:
+                    continue
+                if energy_min_mev is not None and e_max is not None and e_max < energy_min_mev:
+                    continue
+                if energy_max_mev is not None and e_min is not None and e_min > energy_max_mev:
+                    continue
+            fields = parse_reacode_fields(row.reacode)
+            results.append({
+                "dataset_id": row.dataset_id,
+                "year": int(row.year) if pd.notna(row.year) else None,
+                "author": str(row.author),
+                "target": str(row.target),
+                "projectile": str(row.projectile),
+                "mf": int(row.mf) if pd.notna(row.mf) else None,
+                "mt": int(row.mt) if pd.notna(row.mt) else None,
+                "ndat": int(row.ndat) if pd.notna(row.ndat) else 0,
+                "quant": str(row.quant),
+                "reacode": row.reacode,
+                "e_min": e_min,
+                "e_max": e_max,
+                "sf5": fields["sf5"],
+                "sf6": fields["sf6"],
+            })
+        return results
+
+    def energy_ranges(
+        self, dataset_ids: Iterable[str]
+    ) -> Dict[str, Tuple[Optional[float], Optional[float]]]:
+        """
+        Incident-energy range (MeV) of each dataset, fetched in bulk and cached.
+
+        Only the ids not yet in the cache touch the database, in ``IN (...)``
+        chunks under SQLite's default parameter limit. Ids without a JSON row
+        or without an energy column are cached as ``(None, None)``.
+        """
+        ids = list(dict.fromkeys(dataset_ids))
+        cache = self._energy_range_cache
+        missing = [i for i in ids if i not in cache]
+        if missing:
+            conn = self._get_connection()
+            chunk_size = 500
+            for start in range(0, len(missing), chunk_size):
+                chunk = missing[start:start + chunk_size]
+                placeholders = ",".join("?" * len(chunk))
+                cursor = conn.execute(
+                    f"SELECT DatasetID, jx5z FROM x4pro_x5z WHERE DatasetID IN ({placeholders})",
+                    chunk,
+                )
+                for ds_id, blob in cursor.fetchall():
+                    try:
+                        cache[ds_id] = self._extract_energy_range(json.loads(blob))
+                    except Exception:
+                        cache[ds_id] = (None, None)
+            for i in missing:
+                cache.setdefault(i, (None, None))
+            self._save_energy_cache()
+        return {i: cache[i] for i in ids}
+
+    def _load_energy_cache(self) -> None:
+        """Seed the range cache from ``energy_cache_path`` when the file exists."""
+        path = self._energy_cache_path
+        if not path or not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+            for ds_id, pair in raw.items():
+                if isinstance(pair, list) and len(pair) == 2:
+                    self._energy_range_cache[str(ds_id)] = (pair[0], pair[1])
+        except Exception:
+            # A corrupt cache costs a re-parse, nothing more.
+            self._energy_range_cache = {}
+
+    def _save_energy_cache(self) -> None:
+        """Write the range cache to ``energy_cache_path`` (atomically), if set."""
+        path = self._energy_cache_path
+        if not path:
+            return
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({k: [v[0], v[1]] for k, v in self._energy_range_cache.items()}, fh)
+            os.replace(tmp, path)
+        except Exception:
+            pass
+
     def get_dataset_json(self, dataset_id: str) -> Optional[Dict[str, Any]]:
         """
         Get the raw JSON data for a dataset.
@@ -717,14 +1326,8 @@ class X4ProDatabase:
         if row is None:
             return None
 
-        # Extract energy range from JSON data
-        e_min, e_max = None, None
-        try:
-            jx5z = self.get_dataset_json(dataset_id)
-            if jx5z:
-                e_min, e_max = self._extract_energy_range(jx5z)
-        except Exception:
-            pass  # Energy extraction failed, continue without energy
+        # Energy range from the JSON blob, through the shared cache.
+        e_min, e_max = self.energy_ranges([dataset_id])[dataset_id]
 
         return {
             "dataset_id": row["DatasetID"],
@@ -868,6 +1471,10 @@ class X4ProDatabase:
             correction_notes=correction_notes,
             raw_json=jx5z,
             uncertainty_components=x4_parsed.get("uncertainty_components", []),
+            # Always from x4data: c5data carries the corrected measurement, not
+            # the beam's declared resolution, so there is no c5 equivalent to
+            # prefer here the way there is for values and uncertainties.
+            energy_resolution=x4_parsed.get("energy_resolution"),
         )
 
     def query_angular_distributions(
@@ -1109,19 +1716,51 @@ class X4ProDatabase:
 
         # Get TOF parameters from metadata file
         tof_params = _get_tof_params_for_experiment(dataset.dataset_id)
+        energy_resolution_input = {
+            "distance": {
+                "value": tof_params["flight_path_m"],
+                "unit": "m",
+            },
+            "time_resolution": {
+                "value": tof_params["time_resolution_ns"],
+                "unit": "ns",
+            },
+            "source": tof_params.get("source", "default"),
+        }
+
+        # The experiment's own declared resolution outranks anything curated
+        # externally, and covers far more of the corpus. It is *added* rather
+        # than substituted: it is a width, not a (L, dt) pair, so a consumer
+        # that can only fold from a flight path still has something to use.
+        # `source` says which of the two is the authoritative one.
+        declared = dataset.energy_resolution
+        if declared is not None:
+            declared = dict(declared)
+            # How wide the declared width is relative to the energy it belongs
+            # to. A fact, not a policy: EXFOR occasionally carries a covered
+            # energy *range* or a source spread under EN-RSL rather than a
+            # resolution function, and the signature is a width comparable to
+            # the incident energy itself. Reported as the median over the
+            # dataset's energies — a per-point column has a different ratio at
+            # every point, and the lowest energy alone flags a perfectly
+            # ordinary constant width. Consumers pick their own threshold: an
+            # unattended evaluation may want to salvage the number, an
+            # interactive plot to refuse it and say why. Over the full X4Pro,
+            # 12 of 2914 angular datasets exceed 1.0 and two more exceed 0.5,
+            # against a median of 0.014.
+            ratio = _declared_fwhm_over_energy(declared, dataset.energies_ev)
+            if ratio is not None:
+                declared["fwhm_over_energy"] = ratio
+            energy_resolution_input["declared"] = declared
+            energy_resolution_input["source"] = {
+                "full_width": "exfor_rsl_fw",
+                "half_width": "exfor_rsl_hw",
+                "unspecified": "exfor_rsl_assumed",
+            }.get(declared.get("convention"), "exfor_rsl_assumed")
+
         method = {
             "type": "TOF",
-            "energy_resolution_input": {
-                "distance": {
-                    "value": tof_params["flight_path_m"],
-                    "unit": "m",
-                },
-                "time_resolution": {
-                    "value": tof_params["time_resolution_ns"],
-                    "unit": "ns",
-                },
-                "source": tof_params.get("source", "default"),
-            },
+            "energy_resolution_input": energy_resolution_input,
         }
 
         ad = ExforAngularDistribution(
@@ -1796,6 +2435,9 @@ class X4ProDatabase:
         units = {}
         ind_vars = []
         dep_var = "value"
+        # Unit of the y error as stored; c5 errors are absolute in the units
+        # of y, x4 errors may be PER-CENT.
+        error_unit: Optional[str] = None
 
         # Try c5data first
         if isinstance(c5data, dict):
@@ -1814,6 +2456,13 @@ class X4ProDatabase:
                     columns[var_name] = x_data.get(key, [])
                     units[var_name] = x_data.get("units", "")
                     ind_vars.append(var_name)
+                    # dx{i}: the resolution/uncertainty of that variable,
+                    # already in its units. Kept apart from the y error so
+                    # a client never mistakes one for the other.
+                    dx = x_data.get(f"dx{i}")
+                    if isinstance(dx, list) and dx:
+                        columns[f"{var_name}_error"] = dx
+                        units[f"{var_name}_error"] = x_data.get("units", "")
 
         # Fallback to x4data
         if not columns.get("value"):
@@ -1833,7 +2482,12 @@ class X4ProDatabase:
                     if var_name not in ind_vars:
                         ind_vars.append(var_name)
                 elif cvar == "dy":
-                    columns["error"] = dat0
+                    # Several dy columns may exist (ERR-T, ERR-S, ERR-1 …);
+                    # the first one with a data array is the total error.
+                    # Constant errors live in com0 and have no dat0.
+                    if isinstance(dat0, list) and dat0 and "error" not in columns:
+                        columns["error"] = dat0
+                        error_unit = unit
 
         # Ensure all arrays have the same length
         if columns:
@@ -1856,7 +2510,44 @@ class X4ProDatabase:
         if "error" not in df.columns and "value" in df.columns:
             df["error"] = 0.0
 
+        # Percent errors (x4data only) become absolute in the units of y.
+        if error_unit and _is_percent_unit(error_unit) and "value" in df.columns:
+            df["error"] = pd.to_numeric(df["error"], errors="coerce").abs() \
+                * pd.to_numeric(df["value"], errors="coerce").abs() / 100.0
+
+        df, units = self._normalize_general_units(df, units)
         return df, units, ind_vars, dep_var
+
+    @staticmethod
+    def _normalize_general_units(
+        df: pd.DataFrame, units: Dict[str, str]
+    ) -> Tuple[pd.DataFrame, Dict[str, str]]:
+        """
+        Bring every column the general loader knows the family of to KIKA's
+        canonical unit: energies to MeV, cross sections to b, b/sr or b/MeV.
+
+        The database keeps whatever the compiler wrote (c5 energies in eV,
+        x4 energies in the paper's MeV or keV, cross sections in mb or b), so
+        two datasets of the same quantity rarely share units as stored. The
+        error column follows the value column. Columns in other families
+        (NO-DIM transmissions, PART/FIS yields, ADEG angles …) keep their
+        values and unit strings untouched.
+        """
+        out_units = dict(units)
+        for column, unit in units.items():
+            if column not in df.columns:
+                continue
+            factor, label = canonical_unit_factor(unit)
+            if factor is None:
+                continue
+            if factor != 1.0:
+                df[column] = pd.to_numeric(df[column], errors="coerce") * factor
+            out_units[column] = label
+            if column == "value" and "error" in df.columns:
+                if factor != 1.0:
+                    df["error"] = pd.to_numeric(df["error"], errors="coerce") * factor
+                out_units["error"] = label
+        return df, out_units
 
     def _extract_energy_range(
         self, jx5z: Optional[Dict[str, Any]]
@@ -1917,6 +2608,21 @@ class X4ProDatabase:
         Dict[str, int]
             Statistics including total datasets, angular distributions, etc.
         """
+        # Once the catalogue is in memory the counts are free; before that,
+        # the three LIKE scans below each read the whole table.
+        if self._catalogue is not None:
+            df = self._catalogue
+            is_da = self._category_mask(df["quant"], lambda v: "DA" in v.upper())
+            is_cs = self._category_mask(df["quant"], lambda v: "CS" in v.upper())
+            return {
+                "total_datasets": int(len(df)),
+                "total_metadata": int(len(df)),
+                "angular_distributions": int(is_da.sum()),
+                "elastic_scattering": int((is_da & (df["mt"] == 2)).sum()),
+                "cross_sections": int(is_cs.sum()),
+                "unique_targets": int(df["target"].nunique()),
+            }
+
         conn = self._get_connection()
 
         stats = {}
@@ -1964,9 +2670,15 @@ class X4ProDatabase:
         >>> print(targets[:5])
         ['Ag-0', 'Ag-107', 'Ag-109', 'Al-27', 'Am-241']
         """
-        conn = self._get_connection()
         proj_lower = projectile.lower()
 
+        if self._catalogue is not None:
+            df = self._catalogue
+            mask = df["projectile"].isin([proj_lower, projectile.upper()])
+            mask &= self._category_mask(df["quant"], lambda v: "DA" in v.upper())
+            return sorted(t for t in df.loc[mask, "target"].unique().tolist() if t)
+
+        conn = self._get_connection()
         cursor = conn.execute(
             """SELECT DISTINCT Targ1 FROM x4pro_ds
                WHERE (Proj = ? OR Proj = ?) AND quant1 LIKE '%DA%'""",

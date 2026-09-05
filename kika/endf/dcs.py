@@ -32,7 +32,7 @@ from typing import Literal, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-from kika._constants import NEUTRON_MASS_AMU
+from kika._constants import FWHM_TO_SIGMA, NEUTRON_MASS_AMU
 from kika.processing.interpolation import interpolate_1d
 from kika.utils.energy_folding import tof_energy_resolution
 from kika.utils.numerics import fold_tabulated
@@ -106,20 +106,46 @@ class TofResolution:
     delta_t_is_fwhm: bool = True
     min_sigma_e_kev: float = 1.0
 
+    #: A resolution the experiment declared itself, as a **FWHM in eV**,
+    #: constant in energy.  When set it replaces the flight-path geometry: see
+    #: the class note below.
+    declared_fwhm_ev: Optional[float] = None
+
+    #: The same, as a fraction of the incident energy (EXFOR's PER-CENT form).
+    #: Ignored when :attr:`declared_fwhm_ev` is set.
+    declared_fwhm_fraction: Optional[float] = None
+
     def sigma_e_mev(self, energy_mev: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
-        r""":math:`\sigma_E` in MeV at one or many incident energies."""
+        r""":math:`\sigma_E` in MeV at one or many incident energies.
+
+        A declared width wins over the flight-path geometry when one is given.
+        The two are not interchangeable and one cannot be re-expressed as the
+        other: the TOF relation makes :math:`\sigma_E` grow as
+        :math:`E^{3/2}`, whereas a declared resolution is typically quoted as a
+        constant or as a fixed fraction of :math:`E`.  Fitting an
+        :math:`(L, \delta t)` pair to a declared width would therefore only
+        agree at the single energy it was fitted at.
+        """
         e = np.atleast_1d(np.asarray(energy_mev, dtype=float))
         out = np.empty_like(e)
-        for i, ei in enumerate(e):
-            if ei <= 0 or self.flight_path_m <= 0 or self.delta_t_ns <= 0:
-                out[i] = 0.0
-            else:
-                out[i] = tof_energy_resolution(
-                    float(ei),
-                    flight_path_m=self.flight_path_m,
-                    delta_t_ns=self.delta_t_ns,
-                    delta_t_is_fwhm=self.delta_t_is_fwhm,
-                )
+
+        if self.declared_fwhm_ev is not None and self.declared_fwhm_ev > 0:
+            out[:] = (self.declared_fwhm_ev / 1e6) / FWHM_TO_SIGMA
+            out[e <= 0] = 0.0
+        elif self.declared_fwhm_fraction is not None and self.declared_fwhm_fraction > 0:
+            out[:] = np.where(e > 0, e * self.declared_fwhm_fraction / FWHM_TO_SIGMA, 0.0)
+        else:
+            for i, ei in enumerate(e):
+                if ei <= 0 or self.flight_path_m <= 0 or self.delta_t_ns <= 0:
+                    out[i] = 0.0
+                else:
+                    out[i] = tof_energy_resolution(
+                        float(ei),
+                        flight_path_m=self.flight_path_m,
+                        delta_t_ns=self.delta_t_ns,
+                        delta_t_is_fwhm=self.delta_t_is_fwhm,
+                    )
+
         np.maximum(out, self.min_sigma_e_kev / 1000.0, out=out)
         return float(out[0]) if np.ndim(energy_mev) == 0 else out
 

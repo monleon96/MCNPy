@@ -33,8 +33,12 @@ from kika.nuclear_data.cross_section import CrossSection
 
 _log = logging.getLogger(__name__)
 
-def _read_endf(path: str):
+def _read_endf(path: str, mf_numbers: Optional[List[int]] = None):
     """Parse an ENDF/PENDF tape, importing the parser only when actually used.
+
+    ``mf_numbers`` is forwarded to :func:`kika.endf.read_endf.read_endf`; a
+    caller that wants one file asks for it, because a bare read parses every
+    MF with a registered parser and the registry keeps growing.
 
     ``kika/processing`` must not pull ``kika.endf`` in at *import* time: a
     module-level import here puts ``kika.endf`` on ``kika.processing``'s import
@@ -48,7 +52,40 @@ def _read_endf(path: str):
     """
     from kika.endf.read_endf import read_endf
 
-    return read_endf(path)
+    return read_endf(path, mf_numbers=mf_numbers)
+
+
+def _mat_from_tape_header(path: Path) -> Optional[int]:
+    """The MAT of the first material on an ENDF tape, read off the header.
+
+    reconr only needs the number; parsing the whole evaluation to get it cost
+    as much as reconr itself on a heavy tape (MF6 and MF32 are the largest
+    files of an actinide evaluation) and duplicated a parse the calling
+    application had already done. The ENDF-6 record layout puts MAT in columns
+    67-70, MF in 71-72 and MT in 73-75; the tape identification line is
+    skipped by requiring the record to be MF1/MT451, the first of any material.
+    Returns ``None`` when no such record is found among the first lines, and
+    the caller falls back to the parser.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for _ in range(8):
+                line = fh.readline()
+                if not line:
+                    break
+                if len(line) < 75:
+                    continue
+                try:
+                    mat = int(line[66:70])
+                    mf = int(line[70:72])
+                    mt = int(line[72:75])
+                except ValueError:
+                    continue
+                if mat > 0 and mf == 1 and mt == 451:
+                    return mat
+    except OSError:
+        return None
+    return None
 
 
 
@@ -206,12 +243,16 @@ def njoy_reconstruct_stream(
     # from kika.processing at module scope -- which is what blocked moving
     # interpolate_1d down in phase 2. Reading a PENDF tape genuinely needs
     # the parser, so the dependency stays; only its timing changes.
-    endf = _read_endf(str(endf_path))
-    if endf.mat is None:
-        raise NjoyReconstructError(
-            f"Could not determine MAT number from {endf_path.name}"
-        )
-    mat = int(endf.mat)
+    mat = _mat_from_tape_header(endf_path)
+    if mat is None:
+        # Not a tape the header scan recognises: let the parser decide, but
+        # only over MF1, which is all the MAT needs.
+        endf = _read_endf(str(endf_path), mf_numbers=[1])
+        if endf.mat is None:
+            raise NjoyReconstructError(
+                f"Could not determine MAT number from {endf_path.name}"
+            )
+        mat = int(endf.mat)
 
     tolerances = _tolerance_fallback_sequence(tolerance)
     last_err: Optional[NjoyReconstructError] = None
@@ -297,10 +338,13 @@ def _run_reconr_once_stream(
             # this NJOY (a gfortran/MinGW binary) block-buffers stdout whenever
             # it is not a TTY, so the parent only sees output after ~4-64 KB
             # accumulate — which for reconr often means nothing appears until
-            # the process exits.  GFORTRAN_UNBUFFERED_ALL is the documented
-            # knob that makes Fortran write-then-flush behaviour match
-            # Python's ``-u``.
-            "GFORTRAN_UNBUFFERED_ALL": "y",
+            # the process exits.  GFORTRAN_UNBUFFERED_PRECONNECTED covers the
+            # preconnected units only (stdin, stdout, stderr), which is the
+            # one we read live.  The _ALL variant also unbuffered every tape
+            # NJOY writes, and the PENDF of an actinide is a hundred
+            # megabytes of 80-character records: one syscall per record on
+            # Windows is a cost the live log never asked for.
+            "GFORTRAN_UNBUFFERED_PRECONNECTED": "y",
             "PYTHONUNBUFFERED": "1",
         }
         env.update(forward_env)
@@ -417,7 +461,9 @@ def _run_reconr_once_stream(
             # from kika.processing at module scope -- which is what blocked moving
             # interpolate_1d down in phase 2. Reading a PENDF tape genuinely needs
             # the parser, so the dependency stays; only its timing changes.
-            pendf = _read_endf(str(pendf_tape))
+            # MF3 is the only file the result is built from; a PENDF's MF2
+            # is a stub after reconr and MF1 is a directory.
+            pendf = _read_endf(str(pendf_tape), mf_numbers=[3])
         except Exception as e:
             raise NjoyReconstructError(
                 f"Failed to parse PENDF output: {e}",
