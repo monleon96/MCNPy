@@ -10,7 +10,7 @@ from ..classes.mt import MT
 from ..classes.mf1.mf1mt451 import MF1MT451
 from ..classes.mf import MF
 from ..classes.mf4.base import MF4MT
-from ..utils import parse_endf_id
+from ..utils import NonMonotonicTable, parse_endf_id
 from ...utils import get_endf_logger
 from .update_directory import update_mf1_directory
 
@@ -184,6 +184,13 @@ class ENDFWriter:
 
             return True
 
+        except NonMonotonicTable:
+            # Deliberately not swallowed into the `bool`. "I could not write the
+            # file" and "the data you handed me is not a function" are different
+            # answers, and flattening the second into the first is how D31 got
+            # to run for months: the caller sees a failure with no cause, logs
+            # it, and moves on. Let the diagnosis reach whoever built the table.
+            raise
         except Exception as e:
             logger.error(f"Error replacing MF{modified_mf.number} section: {e}")
             return False
@@ -286,6 +293,8 @@ class ENDFWriter:
 
             return True
 
+        except NonMonotonicTable:
+            raise  # see replace_mf_section
         except Exception as e:
             logger.error(f"Error replacing MF{mf_number}/MT{modified_mt.number} section: {e}")
             return False
