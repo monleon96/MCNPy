@@ -71,6 +71,41 @@ class Function1d(ABC):
     ) -> Union[float, np.ndarray]:
         """The function's value at ``x``."""
 
+    # ------------------------------------------------------------------
+    # Integrals
+    # ------------------------------------------------------------------
+    #
+    # Here rather than on ``XYs1d`` and ``Regions1d`` separately because the
+    # implementation is the same call for both -- ``toEndfRegions`` flattens
+    # one region and many into the same triple -- and because a node that is
+    # *not* a table should answer the question with a refusal that names it,
+    # not with an ``AttributeError`` from somewhere further in. See
+    # :mod:`~kika.nuclear_data.model.functions.integration`.
+
+    def integrate(self, domainMin: Optional[float] = None,
+                  domainMax: Optional[float] = None) -> float:
+        """``int f(x) dx`` over the given limits, exactly on the stated law.
+
+        Both limits default to the function's own domain, so ``f.integrate()``
+        is the whole integral -- which for a normalised spectrum is the
+        quantity a perturbation has to give back unchanged.
+        """
+        from .integration import integrateFunction1d
+
+        return integrateFunction1d(self, domainMin, domainMax,
+                                   what=type(self).__name__)
+
+    def groupIntegrals(self, boundaries: ArrayLike) -> np.ndarray:
+        """``P_j = int_{g_j}^{g_j+1} f`` for every group of *boundaries*.
+
+        The quantity an MF35 covariance is stated over. Exact on the function's
+        own panels rather than on a refinement of them; see
+        :func:`~kika.nuclear_data.model.functions.integration.groupIntegralsOf`.
+        """
+        from .integration import groupIntegralsOf
+
+        return groupIntegralsOf(self, boundaries, what=type(self).__name__)
+
     @property
     def domainUnit(self) -> str:
         """Unit of the independent axis, or ``''`` when no axes are attached."""

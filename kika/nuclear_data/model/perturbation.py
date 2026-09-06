@@ -47,7 +47,7 @@ edges. The calculation layer may not import the format or sampling layers
 """
 from __future__ import annotations
 
-from typing import List, Sequence, Tuple, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -56,7 +56,10 @@ from .functions.regions1d import Regions1d
 from .functions.xys1d import XYs1d
 
 __all__ = ["applyFactors", "refineAtBinEdges", "applyLegendreFactors",
-           "MAGNITUDE_ORDER", "applyNubarFactors", "refineForNubar"]
+           "MAGNITUDE_ORDER", "applyNubarFactors", "refineForNubar",
+           "applySpectrumFactors", "summariseSpectrumNodes",
+           "SPECTRUM_STEP_SHOULDER", "SPECTRUM_OUTER_SHOULDER",
+           "SPECTRUM_ENERGY_RTOL"]
 
 #: How close two abscissae must be to count as the repeated pair that ENDF-6
 #: uses for a step. The same value the format applier uses, and it is an
@@ -788,3 +791,389 @@ def applyNubarFactors(function1d, factors: ArrayLike, binEdges: ArrayLike, *,
         "regions_collapsed": bool(collapsed),
     }
     return perturbed, diagnostics
+
+
+# ======================================================================
+# Energy distributions: two axes, a norm, and a self-check
+# ======================================================================
+#
+# **The third node, and the one the other two do not prepare you for.** A cross
+# section and a nu-bar are scaled: refine at the bin edges, multiply. A fission
+# spectrum is not, because MF35 is not the covariance of chi(E') -- it is the
+# covariance of the *group-integrated probabilities*
+# ``P_j = int_{g_j}^{g_j+1} chi``, measured three independent ways
+# (``docs/pfns/pfns_mf5_mf35_roadmap.md`` fact 4). So the perturbation is stated
+# on quantities the node does not store, and applying it means integrating the
+# node, turning a delta on the integral into a ratio, scaling the table so the
+# integral comes out right, and then checking that it did.
+#
+# The arithmetic reproduces ``kika.sampling.mf35_sampling.perturb_pfns_partial``
+# and the gate is that the two produce the same tables point for point. What is
+# **not** here is what a *sample* is allowed to be -- positivity, the simplex
+# projection, what to do with a group whose P0 is zero. That is a property of
+# the draw and it belongs to the sampler; it arrives through *ratiosFor*.
+
+#: How far below an outgoing group boundary the shoulder node goes, as a
+#: fraction of the **lower group's width** -- not of the boundary energy.
+#:
+#: A duplicate-free lin-lin table cannot express a step, so the perturbed curve
+#: ramps between two adjacent groups' factors and the shoulder confines that
+#: ramp to a sliver. :data:`NUBAR_STEP_SHOULDER` measures the sliver as a
+#: fraction of the *energy* and is right to, because MF31's bins span decades so
+#: ``s*E`` is always a small part of a bin.
+#:
+#: **That does not carry over, and copying it was measurably wrong.** An MF5
+#: outgoing grid is linear at the top: Cf-252's highest groups are 2e5 wide at
+#: 2e7 eV, where ``s*E`` = 2e4 is a *tenth of the group*. The ramp then spans a
+#: tenth of the group and the realised group integral misses ``r_j*P0_j`` by
+#: percent, which is the same size as the perturbation. Measured on Cf-252: max
+#: group error 1.5 with the energy-relative shoulder, 8e-4 with this one.
+#:
+#: ``kika.sampling.mf35_sampling.OUTGOING_STEP_SHOULDER`` holds the same number
+#: and has to: the two appliers are gated against each other.
+SPECTRUM_STEP_SHOULDER = 1.0e-3
+
+#: The same, for the step in the *outer* coordinate at a band edge. The factor
+#: is piecewise constant in incident energy, so it steps at every band edge, and
+#: without a node just below the edge the lower band's factor ramps across the
+#: whole preceding incident interval.
+SPECTRUM_OUTER_SHOULDER = 1.0e-3
+
+#: How close an inserted node may be to one already there, relatively, before it
+#: is dropped -- ENDF's eleven-character field would write the two as the same
+#: energy, and a duplicate abscissa is what the shoulder construction exists to
+#: avoid.
+SPECTRUM_ENERGY_RTOL = 1.0e-6
+
+
+def _asBandMap(bands) -> "dict":
+    """*bands* as ``{key: (lo, hi)}``, whichever way it was given.
+
+    A mapping keeps the caller's own names for its blocks -- for MF35 the band
+    index the file states, which is **not** the position in a list the moment a
+    request asks for some bands and not others. A bare sequence still works and
+    is keyed by position, which is what a caller perturbing every band means.
+    """
+    if hasattr(bands, "items"):
+        return {key: (float(lo), float(hi)) for key, (lo, hi) in bands.items()}
+    return {index: (float(lo), float(hi))
+            for index, (lo, hi) in enumerate(bands)}
+
+
+def _bandOf(value: float, bands: "dict"):
+    """The key of the band containing *value*: ``[E1, E2)``, the last closed."""
+    ordered = sorted(bands.items(), key=lambda item: item[1][0])
+    for position, (key, (lo, hi)) in enumerate(ordered):
+        if lo <= value < hi:
+            return key
+        if position == len(ordered) - 1 and value == hi:
+            return key
+    return None
+
+
+def _insertOuterShoulders(form, bands, *, shoulder=SPECTRUM_OUTER_SHOULDER,
+                          rtol=SPECTRUM_ENERGY_RTOL) -> int:
+    """Give every interior band edge an outer node just below it.
+
+    Band edges are already nodes on every tape measured -- 6/6 on ENDF/B-VIII.1
+    and 9/9 on JEFF-4.0 -- but that only puts a node *at* the step. The new
+    node's table comes from
+    :meth:`~kika.nuclear_data.model.functions.higher.XYs2d.evaluateAtOuter`,
+    which is an exact refinement; copying the edge's own table instead is ~0.1 %
+    wrong and would surface as a central-value shift in a zero-perturbation run,
+    which is a defect that looks like physics.
+    """
+    # Every band's lower edge, and not "all but the lowest". The factor steps
+    # from *whatever is below* to this band's, and below the lowest requested
+    # band there may be a band nobody asked to perturb -- a partial request is
+    # exactly the case where the lowest edge is an interior step. Where it is
+    # not interior, the domain guard below drops it, which is what happens on
+    # both committed tapes: band 0 starts at the first incident energy. The
+    # ENDF twin skips ``bands[1:]`` instead, which is right only because it is
+    # always handed the whole band list.
+    edges = sorted({float(lo) for lo, _ in bands.values()})
+    inserted = 0
+    for edge in edges:
+        below = edge * (1.0 - shoulder)
+        existing = np.asarray(form.outerDomainValues, dtype=float)
+        if existing.size == 0 or not (existing[0] < below < existing[-1]):
+            continue
+        nearest = existing[np.argmin(np.abs(existing - below))]
+        if np.isclose(below, nearest, rtol=rtol, atol=0.0):
+            continue
+        form.insertOuterNode(below)
+        inserted += 1
+    return inserted
+
+
+def _refineAndScale(xs, ys, boundaries, ratios, *, maxPoints=None,
+                    shoulder=SPECTRUM_STEP_SHOULDER, rtol=SPECTRUM_ENERGY_RTOL):
+    """Refine a table where the factor steps, then scale every node.
+
+    Returns ``(xs, ys, nInserted, nStepsDropped)``.
+
+    **This is the load-bearing step and the single most likely silent bug.**
+    Scaling the nodes without first inserting the group boundary applies the
+    factor over the wrong interval: the panel straddling a boundary gets one
+    group's factor across both groups. The realised group integral then stops
+    being ``r_j * P0_j``, which is the property that makes the whole
+    construction preserve normalisation -- and the renormalisation that follows
+    absorbs the difference into a scalar, so the run completes, the file is
+    valid, and the perturbation is not the one that was computed.
+    """
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    boundaries = np.asarray(boundaries, dtype=float)
+    ratios = np.asarray(ratios, dtype=float)
+    lo, hi = float(xs[0]), float(xs[-1])
+
+    # Boundary ``interior[i]`` separates groups i and i+1, so the factor steps
+    # there iff ``ratios[i+1] != ratios[i]``. Only steps strictly inside the
+    # table's own support can be represented at all.
+    interior = boundaries[1:-1]
+    widths = np.diff(boundaries)[:-1]            # width of the group *below*
+    jumps = np.abs(ratios[1:] - ratios[:-1])
+    stepping = (jumps != 0.0) & (interior > lo) & (interior < hi)
+    candidates = interior[stepping]
+    magnitudes = jumps[stepping]
+    shoulderWidths = widths[stepping]
+
+    nDropped = 0
+    if maxPoints is not None and candidates.size:
+        # Two nodes per surviving step. Drop the smallest steps first, and say
+        # how many -- a silent cap reads as "the factor was applied
+        # everywhere", which is exactly the claim that would then be false.
+        budget = max(int((maxPoints - xs.size) // 2), 0)
+        if budget < candidates.size:
+            keep = np.argsort(magnitudes)[::-1][:budget]
+            nDropped = int(candidates.size - keep.size)
+            order = np.sort(keep)
+            candidates = candidates[order]
+            shoulderWidths = shoulderWidths[order]
+
+    wanted: List[float] = []
+    for edge, width in zip(candidates, shoulderWidths):
+        wanted.append(float(edge))
+        below = float(edge) - shoulder * float(width)
+        if below > lo:
+            wanted.append(below)
+
+    nInserted = 0
+    if wanted:
+        new = np.unique(np.asarray(wanted, dtype=float))
+        new = new[(new > lo) & (new < hi)]
+        if new.size:
+            nearest = xs[np.clip(np.searchsorted(xs, new), 1, xs.size - 1)]
+            under = xs[np.clip(np.searchsorted(xs, new) - 1, 0, xs.size - 1)]
+            duplicate = (np.isclose(new, nearest, rtol=rtol, atol=0.0)
+                         | np.isclose(new, under, rtol=rtol, atol=0.0))
+            new = new[~duplicate]
+        if new.size:
+            values = np.interp(new, xs, ys)
+            xs = np.concatenate([xs, new])
+            ys = np.concatenate([ys, values])
+            order = np.argsort(xs, kind="stable")
+            xs, ys = xs[order], ys[order]
+            nInserted = int(new.size)
+
+    # Group of each node: side='right' puts a node sitting exactly on a
+    # boundary into the group *above* it, and the shoulder just below into the
+    # group beneath -- which is the assignment the step construction needs.
+    group = np.clip(np.searchsorted(boundaries, xs, side="right") - 1,
+                    0, ratios.size - 1)
+    inside = (xs >= boundaries[0]) & (xs <= boundaries[-1])
+    scale = np.where(inside, ratios[group], 1.0)
+    return xs, ys * scale, nInserted, nDropped
+
+
+def _copyOuterContainer(form):
+    """*form* with a fresh child list, so replacing a child leaves the original.
+
+    Not a ``deepcopy``: the children themselves are shared until one is
+    replaced, and ``replaceTable`` replaces a *slot* rather than mutating the
+    function in it. So the evaluated node keeps every table it had, and the
+    realisation carries new objects only where the perturbation actually
+    changed something.
+    """
+    import copy as _copy
+
+    from .functions.higher import Regions2d, XYs2d
+
+    if isinstance(form, XYs2d):
+        clone = _copy.copy(form)
+        clone.function1ds = list(form.function1ds)
+        return clone
+    if isinstance(form, Regions2d):
+        clone = _copy.copy(form)
+        clone.function2ds = [_copyOuterContainer(region)
+                             for region in form.function2ds]
+        return clone
+    raise TypeError(
+        f"an energy distribution is an XYs2d or a regions2d, not a "
+        f"{type(form).__name__}"
+    )
+
+
+def applySpectrumFactors(energyForm, bands, boundariesByBand, ratiosFor, *,
+                         maxOutgoingPoints=None,
+                         shoulder: float = SPECTRUM_STEP_SHOULDER,
+                         outerShoulder: float = SPECTRUM_OUTER_SHOULDER,
+                         rtol: float = SPECTRUM_ENERGY_RTOL):
+    """Perturb an energy distribution from group-probability factors.
+
+    Parameters
+    ----------
+    energyForm
+        The ``XYs2d`` (or ``regions2d``) of tabulated ``chi(E'|E)`` an
+        :class:`~kika.nuclear_data.model.distributions.Uncorrelated` carries.
+        **Not mutated**: the perturbed node comes back and the evaluated one is
+        left where it was.
+    bands
+        ``{key: (E1, E2)}`` -- the outer-coordinate range each factor block is
+        stated over. For MF35 these are the incident-energy bands, one per
+        covariance section, and the key is the band the file states rather than
+        a position, so a request for some bands and not others still lines up.
+        A bare sequence is accepted and keyed by position.
+    boundariesByBand
+        ``key -> the outgoing-energy group boundaries`` that band's factors are
+        stated on, keyed as *bands* is. One longer than the ratios.
+    ratiosFor
+        ``callable(band, p0, covered) -> (ratios, info)``. Given a node's own
+        group probabilities ``p0`` and the mass ``covered`` by the band's grid,
+        it returns one ratio per group and whatever it wants recorded. **This is
+        where a sample's physics lives** -- forming ratios from absolute deltas,
+        freezing groups with no probability to scale, and projecting onto
+        ``{r >= 0, sum P0 r = sum P0}``. It is a callback and not an argument
+        because ``p0`` is *per outer node*: every node inside a band shares the
+        deltas and has its own probabilities, so the ratios differ node by node
+        and only this function knows them.
+    maxOutgoingPoints
+        Cap on the size of one table. Steps are dropped smallest-first and the
+        count is reported; ``None`` means no cap.
+
+    Returns
+    -------
+    (perturbed, diagnostics)
+        A node of the same kind, and per-node diagnostics plus the summary
+        :func:`summariseSpectrumNodes` builds.
+
+    **What it does, per outer node, and why in that order.**
+
+    1. integrate the table over the band's groups -> ``P0``;
+    2. measure ``int chi`` and ``sum P0`` and record both, before anything
+       changes -- the mass outside the band's grid is real (an MF5 table may
+       start at ``E'=0`` where MF35 starts at 1e-5, and a top group may run past
+       the end of the table), so **the normalisation target is ``sum P0`` as
+       measured, not 1**;
+    3. ask *ratiosFor* what the factors are;
+    4. insert the boundaries the factor steps at, plus a shoulder just below
+       each, and scale -- :func:`_refineAndScale`;
+    5. rescale the whole table so ``int chi`` is exactly what it was;
+    6. **check that step 4 delivered ``P_j = rescale * r_j * P0_j``.** Nothing
+       outside this function can see that it did, and step 5 would hide a
+       failure of it in a scalar, so it is measured here and reported per node.
+
+    The residual that legitimately remains is the shoulder ramp -- the sliver
+    between ``g_j(1-s)`` and ``g_j`` carries a blend of two factors -- and it is
+    bounded by about ``s/2 * max|dr|``.
+    """
+    bands = _asBandMap(bands)
+    form = _copyOuterContainer(energyForm)
+    insertedOuter = _insertOuterShoulders(form, bands, shoulder=outerShoulder,
+                                          rtol=rtol)
+
+    perNode: List[dict] = []
+    for k, value in enumerate(list(form.outerDomainValues)):
+        band = _bandOf(float(value), bands)
+        if band is None or band not in boundariesByBand:
+            continue
+
+        boundaries = np.asarray(boundariesByBand[band], dtype=float)
+        p0 = form.groupIntegrals(k, boundaries)
+        total = form.normalisation(k)
+        covered = float(p0.sum())
+
+        ratios, info = ratiosFor(band, p0, covered)
+        ratios = np.asarray(ratios, dtype=float)
+        if ratios.size != p0.size:
+            raise ValueError(
+                f"band {band}: {ratios.size} ratio(s) for {p0.size} group(s) of "
+                f"the boundaries this band is stated on"
+            )
+
+        xs, ys = form.table(k)
+        xNew, yNew, nInserted, nDropped = _refineAndScale(
+            xs, ys, boundaries, ratios, maxPoints=maxOutgoingPoints,
+            shoulder=shoulder, rtol=rtol)
+        form.replaceTable(k, xNew, yNew)
+
+        realised = form.normalisation(k)
+        rescale = (total / realised) if realised != 0.0 else 1.0
+        if rescale != 1.0:
+            form.replaceTable(k, xNew, yNew * rescale)
+
+        wanted = rescale * ratios * p0
+        realisedGroups = form.groupIntegrals(k, boundaries)
+        scored = wanted > 0.0
+        groupError = (
+            float(np.max(np.abs(realisedGroups[scored] / wanted[scored] - 1.0)))
+            if np.any(scored) else 0.0
+        )
+        # The same discrepancy as a fraction of the whole spectrum. **This is
+        # the one to gate on.** The relative form above is unbounded wherever a
+        # group's ratio was driven towards zero -- its denominator goes to
+        # nothing while the neighbouring shoulder ramp does not -- so it reports
+        # percent-level numbers on groups holding 1e-5 of the spectrum and says
+        # nothing about whether the perturbation is right.
+        groupMassError = (
+            float(np.max(np.abs(realisedGroups - wanted)) / covered)
+            if covered else 0.0
+        )
+
+        perNode.append({
+            "node": k,
+            "outer_value": float(value),
+            "band": band,
+            "integral_before": float(total),
+            "covered_before": covered,
+            "mass_outside_bands": float(total - covered),
+            "frac_mass_outside_bands": (float((total - covered) / total)
+                                        if total else 0.0),
+            "renormalisation_scalar": float(rescale),
+            "renormalisation_error": float(abs(rescale - 1.0)),
+            "n_outgoing_inserted": nInserted,
+            "n_steps_dropped": nDropped,
+            "n_outgoing_points": int(xNew.size),
+            "max_group_ratio_error": groupError,
+            "max_group_mass_error": groupMassError,
+            **dict(info or {}),
+        })
+
+    diagnostics = summariseSpectrumNodes(perNode)
+    diagnostics["n_outer_inserted"] = insertedOuter
+    diagnostics["per_node"] = perNode
+    return form, diagnostics
+
+
+def summariseSpectrumNodes(perNode) -> dict:
+    """The worst of each per-node quantity, over every node that was perturbed.
+
+    A summary rather than a mean on purpose: a normalisation that is right on
+    thirty nodes and wrong on one is a broken file, and an average says it is
+    fine.
+    """
+    def worst(field: str) -> float:
+        values = [abs(entry[field]) for entry in perNode if field in entry]
+        return float(max(values)) if values else 0.0
+
+    return {
+        "n_nodes": len(perNode),
+        "max_renormalisation_error": worst("renormalisation_error"),
+        "max_group_ratio_error": worst("max_group_ratio_error"),
+        "max_group_mass_error": worst("max_group_mass_error"),
+        "max_frac_mass_outside_bands": worst("frac_mass_outside_bands"),
+        "total_steps_dropped": int(sum(entry.get("n_steps_dropped", 0)
+                                       for entry in perNode)),
+        "total_outgoing_inserted": int(sum(entry.get("n_outgoing_inserted", 0)
+                                           for entry in perNode)),
+    }

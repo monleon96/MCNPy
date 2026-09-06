@@ -11,6 +11,17 @@ The pipeline, per incident-energy node of an MF5 LF=1 table:
    and scale;
 7. rescale the whole table so ``∫χ`` is exactly what it was.
 
+**There is now a second applier, on the model, and this one is unmoved.**
+:func:`kika.nuclear_data.model.perturbation.applySpectrumFactors` does the same
+seven steps on the ``XYs2d`` an
+:class:`~kika.nuclear_data.model.distributions.Uncorrelated` carries, and
+:func:`pfns_ratio_rule` is this module's half of it -- steps 3 to 5, which are
+statements about the *sample* rather than about the function and stay here.
+The two are gated against each other point for point on both committed tapes
+(``test_perturbing_a_fission_spectrum_on_the_model.py``), and this function is
+what the shipped PFNS driver runs: it is not a fork awaiting deletion, it is the
+side of the gate that must not move.
+
 **Step 6 is load-bearing and is the single most likely silent bug.** Scaling the
 existing nodes without first inserting the group boundary applies the factor
 over the wrong interval: the panel straddling a boundary gets one group's factor
@@ -49,6 +60,7 @@ __all__ = [
     "load_pfns_covariance", "build_pfns_covariance", "covariance_suite_blocks",
     "band_grids",
     "generate_pfns_samples", "normalisation_residual", "perturb_pfns_partial",
+    "pfns_ratio_rule",
     "realised_group_probabilities", "realised_covariance_report",
     "row_sum_residual", "normalisation_drift",
 ]
@@ -733,3 +745,72 @@ def realised_covariance_report(
         "null_leakage": leakage,
         "max_abs_delta_sum": float(np.max(np.abs(deltas.sum(axis=1)))),
     }
+
+
+# ---------------------------------------------------------------------------
+# The sampling half of the model applier
+# ---------------------------------------------------------------------------
+
+def pfns_ratio_rule(deltas_by_band: Dict[int, np.ndarray], *,
+                    metric: str = "probability"):
+    """The ``ratiosFor`` callback
+    :func:`kika.nuclear_data.model.perturbation.applySpectrumFactors` takes.
+
+    **This is the half of the PFNS perturbation that is not arithmetic on a
+    node.** Refining a table where a factor steps, rescaling it so its integral
+    is what it was, and checking that the realised group integrals are what was
+    asked for -- all of that is a property of the *function*, and it moved to
+    the model with :func:`~kika.nuclear_data.model.perturbation.applySpectrumFactors`.
+    What did not move is what a **sample** is allowed to be: turning an absolute
+    delta on a group probability into a ratio, freezing a group with no
+    probability to scale, and projecting onto ``{r >= 0, sum P0 r = sum P0}``.
+    Those are statements about the draw, they need this module's covariance
+    vocabulary, and the roadmap's decision 4 keeps them here.
+
+    Returns a callable ``(band, p0, covered) -> (ratios, info)``, which
+    ``applySpectrumFactors`` invokes once per outer node -- once per incident
+    energy -- because ``p0`` is that node's own and the ratios follow from it.
+    The ``info`` keys are the ones ``perturb_pfns_partial`` reports per node, so
+    the two appliers' diagnostics can be compared field by field.
+    """
+    def ratiosFor(band: int, p0: np.ndarray, covered: float):
+        deltas = np.asarray(deltas_by_band[band], dtype=float)
+        p0 = np.asarray(p0, dtype=float)
+        if deltas.size != p0.size:
+            raise ValueError(
+                f"band {band}: {deltas.size} deltas for {p0.size} groups"
+            )
+
+        # Frozen groups first, so the projection re-closes the sum that
+        # dropping their deltas re-opens.
+        empty = p0 == 0.0
+        n_frozen = int(empty.sum())
+        deltas = np.where(empty, 0.0, deltas)
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            raw = np.where(empty, 1.0,
+                           1.0 + deltas / np.where(empty, 1.0, p0))
+
+        before = check_ratios(raw, p0, covered)
+        ratios, shift, n_clipped = project_ratios_to_simplex(
+            raw, p0, covered, metric=metric)
+        after = check_ratios(ratios, p0, covered)
+
+        # The honest measure of what clipping cost is the *mass* it moved, not
+        # the number of groups: zeroing thirty groups that hold 1e-15 of the
+        # spectrum between them is not the same event as zeroing one that holds
+        # a per cent, and a group count cannot tell them apart.
+        clipped = (raw + shift < 0.0) & (p0 > 0.0)
+        clipped_mass = (float(p0[clipped].sum() / covered)
+                        if covered and clipped.any() else 0.0)
+
+        return ratios, {
+            "n_groups_frozen": n_frozen,
+            "sum_error_before_projection": before["sum_error"],
+            "sum_error_after_projection": after["sum_error"],
+            "projection_shift": shift,
+            "n_clipped": n_clipped,
+            "clipped_mass_fraction": clipped_mass,
+        }
+
+    return ratiosFor

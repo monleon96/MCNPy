@@ -31,6 +31,7 @@ import numpy as np
 from kika._covariance_forms import require_single_matrix
 
 __all__ = ["covariance_suite_blocks", "parameter_covariance_blocks",
+           "mf35_band_domains",
            "parameter_covariance_index", "legendre_covariance_blocks",
            "legendre_covariance_index", "cross_section_covariance_blocks",
            "cross_section_covariance_index", "assemble_joint", "UNION_MODES",
@@ -426,6 +427,124 @@ def _mf34_entries(suite, mt=None, orders=None, relative=None):
         ))
     return entries
 
+
+
+def _incident_band(link):
+    """The ``(E1, E2)`` an MF35 link is sliced to, or ``None``.
+
+    Read off the ``Slices`` the way :func:`_legendre_order` reads the Legendre
+    order, and duck-typed for the same reason: this module must not import the
+    ENDF adapter, and ``DataLink.incidentEnergyBand`` is the model-side property
+    that answers the same question. A band is a *range* slice
+    (``domainMin``/``domainMax``) where an order is a *point* slice
+    (``domainValue``) -- §25.2.6 admits either, and exactly one.
+    """
+    slices = getattr(getattr(link, "slices", None), "slices", None) or ()
+    for entry in slices:
+        if entry.domainMin is not None or entry.domainMax is not None:
+            return (float(entry.domainMin), float(entry.domainMax))
+    return None
+
+
+def _mf35_sections(suite, mt=None, bands=None):
+    """``(key, section, (E1, E2))`` for every MF35 section, band index included.
+
+    **The band index is positional, and it has to be derived here rather than
+    parsed out of a label.** ``decodeMF35MT`` names its sections
+    ``MF35-MT18-band0``, ``band1``, ... in file order, and ENDF-6 §35 writes the
+    bands contiguously in increasing energy, so the position *is* the band. A
+    label is a display string; counting the sections of one ``(ZA, MT)`` is the
+    thing the label was made from.
+
+    One generator behind both :func:`_mf35_entries` and
+    :func:`mf35_band_domains` so the two cannot disagree about which section is
+    band 3 -- which would be a hard failure to see, because both answers are
+    well formed.
+    """
+    wanted_mts = _selection(mt)
+    wanted_bands = _selection(bands)
+
+    counters: Dict[Tuple[int, int], int] = {}
+    for section in getattr(suite, "covarianceSections", suite):
+        rowData = section.rowData
+        if not _is_endf_mf(rowData, 35):
+            continue
+        za = int(getattr(section.provenance, "za", None) or 0)
+        section_mt = _endf_mt(rowData)
+        index = counters.get((za, section_mt), 0)
+        counters[(za, section_mt)] = index + 1
+
+        if wanted_mts is not None and section_mt not in wanted_mts:
+            continue
+        if wanted_bands is not None and index not in wanted_bands:
+            continue
+
+        domain = _incident_band(rowData)
+        if domain is None:
+            raise ValueError(
+                f"MF35 section {getattr(section, 'label', '?')!r} carries no "
+                f"incident-energy slice, so which band it is about is not in "
+                f"the object. A band is the covariance of one energy "
+                f"distribution over one range of incident energies, and "
+                f"without the range there is nothing to apply it to"
+            )
+        yield (za, section_mt, index), section, domain
+
+
+def _mf35_entries(suite, mt=None, bands=None, relative=None):
+    """The MF35 sections of *suite*, as :func:`assemble_joint` entries.
+
+    **One entry per band, and never more than one block per section**, which is
+    the opposite of MF34 and is a statement about what the two files *are*.
+    MF34's Legendre orders are components of one distribution and a file may
+    state the covariance between two of them; MF35's bands are the covariance of
+    the same distribution over disjoint ranges of incident energy, and ENDF-6
+    §35 states no cross-band block -- there is no record shape for one. So the
+    result is block-diagonal by construction and every section is its own
+    matrix, which is also why their orders may differ (84, 641, 641, 641, 641 on
+    ENDF/B-VIII.1's U-235) without anything being wrong.
+
+    **The grid is the *outgoing* energy, and that is the one thing about MF35
+    that surprises code written for the other three files.** For MF31, MF33 and
+    MF34 the grid a factor block is stated on is the incident-energy axis of the
+    quantity itself. Here it is the group structure of ``chi(E'|E)`` at fixed
+    incident energy, and the incident axis is the *band*, which is carried
+    separately -- see :func:`mf35_band_domains`.
+
+    *relative* is accepted for symmetry with the other builders and **``True``
+    matches nothing**: LB=7 holds the covariance of group-integrated
+    probabilities, which are already dimensionless and already sum to one, so
+    ``decodeMF35MT`` marks every band absolute and the encoder refuses anything
+    else. A caller asking for the relative sections of an MF35 is asking a
+    question the file cannot answer, and getting an empty list back rather than
+    an error is how a request comes to perturb nothing while claiming to.
+    """
+    entries = []
+    for key, section, _domain in _mf35_sections(suite, mt=mt, bands=bands):
+        form = require_single_matrix(
+            getattr(section, "form", None),
+            f"MF35 covariance section {getattr(section, 'label', '?')!r}",
+        )
+        if relative is not None and bool(form.isRelative) != bool(relative):
+            continue
+        grid = np.asarray(form.rowGrid, dtype=float)
+        entries.append((key, key, np.asarray(form.matrix, dtype=float),
+                        grid, grid))
+    return entries
+
+
+def mf35_band_domains(suite, mt=None, bands=None):
+    """``{(ZA, MT, band): (E1, E2)}`` -- the incident range of each band.
+
+    The coordinate an MF35 factor block is *not* stated on, and the one the
+    applier needs: the block says how the outgoing spectrum moves, the domain
+    says at which incident energies it moves that way. Kept beside the entries
+    rather than inside them because ``assemble_joint`` takes five-element
+    entries and a sixth would have to be understood by every builder, three of
+    which have no such coordinate.
+    """
+    return {key: domain
+            for key, _section, domain in _mf35_sections(suite, mt=mt, bands=bands)}
 
 def legendre_covariance_blocks(
     suite, isotope: Any = None, mt=None, orders=None, relative=None,

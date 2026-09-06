@@ -55,14 +55,32 @@ __all__ = ["PerturbationSet", "SEMANTICS", "EDGE_RULE"]
 #: The ways a factor block can act on the quantity it perturbs. A closed set,
 #: because "the file says ``relative`` and the code assumed ``absolute``" is a
 #: failure that produces plausible numbers.
-SEMANTICS = ("multiplicative-relative",)
+SEMANTICS = ("multiplicative-relative", "additive-absolute")
+
+#: Which of :data:`SEMANTICS` a block of each file acts under, read off the
+#: file rather than chosen. MF31, MF33 and MF34 state relative covariances --
+#: MF33's absolute sections are converted before they reach a draw, and MF34's
+#: are dropped -- so their blocks are factors and the applier multiplies. **MF35
+#: is the exception and it is not a variant of the same thing**: LB=7 is the
+#: covariance of group-integrated *probabilities*, which are dimensionless and
+#: sum to one, so a draw of it is a vector of absolute deltas on quantities the
+#: node does not even store. Multiplying a spectrum by one of those would be
+#: arithmetic on the wrong object, and it would produce a plausible file.
+SEMANTICS_OF_MF = {31: SEMANTICS[0], 33: SEMANTICS[0], 34: SEMANTICS[0],
+                   35: SEMANTICS[1]}
 
 #: Which discontinuity convention the factors were drawn to be applied under.
 #: Named rather than implied: a piecewise-constant block is silent about its own
 #: steps, so the rule lives in the applier and the set records which one.
 EDGE_RULE = "endf-step-duplicate"
 
-_FORMAT_VERSION = 2
+#: Bumped to 3 when a block learned to state its own semantics and its own
+#: outer domain, which is what a fission spectrum needs and the other three
+#: quantities do not. A version-2 file is still read: every block in one is
+#: ``multiplicative-relative`` with no outer domain, which is exactly what the
+#: defaults give, so nothing about it has to be guessed.
+_FORMAT_VERSION = 3
+_READABLE_VERSIONS = (2, 3)
 
 
 @dataclass(frozen=True)
@@ -92,14 +110,37 @@ class PerturbationSet:
     binEdges: Dict[ComponentKey, np.ndarray]
     groups: Tuple[Tuple[ComponentKey, ...], ...] = ()
     semantics: str = SEMANTICS[0]
+    #: Where one component acts under something other than :attr:`semantics`.
+    #: A realisation may cover several quantities at once and they need not
+    #: agree -- a request for cross sections and a fission spectrum draws
+    #: factors for one and absolute deltas for the other -- so the set-wide
+    #: field is the default and this is what a block says about itself.
+    componentSemantics: Dict[ComponentKey, str] = field(default_factory=dict)
+    #: The coordinate a block is stated *over* but not *on*: MF35's
+    #: incident-energy band. Empty for every quantity whose factors already
+    #: live on the axis they apply to.
+    outerDomains: Dict[ComponentKey, Tuple[float, float]] = field(
+        default_factory=dict)
     edgeRule: str = EDGE_RULE
     provenance: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.semantics not in SEMANTICS:
+        for value in (self.semantics, *self.componentSemantics.values()):
+            if value not in SEMANTICS:
+                raise ValueError(
+                    f"semantics {value!r} is not one of {list(SEMANTICS)}. A "
+                    f"perturbation that does not say how it acts cannot be "
+                    f"applied"
+                )
+        stranded = [component for component in self.factors
+                    if component.mf == 35 and component not in self.outerDomains]
+        if stranded:
             raise ValueError(
-                f"semantics {self.semantics!r} is not one of {list(SEMANTICS)}. "
-                f"A perturbation that does not say how it acts cannot be applied"
+                f"{[c.describe() for c in stranded]} carry factors on an "
+                f"outgoing-energy grid and no incident-energy band. An MF35 "
+                f"block says how the spectrum moves; without its band nothing "
+                f"says at which incident energies it moves that way, and an "
+                f"applier would have to guess"
             )
         if set(self.factors) != set(self.binEdges):
             missing = set(self.factors) ^ set(self.binEdges)
@@ -166,6 +207,8 @@ class PerturbationSet:
 
         factors: Dict[ComponentKey, np.ndarray] = {}
         binEdges: Dict[ComponentKey, np.ndarray] = {}
+        outerDomains: Dict[ComponentKey, Tuple[float, float]] = {}
+        componentSemantics: Dict[ComponentKey, str] = {}
         groups: List[Tuple[ComponentKey, ...]] = []
         for blockKey, meta in index.items():
             components = list(meta.get("components") or meta.get("pairs")
@@ -190,11 +233,24 @@ class PerturbationSet:
                 factors[component] = values[start:start + width].copy()
                 grid = grids[lookup] if isinstance(grids, Mapping) else grids[position]
                 binEdges[component] = np.asarray(grid, dtype=float)
+                # The semantics is read off the MF, which is to say off the
+                # file: `SEMANTICS_OF_MF` records what each covariance file
+                # states its numbers to be. Recorded per block rather than
+                # inferred again at apply time, so the JSON beside the sample
+                # says it and a reader can check it.
+                semantics = SEMANTICS_OF_MF.get(component.mf)
+                if semantics is not None and semantics != cls.semantics:
+                    componentSemantics[component] = semantics
+                domain = (meta.get("domains") or {}).get(lookup)
+                if domain is not None:
+                    outerDomains[component] = (float(domain[0]), float(domain[1]))
                 group.append(component)
             groups.append(tuple(group))
 
         return cls(label=label, factors=factors, binEdges=binEdges,
-                   groups=tuple(groups), provenance=dict(provenance or {}))
+                   groups=tuple(groups), componentSemantics=componentSemantics,
+                   outerDomains=outerDomains,
+                   provenance=dict(provenance or {}))
 
     @staticmethod
     def _asComponentKey(component, blockKey) -> ComponentKey:
@@ -231,6 +287,10 @@ class PerturbationSet:
     def reactions(self) -> Tuple[int, ...]:
         """The MTs this set perturbs, ascending, whatever the quantity."""
         return tuple(sorted({component.mt for component in self.factors}))
+
+    def semanticsOf(self, component: ComponentKey) -> str:
+        """How this component's block acts -- its own statement, or the set's."""
+        return self.componentSemantics.get(component, self.semantics)
 
     def quantities(self) -> Tuple[str, ...]:
         """The model nodes this set touches, e.g. ``('crossSection',)``."""
@@ -326,7 +386,8 @@ class PerturbationSet:
             resolved[reaction] = components[0]
         return resolved
 
-    def applyToSuite(self, suite, *, multiplicityResolver=None
+    def applyToSuite(self, suite, *, multiplicityResolver=None,
+                     maxOutgoingPoints: Optional[int] = None
                      ) -> Dict[ComponentKey, Dict[str, Any]]:
         """Put a perturbed form under :attr:`label` on every node this set covers.
 
@@ -345,6 +406,10 @@ class PerturbationSet:
         * ``angularDistribution`` -- MF34's L>=1, all orders of one reaction in
           one call, because a Legendre vector is perturbed once and not once per
           order.
+        * ``energyDistribution`` -- MF35, every band of one reaction in one
+          call, because the bands are drawn apart and written together. See
+          :meth:`_applyEnergyDistribution`; *maxOutgoingPoints* caps how large
+          one perturbed table may grow and is reported when it bites.
         * ``multiplicity`` -- MF31, beside the evaluation like the other two
           since ``Multiplicity`` became a
           :class:`~kika.nuclear_data.model.component.Component`. It needs
@@ -397,7 +462,140 @@ class PerturbationSet:
                     "n_inserted": info["n_inserted"],
                     **info["per_order"].get(order, {}),
                 }
+
+        spectra = [c for c in self.components() if c.mf == 35]
+        if spectra:
+            diagnostics.update(self._applyEnergyDistribution(
+                suite, spectra, maxOutgoingPoints=maxOutgoingPoints))
         return diagnostics
+
+    def _applyEnergyDistribution(self, suite, components,
+                                 maxOutgoingPoints=None):
+        """Put a perturbed fission spectrum beside the evaluated one.
+
+        **The third dispatch, and the one that is not a scaling.** MF35 states
+        the covariance of the *group-integrated probabilities* of chi(E'|E), so
+        a block is a vector of absolute deltas on quantities the node does not
+        store, over one band of incident energy. Applying it means integrating
+        the node over the band's groups, turning each delta into a ratio,
+        refining the table where the ratio steps, scaling, and putting the
+        integral back where it was --
+        :func:`~kika.nuclear_data.model.perturbation.applySpectrumFactors`.
+
+        **Every band of one reaction goes in one call.** The bands are drawn
+        independently -- the file states no block between two of them, which is
+        why :func:`~kika.sampling.joint_blocks.samplingGroups` never merges them
+        -- but they act on **one** node, and an applier run once per band would
+        integrate a table a previous band had already rewritten. The realisation
+        is one function of two variables and it is written once.
+
+        What a *sample* may be -- positivity, the projection onto
+        ``{r >= 0, sum P0 r = sum P0}``, freezing a group with no probability to
+        scale -- arrives as
+        :func:`~kika.sampling.mf35_sampling.pfns_ratio_rule`. It stays in the
+        sampling layer on purpose (roadmap decision 4): it is a statement about
+        the draw, not about the function.
+        """
+        from kika.nuclear_data.model.perturbation import (applySpectrumFactors,
+                                                          summariseSpectrumNodes)
+        from kika.sampling.mf35_sampling import pfns_ratio_rule
+
+        diagnostics: Dict[ComponentKey, Dict[str, Any]] = {}
+        byReaction: Dict[Tuple[int, int], List[ComponentKey]] = {}
+        for component in components:
+            byReaction.setdefault((component.za, component.mt), []).append(
+                component)
+
+        for (_za, mt), bandComponents in byReaction.items():
+            reaction = suite.reactionByENDF_MT(mt)
+            product, energyForm = self._energyOf(reaction, mt)
+            bands = {c.index: self.outerDomains[c] for c in bandComponents}
+            boundaries = {c.index: self.binEdges[c] for c in bandComponents}
+            deltas = {c.index: self.factors[c] for c in bandComponents}
+
+            perturbed, info = applySpectrumFactors(
+                energyForm, bands, boundaries, pfns_ratio_rule(deltas),
+                maxOutgoingPoints=maxOutgoingPoints)
+            self._putEnergyRealisation(product, perturbed)
+
+            for component in bandComponents:
+                # Per band, because that is what was drawn: a band's own nodes
+                # carry its renormalisation and its group self-check, and the
+                # summary over every band would hide one bad band behind three
+                # good ones.
+                nodes = [entry for entry in info["per_node"]
+                         if entry["band"] == component.index]
+                diagnostics[component] = {
+                    "n_outer_inserted": info["n_outer_inserted"],
+                    **summariseSpectrumNodes(nodes),
+                }
+        return diagnostics
+
+    @staticmethod
+    def _energyOf(reaction, mt: int):
+        """The product whose evaluated distribution carries chi(E'|E).
+
+        The energy twin of :meth:`_angularOf`, and it refuses in the same two
+        places. **§18.3's ``uncorrelated`` holds both halves of one
+        distribution**, so MF4's angular and MF5's energy hang on the same node
+        and this differs from that method only in which half it asks for.
+
+        A product whose ``energy`` is a ``discreteGamma``, a ``primaryGamma`` or
+        anything else that is not a table of chi against outgoing energy is not
+        a candidate: MF35 is the covariance of an integral over E', and a
+        discrete line has no such integral.
+        """
+        from kika.nuclear_data.model import EVAL_LABEL
+        from kika.nuclear_data.model.functions.higher import Function2d
+
+        channel = getattr(reaction, "outputChannel", None)
+        candidates = []
+        for product in (getattr(channel, "products", None) or ()):
+            distribution = getattr(product, "distribution", None)
+            if distribution is None:
+                continue
+            form = (distribution.get(EVAL_LABEL)
+                    if hasattr(distribution, "get") else distribution)
+            energy = getattr(form, "energy", None)
+            if isinstance(energy, Function2d):
+                candidates.append((product, energy))
+        if not candidates:
+            raise ValueError(
+                f"MT{mt} has no product carrying an evaluated energy "
+                f"distribution as a table of chi(E'|E), so an MF35 "
+                f"perturbation has nothing to act on. An NK>1 MF5 section and "
+                f"the analytic laws (LF=5/7/9/11/12) reach the model as "
+                f"provenance and not as a node -- the decoder's report says so "
+                f"-- and neither can be perturbed from a covariance of group "
+                f"integrals"
+            )
+        if len(candidates) > 1:
+            raise ValueError(
+                f"MT{mt} has {len(candidates)} products carrying an energy "
+                f"distribution and MF35 states one covariance; which one it is "
+                f"about is not in the file, so it is not for this to guess"
+            )
+        return candidates[0]
+
+    def _putEnergyRealisation(self, product, energyForm) -> None:
+        """The perturbed spectrum, beside the evaluated one, under the label.
+
+        The same move as :meth:`_putRealisation` makes for the angular half, and
+        deliberately built from the **evaluated** distribution rather than from
+        whatever this realisation may already have put there: a request that
+        perturbs MF34 and MF35 of one reaction writes two halves of one node,
+        and each has to start from the evaluation. Where a labelled form already
+        exists -- the angular half was written first -- it is that form that
+        gets the new energy, so neither half is dropped.
+        """
+        import dataclasses
+
+        from kika.nuclear_data.model import EVAL_LABEL
+
+        distribution = product.distribution
+        form = distribution.get(self.label) or distribution[EVAL_LABEL]
+        distribution[self.label] = self._labelled(
+            dataclasses.replace(form, energy=energyForm))
 
     def _applyMultiplicity(self, suite, components, resolver):
         """Put a nu-bar realisation on the node an MT names, and say what it cost.
@@ -610,8 +808,11 @@ class PerturbationSet:
                 {
                     "component": list(component),
                     "quantity": component.quantity,
+                    "semantics": self.semanticsOf(component),
                     "factors": [float(v) for v in self.factors[component]],
                     "binEdges": [float(e) for e in self.binEdges[component]],
+                    **({"outerDomain": list(self.outerDomains[component])}
+                       if component in self.outerDomains else {}),
                 }
                 for component in self.components()
             ],
@@ -620,21 +821,30 @@ class PerturbationSet:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "PerturbationSet":
         version = int(data.get("format", 0))
-        if version != _FORMAT_VERSION:
+        if version not in _READABLE_VERSIONS:
             raise ValueError(
-                f"perturbation set format {version}, this kika writes and reads "
-                f"{_FORMAT_VERSION}"
+                f"perturbation set format {version}, this kika writes "
+                f"{_FORMAT_VERSION} and reads {list(_READABLE_VERSIONS)}"
             )
-        factors, binEdges = {}, {}
+        setSemantics = data.get("semantics", SEMANTICS[0])
+        factors, binEdges, outerDomains, componentSemantics = {}, {}, {}, {}
         for block in data["blocks"]:
             component = ComponentKey(*(int(v) for v in block["component"]))
             factors[component] = np.asarray(block["factors"], dtype=float)
             binEdges[component] = np.asarray(block["binEdges"], dtype=float)
+            semantics = block.get("semantics")
+            if semantics is not None and semantics != setSemantics:
+                componentSemantics[component] = semantics
+            domain = block.get("outerDomain")
+            if domain is not None:
+                outerDomains[component] = (float(domain[0]), float(domain[1]))
         groups = tuple(tuple(ComponentKey(*(int(v) for v in component))
                              for component in group)
                        for group in data.get("groups", ()))
         return cls(label=data["label"], factors=factors, binEdges=binEdges,
-                   groups=groups, semantics=data.get("semantics", SEMANTICS[0]),
+                   groups=groups, semantics=setSemantics,
+                   componentSemantics=componentSemantics,
+                   outerDomains=outerDomains,
                    edgeRule=data.get("edgeRule", EDGE_RULE),
                    provenance=dict(data.get("provenance", {})))
 

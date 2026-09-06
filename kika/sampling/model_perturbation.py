@@ -2,9 +2,15 @@
 
 This is the pipeline the four single-quantity ones do not add up to. It reads a
 tape once, assembles whatever covariance the request names -- cross sections,
-angular distributions, multiplicities, in any combination -- decides from the
-file which of them have to be drawn together, draws, puts each realisation on
-the model nodes it belongs to, and emits.
+angular distributions, multiplicities, fission spectra, in any combination --
+decides from the file which of them have to be drawn together, draws, puts each
+realisation on the model nodes it belongs to, and emits.
+
+**Not everything it draws is a factor.** MF35's bands are the absolute
+covariance of group-integrated probabilities, so they are drawn linearly as
+deltas while the other three files are drawn in log space as factors. One
+request may carry both; the draw is split by what each covariance *states*, not
+by what the caller asked for. See :func:`_splitBySemantics`.
 
 It is a **fork, not a flag.** ``perturb_PENDF_files`` and ``perturb_ENDF_files``
 are untouched, and the reason is risk to a finished result rather than tidiness:
@@ -42,7 +48,7 @@ from typing import Any, Dict, Hashable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 from kika.sampling.joint_blocks import (assembleRequest, collectEntries,
-                                        describeRequest)
+                                        componentDomains, describeRequest)
 from kika.sampling.perturbation_set import PerturbationSet
 
 __all__ = ["perturbFromModel", "RunResult", "EMITTERS"]
@@ -164,6 +170,39 @@ def _sumRuleNote(applied) -> Optional[str]:
     return None
 
 
+def _spectrumNote(applied) -> Optional[str]:
+    """How much of the spectrum an MF35 realisation did *not* perturb.
+
+    An MF5 table and its MF35 grid do not have to cover the same range, and on
+    real evaluations they do not: ENDF/B-VIII.1's tables start at ``E'=0`` where
+    MF35 starts at 1e-5, and Cf-252's top group runs past the end of some
+    tables. The mass outside the bands' groups is left where it is and then
+    carried by the renormalisation scalar, so it moves *with* the spectrum and
+    is never perturbed in its own right.
+
+    That is the right thing to do -- there is no covariance for it -- and it is
+    invisible in the output tape, which is exactly what this list is for. A run
+    whose bands cover 99.99 % of the spectrum and one whose bands cover 80 % of
+    it write files that look alike and mean different things.
+    """
+    worst = 0.0
+    bands = []
+    for component, info in applied.items():
+        if component.mf != 35:
+            continue
+        bands.append(component.index)
+        worst = max(worst, float(info.get("max_frac_mass_outside_bands", 0.0)))
+    if not bands:
+        return None
+    return (
+        f"MF35/MT{sorted({c.mt for c in applied if c.mf == 35})}: band(s) "
+        f"{sorted(bands)} perturb the spectrum only where their groups reach "
+        f"it. At worst {worst:.2e} of an incident node's integral falls outside "
+        f"them; that mass is not perturbed, it is only carried by the "
+        f"renormalisation that puts the integral back where it was"
+    )
+
+
 def _readTape(source):
     """*source* as ``(ENDF object, path or None)``."""
     from kika.endf import read_endf
@@ -202,6 +241,12 @@ def _touchedFiles(pset: PerturbationSet, alsoChanged=()) -> Dict[int, List[int]]
             touched.setdefault(4, set()).add(component.mt)
         elif component.mf == 31:
             touched.setdefault(1, set()).add(component.mt)
+        elif component.mf == 35:
+            # Every band of one MT rewrites the same MF5 section, so the set
+            # collapses them to one entry -- which is what a delta emitter
+            # needs, because re-encoding that section four times would write
+            # the same file four times and call it a fidelity guarantee.
+            touched.setdefault(5, set()).add(component.mt)
     return {mf: sorted(mts) for mf, mts in sorted(touched.items())}
 
 
@@ -213,7 +258,7 @@ def _emitEndfDelta(suite, endfObj, sourcePath, pset, outPath, report,
     perturbed tape comparable to the one it came from -- and what makes ``cmp``
     between two samples show exactly the perturbation and nothing else.
     """
-    from kika.endf.model_adapter import encodeMF3MT, encodeMF4MT
+    from kika.endf.model_adapter import encodeMF3MT, encodeMF4MT, encodeMF5MT
     from kika.endf.model_adapter.multiplicity import (encodeMF1MT452,
                                                       encodeMF1MT455,
                                                       encodeMF1MT456)
@@ -252,6 +297,18 @@ def _emitEndfDelta(suite, endfObj, sourcePath, pset, outPath, report,
                     product.distribution[EVAL_LABEL]
                 encoded, _report = encodeMF4MT(form, product.provenance, mt,
                                                report)
+            elif mf == 5:
+                # The MF5 encoder needs the provenance decodeMF5MT produced --
+                # NK, LF, U, p(E) and the verbatim records of every law kika
+                # does not model are not recoverable from the node -- and that
+                # provenance lives on the product, beside MF4's. So this asks
+                # the same product the applier perturbed rather than looking
+                # the section up again: what gets written is what was moved.
+                reaction = suite.reactionByENDF_MT(mt)
+                product, _energy = PerturbationSet._energyOf(reaction, mt)
+                form = product.distribution.get(pset.label) or                     product.distribution[EVAL_LABEL]
+                encoded, _report = encodeMF5MT(form.energy, product.provenance,
+                                               mt, report)
             elif mf == 1:
                 # The MF1 encoders take the *suite* and find the node with
                 # `nubarNode` -- the same lookup the applier perturbed through,
@@ -285,6 +342,92 @@ def _emitWholeFile(suite, pset, outPath, fmt, mat=None) -> Path:
     return outPath
 
 
+def _splitBySemantics(blocks, index):
+    """``(factorBlocks, deltaBlocks)`` -- what multiplies, and what is added.
+
+    **Two draws and not one, because ``space`` is a property of the covariance
+    and not of the run.** MF31, MF33 and MF34 state relative covariances, so
+    their blocks are drawn in log space and come back as factors that stay
+    positive. MF35's bands are the absolute covariance of group probabilities
+    that sum to one, where ``C.1 ~ 0`` -- so a *linear* draw satisfies the
+    normalisation constraint to within the drift the file itself carries, and a
+    log draw of it would be arithmetic on the wrong object.
+    ``mf35_sampling.SAMPLING_SPACE`` states that as a constant so it cannot be
+    "fixed" back to log by analogy with nu-bar.
+
+    A block is homogeneous by construction -- MF35 is never merged with another
+    file, see ``joint_blocks.PER_SECTION_MF`` -- and that is checked rather than
+    assumed, because a mixed block would be drawn under one of the two
+    conventions and be wrong under the other with nothing to show for it.
+    """
+    from kika.sampling.perturbation_set import SEMANTICS, SEMANTICS_OF_MF
+
+    factorBlocks, deltaBlocks = [], []
+    for key, matrix in blocks:
+        semantics = {SEMANTICS_OF_MF.get(component.mf, SEMANTICS[0])
+                     for component in index[key]["components"]}
+        if len(semantics) > 1:
+            raise ValueError(
+                f"block {key} holds components of {sorted(semantics)}: one "
+                f"matrix cannot be drawn as factors and as absolute deltas at "
+                f"once. MF35 is assembled per section for this reason, so a "
+                f"mixed block means the grouping stopped honouring it"
+            )
+        if semantics == {SEMANTICS[1]}:
+            deltaBlocks.append((key, matrix))
+        else:
+            factorBlocks.append((key, matrix))
+    return factorBlocks, deltaBlocks
+
+
+def _drawEverything(blocks, index, nSamples, *, seed, space, decompositionMethod,
+                    samplingMethod, psdMethod, nullTol, logger):
+    """Draw every block, each under the convention its covariance states.
+
+    Returns the merged ``(samples, diagnostics)``, keyed exactly as a single
+    call would have keyed them.
+
+    **The seed ladder is continued rather than restarted.**
+    :func:`~kika.sampling.core.draw_samples` gives block *i* of a call the seed
+    ``seed + i * BLOCK_SEED_STRIDE``, counting from that call's own first block.
+    Two calls that both started at *seed* would hand two different blocks the
+    same stream, which is a correlation nobody asked for and nothing would
+    report. So the second call starts where the first left off, and the result
+    is the ladder one call would have produced. A run with no MF35 in it draws
+    exactly what it drew before this function existed: the delta list is empty,
+    the factor list is the whole thing in the same order, and the offset is
+    zero.
+    """
+    from kika.sampling.core import BLOCK_SEED_STRIDE, draw_samples
+
+    factorBlocks, deltaBlocks = _splitBySemantics(blocks, index)
+    samples: Dict[Hashable, np.ndarray] = {}
+    diagnostics: Dict[Hashable, Dict[str, Any]] = {}
+
+    if factorBlocks:
+        drawn, info = draw_samples(
+            factorBlocks, nSamples, space=space, returns="factors",
+            decomposition_method=decompositionMethod,
+            sampling_method=samplingMethod, seed=seed, psd_method=psdMethod,
+            null_tol=nullTol, verbose=False, logger=logger)
+        samples.update(drawn)
+        diagnostics.update(info)
+
+    if deltaBlocks:
+        from kika.sampling.mf35_sampling import SAMPLING_SPACE
+
+        offset = len(factorBlocks) * BLOCK_SEED_STRIDE
+        drawn, info = draw_samples(
+            deltaBlocks, nSamples, space=SAMPLING_SPACE, returns="deltas",
+            decomposition_method=decompositionMethod,
+            sampling_method=samplingMethod, seed=seed + offset,
+            psd_method=psdMethod, null_tol=nullTol, verbose=False, logger=logger)
+        samples.update(drawn)
+        diagnostics.update(info)
+
+    return samples, diagnostics
+
+
 def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
                      outputDir=None, formats: Sequence[str] = ("endf-delta",),
                      grouping: str = "mf", space: str = "log",
@@ -306,10 +449,14 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
         What to perturb, in any of the spellings
         :func:`~kika.sampling.joint_blocks.collectEntries` accepts --
         ``{33: None, 34: [2]}`` for "every cross section the file states, and
-        MT2's angular distribution".
+        MT2's angular distribution", ``{35: None}`` for every band of the
+        fission spectrum, ``{35: {"index": [0, 1]}}`` for the two lowest.
     nSamples, seed, space, decompositionMethod, samplingMethod
         Passed to :func:`~kika.sampling.core.draw_samples`. ``space="log"`` is
-        the cross-section default and keeps factors positive.
+        the cross-section default and keeps factors positive. **It does not
+        reach MF35**: a band's covariance is absolute and its rows sum to zero,
+        so those blocks are drawn linearly as deltas whatever this says --
+        see :func:`_splitBySemantics`.
     psdMethod
         ``"none"`` by default, and that is the design rather than a shortcut:
         the repairs a matrix needs are decided before a run by
@@ -339,8 +486,6 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
                                          decodeReactionSuite)
     from kika.endf.model_adapter.multiplicity import nubarNode
     from kika.nuclear_data.model.conversion import ConversionReport
-    from kika.sampling.core import draw_samples
-
     unknown = [fmt for fmt in formats if fmt not in EMITTERS]
     if unknown:
         raise ValueError(f"unknown emitter(s) {unknown}; known: {list(EMITTERS)}")
@@ -350,7 +495,8 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
     suite, suiteReport = decodeReactionSuite(endfObj)
 
     entries = collectEntries(covariances, request)
-    blocks, index = assembleRequest(entries, grouping=grouping)
+    domains = componentDomains(covariances, request)
+    blocks, index = assembleRequest(entries, grouping=grouping, domains=domains)
     description = describeRequest(entries, grouping=grouping)
     if logger is not None:
         logger.info(description)
@@ -358,11 +504,10 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
     if conditioningPlan is not None:
         blocks = apply_plan(blocks, conditioningPlan)
 
-    samples, drawDiagnostics = draw_samples(
-        blocks, nSamples, space=space, returns="factors",
-        decomposition_method=decompositionMethod, sampling_method=samplingMethod,
-        seed=seed, psd_method=psdMethod, null_tol=nullTol, verbose=False,
-        logger=logger)
+    samples, drawDiagnostics = _drawEverything(
+        blocks, index, nSamples, seed=seed, space=space,
+        decompositionMethod=decompositionMethod, samplingMethod=samplingMethod,
+        psdMethod=psdMethod, nullTol=nullTol, logger=logger)
 
     outputDir = Path(outputDir) if outputDir is not None else None
     if outputDir is not None:
@@ -404,7 +549,8 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
                 files["perturbation-set"] = pset.write(
                     sampleDir / "perturbation.json")
 
-        for note in (_redundancyNote(suite, pset), _sumRuleNote(applied)):
+        for note in (_redundancyNote(suite, pset), _sumRuleNote(applied),
+                     _spectrumNote(applied)):
             if note is not None and note not in result.notes:
                 result.notes.append(note)
                 if logger is not None:

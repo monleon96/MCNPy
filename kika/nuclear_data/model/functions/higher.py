@@ -37,6 +37,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Sequence, Tuple
 
+import numpy as np
+
 from ..axes import Axes
 from ..enums import (ENDF_INT_TO_INTERPOLATION, INTERPOLATION_TO_ENDF_INT,
                      Interpolation, InterpolationQualifier,
@@ -71,6 +73,124 @@ class Function2d(ABC):
     @abstractmethod
     def domainMax(self) -> float:
         """Highest outer-axis value the function is defined at."""
+
+    # ------------------------------------------------------------------
+    # The children as tables: read, integrate, replace
+    # ------------------------------------------------------------------
+    #
+    # **The four capabilities that made perturbing MF5 format work.**
+    # ``MF5PartialTabulated`` has ``table``, ``normalisation``,
+    # ``group_integrals`` and ``replace_table``; the model node holding the same
+    # numbers had none of them, so the PFNS applier had to be written against
+    # the ENDF class and the perturbation became a property of ENDF. These are
+    # those four on the node, spelled the model's way, and the arithmetic under
+    # them is the one :mod:`kika.processing.panel_integrals` gives the ENDF
+    # class -- so the two integrate identically by construction rather than by
+    # agreement.
+    #
+    # They are on ``Function2d`` and not on ``XYs2d`` alone because an ENDF
+    # TAB2 with more than one interpolation region decodes to a ``Regions2d``,
+    # and which of the two a tape produces is not something a caller holding a
+    # fission spectrum should have to branch on. ``k`` therefore counts the 1-d
+    # children in **file order**, across regions, exactly as the flat TAB2 does.
+
+    # ``function1ds`` is deliberately **not** declared here. ``XYs2d`` holds it
+    # as a dataclass field and ``Regions2d`` computes it as a property, and a
+    # property on this base would be a data descriptor that ``XYs2d.__init__``
+    # could not assign through. Both spellings answer ``self.function1ds``,
+    # which is all these methods need.
+
+    def _childSlot(self, k: int) -> Tuple[List[Function1d], int]:
+        """``(the list that holds child k, its position in that list)``.
+
+        The one thing the two containers do differently: an ``XYs2d`` holds its
+        children directly, a ``regions2d`` holds them one region deep. Written
+        as a hook so :meth:`replaceTable` is one implementation and not two.
+        """
+        raise NotImplementedError
+
+    @property
+    def outerDomainValues(self) -> List[float]:
+        """The outer abscissae of every 1-d child, in file order."""
+        return [f.outerDomainValue for f in self.function1ds]
+
+    def table(self, k: int) -> Tuple["np.ndarray", "np.ndarray"]:
+        """``(xs, ys)`` of the 1-d child at position *k*.
+
+        The child's own grid, not a resampling of it: a group integral taken on
+        anything else is not the integral the evaluator wrote.
+        """
+        from .integration import tabulateFunction1d
+
+        xs, ys, _codes = tabulateFunction1d(self.function1ds[k],
+                                            f"{type(self).__name__} child {k}")
+        return xs, ys
+
+    def normalisation(self, k: int) -> float:
+        """``int f_k(x) dx`` over child *k*'s whole domain.
+
+        Named as the spectra call it rather than ``integral``: for an MF5 table
+        this is the number ENDF-6 §5 requires to be 1, and what a perturbation
+        has to give back unchanged.
+        """
+        return self.function1ds[k].integrate()
+
+    def groupIntegrals(self, k: int, boundaries) -> "np.ndarray":
+        """``P_j`` of child *k* over *boundaries* -- what MF35 is a covariance of."""
+        return self.function1ds[k].groupIntegrals(boundaries)
+
+    def replaceTable(self, k: int, xs, ys, regions=None) -> Function1d:
+        """Put a new table in child *k*'s place, and return it.
+
+        Keeps the child's ``axes``, ``label``, ``outerDomainValue`` and
+        ``index``: the replacement is the same function of the same outer
+        coordinate, differently tabulated, and a caller that had to restate
+        those would eventually restate one of them wrongly.
+
+        *regions* is an ENDF ``(NBT, INT)`` list when the new table is
+        piecewise. Leaving it ``None`` means "one region under the rule this
+        child already states", which is defined only when the child *has* one
+        rule -- so a multi-region child raises rather than being flattened.
+        **That refusal is the point.** ``MF5PartialTabulated.replace_table``
+        defaults to a single lin-lin region, which silently relabels every panel
+        of a table whose later regions were histogram; no MF5 tape read so far
+        has one, and if one turns up the caller has to say what it wants rather
+        than find out from the file that comes out.
+        """
+        from .regions1d import Regions1d
+        from .xys1d import XYs1d
+
+        holder, position = self._childSlot(k)
+        old = holder[position]
+        xs = np.asarray(xs, dtype=float)
+        ys = np.asarray(ys, dtype=float)
+
+        if regions is None:
+            interpolation = getattr(old, "interpolation", None)
+            if interpolation is None:
+                raise ValueError(
+                    f"child {k} is a {type(old).__name__} carrying "
+                    f"{len(getattr(old, 'function1ds', ()))} interpolation "
+                    f"region(s), so 'the rule it already states' is not one "
+                    f"rule. Pass regions=[(NBT, INT), ...] saying what the new "
+                    f"table's regions are"
+                )
+            new: Function1d = XYs1d(xs=xs, ys=ys, interpolation=interpolation,
+                                    axes=old.axes)
+        else:
+            new = Regions1d.fromEndfRegions(
+                xs, ys, [(int(a), int(b)) for a, b in regions], axes=old.axes)
+            if len(new.function1ds) == 1:
+                # gnds.xsd puts minOccurs="2" on the children of regions1d, so
+                # a one-region regions1d is a node the schema rejects. The same
+                # rule the MF5 decoder applies when it builds these.
+                new = new.function1ds[0]
+
+        new.label = old.label
+        new.outerDomainValue = old.outerDomainValue
+        new.index = old.index
+        holder[position] = new
+        return new
 
 
 @dataclass
@@ -132,6 +252,137 @@ class XYs2d(Function2d):
         drop a statement the file made.
         """
         return joinEndfTab2Code(self.interpolation, self.interpolationQualifier)
+
+    def _childSlot(self, k: int) -> Tuple[List[Function1d], int]:
+        return self.function1ds, k
+
+    # ------------------------------------------------------------------
+    # The outer axis: refining it exactly
+    # ------------------------------------------------------------------
+
+    def _outerCode(self) -> int:
+        """The ENDF INT of the outer axis, refusing anything not exact.
+
+        A qualifier is refused with the code it came in as rather than being
+        dropped: ``INT=22`` is unit base, which blends two children after
+        mapping both onto a common domain, and doing a plain linear blend of a
+        unit-base TAB2 is a wrong answer that looks like a right one. 44 of
+        ENDF/B-VIII.1's 487 LF=1 MF5 sections state it, so this is a real
+        branch and not a defensive one -- and the ENDF-side twin refuses it too,
+        by the same test on the same code.
+        """
+        code = self.endfInterpolationCode
+        if code not in (1, 2):
+            raise NotImplementedError(
+                f"the outer axis of this XYs2d interpolates with INT={code}"
+                + (f" ({self.interpolation.value}, "
+                   f"{self.interpolationQualifier.value})"
+                   if self.interpolationQualifier is not None
+                   else f" ({self.interpolation.value})")
+                + "; only histogram and lin-lin refine exactly, and an "
+                  "inexact refinement of the outer axis moves the central "
+                  "value of every node inserted into it"
+            )
+        return code
+
+    def evaluateAtOuter(self, value: float) -> Tuple["np.ndarray", "np.ndarray"]:
+        """The 1-d function at outer coordinate *value*, as ``(xs, ys)``.
+
+        **An exact refinement of the stated interpolant, not an approximation**,
+        and a perturbation that inserts nodes depends on that. With lin-lin on
+        both axes the function is linear in the outer coordinate at fixed inner
+        one, so evaluating both bracketing children on the union of their grids
+        loses nothing -- the union refines each, and each is lin-lin -- and
+        blending them linearly reproduces the interpolant at the new node
+        exactly. Interpolating between the original child and the new one then
+        agrees with the original everywhere.
+
+        Copying the neighbouring child instead -- the obvious shortcut -- is
+        about 0.1 % wrong on a real MF5 table and shows up as a central-value
+        shift in a zero-perturbation run, which is precisely the defect such a
+        run exists to rule out.
+        """
+        from .integration import evaluateExactly
+
+        outer = np.asarray(self.outerDomainValues, dtype=float)
+        if outer.size == 0:
+            return np.empty(0), np.empty(0)
+        if value <= outer[0]:
+            return self.table(0)
+        if value >= outer[-1]:
+            return self.table(outer.size - 1)
+
+        upper = int(np.searchsorted(outer, value, side="right"))
+        lower = upper - 1
+        if outer[lower] == value:
+            return self.table(lower)
+
+        if self._outerCode() == 1:                # histogram: hold the lower
+            xs, ys = self.table(lower)
+            return xs.copy(), ys.copy()
+
+        xLow, _ = self.table(lower)
+        xHigh, _ = self.table(upper)
+        union = np.union1d(xLow, xHigh)
+        low = evaluateExactly(self.function1ds[lower], union)
+        high = evaluateExactly(self.function1ds[upper], union)
+        weight = (value - outer[lower]) / (outer[upper] - outer[lower])
+        return union, low + weight * (high - low)
+
+    def _refusesInexactChildren(self, position: int) -> None:
+        """Refuse to insert between children a lin-lin table cannot represent.
+
+        The blend :meth:`evaluateAtOuter` returns is evaluated at the union of
+        the two bracketing grids and written back as a table, and a table needs
+        a rule. Lin-lin is the right one exactly when both children are lin-lin
+        throughout -- which is every MF5/LF=1 section of both target libraries.
+        Where they are not, the blend is a genuinely different function from
+        anything a lin-lin table can hold, so this raises instead of writing a
+        table that is a few parts in a thousand off and looks like data.
+        """
+        for k in (position - 1, position):
+            if not 0 <= k < len(self.function1ds):
+                continue
+            child = self.function1ds[k]
+            rule = getattr(child, "interpolation", None)
+            if rule != Interpolation.linlin:
+                raise NotImplementedError(
+                    f"child {k} interpolates as "
+                    f"{getattr(rule, 'value', type(child).__name__)!r}, so the "
+                    f"blend at a new outer node is not a lin-lin table and "
+                    f"cannot be written back as one"
+                )
+
+    def insertOuterNode(self, value: float) -> int:
+        """Add a 1-d child at outer coordinate *value*, refining exactly.
+
+        Returns its position. An outer coordinate the container already carries
+        is not duplicated and its position comes back unchanged, so a caller may
+        be careless about a band edge that is already a node -- which, measured
+        on both PFNS target libraries, every band edge is.
+        """
+        from .xys1d import XYs1d
+
+        outer = list(self.outerDomainValues)
+        for position, existing in enumerate(outer):
+            if existing == value:
+                return position
+
+        position = int(np.searchsorted(np.asarray(outer, dtype=float), value))
+        self._refusesInexactChildren(position)
+        xs, ys = self.evaluateAtOuter(value)
+        template = self.function1ds[min(position, len(outer) - 1)]
+        child = XYs1d(xs=xs, ys=ys, interpolation=Interpolation.linlin,
+                      axes=getattr(template, "axes", None))
+        child.outerDomainValue = float(value)
+        child.index = position
+        self.function1ds.insert(position, child)
+        for order, sibling in enumerate(self.function1ds):
+            # ``index`` is the child's position in its container (§6), so every
+            # sibling above the insertion is now one further along. Leaving them
+            # stale writes a TAB2 whose records disagree with their own indices.
+            sibling.index = order
+        return position
 
     def evaluate(self, *args: Any, **kwargs: Any):
         raise NotImplementedError(
@@ -202,6 +453,35 @@ class Regions2d(Function2d):
         for region in self.function2ds:
             out.extend(region.function1ds)
         return out
+
+    def _childSlot(self, k: int) -> Tuple[List[Function1d], int]:
+        position = k
+        for region in self.function2ds:
+            size = len(region.function1ds)
+            if position < size:
+                return region._childSlot(position)
+            position -= size
+        raise IndexError(
+            f"this regions2d holds {len(self.function1ds)} 1-d child(ren); "
+            f"there is no child {k}"
+        )
+
+    def insertOuterNode(self, value: float) -> int:
+        """Refused: which region a new outer node joins is not derivable.
+
+        The ENDF twin refuses the same case for the same reason -- see
+        ``MF5PartialTabulated._renumber_tab2`` -- and no MF5/LF=1 tape read so
+        far states a multi-region TAB2. Growing one region means the later
+        regions' ``NBT`` all shift, and *which* region the new node belongs to
+        at a shared boundary is a statement about interpolation that the caller
+        has and this node does not.
+        """
+        raise NotImplementedError(
+            f"inserting an outer node into a regions2d ({len(self)} regions) "
+            f"is not implemented: the region the new node joins is not "
+            f"derivable from the value alone. No MF5/LF=1 tape read so far "
+            f"states a multi-region TAB2"
+        )
 
     @property
     def sharesBoundaries(self) -> bool:

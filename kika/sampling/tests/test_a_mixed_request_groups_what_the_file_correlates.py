@@ -36,9 +36,10 @@ import numpy as np
 import pytest
 
 from kika.endf import read_endf
-from kika.sampling.joint_blocks import (ComponentKey, Selection, assembleRequest,
-                                        collectEntries, describeRequest,
-                                        requestIndex, samplingGroups)
+from kika.sampling.joint_blocks import (SUPPORTED_MF, ComponentKey, Selection,
+                                        assembleRequest, collectEntries,
+                                        describeRequest, requestIndex,
+                                        samplingGroups)
 from kika.sampling.model_blocks import (cross_section_covariance_blocks,
                                         legendre_covariance_blocks)
 
@@ -267,8 +268,22 @@ def test_a_selection_that_matches_nothing_is_refused(mixed):
 
 
 def test_a_quantity_with_no_applier_is_refused_rather_than_assembled():
+    """The rule, not the list: MF32 has no applier, so it cannot be assembled.
+
+    MF35 was this test's subject until its model applier was written
+    (``applySpectrumFactors``). It is now supported and MF32 stands in its
+    place, which is the honest version of the same rule: resonance-parameter
+    covariances have no applier and projecting one onto a cross-section grid is
+    a physics calculation, not a formatting one.
+    """
     with pytest.raises(ValueError, match="no model applier"):
-        Selection(mf=35)
+        Selection(mf=32)
+
+
+def test_the_fission_spectrum_is_assembled_now_that_it_can_be_applied():
+    assert 35 in SUPPORTED_MF
+    assert Selection(mf=35, index=[0, 2]).index == [0, 2], (
+        "MF35's third coordinate is the incident-energy band")
 
 
 def test_an_index_on_a_quantity_that_has_none_is_refused():

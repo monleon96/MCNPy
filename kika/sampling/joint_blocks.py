@@ -57,11 +57,13 @@ import numpy as np
 
 from kika.sampling.model_blocks import (CROSS_SECTION_MF,
                                         _cross_section_entries, _mf34_entries,
-                                        _union_grids, assemble_joint)
+                                        _mf35_entries, _union_grids,
+                                        assemble_joint, mf35_band_domains)
 
 __all__ = ["ComponentKey", "Selection", "QUANTITY_OF_MF", "SUPPORTED_MF",
-           "GROUPINGS", "collectEntries", "samplingGroups", "requestIndex",
-           "assembleRequest", "describeRequest"]
+           "PER_SECTION_MF", "GROUPINGS", "collectEntries", "samplingGroups",
+           "requestIndex", "assembleRequest", "describeRequest",
+           "componentDomains"]
 
 
 #: What each covariance file is a covariance *of*, in the model's vocabulary
@@ -74,15 +76,24 @@ QUANTITY_OF_MF = {
     35: "energyDistribution",
 }
 
-#: The MFs this module will assemble today. MF35 is absent and that is a
-#: statement about the *applier*, not about the assembly: a band's covariance is
-#: over outgoing energy at a fixed incident band, so its component key and its
-#: entry builder both exist in shape, but perturbing the node means refining in
-#: two axes under a norm constraint -- which is where the one known silent
-#: defect of this area lives (``mf35_sampling`` step 6). MF35 is added here when
-#: that applier is written; assembling a covariance nothing can apply would only
-#: produce a draw with nowhere to go.
-SUPPORTED_MF = (31, 33, 34)
+#: The MFs this module will assemble. MF35 joined the day its model applier was
+#: written -- :func:`~kika.nuclear_data.model.perturbation.applySpectrumFactors`
+#: -- and not before, on the rule that assembling a covariance nothing can apply
+#: only produces a draw with nowhere to go.
+#:
+#: **MF35 is not grouped like the other three**, and that is a property of the
+#: file rather than a preference: its sections are the covariance of one energy
+#: distribution over *disjoint* bands of incident energy, no cross-band block
+#: exists in ENDF-6 §35, and their orders differ (84, 641, 641, 641, 641 on
+#: ENDF/B-VIII.1's U-235). Merging them into one matrix under the ``"mf"``
+#: grouping would state a dimension no section has. So a request for MF35
+#: assembles **one block per band** whatever the grouping says -- see
+#: :func:`samplingGroups`.
+SUPPORTED_MF = (31, 33, 34, 35)
+
+#: The MFs whose sections stay one matrix per section, never merged with a
+#: sibling. Only MF35, and the reason is in :data:`SUPPORTED_MF`.
+PER_SECTION_MF = (35,)
 
 #: How components are partitioned into matrices that are drawn independently.
 #:
@@ -166,11 +177,11 @@ class Selection:
                 f"applier yet, and a covariance nothing can apply would produce "
                 f"a draw with nowhere to go"
             )
-        if self.index is not None and self.mf != 34:
+        if self.index is not None and self.mf not in (34, 35):
             raise ValueError(
                 f"MF{self.mf} components carry no third coordinate, so "
-                f"index={self.index!r} selects nothing. Only MF34 takes one, "
-                f"and there it is the Legendre order"
+                f"index={self.index!r} selects nothing. Only MF34 and MF35 take "
+                f"one -- the Legendre order there, the incident-energy band here"
             )
 
 
@@ -203,6 +214,10 @@ def _legendreKey(triplet) -> ComponentKey:
     return ComponentKey(int(triplet[0]), 34, int(triplet[1]), int(triplet[2]))
 
 
+def _bandKey(triplet) -> ComponentKey:
+    return ComponentKey(int(triplet[0]), 35, int(triplet[1]), int(triplet[2]))
+
+
 def collectEntries(suite, request) -> List[Tuple[ComponentKey, ComponentKey,
                                                  np.ndarray, np.ndarray,
                                                  np.ndarray]]:
@@ -233,6 +248,17 @@ def collectEntries(suite, request) -> List[Tuple[ComponentKey, ComponentKey,
             keys = [(_crossSectionKey(row, selection.mf),
                      _crossSectionKey(col, selection.mf))
                     for row, col, *_ in found]
+        elif selection.mf == 35:
+            # `relative` is not forwarded, and that is the one place a
+            # selection's default is deliberately ignored. It defaults to True
+            # because the other three appliers *multiply* by what comes back;
+            # MF35's bands are absolute by construction -- LB=7 is the
+            # covariance of probabilities that already sum to one -- so
+            # forwarding the default would filter every section out and the
+            # request would raise "MF35 states no section" against a file that
+            # states four.
+            found = _mf35_entries(suite, mt=selection.mt, bands=selection.index)
+            keys = [(_bandKey(row), _bandKey(col)) for row, col, *_ in found]
         else:
             found = _mf34_entries(suite, mt=selection.mt, orders=selection.index,
                                   relative=selection.relative)
@@ -248,6 +274,30 @@ def collectEntries(suite, request) -> List[Tuple[ComponentKey, ComponentKey,
         for (rowKey, colKey), (_r, _c, matrix, rowGrid, colGrid) in zip(keys, found):
             entries.append((rowKey, colKey, matrix, rowGrid, colGrid))
     return entries
+
+
+def componentDomains(suite, request) -> Dict[ComponentKey, Tuple[float, float]]:
+    """``{component: (lo, hi)}`` for the components that have an outer domain.
+
+    Today that is MF35 and only MF35: a band is the covariance of an energy
+    distribution over a *range of incident energies*, and the factors are stated
+    on the outgoing grid, so the range is a coordinate the block itself does not
+    carry. Without it a realisation knows how the spectrum moves and not where.
+
+    Kept out of :func:`collectEntries` because an ``assemble_joint`` entry is
+    five elements and three of the four builders have no such coordinate to put
+    in a sixth. Both read the same sections through the same filters -- see
+    :func:`~kika.sampling.model_blocks._mf35_sections` -- so they cannot
+    disagree about which section is band 3.
+    """
+    domains: Dict[ComponentKey, Tuple[float, float]] = {}
+    for selection in _asSelections(request):
+        if selection.mf != 35:
+            continue
+        found = mf35_band_domains(suite, mt=selection.mt, bands=selection.index)
+        for triplet, domain in found.items():
+            domains[_bandKey(triplet)] = (float(domain[0]), float(domain[1]))
+    return domains
 
 
 def _componentsOf(entries) -> List[ComponentKey]:
@@ -298,6 +348,13 @@ def samplingGroups(entries, grouping: str = "mf") -> List[List[ComponentKey]]:
         # to prevent, one level out.
         firstOfMf: Dict[int, ComponentKey] = {}
         for key in list(parent):
+            if key.mf in PER_SECTION_MF:
+                # One matrix per section, under either grouping. See
+                # `SUPPORTED_MF`: MF35's bands are disjoint in incident energy,
+                # ENDF states no block between two of them, and their orders
+                # differ -- so "everything of one MF in one matrix" would
+                # assemble a dimension no section has.
+                continue
             if key.mf in firstOfMf:
                 union(firstOfMf[key.mf], key)
             else:
@@ -336,7 +393,8 @@ def _entriesOfGroup(entries, members):
 
 
 def requestIndex(entries, *, isotope: Any = None, grouping: str = "mf",
-                 atol: float = 1e-12) -> Dict[Hashable, Dict[str, Any]]:
+                 atol: float = 1e-12, domains=None
+                 ) -> Dict[Hashable, Dict[str, Any]]:
     """What the rows of each assembled block are, without assembling anything.
 
     The sibling of :func:`~kika.sampling.model_blocks.legendre_covariance_index`
@@ -353,6 +411,13 @@ def requestIndex(entries, *, isotope: Any = None, grouping: str = "mf",
     and ``triplets``. One name, because the point of the key being a 4-tuple is
     that a consumer no longer has to know which quantity it is looking at in
     order to know what a row is.
+
+    *domains* is what :func:`componentDomains` returned, when the request names
+    a quantity that has an outer coordinate the block is not stated on -- MF35's
+    incident band. It is carried through into ``domains`` on each block's entry,
+    per component, so a :class:`~kika.sampling.perturbation_set.PerturbationSet`
+    built from this index knows *where* each block applies as well as *what* it
+    says.
     """
     index: Dict[Hashable, Dict[str, Any]] = {}
     for members in samplingGroups(entries, grouping=grouping):
@@ -370,12 +435,14 @@ def requestIndex(entries, *, isotope: Any = None, grouping: str = "mf",
             "dimension": len(keys) * stride,
             "union": union,
             "quantities": sorted({key.quantity for key in keys}),
+            "domains": {key: tuple(domains[key])
+                        for key in keys if key in (domains or {})},
         }
     return index
 
 
 def assembleRequest(entries, *, isotope: Any = None, grouping: str = "mf",
-                    atol: float = 1e-12
+                    atol: float = 1e-12, domains=None
                     ) -> Tuple[List[Tuple[Hashable, np.ndarray]],
                                Dict[Hashable, Dict[str, Any]]]:
     """The blocks a request assembles to, and the index saying what their rows are.
@@ -389,7 +456,8 @@ def assembleRequest(entries, *, isotope: Any = None, grouping: str = "mf",
     beside it, so a single-MF request produces the same matrix as that MF's own
     entry point, bit for bit.
     """
-    index = requestIndex(entries, isotope=isotope, grouping=grouping, atol=atol)
+    index = requestIndex(entries, isotope=isotope, grouping=grouping, atol=atol,
+                         domains=domains)
     blocks: List[Tuple[Hashable, np.ndarray]] = []
     for key, meta in index.items():
         groupEntries = _entriesOfGroup(entries, meta["components"])

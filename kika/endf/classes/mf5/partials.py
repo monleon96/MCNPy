@@ -27,6 +27,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from ....processing.panel_integrals import (
+    EXACT_INT_CODES,
+    cumulative_integral,
+    evaluate_table,
+    exact_segment_codes,
+    integral_to,
+)
 from ...utils import (
     ENDF_FORMAT_FLOAT,
     ENDF_FORMAT_INT,
@@ -36,11 +43,9 @@ from ...utils import (
 )
 
 #: Interpolation codes the tabulated partial can integrate and refine exactly.
-#: 1 is histogram, 2 is lin-lin. Everything else — log in either axis — has no
-#: exact group integral in closed form here and no exact node insertion, and
-#: the whole normalisation argument of the PFNS sampler rests on both being
-#: exact. So they raise rather than approximate.
-_EXACT_INT_CODES = (1, 2)
+#: Kept as a name here because this module's own error messages and tests speak
+#: of it; the list itself now lives with the arithmetic it constrains.
+_EXACT_INT_CODES = EXACT_INT_CODES
 
 #: How many TAB1 records follow the subsection header, per law (ENDF-6 §5.1).
 #: Used only to walk past a law this module stores verbatim, so it needs the
@@ -55,101 +60,23 @@ TAB1_RECORDS_AFTER_HEADER = {5: 2, 7: 1, 9: 1, 11: 2, 12: 1}
 
 
 # ---------------------------------------------------------------------------
-# The exact panel arithmetic, shared
+# The exact panel arithmetic, shared -- and no longer defined here
 #
 # LF=1 owns a table in E' and every analytic law owns at least one table too --
 # theta(E), g(x), a(E), b(E). They need the same three things: the INT code of
 # every interval, an exact cumulative integral, and evaluation at arbitrary
-# points. These live at module scope rather than on ``MF5PartialTabulated`` so
-# :mod:`~kika.endf.classes.mf5.analytic` can reuse them instead of growing a
-# second implementation of the same integral, which is precisely the kind of
-# drift that makes a normalisation silently wrong.
+# points. They were written at this module's scope so
+# :mod:`~kika.endf.classes.mf5.analytic` could reuse them instead of growing a
+# second implementation of the same integral.
+#
+# **The same argument then reached one layer further out.** The model's energy
+# distribution node needs those integrals too -- MF35 is the covariance of the
+# group-integrated probabilities of an MF5 table, so perturbing the node means
+# integrating it -- and ``kika/nuclear_data`` may not import ``kika.endf``. So
+# the four moved down to :mod:`kika.processing.panel_integrals`, which is the
+# calculation layer both sides may read, and are imported back here under their
+# original names. Nothing about them changed in the move.
 # ---------------------------------------------------------------------------
-
-
-def exact_segment_codes(x: Sequence[float],
-                        interp: Sequence[Tuple[int, int]],
-                        what: str) -> np.ndarray:
-    """The ENDF INT code of every interval of a table, restricted to 1 and 2.
-
-    Rejects anything else, naming the code and *what* the table is. See
-    :data:`_EXACT_INT_CODES` for why approximating would be the wrong favour to
-    do the caller.
-    """
-    n = len(x)
-    pairs = list(interp) or [(n, 2)]
-    codes = np.empty(max(n - 1, 0), dtype=int)
-    start = 0
-    for nbt, code in pairs:
-        stop = min(int(nbt) - 1, n - 1)
-        if stop > start:
-            codes[start:stop] = int(code)
-        start = max(start, stop)
-    if start < n - 1:                      # NBT short of NP: hold the last
-        codes[start:] = int(pairs[-1][1])
-    bad = sorted(set(int(c) for c in codes) - set(_EXACT_INT_CODES))
-    if bad:
-        raise NotImplementedError(
-            f"{what} uses interpolation code(s) {bad}; only "
-            f"{list(_EXACT_INT_CODES)} (histogram, lin-lin) have an exact "
-            f"group integral and an exact node insertion here"
-        )
-    return codes
-
-
-def cumulative_integral(x: np.ndarray, y: np.ndarray,
-                        codes: np.ndarray) -> np.ndarray:
-    """``[0, int_{x0}^{x1}, int_{x0}^{x2}, ...]`` -- exact on the stated law."""
-    if x.size < 2:
-        return np.zeros(x.size, dtype=float)
-    dx = np.diff(x)
-    panel = np.where(codes == 1, y[:-1] * dx, 0.5 * (y[:-1] + y[1:]) * dx)
-    return np.concatenate(([0.0], np.cumsum(panel)))
-
-
-def integral_to(x: np.ndarray, y: np.ndarray, codes: np.ndarray,
-                cumulative: np.ndarray, limit: float) -> float:
-    """``int_{x0}^{limit}``, with *limit* anywhere inside or outside the table."""
-    if x.size < 2:
-        return 0.0
-    if limit <= x[0]:
-        return 0.0
-    if limit >= x[-1]:
-        return float(cumulative[-1])
-    i = int(np.searchsorted(x, limit, side="right")) - 1
-    i = min(max(i, 0), x.size - 2)
-    span = x[i + 1] - x[i]
-    t = 0.0 if span == 0 else (limit - x[i]) / span
-    if codes[i] == 1:
-        partial = y[i] * (limit - x[i])
-    else:
-        y_at = y[i] + t * (y[i + 1] - y[i])
-        partial = 0.5 * (y[i] + y_at) * (limit - x[i])
-    return float(cumulative[i] + partial)
-
-
-def evaluate_table(x: np.ndarray, y: np.ndarray, codes: np.ndarray,
-                   points: np.ndarray) -> np.ndarray:
-    """The table evaluated at *points*, zero outside its own support."""
-    out = np.zeros(np.shape(points), dtype=float)
-    if x.size == 0:
-        return out
-    points = np.asarray(points, dtype=float)
-    inside = (points >= x[0]) & (points <= x[-1])
-    if not np.any(inside):
-        return out
-    if x.size == 1:
-        out[inside] = y[0]
-        return out
-    idx = np.clip(np.searchsorted(x, points[inside], side="right") - 1,
-                  0, x.size - 2)
-    span = x[idx + 1] - x[idx]
-    with np.errstate(divide="ignore", invalid="ignore"):
-        t = np.where(span > 0, (points[inside] - x[idx]) / span, 0.0)
-    linear = y[idx] + t * (y[idx + 1] - y[idx])
-    out[inside] = np.where(codes[idx] == 1, y[idx], linear)
-    return out
-
 
 @dataclass
 class MF5Partial:
