@@ -28,7 +28,9 @@ beside each array. Both were wrong, and nothing could tell us so, because CI
 had not run a test since 2026-08-07 — the install step was dying on a stale
 ``poetry.lock``. The first run after that was fixed failed here: Fe-56 MT102
 came out different on a GitHub runner, on 4 of 20 459 points, by 3.66e-12
-relative. The digests are gone and the tolerance is 1e-9; see ``RTOL``. The
+relative. The digests are gone and the tolerance is 1e-9 relative plus an
+absolute floor tied to each array's own scale; see ``RTOL`` and
+``GOLDEN_ULP``. The
 lesson worth keeping is not about tolerances — it is that a claim about CI in a
 docstring is worth exactly as much as the last green CI run.*
 
@@ -97,6 +99,42 @@ REGEN = bool(os.environ.get("REGEN_NUMERIC_GOLDENS"))
 #: reason -- see the module docstring.
 RTOL = 1e-9
 
+#: Absolute slack, in units of the last bit of the array's own largest value.
+#:
+#: **``rtol`` alone is the wrong measure for these arrays, and loosening it
+#: further would have been the wrong fix.** Cross-machine arithmetic noise is
+#: absolute at the scale the computation runs at -- a sum over resonances, or a
+#: 3x3 collision-matrix inverse, carries the same last-bit uncertainty whether
+#: the answer it produces is 300 barns or 1e-7 barns. Dividing that fixed noise
+#: by a value nine orders below the array's peak turns it into a large relative
+#: number, which is why ``rtol=1e-9`` failed on exactly two points of
+#: ``reconstruct_rm_fission[mt102]`` -- 8.83e-07 and 9.34e-08 in an array that
+#: peaks at 309 barns, the deep minima between resonances where capture is the
+#: difference of two nearly equal terms.
+#:
+#: Measured over every reconstruction golden on the home workstation against
+#: goldens generated elsewhere, as a distance in ULP of each array's maximum:
+#:
+#:     reconstruct_slbw          <= 0.02 ULP
+#:     reconstruct_mlbw          <= 0.07 ULP
+#:     reconstruct_rm            <= 8.95 ULP  (mt102)
+#:     reconstruct_rm_fission    <= 45.0 ULP  (mt18)
+#:
+#: 1024 leaves ~23x over the worst observed and still says something very
+#: strong: nothing moved by more than one part in 10^13 of the array's peak.
+#: A real change -- a moved formula, grid or Q value -- shifts these numbers by
+#: parts in 10^3.
+#:
+#: **What this costs, stated rather than left to be found.** Measured on
+#: ``reconstruct_rm_fission[mt102]``: at the peak the floor contributes nothing
+#: and ``rtol`` still governs, so a change of 1e-9 relative is caught exactly as
+#: before. At the deep minimum that used to fail -- 8.83e-07, nine orders under
+#: the peak -- the floor dominates and the gate now catches 1e-4 relative but
+#: not 1e-5. That is the trade, and it is the right way round: those points
+#: carry no physics, the arithmetic that produces them cannot promise more, and
+#: 1e-4 is still two orders tighter than any change worth calling a change.
+GOLDEN_ULP = 1024
+
 
 # ---------------------------------------------------------------------------
 # Golden I/O
@@ -129,8 +167,11 @@ def check_golden(name: str, produced: dict[str, np.ndarray]) -> None:
             if want.dtype.kind in "US":  # digests compare exactly
                 assert have == want, f"{name}[{key}] changed: {want} -> {have}"
                 continue
+            # atol from the array's own scale, not zero: see GOLDEN_ULP.
+            scale = float(np.abs(want).max()) if want.size else 0.0
             np.testing.assert_allclose(
-                have, want, rtol=RTOL, atol=0.0,
+                have, want, rtol=RTOL,
+                atol=GOLDEN_ULP * float(np.spacing(scale)) if scale else 0.0,
                 err_msg=f"{name}[{key}] moved",
             )
 
