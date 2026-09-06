@@ -147,11 +147,15 @@ def unsupported(suite) -> list[str]:
     return list(suite.report.unsupported)
 
 
-def test_report_declares_mf5_partials_it_did_not_decode(micro_pfns_tape):
-    """One line per verbatim subsection, naming the law and the count.
+def test_report_declares_the_mf5_section_it_did_not_model(micro_pfns_tape):
+    """MT455 is absent from the reactionSuite, and the report names its laws.
 
-    Six LF=5 partials on Cf-252 MT455. Without these lines the report would say
-    MF5 is supported and stop, which reads as "decoded" to every consumer.
+    This used to count six "stored verbatim" lines, one per subsection, because
+    the reader could not decode LF=5 and ``report_gaps`` said so. It can now,
+    so those lines are gone and they *should* be: they were about the reader.
+    What the model owes is a separate statement -- that a section it read in
+    full still has no §18 node -- and this is it. Without it the report would
+    say MF5 is supported and stop, which reads as "decoded" to every consumer.
     """
     suite = kika.read(str(micro_pfns_tape))
     messages = unsupported(suite)
@@ -159,11 +163,13 @@ def test_report_declares_mf5_partials_it_did_not_decode(micro_pfns_tape):
     # The blanket "nothing decodes MF5" notice is gone: MT18 is decoded.
     assert not any("nothing decodes it into this reactionSuite" in m
                    for m in messages)
-    verbatim = [m for m in messages if "stored verbatim" in m]
-    assert len(verbatim) == 6
-    for index in range(6):
-        assert any(f"MF5/MT455 partial {index} is stored verbatim: LF=5" in m
-                   for m in verbatim)
+
+    declared = [m for m in messages if "MF5/MT455" in m]
+    assert len(declared) == 1, declared
+    # Every law that went missing is named, not just the count of them.
+    assert "NK=6" in declared[0]
+    assert "LF=[5,5,5,5,5,5]" in declared[0]
+    assert "absent from this reactionSuite" in declared[0]
 
 
 def test_the_redirect_no_longer_claims_mf5_is_a_covariance(micro_pfns_tape):
@@ -203,11 +209,13 @@ def test_report_is_clean_apart_from_the_declared_gaps(micro_pfns_tape):
     assert "not read but inferred" in report.approximations[0]
 
     messages = unsupported(suite)
-    assert len(messages) == 7, messages
+    assert len(messages) == 1, messages
     assert all(m.startswith("MF5") for m in messages), messages
-    # Six verbatim partials plus the one refusal that says why MT455 as a whole
-    # stayed out — the count is the same as before the adapter landed, and it
-    # is the same seven only by arithmetic, so the content is asserted too.
+    # One refusal, saying why MT455 as a whole stayed out. It was seven while
+    # the six LF=5 subsections each reported themselves as unread; the reader
+    # decodes them now, so what is left is the single statement the *model*
+    # owes. A count is easy to satisfy by accident, so the content is asserted
+    # too.
     assert sum("weightedFunctionals" in m for m in messages) == 1
 
     # And the MF35 redirect really was acted on rather than left standing.

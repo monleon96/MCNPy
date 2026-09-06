@@ -245,7 +245,11 @@ def test_a_tape_with_mf5_comes_back_with_it(micro_pfns_tape, tmp_path):
 
     said = "\n".join(report.losses + report.unsupported)
     assert "MF5/MT455 has no MF3/MT455 to hang from" in said
-    assert "MF5/MT455 partial 0 is stored verbatim: LF=5" in said
+    # NK=6 is §18.3's weightedFunctionals and kika has no node for it, so the
+    # whole section stays out -- said once for the section rather than once per
+    # subsection, which is what it used to be when the six LF=5 partials were
+    # undecoded and each reported itself.
+    assert "MF5/MT455 has NK=6 subsections (LF=[5,5,5,5,5,5])" in said
 
     # And nothing left over from the old regime: no message may claim MF5 is
     # undecoded, and none may send the reader to the covariance decoder for it.

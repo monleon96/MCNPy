@@ -202,9 +202,26 @@ def decodeMF5MT(mf5mt, report: Optional[ConversionReport] = None):
                 f"distribution. The section's own bytes are kept, so the tape "
                 f"still comes back with it"
             )
-        # An NK=1 that is not LF=1 is one of the six analytic spectra, and
-        # `MF5MT.report_gaps` already names it by law. Saying it twice here
-        # would make the report longer without making it truer.
+        else:
+            # An NK=1 that is not LF=1 is one of ENDF-6 §5's parametrised
+            # spectra. This used to defer to `MF5MT.report_gaps`, on the
+            # grounds that it named the law already -- and that deferral broke
+            # the moment the reader learned to decode LF=5/7/9/11, because
+            # `report_gaps` reports what the *reader* could not read and this
+            # report is about what the *model* did not receive. They were the
+            # same list once and are not any more: kika now evaluates these
+            # spectra and still has no §18 node to put them in, so a section
+            # that is fully read is still fully absent from here. Saying it
+            # from the model's own side is the only version that stays true.
+            partial = partials[0]
+            report.unsupportedNode(
+                f"MF5/MT{mt} is NK=1 LF={partial.lf} ({partial.describe()}), "
+                f"one of ENDF-6 §5's parametrised spectra. kika "
+                f"{'reads' if partial.is_decoded else 'does not read'} it, and "
+                f"has no GNDS §18 node to carry it either way, so the energy "
+                f"distribution is absent from this reactionSuite. The section's "
+                f"own bytes are kept, so the tape still comes back with it"
+            )
         return None, provenance, report
 
     partial = partials[0]

@@ -16,7 +16,7 @@ from ...utils import (
     format_endf_data_line,
     format_endf_send_record,
 )
-from .partials import MF5Partial, MF5PartialRaw, MF5PartialTabulated
+from .partials import MF5Partial, MF5PartialTabulated
 
 
 @dataclass
@@ -50,12 +50,18 @@ class MF5MT(MT):
         only passed through turns a silent skip into a silent false claim of
         coverage, which is the worse of the two. Everything that reports on
         kika's ENDF coverage calls this.
+
+        The test is ``is_decoded`` and not ``isinstance(.., MF5PartialRaw)``:
+        the analytic laws in :mod:`~kika.endf.classes.mf5.analytic` *are* raw
+        partials -- they keep their bytes so they can emit them -- and are read
+        all the same, so an isinstance check here would report every LF=5
+        subsection on the reference tape as a gap it is not.
         """
         return [
             f"MF5/MT{self.number} partial {index} is stored verbatim: "
             f"{partial.describe()}"
             for index, partial in enumerate(self.partials)
-            if isinstance(partial, MF5PartialRaw)
+            if not partial.is_decoded
         ]
 
     # ------------------------------------------------------------------

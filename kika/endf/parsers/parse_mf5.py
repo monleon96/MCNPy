@@ -15,6 +15,7 @@ uses in MF4.
 from typing import List, Tuple
 
 from ..classes.mf import MF
+from ..classes.mf5.analytic import ANALYTIC_LAWS, ANALYTIC_RECORDS
 from ..classes.mf5.base import MF5MT
 from ..classes.mf5.partials import (
     TAB1_RECORDS_AFTER_HEADER,
@@ -88,13 +89,46 @@ def _parse_partial(lines: List[str], idx: int, mt: int,
         return _parse_lf1(lines, idx, u, p_interp, p_energies, p_values)
 
     body_start = idx
-    idx = _skip_lf(lines, idx, lf, mt, partial_index)
-    return MF5PartialRaw(
+    records, idx = _read_law_records(lines, idx, lf, mt, partial_index)
+    common = dict(
         u=u, lf=lf,
         p_interp=list(p_interp), p_energies=list(p_energies),
         p_values=list(p_values),
         raw_lines=[line[:66] for line in lines[body_start:idx]],
-    ), idx
+    )
+
+    law_class = ANALYTIC_LAWS.get(lf)
+    fields = _law_fields(lf, records) if law_class is not None else None
+    if fields is None:
+        # Either a law nothing decodes (LF=12), or one whose records ran out
+        # mid-subsection. Both keep their bytes: a half-populated analytic
+        # partial would answer questions about a spectrum it does not have.
+        if law_class is not None:
+            logger.warning(
+                f"MF5/MT{mt} subsection {partial_index} declares LF={lf} but "
+                f"carries {len(records)} of the "
+                f"{TAB1_RECORDS_AFTER_HEADER[lf]} expected TAB1 record(s); "
+                f"kept verbatim"
+            )
+        return MF5PartialRaw(**common), idx
+    return law_class(**common, **fields), idx
+
+
+def _law_fields(lf: int, records):
+    """Map the walked TAB1 records onto the law class's field names.
+
+    ``None`` when the count does not match what the law declares -- the caller
+    falls back to keeping the bytes.
+    """
+    names = ANALYTIC_RECORDS.get(lf)
+    if names is None or len(records) != len(names):
+        return None
+    fields = {}
+    for (interp_name, x_name, y_name), (interp, x, y) in zip(names, records):
+        fields[interp_name] = list(interp)
+        fields[x_name] = list(x)
+        fields[y_name] = list(y)
+    return fields
 
 
 def _parse_lf1(lines: List[str], idx: int, u: float, p_interp,
@@ -128,9 +162,14 @@ def _parse_lf1(lines: List[str], idx: int, u: float, p_interp,
     ), idx
 
 
-def _skip_lf(lines: List[str], idx: int, lf: int, mt: int,
-             partial_index: int) -> int:
-    """Walk past the TAB1 records of a law this parser keeps verbatim.
+def _read_law_records(lines: List[str], idx: int, lf: int, mt: int,
+                      partial_index: int) -> Tuple[List[Tuple], int]:
+    """Walk the TAB1 records of a law, keeping what they held.
+
+    This used to be ``_skip_lf`` and threw the records away. Walking already
+    *parses* every one of them to find its end, so decoding LF=5/7/9/11 costs
+    nothing here beyond returning what was read — the walk itself is unchanged,
+    and so is the position it leaves ``idx`` at.
 
     Raises on an LF it has never been told the shape of, naming the MT and the
     subsection — a wrong record count would silently swallow the *next*
@@ -146,8 +185,10 @@ def _skip_lf(lines: List[str], idx: int, lf: int, mt: int,
             f"{sorted(TAB1_RECORDS_AFTER_HEADER)} plus LF=1)"
         ) from None
 
+    records: List[Tuple] = []
     for _ in range(n_records):
         if idx >= len(lines):
             break
-        _, _, _, _, idx = parse_tab1(lines, idx)
-    return idx
+        _, interp, x_data, y_data, idx = parse_tab1(lines, idx)
+        records.append((interp, x_data, y_data))
+    return records, idx

@@ -817,7 +817,13 @@ def test_pfns_tape_carries_the_laws_the_fixture_exists_for(micro_pfns_tape):
 
     The point of paying 770 kB is that these are the evaluator's records. If a
     future cut trimmed MT455 or dropped a band, the fixture would still parse
-    and would silently stop covering the verbatim path and the band geometry.
+    and would silently stop covering the LF=5 reader, the bytes-preserving emit
+    path and the band geometry.
+
+    MT455's six subsections used to be this file's ``report_gaps`` witness and
+    are now its LF=5 *decode* witness -- the only real general-evaporation
+    records on this machine. They still carry their bytes, which is what
+    ``test_mf5_roundtrip`` gates, so the emit path is covered either way.
     """
     endf = read_endf(str(micro_pfns_tape))
     assert endf.zaid == 98252
@@ -829,8 +835,11 @@ def test_pfns_tape_carries_the_laws_the_fixture_exists_for(micro_pfns_tape):
 
     mt455 = endf.files[5].sections[455]
     assert [p.lf for p in mt455.partials] == [5] * 6
+    # Read, but not perturbable: only LF=1 is a table the sampler can move.
     assert mt455.tabulated_partials() == []
-    assert len(mt455.report_gaps()) == 6
+    assert all(p.is_decoded for p in mt455.partials)
+    assert mt455.report_gaps() == []
+    assert all(p.raw_lines for p in mt455.partials), "the emit path needs them"
 
     mf35 = endf.files[35].sections[18]
     assert mf35.num_bands == 4

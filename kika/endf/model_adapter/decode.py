@@ -310,12 +310,20 @@ def decodeReactionSuite(endf, report: Optional[ConversionReport] = None):
         )
 
     # MF5 is decoded above, one section at a time. What stays here is the part
-    # that is *not* about this reactionSuite: `report_gaps` names the laws
-    # `MF5PartialRaw` kept as bytes, and declaring MF5 supported without saying
-    # which laws only pass through would turn a silent skip into a silent false
-    # claim of coverage. Note what is deliberately absent: no message sends the
-    # user to `decodeCovarianceSuite` for MF5, which is what the old
-    # `- {1,2,3,4}` set did and was simply false.
+    # that is *not* about this reactionSuite: `report_gaps` names the laws the
+    # *reader* kept as bytes -- LF=12 and anything a future revision adds --
+    # and declaring MF5 supported without saying which laws only pass through
+    # would turn a silent skip into a silent false claim of coverage.
+    #
+    # This list is narrower than it used to be, and `decodeMF5MT` covers the
+    # difference. Since the reader learned LF=5/7/9/11 those laws are decoded
+    # and so are *not* gaps here, while the model still has no node for them --
+    # so the section-level decode states that loss itself rather than leaning
+    # on this pass, which would now stay quiet about it.
+    #
+    # Note what is deliberately absent: no message sends the user to
+    # `decodeCovarianceSuite` for MF5, which is what the old `- {1,2,3,4}` set
+    # did and was simply false.
     if mf5 is not None:
         for mt in sorted(getattr(mf5, "mt", {})):
             for gap in getattr(mf5.mt[mt], "report_gaps", list)():
