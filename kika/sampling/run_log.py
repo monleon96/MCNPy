@@ -233,6 +233,19 @@ class RunLog:
         self.event(kind, message, subject=subject, sample=sample,
                    seconds=time.perf_counter() - start, **payload, **extra)
 
+    def absorb(self, events) -> None:
+        """Take in events recorded elsewhere, as they were.
+
+        A worker process keeps its own :class:`RunLog` and sends the events
+        back; they are appended here with their own timestamps and forwarded
+        to the logger like anything recorded directly. Accepts
+        :class:`Event` objects or their ``to_dict`` form.
+        """
+        for item in events:
+            event = item if isinstance(item, Event) else Event.from_dict(item)
+            self.events.append(event)
+            self._forward(event)
+
     def _forward(self, event: Event) -> None:
         if self._logger is None:
             return

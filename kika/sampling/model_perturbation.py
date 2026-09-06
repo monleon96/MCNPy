@@ -52,6 +52,7 @@ Three things it does differently, each of them deliberate:
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Hashable, List, Mapping, Optional, Sequence, Tuple
@@ -838,6 +839,163 @@ def _checkRealisation(pset: PerturbationSet, log, sample: int) -> None:
                       subject=component.describe(), sample=sample, **payload)
 
 
+@dataclass(frozen=True)
+class _SampleContext:
+    """What every sample needs and no sample changes.
+
+    One object so that the serial loop and a worker process are handed the
+    same thing, and so that what crosses the process boundary is small and
+    named: the suite is **not** in here -- a worker re-reads the tape itself
+    -- and neither is the log, which each side keeps for itself.
+    """
+
+    sourcePath: Optional[Path]
+    sourceFormat: str
+    index: Any
+    labelPrefix: str
+    seed: int
+    space: str
+    grouping: str
+    formats: Tuple[str, ...]
+    outputDir: Optional[Path]
+    stem: str
+    mat: Optional[int]
+    ace: Optional[AceOptions]
+    writeSets: bool
+    emitTapes: bool
+
+
+def _processSample(number: int, drawn: Mapping[Hashable, np.ndarray],
+                   ctx: _SampleContext, suite, endfObj, log) -> Dict[str, Any]:
+    """One realisation, start to finish: build, apply, check, emit, forget.
+
+    This is the unit of work that parallelises. It runs on whichever suite it
+    is given -- the run's own in the serial case, a worker's private copy in
+    the parallel one -- and records into whichever log it is given; the notes
+    it produces are **returned**, not logged, because whether a note is new
+    is a fact about the run and only the parent knows it.
+    """
+    from kika.endf.model_adapter.multiplicity import nubarNode
+    from kika.nuclear_data.model.conversion import ConversionReport
+
+    label = f"{ctx.labelPrefix}-{number:04d}"
+    pset = PerturbationSet.fromDraw(
+        dict(drawn), ctx.index, label=label,
+        provenance={"seed": ctx.seed, "sample": number, "space": ctx.space,
+                    "grouping": ctx.grouping, "source": str(ctx.sourcePath or ""),
+                    "sourceFormat": ctx.sourceFormat})
+    with log.timed("applied", f"{label} on the model", sample=number) as info:
+        applied = pset.applyToSuite(suite, multiplicityResolver=nubarNode)
+        info["components"] = [c.describe() for c in applied]
+    _checkRealisation(pset, log, number)
+
+    files: Dict[str, Any] = {}
+    aceProduced: List[Dict[str, Any]] = []
+    conversion = ConversionReport()
+    if ctx.emitTapes:
+        sampleDir = ctx.outputDir / f"{number:04d}"
+        sampleDir.mkdir(parents=True, exist_ok=True)
+        # ACE needs an ENDF tape on disk. The delta is the faithful one
+        # when there is a tape to patch; otherwise the whole tape from the
+        # model. Either is written on demand if it was not asked for.
+        tapeFormats = [fmt for fmt in ctx.formats if fmt != "ace"]
+        if "ace" in ctx.formats and not any(
+                fmt in tapeFormats for fmt in ("endf-delta", "endf-tape")):
+            tapeFormats.append("endf-delta" if ctx.sourceFormat == "endf"
+                               else "endf-tape")
+        for fmt in tapeFormats:
+            with log.timed("emitted", f"{fmt}", subject=fmt, sample=number) as info:
+                if fmt == "endf-delta":
+                    files[fmt] = _emitEndfDelta(
+                        suite, endfObj, ctx.sourcePath, pset,
+                        sampleDir / f"{ctx.stem}_{number:04d}.endf", conversion,
+                        alsoChanged=tuple(applied))
+                elif fmt == "endf-tape":
+                    files[fmt] = _emitWholeFile(
+                        suite, pset, sampleDir / f"{ctx.stem}_{number:04d}.tape.endf",
+                        fmt, mat=ctx.mat)
+                else:
+                    files[fmt] = _emitWholeFile(
+                        suite, pset, sampleDir / f"{ctx.stem}_{number:04d}.gnds.xml",
+                        fmt)
+                info["path"] = str(files[fmt])
+                info["bytes"] = files[fmt].stat().st_size
+        if "ace" in ctx.formats:
+            tape = files.get("endf-delta") or files["endf-tape"]
+            aceProduced = _emitAce(tape, sampleDir, ctx.ace, log, number)
+            good = [r["ace"] for r in aceProduced if r["ace"] and r["returncode"] == 0]
+            if good:
+                files["ace"] = [Path(p) for p in good]
+        if ctx.writeSets:
+            files["perturbation-set"] = pset.write(
+                sampleDir / "perturbation.json")
+
+    notes = [note for note in (_redundancyNote(suite, pset), _sumRuleNote(applied),
+                               _spectrumNote(applied)) if note is not None]
+    _forget(suite, pset, applied)
+    return {"sample": number, "label": label, "set": pset, "files": files,
+            "applied": applied, "ace": aceProduced, "notes": notes}
+
+
+def _recordSample(result: RunResult, out: Dict[str, Any], log) -> None:
+    """Put one processed sample on the result, and its notes on the run.
+
+    A note is recorded -- and warned about -- the first time any sample raises
+    it, whichever sample that was; the same note from every other sample is
+    the same fact and is not repeated.
+    """
+    number = out["sample"]
+    for note in out["notes"]:
+        if note not in result.notes:
+            result.notes.append(note)
+            log.warning(note, sample=number)
+    result.samples.append({"label": out["label"], "set": out["set"],
+                           "files": out["files"], "applied": out["applied"],
+                           "ace": out["ace"]})
+
+
+#: What a worker process holds between samples: its own suite, read once.
+_WORKER: Dict[str, Any] = {}
+
+
+def _initWorker(context: _SampleContext) -> None:
+    """``Pool`` initializer: read the source once per worker process.
+
+    The suite is mutable state -- a realisation is a labelled form put on it
+    and taken off again -- so it cannot be shared between processes, and it
+    is too large to pickle per sample. Each worker therefore decodes the tape
+    itself, once, and works its samples on that copy. The draw is not
+    repeated: workers receive their factors from the parent.
+    """
+    from kika.sampling.run_log import RunLog
+
+    suite, _covariances, endfObj, _path, _fmt, _reports = _readSource(
+        context.sourcePath, RunLog())
+    _WORKER.update(context=context, suite=suite, endfObj=endfObj)
+
+
+def _workerSample(task: Tuple[int, Mapping[Hashable, np.ndarray]]) -> Dict[str, Any]:
+    """One sample in a worker: records into its own log, never raises.
+
+    The events go back with the result so the parent can put them in the
+    run's log, timestamps and all; an exception goes back as text, because
+    a traceback that dies inside ``Pool`` names nothing.
+    """
+    import traceback
+
+    from kika.sampling.run_log import RunLog
+
+    number, drawn = task
+    log = RunLog()
+    try:
+        out = _processSample(number, drawn, _WORKER["context"],
+                             _WORKER["suite"], _WORKER["endfObj"], log)
+    except Exception:
+        out = {"sample": number, "error": traceback.format_exc()}
+    out["events"] = log.to_dicts()
+    return out
+
+
 def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
                      outputDir=None, formats: Sequence[str] = ("endf-delta",),
                      grouping: str = "mf", space: str = "log",
@@ -851,6 +1009,7 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
                      writeFactors: bool = True,
                      writeSets: bool = False,
                      ace: Optional[AceOptions] = None,
+                     nWorkers: int = 1,
                      runLog=None, logger=None) -> RunResult:
     """Draw *nSamples* realisations of *request* and write each one out.
 
@@ -917,6 +1076,18 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
         :class:`~kika.sampling.perturbation_set.PerturbationSet` as JSON beside
         its files. Off by default since the table exists: a thousand samples
         were a thousand files saying the same bin edges a thousand times.
+    nWorkers
+        Worker processes for the per-sample stage -- apply, emit, NJOY. ``1``
+        (the default) does everything in this process. Above 1, the read,
+        the pre-flight and the **draw still happen once, here**, so the
+        factors table is the same whatever the count; the samples are then
+        handed to a ``multiprocessing.Pool`` whose workers each re-read the
+        source tape once and write whole samples, and their log events come
+        back into the run's log in sample order. Needs a path as *source*. A
+        dry run ignores it, since without tapes to write there is nothing
+        worth a process. On a cluster node, pass the CPUs the job was given
+        (``int(os.environ["SLURM_CPUS_PER_TASK"])``); with ``"ace"`` among the
+        formats one NJOY run per worker is what fills them.
     runLog, logger
         A :class:`~kika.sampling.run_log.RunLog` to record into, or none to
         make one; a ``logging.Logger`` to forward every event to as a line.
@@ -929,8 +1100,6 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
         diagnostics; the run's :class:`~kika.sampling.run_log.RunLog`; and the
         pre-flight report when the run made one.
     """
-    from kika.endf.model_adapter.multiplicity import nubarNode
-    from kika.nuclear_data.model.conversion import ConversionReport
     from kika.sampling.joint_blocks import normaliseRequest
     from kika.sampling.perturbation_set import writeFactorsTable
     from kika.sampling.run_log import RunLog
@@ -944,13 +1113,16 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
                 "formats includes 'ace' and no AceOptions were given: NJOY, "
                 "the temperatures and the library have to be named")
         ace.validate()
+    nWorkers = int(nWorkers)
+    if nWorkers < 1:
+        raise ValueError(f"nWorkers must be at least 1, got {nWorkers}")
 
     log = runLog if runLog is not None else RunLog(logger=logger, label=labelPrefix)
     log.event("started", f"perturbFromModel: {nSamples} sample(s), seed {seed}",
               nSamples=nSamples, seed=seed, space=space, grouping=grouping,
               decompositionMethod=decompositionMethod,
               samplingMethod=samplingMethod, psdMethod=psdMethod,
-              dryRun=dryRun, formats=list(formats),
+              dryRun=dryRun, formats=list(formats), nWorkers=nWorkers,
               source=str(source) if isinstance(source, (str, Path)) else "<parsed>",
               outputDir=str(outputDir) if outputDir is not None else None,
               ace=ace.to_dict() if ace is not None else None)
@@ -1046,67 +1218,59 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
     if stem.endswith(".gnds"):
         stem = stem[:-5]
     emitTapes = outputDir is not None and not dryRun
-    for number in range(nSamples):
-        label = f"{labelPrefix}-{number:04d}"
-        pset = PerturbationSet.fromDraw(
-            {key: samples[key][number] for key in samples}, index, label=label,
-            provenance={"seed": seed, "sample": number, "space": space,
-                        "grouping": grouping, "source": str(sourcePath or ""),
-                        "sourceFormat": sourceFormat})
-        with log.timed("applied", f"{label} on the model", sample=number) as info:
-            applied = pset.applyToSuite(suite, multiplicityResolver=nubarNode)
-            info["components"] = [c.describe() for c in applied]
-        _checkRealisation(pset, log, number)
+    context = _SampleContext(
+        sourcePath=sourcePath, sourceFormat=sourceFormat, index=index,
+        labelPrefix=labelPrefix, seed=seed, space=space, grouping=grouping,
+        formats=tuple(formats), outputDir=outputDir, stem=stem, mat=mat,
+        ace=ace if "ace" in formats else None, writeSets=writeSets,
+        emitTapes=emitTapes)
 
-        files: Dict[str, Path] = {}
-        aceProduced: List[Dict[str, Any]] = []
-        conversion = ConversionReport()
-        if emitTapes:
-            sampleDir = outputDir / f"{number:04d}"
-            sampleDir.mkdir(parents=True, exist_ok=True)
-            # ACE needs an ENDF tape on disk. The delta is the faithful one
-            # when there is a tape to patch; otherwise the whole tape from the
-            # model. Either is written on demand if it was not asked for.
-            tapeFormats = [fmt for fmt in formats if fmt != "ace"]
-            if "ace" in formats and not any(
-                    fmt in tapeFormats for fmt in ("endf-delta", "endf-tape")):
-                tapeFormats.append("endf-delta" if sourceFormat == "endf"
-                                   else "endf-tape")
-            for fmt in tapeFormats:
-                with log.timed("emitted", f"{fmt}", subject=fmt, sample=number) as info:
-                    if fmt == "endf-delta":
-                        files[fmt] = _emitEndfDelta(
-                            suite, endfObj, sourcePath, pset,
-                            sampleDir / f"{stem}_{number:04d}.endf", conversion,
-                            alsoChanged=tuple(applied))
-                    elif fmt == "endf-tape":
-                        files[fmt] = _emitWholeFile(
-                            suite, pset, sampleDir / f"{stem}_{number:04d}.tape.endf",
-                            fmt, mat=mat)
-                    else:
-                        files[fmt] = _emitWholeFile(
-                            suite, pset, sampleDir / f"{stem}_{number:04d}.gnds.xml",
-                            fmt)
-                    info["path"] = str(files[fmt])
-                    info["bytes"] = files[fmt].stat().st_size
-            if "ace" in formats:
-                tape = files.get("endf-delta") or files["endf-tape"]
-                aceProduced = _emitAce(tape, sampleDir, ace, log, number)
-                good = [r["ace"] for r in aceProduced if r["ace"] and r["returncode"] == 0]
-                if good:
-                    files["ace"] = [Path(p) for p in good]
-            if writeSets:
-                files["perturbation-set"] = pset.write(
-                    sampleDir / "perturbation.json")
+    parallel = nWorkers > 1 and nSamples > 1 and emitTapes
+    if nWorkers > 1 and not parallel:
+        log.note(f"nWorkers={nWorkers} not used: "
+                 + ("a dry run writes no tapes, so there is nothing worth a "
+                    "process" if not emitTapes else "one sample is one process"),
+                 nWorkers=nWorkers)
+    if parallel:
+        if sourcePath is None:
+            raise ValueError(
+                "nWorkers > 1 needs a path as source: each worker process "
+                "re-reads the tape itself, and a parsed object cannot be handed "
+                "to it. Pass the path, or nWorkers=1")
+        from multiprocessing import Pool
 
-        for note in (_redundancyNote(suite, pset), _sumRuleNote(applied),
-                     _spectrumNote(applied)):
-            if note is not None and note not in result.notes:
-                result.notes.append(note)
-                log.warning(note, sample=number)
-        result.samples.append({"label": label, "set": pset, "files": files,
-                               "applied": applied, "ace": aceProduced})
-        _forget(suite, pset, applied)
+        workers = min(nWorkers, nSamples)
+        log.note(f"{nSamples} sample(s) over {workers} worker process(es); the "
+                 f"draw was made once here, each worker re-reads "
+                 f"{sourcePath.name} once and writes whole samples",
+                 nWorkers=workers)
+        tasks = [(number, {key: samples[key][number] for key in samples})
+                 for number in range(nSamples)]
+        done: Dict[int, Dict[str, Any]] = {}
+        started = time.perf_counter()
+        with Pool(processes=workers, initializer=_initWorker,
+                  initargs=(context,)) as pool:
+            for out in pool.imap_unordered(_workerSample, tasks, chunksize=1):
+                if "error" in out:
+                    log.absorb(out["events"])
+                    raise RuntimeError(
+                        f"sample {out['sample']} failed in a worker "
+                        f"process:\n{out['error']}")
+                done[out["sample"]] = out
+        # The workers' events first, in sample order, then the one line that
+        # says what the pool as a whole took -- wall clock, start-up included.
+        for number in range(nSamples):
+            out = done.pop(number)
+            log.absorb(out.pop("events"))
+            _recordSample(result, out, log)
+        log.event("applied", f"{nSamples} sample(s) on {workers} worker(s), "
+                  f"start-up and tapes included",
+                  seconds=time.perf_counter() - started, nWorkers=workers)
+    else:
+        for number in range(nSamples):
+            drawn = {key: samples[key][number] for key in samples}
+            out = _processSample(number, drawn, context, suite, endfObj, log)
+            _recordSample(result, out, log)
 
     if outputDir is not None:
         if writeFactors and result.samples:
@@ -1132,7 +1296,7 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
         result.files["log-text"] = outputDir / "run.log"
         result.files["metadata"] = outputDir / "run_metadata.json"
         _writeRunMetadata(result, outputDir, covReport, suiteReport, sourcePath,
-                          original, seed, space, psdMethod)
+                          original, seed, space, psdMethod, nWorkers=nWorkers)
         log.write(outputDir)
     return result
 
@@ -1195,7 +1359,7 @@ def _forget(suite, pset: PerturbationSet, applied=()) -> None:
 
 def _writeRunMetadata(result: RunResult, outputDir: Path, covReport, suiteReport,
                       sourcePath, request, seed: int, space: str,
-                      psdMethod: str = "none") -> Path:
+                      psdMethod: str = "none", nWorkers: int = 1) -> Path:
     """The run's own account of itself, beside the samples.
 
     Deliberately includes the grouping description in full: "these quantities
@@ -1226,6 +1390,7 @@ def _writeRunMetadata(result: RunResult, outputDir: Path, covReport, suiteReport
         ],
         "notes": list(result.notes),
         "dryRun": result.dryRun,
+        "nWorkers": nWorkers,
         "sourceFormat": result.sourceFormat,
         "requestNormalised": {str(key): _jsonableRequest(value)
                               for key, value in result.request.items()}
