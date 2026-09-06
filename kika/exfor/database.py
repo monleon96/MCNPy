@@ -793,12 +793,12 @@ _ENERGY_UNIT_TO_MEV: Dict[str, float] = {
 _BARN_PREFIX_FACTOR: Dict[str, float] = {
     "": 1.0,
     "M": 1e-3, "MILLI-": 1e-3,
-    "MU": 1e-6, "MICRO-": 1e-6, "U": 1e-6,
+    "MU": 1e-6, "MU-": 1e-6, "MICRO-": 1e-6, "U": 1e-6,
     "N": 1e-9, "NANO-": 1e-9,
     "P": 1e-12, "PICO-": 1e-12,
     "K": 1e3, "KILO-": 1e3,
 }
-_BARN_RE = re.compile(r"^(P|N|MU|U|M|K|MILLI-|MICRO-|NANO-|PICO-|KILO-)?B$")
+_BARN_RE = re.compile(r"^(P|N|MU-|MU|U|M|K|MILLI-|MICRO-|NANO-|PICO-|KILO-)?B$")
 
 
 def canonical_unit_factor(unit: Optional[str]) -> Tuple[Optional[float], Optional[str]]:

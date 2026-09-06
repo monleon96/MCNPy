@@ -124,6 +124,7 @@ from scripts.tof_parameters import (
     load_tof_parameters_file,
     get_tof_parameters,
     compute_sigma_E,
+    CORPUS_MEDIAN_REL_SIGMA_E,
 )
 
 
@@ -189,6 +190,11 @@ DEFAULT_TIME_RESOLUTION_NS = 5.0
 # Must match DELTA_T_IS_FWHM in exfor_to_endf_sampling_v2.py, or this chi2 folds
 # over a different kernel than the fit used. From run 82 delta_t is a FWHM.
 DELTA_T_IS_FWHM            = True
+# 2026-08-26: must match DEFAULT_REL_SIGMA_E in exfor_to_endf_research.py for
+# the same reason. sigma_E for subentries EXFOR documents no width for, as a
+# fraction of E, in place of the ORELA-like (L, delta_t) default.
+DEFAULT_REL_SIGMA_E        = CORPUS_MEDIAN_REL_SIGMA_E
+QUARANTINED_AS_BOX         = True   # read a review_required EN-RSL* width as a box
 
 E_MIN_MEV = 0.85
 E_MAX_MEV = 4.0
@@ -305,6 +311,67 @@ MF33_MF34_CROSS_FROM_FILE = os.environ.get(
 # a mask derived from our MC to their files would be meaningless.
 MF34_NULL_MASK = os.environ.get("KIKA_MF34_NULL_MASK", "").strip()
 
+# ── EXFOR detector corrections (4-sep-2026) ──────────────────────────────────
+# Juan: "si consideramos que esos puntos realmente deben ser corregidos, la
+# comparativa debería hacerse con los puntos corregidos; si no, V2 claro que
+# sale peor". The B-spline recipe (kika-workspace/myworkspace/chi2/bspline_window,
+# wrecipe.py v5) treats two things in the fine experiments as detector
+# systematics measured against the 65 third experiments and FIXED:
+#   - a multiplicative efficiency per (experiment, CM detector angle) for Kinney
+#     10571002 and Cierjacks 20743002 (geometric mean per experiment removed:
+#     that is the normalization mode the covariance already carries), and
+#   - a relative energy scale per Kinney detector (E_true = E_nominal (1 + s),
+#     backward detectors +3.0..+4.4 permille).
+# Scoring against the RAW points makes V2 punish exactly those corrections for
+# every library alike; scoring against the CORRECTED points asks the symmetric
+# question (which evaluation describes the corrected database). Both are
+# reported. This switch applies the SAME corrections to the rows every library
+# is scored on -- JEFF and JENDL included -- so it is single-variable.
+#
+# KIKA_EXFOR_CORRECTIONS = path of the table (columns exp_key, angle_deg,
+# efficiency, kinney_scale_permille; the shipped one is
+# splines/deliverable/corrections/w18_shipped_efficiencies.csv, written by
+# w18_shipped_efficiencies.py from the same functions the recipe calls).
+# Unset (default) = raw points, bit-identical to every run before 4-sep.
+#
+# What it does to a row of a listed experiment whose CM angle matches a listed
+# detector (nearest within CORR_ANGLE_TOL degrees):
+#   y_exp, sigma_stat, sigma_sys  /= efficiency        (relative errors unchanged)
+#   the library fold for that row is evaluated at E (1 + s), sigma_E recomputed
+#   there; `energy_mev` keeps the ORIGINAL nominal energy (the grouping key of
+#   every subset and table), `energy_mev_fold` carries the corrected one.
+EXFOR_CORRECTIONS = os.environ.get("KIKA_EXFOR_CORRECTIONS", "").strip()
+CORR_ANGLE_TOL = 1.5
+
+
+def load_exfor_corrections(path: str) -> Dict[str, Dict[float, Tuple[float, float]]]:
+    """``{experiment_id: {cm_angle_deg: (efficiency, energy_scale)}}`` from the recipe's table."""
+    t = pd.read_csv(path, dtype={"exp_key": str})
+    need = {"exp_key", "angle_deg", "efficiency"}
+    if not need <= set(t.columns):
+        raise SystemExit(f"{path}: expected columns {sorted(need)}, found {list(t.columns)}")
+    out: Dict[str, Dict[float, Tuple[float, float]]] = {}
+    for r in t.itertuples(index=False):
+        sc = getattr(r, "kinney_scale_permille", float("nan"))
+        sc = 0.0 if (sc is None or not np.isfinite(float(sc))) else 1e-3 * float(sc)
+        out.setdefault(str(r.exp_key).strip(), {})[float(r.angle_deg)] = (float(r.efficiency), sc)
+    return out
+
+
+def match_corrections(mu: np.ndarray, table: Dict[float, Tuple[float, float]]) -> Tuple[np.ndarray, np.ndarray, int]:
+    """Per-row (efficiency, energy scale) for the CM angles of ``mu``; rows farther than
+    CORR_ANGLE_TOL from every listed detector stay at (1, 0) and are counted."""
+    ang = np.degrees(np.arccos(np.clip(np.asarray(mu, dtype=float), -1.0, 1.0)))
+    keys = np.array(sorted(table))
+    eff = np.ones(ang.size); sc = np.zeros(ang.size); n_miss = 0
+    for j, a in enumerate(ang):
+        k = keys[np.argmin(np.abs(keys - a))]
+        if abs(k - a) <= CORR_ANGLE_TOL:
+            eff[j], sc[j] = table[float(k)]
+        else:
+            n_miss += 1
+    return eff, sc, n_miss
+
 OUTPUT_PARQUET = (
     "/share_snc/snc/JuanMonleon/chi2/"
     f"chi2_data_predictive_{RUN_TAG}{_FOLD_SUFFIX[FOLD_MODE]}.parquet"
@@ -400,11 +467,18 @@ def build_rows_at_energy(
     experiments_at_energy: List[Tuple[pd.DataFrame, Dict]],
     libraries: Dict[str, Dict],
     tof_cache: Dict,
+    corrections: Optional[Dict[str, Dict[float, Tuple[float, float]]]] = None,
+    corr_log: Optional[Dict[str, dict]] = None,
 ) -> List[dict]:
     """One row per (library, experiment, datapoint) at this incident energy.
 
     sigma_E depends on the subentry's TOF parameters, so the fold is computed
     inside the experiment loop rather than cached once per energy.
+
+    With ``corrections`` (KIKA_EXFOR_CORRECTIONS) the rows of a listed experiment
+    are divided by their detector efficiency and folded at their detector's
+    energy scale; without it the function is bit-identical to the 4-sep-2026
+    version (one fold per experiment, rows in the same order).
     """
     rows: List[dict] = []
     for cache_df, meta in experiments_at_energy:
@@ -418,25 +492,57 @@ def build_rows_at_energy(
             default_flight_path_m=DEFAULT_FLIGHT_PATH_M,
             default_time_resolution_ns=DEFAULT_TIME_RESOLUTION_NS,
             default_delta_t_is_fwhm=DELTA_T_IS_FWHM,
+            default_rel_sigma_E=DEFAULT_REL_SIGMA_E,
+            quarantined_as_box=QUARANTINED_AS_BOX,
         )
-        sigma_E_mev = compute_sigma_E(e_mev, tof)
-        sample_e_ev, weights = _resolution_window(e_mev, sigma_E_mev)
 
         mu = exp_df["mu"].to_numpy(dtype=float)
         y_exp = exp_df["value"].to_numpy(dtype=float)
         sigma_stat = exp_df["sigma_stat"].to_numpy(dtype=float)
         sigma_sys = exp_df["sigma_sys"].to_numpy(dtype=float)
+        n = len(exp_df)
+
+        # detector corrections: efficiency per row, energy scale per row
+        eff_row = np.ones(n); scale_row = np.zeros(n)
+        exp_id = str(exp_df["experiment_id"].iloc[0])
+        table = None
+        if corrections:
+            table = corrections.get(exp_id) or corrections.get(subentry_id)
+        if table:
+            eff_row, scale_row, n_miss = match_corrections(mu, table)
+            y_exp = y_exp / eff_row
+            sigma_stat = sigma_stat / eff_row
+            sigma_sys = sigma_sys / eff_row
+            if corr_log is not None:
+                d = corr_log.setdefault(exp_id, {"rows": 0, "rows_corrected": 0, "rows_unmatched": 0,
+                                                 "rows_energy_scaled": 0, "min_eff": np.inf, "max_eff": -np.inf})
+                d["rows"] += n; d["rows_corrected"] += int(np.sum(eff_row != 1.0)); d["rows_unmatched"] += n_miss
+                d["rows_energy_scaled"] += int(np.sum(scale_row != 0.0))
+                d["min_eff"] = min(d["min_eff"], float(eff_row.min())); d["max_eff"] = max(d["max_eff"], float(eff_row.max()))
         sigma_exp = np.sqrt(sigma_stat ** 2 + sigma_sys ** 2)
 
-        for lib_key, lib in libraries.items():
-            y_eval, sigma_avg_b, a_l_folded = fold_dcs(
-                lib, mu, sample_e_ev, weights,
-            )
-            if not np.isfinite(sigma_avg_b) or sigma_avg_b <= 0:
-                continue
-            c0 = sigma_avg_b / (4.0 * np.pi)
+        # one fold per distinct fold energy (a single group, at e_mev, without corrections)
+        fold_groups: List[Tuple[float, np.ndarray]] = []
+        for s_val in np.unique(scale_row):
+            fold_groups.append((float(e_mev * (1.0 + s_val)), np.flatnonzero(scale_row == s_val)))
 
-            for j in range(len(exp_df)):
+        for lib_key, lib in libraries.items():
+            y_eval_all = np.full(n, np.nan); c0_all = np.full(n, np.nan); sig_all = np.full(n, np.nan)
+            a1_all = np.full(n, np.nan); sigE_all = np.full(n, np.nan); efold_all = np.full(n, np.nan)
+            for e_fold, idx in fold_groups:
+                sigma_E_mev = compute_sigma_E(e_fold, tof)
+                sample_e_ev, weights = _resolution_window(e_fold, sigma_E_mev)
+                y_eval, sigma_avg_b, a_l_folded = fold_dcs(
+                    lib, mu[idx], sample_e_ev, weights,
+                )
+                if not np.isfinite(sigma_avg_b) or sigma_avg_b <= 0:
+                    continue
+                y_eval_all[idx] = y_eval; c0_all[idx] = sigma_avg_b / (4.0 * np.pi); sig_all[idx] = sigma_avg_b
+                a1_all[idx] = a_l_folded[0]; sigE_all[idx] = sigma_E_mev; efold_all[idx] = e_fold
+
+            for j in range(n):
+                if not np.isfinite(c0_all[j]):
+                    continue
                 rows.append({
                     "energy_mev":      float(e_mev),
                     "mu":              float(mu[j]),
@@ -454,15 +560,18 @@ def build_rows_at_energy(
                     "is_natural":      bool(exp_df["is_natural"].iloc[j]),
                     "ks_subentry":     str(exp_df["ks_subentry"].iloc[j]),
                     "library":         lib_key,
-                    "y_eval":          float(y_eval[j]),
-                    "c0":              float(c0),
+                    "y_eval":          float(y_eval_all[j]),
+                    "c0":              float(c0_all[j]),
                     "L_max":           int(L_MAX),
-                    "sigma_avg_b":     float(sigma_avg_b),
-                    "a1_folded":       float(a_l_folded[0]),
-                    "sigma_E_mev":     float(sigma_E_mev),
+                    "sigma_avg_b":     float(sig_all[j]),
+                    "a1_folded":       float(a1_all[j]),
+                    "sigma_E_mev":     float(sigE_all[j]),
                     "n_sigma":         float(N_SIGMA),
                     "tof_source":      str(tof.source),
                     "fold_mode":       FOLD_MODE,
+                    "eff_applied":     float(eff_row[j]),
+                    "energy_scale_applied": float(scale_row[j]),
+                    "energy_mev_fold": float(efold_all[j]),
                 })
     return rows
 
@@ -946,11 +1055,37 @@ def main() -> None:
     print(f"Iterating {len(energies_in_range)} EXFOR energies in "
           f"[{E_MIN_MEV}, {E_MAX_MEV}] MeV")
 
+    corrections = None
+    corr_log: Dict[str, dict] = {}
+    if EXFOR_CORRECTIONS:
+        if not Path(EXFOR_CORRECTIONS).is_file():
+            raise SystemExit(f"KIKA_EXFOR_CORRECTIONS={EXFOR_CORRECTIONS} does not exist")
+        corrections = load_exfor_corrections(EXFOR_CORRECTIONS)
+        print(f"\n[CORR] EXFOR detector corrections ON for EVERY library (single-variable).")
+        print(f"[CORR]   source : {EXFOR_CORRECTIONS}")
+        for k, t in corrections.items():
+            print(f"[CORR]   {k}: {len(t)} detectors; efficiency "
+                  f"{min(v[0] for v in t.values()):.3f}..{max(v[0] for v in t.values()):.3f}; "
+                  f"energy scale (permille) " + ", ".join(f"{a:g}:{1e3 * v[1]:+.2f}" for a, v in sorted(t.items()) if v[1] != 0.0))
+        print(f"[CORR]   y_exp and its uncertainties are DIVIDED by the efficiency; the fold of each "
+              f"library is evaluated at E (1 + s). `energy_mev` keeps the nominal energy.")
+    else:
+        print(f"\n[CORR] OFF -- raw EXFOR points, as in every run before 4-sep-2026.")
+
     all_rows: List[dict] = []
     for e_mev in energies_in_range:
         all_rows.extend(build_rows_at_energy(
             e_mev, exfor_cache[e_mev], libraries, tof_cache,
+            corrections=corrections, corr_log=corr_log,
         ))
+    if corrections:
+        for k, d in sorted(corr_log.items()):
+            print(f"[CORR]   applied to {k}: {d['rows_corrected']} of {d['rows']} rows corrected "
+                  f"(efficiency {d['min_eff']:.3f}..{d['max_eff']:.3f}), {d['rows_energy_scaled']} folded at a "
+                  f"scaled energy, {d['rows_unmatched']} rows with no detector within {CORR_ANGLE_TOL} deg")
+        missing = sorted(set(corrections) - set(corr_log))
+        if missing:
+            raise SystemExit(f"[CORR] listed experiments never met in the corpus: {missing} -- key mismatch, refusing to score")
 
     df = pd.DataFrame(all_rows)
     out_dir = Path(OUTPUT_PARQUET).parent

@@ -795,6 +795,234 @@ PATHS: Dict[str, Dict[str, Optional[str]]] = {
         "title":      "χ² — run 103R4, malla en UNA etapa desde el fino (7 820 params), fina + cruzado a_0 (carry)",
         "systematic_block_col": None,
     },
+    # ── SERIE 104: la malla en una etapa CON el arreglo del singleton ─────
+    #
+    # Las tres salen del MISMO codigo y la MISMA covarianza (la de 103R4); lo
+    # unico que cambia entre ellas son los dos parametros del criterio fisico:
+    #   S1  k=10  c=3   5 964 params   <- 103R4 + SOLO el arreglo del singleton
+    #   S2  k= 3  c=3   6 349 params   <- el entregable pre-registrado
+    #   S3  k= 3  c=2   6 888 params   <- variante conservadora
+    # Las tres reprodujeron su prediccion offline EXACTA y no dieron ni un aviso
+    # de no-cancelacion.
+    #
+    # ⛔ NO SE PUNTUA PARA ELEGIR MALLA. Medido en la serie 99 y CONFIRMADO el
+    # 23-ago sobre la pareja 103R2/103R4: la malla 2,4x mas fina puntua un 4,0 %
+    # PEOR en V4 (5,69 -> 5,92) y un 2,4 % MEJOR en V1, y todo el delta viene de
+    # la correlacion. El chi2 discrimina AL REVES del criterio de
+    # conservadurismo. Esto se puntua para REPORTAR el numero del entregable.
+    #
+    # ⚠ Las tres se puntuan por la cinta FINA con cruzado (`_a0cross.endf`,
+    # dead=carry), igual que 103R2 y 103R4, para que la comparacion siga siendo
+    # de una sola variable contra ellas.
+    "predictive_104S1": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_104S1.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — run 104S1, malla 1 etapa + arreglo singleton, k=10 c=3 (5 964 params), fina + cruzado a_0 (carry)",
+        "systematic_block_col": None,
+    },
+    "predictive_104S2": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_104S2.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — run 104S2, malla 1 etapa + arreglo singleton, k=3 c=3 (6 349 params), fina + cruzado a_0 (carry)",
+        "systematic_block_col": None,
+    },
+    # ── RUN 105T1: 104S2 con los sigma_E de entrada corregidos ─────────────
+    # MISMOS flags que 104S2. La UNICA variable son los inputs de sigma_E:
+    # el JSON corregido (Smith 5.25 m, Perey 200.191 m, Salnikov como caja,
+    # Cox corroborado), los dos canales nuevos del resolver (cuarentena como
+    # caja, default relativo 1.31 % de E) y el marco CM de Becker 11511009.
+    # Se lee CONTRA predictive_104S2 y contra nada mas.
+    "predictive_105T1": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_105T1.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — run 105T1, flags de 104S2 con sigma_E de entrada corregida (Smith 5.25 m, cuarentena como caja, default 1.31 % de E, Becker en CM)",
+        "systematic_block_col": None,
+    },
+    # ── RUN 106T2: 105T1 + los dos arreglos aguas arriba del ajuste ────────
+    # 1. Se rechazan los candidatos Legendre IMPOSIBLES (|a_l| > 1) antes de
+    #    pesarlos por AIC. a_l = <P_l(mu)> con |P_l| <= 1, asi que un ajuste que
+    #    afirma |a_1| > 1 no es una hipotesis rival sino un artefacto de minimos
+    #    cuadrados sin restriccion en un bin con n_eff ~ 1. En 105T1 contaminaba
+    #    2 bins (1,558 y 1,560 MeV): volteaba avg_a_1 contra todos sus vecinos y
+    #    dejaba sigma(a_1) = 1,667, mas que el rango fisico del coeficiente.
+    # 2. La sintesis de DATA-ERR de Gkatis 27673002, que corria con sigma 1 %
+    #    plana porque la guarda era `is None` y el cargador JSON pone `[]`.
+    # ⚠ Los DOS mueven el central, asi que esto NO es una comparacion de una
+    #   sola variable contra 104S2. Se lee contra predictive_105T1.
+    "predictive_106T2": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_106T2.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — run 106T2, 105T1 + rechazo de candidatos Legendre imposibles (|a_l| > 1) y sintesis DATA-ERR de Gkatis 27673002",
+        "systematic_block_col": None,
+    },
+    "predictive_104S3": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_104S3.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — run 104S3, malla 1 etapa + arreglo singleton, k=3 c=2 (6 888 params), fina + cruzado a_0 (carry)",
+        "systematic_block_col": None,
+    },
+    # ── CINTA B-SPLINE v3 (2-sep-2026): la via de ajuste directo, no el pipeline ──
+    # MF4 MT2 = a_1..a_6(E) del ajuste B-spline plegado (receta v3 de la Fase W:
+    # eficiencias por detector contra el consenso de terceros, escala de energia
+    # de Kinney por detector, Cierjacks multiplicativo), 631 puntos a 5 keV en
+    # 0,850-4,000 MeV, lambda por validacion fina (1 030 edf). MF34 MT2 = 63 bins
+    # x 6 ordenes (50 keV), sandwich + nuisances de la receta, LTT 1.
+    # MF3 y MF33 son los del HOST (JEFF-4.0): la cinta no lleva magnitud propia.
+    # SIN cruzado a_0 (KIKA_MF33_MF34_CROSS_FROM_FILE=0 en el brazo B1).
+    # ⚠ NO es comparable de una sola variable con 104S2/106T2: cambia el metodo
+    # entero (ajuste directo contra mezcla AIC + MC). Se lee contra JEFF/JENDL
+    # dentro de su propio informe, y contra 106T2 solo como "que via va mejor".
+    # Cinta: /share_snc/snc/JuanMonleon/splines/deliverable/26-Fe-56g_bspline_v3.endf
+    # Origen: kika-workspace/myworkspace/chi2/bspline_window/w16_write_tape.py
+    "predictive_bspline_v3": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_bspline_v3.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — cinta B-spline v3: MF4+MF34 del ajuste plegado (1 030 edf, 63x6 a 50 keV), MF3/MF33 del host JEFF, sin cruzado",
+        "systematic_block_col": None,
+    },
+    # ── CINTA B-SPLINE v3, MF34 SOLO ESTADISTICA (2-sep noche) ───────────────
+    # MISMO MF4 que predictive_bspline_v3; la MF34 es solo el sandwich a lambda
+    # fija, sin los 27 terminos nuisance (eficiencias por detector, escala de
+    # energia de Kinney, Cierjacks aditivo/multiplicativo). Pregunta que responde:
+    # el V4 de bspline_v3 (1,06; Kinney 0,24, Cierjacks 0,18 con V2 79 y 27) es
+    # bueno porque el central esta bien, o porque los modos nuisance de rango bajo
+    # y totalmente correlados en E apuntan justo hacia donde la cinta se aparta de
+    # Kinney y Cierjacks (que es de donde salieron)? Se lee CONTRA
+    # predictive_bspline_v3 y contra nada mas: si Kinney/Cierjacks V4 se quedan
+    # cerca de 0,3 el central aguanta; si suben a varios, los modos hacian el trabajo.
+    "predictive_bspline_v3_statonly": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_bspline_v3_statonly.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — cinta B-spline v3 con MF34 solo estadistica (sandwich, sin nuisances); mismo MF4 que bspline_v3, MF3/MF33 del host JEFF, sin cruzado",
+        "systematic_block_col": None,
+    },
+    # ── CINTA B-SPLINE v4 (3-sep-2026): nivel libre, plan_revision §9 ─────────
+    # MF4 MT2 = a_1..a_6 = beta_l / m del ajuste con el nivel m(E) libre (M2, lambda_m =
+    # 0,01 lambda_a, ancla de sigma_tot de Cornelis 1995, tau_e recalibrado una vez), 631
+    # puntos a 5 keV. MF34 MT2 = bloques (l,l') del sandwich CONJUNTO (m, a_l) + nuisances
+    # (eficiencias, escala de energia, Cierjacks, variantes de P1 y la eleccion de tau),
+    # 63 bins x 6 ordenes. MF33 MT2 = bloque (0,0) del mismo sandwich, RELATIVO al nivel
+    # ajustado y aplicado sobre el MF3 del host (inconsistencia declarada, medida:
+    # m/sigma_JEFF por bin en el manifiesto). Cruzado = bloques (0,l) como fila L=0 de MF34
+    # (LTT 3), la convencion de 104S2: CHICROSS=1 en el brazo B3.
+    # Se lee contra bspline_v3 (B1): mismo corpus, misma receta de observacion; cambia el
+    # nivel (libre) y la covarianza (conjunta). Y contra 106T2, JEFF y JENDL como B1.
+    "predictive_bspline_v5_tau1": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_bspline_v5_tau1.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — cinta B-spline v4 (nivel libre, tau recalibrado): MF4+MF34+MF33+cruzado del sandwich conjunto; MF3 del host JEFF",
+        "systematic_block_col": None,
+    },
+    # La MISMA receta SIN corregir a Kinney (LOEO la prefiere un 11 %; los dos finos dejan de ser
+    # compatibles): se lee contra predictive_bspline_v5_tau1; V2 es el estadistico libre de banda.
+    "predictive_bspline_v5_tau1_nokinney": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_bspline_v5_tau1_nokinney.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — cinta B-spline v5 sin las correcciones de Kinney (misma lambda, mismos nuisances)",
+        "systematic_block_col": None,
+    },
+    # La MISMA cinta sin cruzado (MF34 LTT 1, MF33 propia): se lee contra predictive_bspline_v5_tau1.
+    "predictive_bspline_v5_tau1_noxs": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_bspline_v5_tau1_noxs.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — cinta B-spline v4 sin cruzado (misma MF4/MF34/MF33, bloques a_0 a cero)",
+        "systematic_block_col": None,
+    },
+    # 3-sep (manana): las mismas tres cintas con la MF34 en una malla POR ORDEN (el DP m2k10c3 de la
+    # pipeline anterior sobre la rejilla de 5 keV del ajuste; colapso 'max' + margen plegado, la barra
+    # de conservadurismo de 104S2). Misma MF4 bit a bit: se leen contra v5_tau1 / _noxs / _nokinney.
+    "predictive_bspline_v5_tau1_perorder": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_bspline_v5_tau1_perorder.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — cinta B-spline v5 con MF34 en malla por orden (DP m2k10c3, colapso conservador); MF33 + cruzado",
+        "systematic_block_col": None,
+    },
+    "predictive_bspline_v5_tau1_perorder_noxs": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_bspline_v5_tau1_perorder_noxs.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — cinta B-spline v5 malla por orden, sin cruzado (bloques a_0 a cero)",
+        "systematic_block_col": None,
+    },
+    # 3-sep (mediodia): B6 con el ancla del borde de 4 MeV (estudio §18.19). Se lee contra B6.
+    "predictive_bspline_v5_tau1_edge_perorder": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_bspline_v5_tau1_edge_perorder.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — cinta B-spline v5 malla por orden, con ancla del anfitrión en 4 MeV",
+        "systematic_block_col": None,
+    },
+    "predictive_bspline_v5_tau1_nokinney_perorder": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_bspline_v5_tau1_nokinney_perorder.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — cinta B-spline v5 malla por orden, sin las correcciones de Kinney",
+        "systematic_block_col": None,
+    },
+    # ── 4-sep: la base de datos CORREGIDA (Juan: «si esos puntos deben corregirse, la comparativa
+    # debería hacerse con los puntos corregidos; si no, V2 claro que sale peor»). El precompute con
+    # KIKA_EXFOR_CORRECTIONS divide los puntos de Kinney y Cierjacks por su eficiencia de detector y
+    # pliega cada librería a la energía reescalada de cada detector de Kinney (la MISMA corrección para
+    # JEFF, JENDL y This_work: variable única). Cada entrada `_corr` se lee contra su gemela cruda.
+    "predictive_bspline_v5_tau1_edge_perorder_corr": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_bspline_v5_tau1_edge_perorder_corr.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — cinta B-spline v5 (por orden, ancla del borde) contra la base EXFOR CORREGIDA (eficiencias por detector y escala de energía de Kinney, aplicadas a las tres evaluaciones)",
+        "systematic_block_col": None,
+    },
+    "predictive_106T2_corr": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_106T2_corr.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — pipeline por bins 106T2 contra la base EXFOR CORREGIDA (mismas correcciones que _bspline_*_corr; se lee contra predictive_106T2)",
+        "systematic_block_col": None,
+    },
+    # 4-sep: la cinta con la malla del NIVEL decidida por el DP (W16_LEVEL_MESH=dp, sufijo _lvdp) en vez
+    # de los 50 keV heredados de v3. Misma MF4 y MF34 que edge_perorder: se lee contra ella (cruda) y
+    # contra su gemela corregida.
+    "predictive_bspline_v5_tau1_edge_perorder_lvdp": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_bspline_v5_tau1_edge_perorder_lvdp.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — cinta B-spline v5 (por orden, ancla del borde) con la MF33 en la malla del DP (misma regla que los órdenes)",
+        "systematic_block_col": None,
+    },
+    "predictive_bspline_v5_tau1_edge_perorder_lvdp_corr": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_bspline_v5_tau1_edge_perorder_lvdp_corr.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — cinta B-spline v5 (por orden, ancla del borde, MF33 en malla del DP) contra la base EXFOR CORREGIDA",
+        "systematic_block_col": None,
+    },
+    # ── 6-sep: la cinta v6 SIN host (sin ancla de sigma_tot ni de borde, ventana derivada de los datos
+    # 0,820-4,035 MeV, nivel/modos/correcciones por iteración de punto fijo en 5 pasadas, regla de malla
+    # m2k10c3 medida). B11 crudo, C11 corregido con SU tabla (w18_v6_x5_efficiencies.csv: las eficiencias
+    # y la escala de Kinney de la v6 no son las de la v5). C11 se lee contra B11; B11/C11 contra
+    # B10/C10 (la v5 con la misma malla de nivel).
+    "predictive_bspline_v6_x5_perorder_m2_c3_lvdp": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_bspline_v6_x5_perorder_m2_c3_lvdp.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — cinta B-spline v6 sin host (punto fijo x5, ventana derivada, por orden m2k10c3, MF33 en malla del DP)",
+        "systematic_block_col": None,
+    },
+    "predictive_bspline_v6_x5_perorder_m2_c3_lvdp_corr": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_bspline_v6_x5_perorder_m2_c3_lvdp_corr.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — cinta B-spline v6 sin host contra la base EXFOR CORREGIDA con las eficiencias de la propia v6",
+        "systematic_block_col": None,
+    },
+    # ── 6-sep (noche): la MISMA cinta v6 con el término `level_vs_host` en la MF33 (w16 docstring (vi)): la
+    # diferencia entre el nivel ajustado y el MT2 del host que embarca la cinta, suavizados a 100 keV, como
+    # término totalmente correlado del nivel (MF4, MF34 y cruzados iguales salvo la malla del nivel que
+    # re-decide el DP). Diagnóstico de B11: V1/V3/centro iguales que v5 y V4 2,08 → 3,20 porque la MF33 de v6
+    # perdió el modo común (nivel promedio 2,2 % contra +6,5 % de diferencia con el host). B12 crudo, C12
+    # corregido (tabla v6). Se leen contra B11/C11 y contra B10/C10.
+    "predictive_bspline_v6_x5_perorder_m2_c3_lvdp_lh": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_bspline_v6_x5_perorder_m2_c3_lvdp_lh.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — cinta B-spline v6 sin host, MF33 con el término nivel-ajustado contra MT2 del host (level_vs_host)",
+        "systematic_block_col": None,
+    },
+    "predictive_bspline_v6_x5_perorder_m2_c3_lvdp_lh_corr": {
+        "parquet":    "/share_snc/snc/JuanMonleon/chi2/chi2_data_predictive_bspline_v6_x5_perorder_m2_c3_lvdp_lh_corr.parquet",
+        "report_dir": "/share_snc/snc/JuanMonleon/CHI_Figures/chi2_predictive",
+        "title":      "χ² — cinta B-spline v6 sin host con level_vs_host, contra la base EXFOR CORREGIDA (eficiencias de la v6)",
+        "systematic_block_col": None,
+    },
     # ── RUN 97: una malla por orden Legendre (roadmap §10.8) ────────────────
     #
     # Candidata frente a `predictive_91_cross`, la misma base contra la que se
