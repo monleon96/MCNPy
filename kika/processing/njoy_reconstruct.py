@@ -105,7 +105,57 @@ class NjoyReconstructError(RuntimeError):
         self.stderr_tail = stderr_tail
 
 
+class NjoyDecimalLocaleReconstructError(NjoyReconstructError):
+    """The reconstruction gave up because NJOY kept misreading its input.
+
+    A :class:`NjoyReconstructError` so every existing caller keeps catching it,
+    with its own type so the app can single this cause out and say something
+    useful instead of quoting NJOY's misleading complaint about the file.
+
+    The detection itself lives in :mod:`kika.njoy.locale_guard`, which this
+    module imports inside functions rather than at module scope: importing
+    ``kika.njoy`` runs its ``__init__`` and so pulls ``kika.endf`` onto
+    ``kika.processing``'s import path, which is exactly the cycle the
+    deferred ``read_endf`` import above exists to avoid.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        detail: str = "",
+        returncode: Optional[int] = None,
+        stderr_tail: Optional[str] = None,
+    ):
+        super().__init__(message, returncode=returncode, stderr_tail=stderr_tail)
+        self.detail = detail
+
+
 _MAX_TOLERANCE = 0.1
+
+_MAX_LOCALE_ATTEMPTS = 8
+"""How many times to re-run NJOY when it misread the deck we gave it.
+
+The corruption is per run, so re-running is what fixes it.  At the 6-in-10 rate
+measured on the binary this was first seen with, five attempts still leave 8 %
+of reconstructions failing and eight leave 1.7 %; at 3 in 10 both are already
+negligible.  A misreading run dies in about a second, so attempts that are
+needed are cheap and attempts that are not never happen.
+
+No number rescues a binary that misreads *every* run -- one of the three
+measured did (see :mod:`kika.njoy.locale_guard`).  That case ends in
+:class:`NjoyDecimalLocaleReconstructError`, which is the right outcome: a clear
+reason to change the binary, and never a PENDF built from wrong numbers.
+"""
+
+
+def _reconr_params(tolerance: float) -> Tuple[float, float, float]:
+    """The three reals on reconr's card 4: ``err``, ``errmax``, ``errint``.
+
+    Shared by the deck builder and by the check that reads them back out of
+    NJOY's listing, so the two can never drift apart.
+    """
+    return tolerance, tolerance * 10.0, tolerance * 5.0e-5
 
 
 def _tolerance_fallback_sequence(initial: float) -> List[float]:
@@ -144,9 +194,10 @@ def _build_reconr_input(mat: int, tolerance: float) -> str:
        -21  binary PENDF        (reconr output)
         22  ASCII PENDF         (final output for our reader)
     """
-    err = f"{tolerance:.4e}"
-    errmax = f"{tolerance * 10.0:.4e}"
-    errint = f"{tolerance * 5.0e-5:.4e}"  # ~err/20000 per NJOY default
+    err_v, errmax_v, errint_v = _reconr_params(tolerance)
+    err = f"{err_v:.4e}"
+    errmax = f"{errmax_v:.4e}"
+    errint = f"{errint_v:.4e}"  # ~err/20000 per NJOY default
     return "\n".join(
         [
             "moder",
@@ -254,51 +305,79 @@ def njoy_reconstruct_stream(
             )
         mat = int(endf.mat)
 
+    # Deferred like every other kika.njoy import in this module; see
+    # NjoyDecimalLocaleReconstructError for why.
+    from kika.njoy.locale_guard import NjoyDecimalLocaleError, locale_error_message
+
     tolerances = _tolerance_fallback_sequence(tolerance)
     last_err: Optional[NjoyReconstructError] = None
 
     for idx, tol in enumerate(tolerances):
         log_tail = ""
-        try:
-            for event in _run_reconr_once_stream(
-                endf_path=endf_path,
-                njoy_executable=njoy_executable,
-                mat=mat,
-                tolerance=tol,
-                timeout_s=timeout_s,
-                keep_workdir=keep_workdir,
-            ):
-                if event[0] == "log":
-                    log_tail = (log_tail + event[1])[-4000:]
-                    yield event
-                elif event[0] == "result":
-                    if tol != tolerance:
-                        yield (
-                            "warning",
-                            f"NJOY reconr required loosened tolerance "
-                            f"{tol:g} (requested {tolerance:g}).",
-                        )
-                    yield event
-                    return
-                else:
-                    # Forward any other event kinds (e.g. "pendf_path",
-                    # "warning") so downstream consumers can react.  The
-                    # "pendf_path" event, in particular, must reach the app
-                    # *before* the inner generator returns — its value is
-                    # only valid while the TemporaryDirectory is still open.
-                    yield event
-        except NjoyReconstructError as e:
-            last_err = e
-            tail = (e.stderr_tail or log_tail or "").lower()
-            if "ill-behaved threshold" in tail and idx < len(tolerances) - 1:
-                next_tol = tolerances[idx + 1]
-                yield (
-                    "warning",
-                    f"NJOY reconr ill-behaved threshold at tol={tol:g}; "
-                    f"retrying at tol={next_tol:g}.",
-                )
-                continue
-            raise
+        locale_attempt = 0
+        while True:
+            locale_attempt += 1
+            try:
+                for event in _run_reconr_once_stream(
+                    endf_path=endf_path,
+                    njoy_executable=njoy_executable,
+                    mat=mat,
+                    tolerance=tol,
+                    timeout_s=timeout_s,
+                    keep_workdir=keep_workdir,
+                ):
+                    if event[0] == "log":
+                        log_tail = (log_tail + event[1])[-4000:]
+                        yield event
+                    elif event[0] == "result":
+                        if tol != tolerance:
+                            yield (
+                                "warning",
+                                f"NJOY reconr required loosened tolerance "
+                                f"{tol:g} (requested {tolerance:g}).",
+                            )
+                        yield event
+                        return
+                    else:
+                        # Forward any other event kinds (e.g. "pendf_path",
+                        # "warning") so downstream consumers can react.  The
+                        # "pendf_path" event, in particular, must reach the app
+                        # *before* the inner generator returns — its value is
+                        # only valid while the TemporaryDirectory is still open.
+                        yield event
+                break
+            except NjoyDecimalLocaleError as e:
+                # The run read something other than what we wrote, so whatever
+                # it produced says nothing about this file or this tolerance.
+                # Run it again: the fault is per run, not per binary.
+                if locale_attempt < _MAX_LOCALE_ATTEMPTS:
+                    yield (
+                        "warning",
+                        f"NJOY misread its own input ({e.detail}); "
+                        f"re-running ({locale_attempt + 1}/"
+                        f"{_MAX_LOCALE_ATTEMPTS}).",
+                    )
+                    continue
+                raise NjoyDecimalLocaleReconstructError(
+                    locale_error_message(e.detail, attempts=_MAX_LOCALE_ATTEMPTS),
+                    detail=e.detail,
+                    stderr_tail=log_tail[-2000:],
+                ) from e
+            except NjoyReconstructError as e:
+                # Only reached once the run is known to have read its input
+                # correctly, so an ill-behaved threshold here is the file's
+                # own and loosening the tolerance is the right answer.
+                last_err = e
+                tail = (e.stderr_tail or log_tail or "").lower()
+                if "ill-behaved threshold" in tail and idx < len(tolerances) - 1:
+                    next_tol = tolerances[idx + 1]
+                    yield (
+                        "warning",
+                        f"NJOY reconr ill-behaved threshold at tol={tol:g}; "
+                        f"retrying at tol={next_tol:g}.",
+                    )
+                    break
+                raise
 
     assert last_err is not None
     raise last_err
@@ -327,6 +406,7 @@ def _run_reconr_once_stream(
         workdir = Path(td)
         shutil.copy2(endf_path, workdir / "tape20")
 
+        err_v, errmax_v, errint_v = _reconr_params(tolerance)
         input_text = _build_reconr_input(mat, tolerance)
         (workdir / "njoy.inp").write_text(input_text, encoding="utf-8")
 
@@ -422,6 +502,26 @@ def _run_reconr_once_stream(
 
         log_text = "".join(collected)
         (workdir / "njoy.out").write_text(log_text, encoding="utf-8")
+
+        # Did NJOY read the numbers we sent it?  This has to come before every
+        # other verdict below: a misreading run usually dies inside lunion
+        # blaming the evaluation, and -- the case worth guarding against -- it
+        # can also exit 0 and leave a PENDF built from numbers nobody asked
+        # for.  Checking here means a corrupt tape never reaches the caller.
+        from kika.njoy.locale_guard import (
+            NjoyDecimalLocaleError,
+            check_reconr_listing,
+            read_listing,
+        )
+
+        listing = read_listing(workdir)
+        locale_check = check_reconr_listing(
+            listing, err=err_v, errmax=errmax_v, errint=errint_v
+        )
+        if locale_check.corrupted:
+            raise NjoyDecimalLocaleError(
+                "NJOY misread its own input deck", detail=locale_check.detail
+            )
 
         if timed_out:
             raise NjoyReconstructError(

@@ -5,6 +5,13 @@ import tempfile
 from pathlib import Path
 from textwrap import dedent
 from .launcher import build_njoy_command
+from .locale_guard import (
+    LISTING_FILENAME,
+    NjoyDecimalLocaleError,
+    check_run,
+    locale_error_message,
+    read_listing,
+)
 from .templates import NJOY_INPUT_TEMPLATE, NJOY_INPUT_TEMPLATE_WITH_PENDF
 from kika.endf.read_endf import read_endf
 from kika._constants import K_TO_SUFFIX, NDLIBRARY_TO_SUFFIX
@@ -136,6 +143,31 @@ def _render_njoy_input(mat: int, T: float, title: str, suff: str = None,
     return dedent(template).format(mat=mat, T=T, title=title, suff=suff)
 
 # ---- 2) Runner ----
+def _guard_decimal_locale(workdir: Path, deck: str, njoy_files_dir: Path,
+                          base_filename: str) -> str | None:
+    """Fail the run if NJOY read numbers other than the ones in the deck.
+
+    An ACE file built from a misread deck looks perfectly normal and is
+    wrong, which is the one outcome worth an exception.  Runs whose deck has
+    no ``reconr`` card, or whose listing we cannot read, pass through
+    unchecked -- see :mod:`kika.njoy.locale_guard`.
+
+    Also keeps NJOY's own listing, which carries the error context that its
+    stdout does not.
+    """
+    listing = read_listing(workdir)
+    listing_file = None
+    if listing is not None:
+        listing_file = njoy_files_dir / f"{base_filename}.{LISTING_FILENAME}"
+        listing_file.write_text(listing, encoding="utf-8")
+    check = check_run(deck, listing)
+    if check.corrupted:
+        raise NjoyDecimalLocaleError(
+            locale_error_message(check.detail, attempts=1), detail=check.detail
+        )
+    return str(listing_file) if listing_file else None
+
+
 def run_njoy(
     njoy_exe: str,
     endf_path: str | Path,
@@ -284,6 +316,10 @@ def run_njoy(
         output_file = njoy_files_dir / f"{base_filename}.output"
         output_file.write_bytes(result.stdout)
         results["njoy_output"] = str(output_file)
+
+        results["njoy_listing"] = _guard_decimal_locale(
+            workdir, njoy_input, njoy_files_dir, base_filename
+        )
         
         # Process tape files (second ACER pass writes final ACE/xsdir)
         tape43 = workdir / "tape43"  # ACE file (final, from second ACER pass)
@@ -442,6 +478,10 @@ def run_njoy_with_pendf(
         output_file = njoy_files_dir / f"{base_filename}.output"
         output_file.write_bytes(result.stdout)
         results["njoy_output"] = str(output_file)
+
+        results["njoy_listing"] = _guard_decimal_locale(
+            workdir, njoy_input, njoy_files_dir, base_filename
+        )
 
         tape43 = workdir / "tape43"
         tape44 = workdir / "tape44"
