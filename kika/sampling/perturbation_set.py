@@ -1,22 +1,33 @@
-"""What a drawn perturbation *is*, written down once.
+"""What a drawn perturbation *is*, written down once -- for every quantity.
 
 A draw produces a flat vector of factors. On its own that vector says nothing:
-which reaction each stretch of it belongs to, what energies it is stated on,
-whether it multiplies or adds, and what happens at a bin edge are all carried
-somewhere else -- in the shape of the code that made it and the shape of the
-code that consumes it, which is how a perturbation comes to mean two different
-things at its two ends.
+which reaction each stretch of it belongs to, which *quantity* of that reaction,
+what energies it is stated on, whether it multiplies or adds, and what happens
+at a bin edge are all carried somewhere else -- in the shape of the code that
+made it and the shape of the code that consumes it, which is how a perturbation
+comes to mean two different things at its two ends.
 
 :class:`PerturbationSet` is that meaning as data. It sits in a run directory
 beside the :class:`~kika.cov.conditioning.ConditioningPlan`, and between them
 they say everything that was done to a covariance and everything that was drawn
 from it.
 
-**Its index already exists.** :func:`kika.sampling.mf33_sampling.loadCrossSectionBlocks`
-returns ``{key: {pairs, stride, grids, widths, dimension}}`` -- the ``*_index``
-this repository has always passed around, only as data rather than as a
-convention. What this class adds on top is the part that was never written
-down anywhere: the semantics.
+**One realisation, not one covariance.** A request may cover cross sections,
+angular distributions and multiplicities at once, and
+:mod:`kika.sampling.joint_blocks` decides which of them are drawn together and
+which apart. What comes out of that is several blocks and therefore several
+draws -- but *one* realisation of the evaluation, and it has to be applied and
+written as one. So this object holds every block of one realisation, keyed by
+:class:`~kika.sampling.joint_blocks.ComponentKey`, and records which components
+were drawn together in :attr:`groups`, because "these two were independent" is a
+claim about the evaluation that a file has to carry if anyone is to check it
+later.
+
+**Its index already exists.** :func:`kika.sampling.joint_blocks.requestIndex`
+returns ``{blockKey: {components, stride, grids, widths, dimension, ...}}`` --
+the ``*_index`` this repository has always passed around, only as data rather
+than as a convention. What this class adds on top is the part that was never
+written down anywhere: the semantics.
 
 **Why the semantics is not a free-form string.** ``"relative"`` versus
 ``"absolute"`` is the difference between multiplying a cross section and adding
@@ -32,11 +43,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Hashable, Mapping, Optional, Sequence, Tuple
+from typing import (Any, Dict, Hashable, List, Mapping, Optional, Sequence,
+                    Tuple)
 
 import numpy as np
 
-__all__ = ["PerturbationSet", "SEMANTICS"]
+from kika.sampling.joint_blocks import ComponentKey
+
+__all__ = ["PerturbationSet", "SEMANTICS", "EDGE_RULE"]
 
 #: The ways a factor block can act on the quantity it perturbs. A closed set,
 #: because "the file says ``relative`` and the code assumed ``absolute``" is a
@@ -44,37 +58,39 @@ __all__ = ["PerturbationSet", "SEMANTICS"]
 SEMANTICS = ("multiplicative-relative",)
 
 #: Which discontinuity convention the factors were drawn to be applied under.
-#: Named rather than implied: a piecewise-constant block is silent about its
-#: own steps, so the rule lives in the applier and the set records which one.
+#: Named rather than implied: a piecewise-constant block is silent about its own
+#: steps, so the rule lives in the applier and the set records which one.
 EDGE_RULE = "endf-step-duplicate"
 
-_FORMAT_VERSION = 1
+_FORMAT_VERSION = 2
 
 
 @dataclass(frozen=True)
 class PerturbationSet:
-    """One drawn realisation, for one covariance, over one or more reactions.
+    """One drawn realisation of an evaluation, over one or more quantities.
 
     Parameters
     ----------
     label
         The §9.3 style label this realisation will be written under --
-        ``'realization-0007'``. It is the name the perturbed form takes inside
-        a :class:`~kika.nuclear_data.model.suite.ReactionSuite`, so it belongs
-        to the perturbation and not to whoever applies it.
-    key
-        Which covariance was drawn, ``'MF33'`` or ``'MF31'``.
+        ``'realization-0007'``. It is the name the perturbed forms take inside a
+        :class:`~kika.nuclear_data.model.suite.ReactionSuite`, so it belongs to
+        the perturbation and not to whoever applies it.
     factors
-        ``MT -> one factor per bin``.
+        ``ComponentKey -> one factor per bin``.
     binEdges
-        ``MT -> the bin boundaries those factors are stated on``, one longer
-        than the factors.
+        ``ComponentKey -> the bin boundaries those factors are stated on``, one
+        longer than the factors.
+    groups
+        The components that were drawn together, one tuple per block. Two
+        components in different tuples were drawn independently, which is a
+        statement about what the evaluation correlates and is worth keeping.
     """
 
     label: str
-    key: str
-    factors: Dict[int, np.ndarray]
-    binEdges: Dict[int, np.ndarray]
+    factors: Dict[ComponentKey, np.ndarray]
+    binEdges: Dict[ComponentKey, np.ndarray]
+    groups: Tuple[Tuple[ComponentKey, ...], ...] = ()
     semantics: str = SEMANTICS[0]
     edgeRule: str = EDGE_RULE
     provenance: Dict[str, Any] = field(default_factory=dict)
@@ -88,123 +104,375 @@ class PerturbationSet:
         if set(self.factors) != set(self.binEdges):
             missing = set(self.factors) ^ set(self.binEdges)
             raise ValueError(
-                f"MT {sorted(missing)} has factors without a grid or a grid "
+                f"{sorted(missing)} has factors without a grid or a grid "
                 f"without factors; a block and its bins are one object"
             )
-        for mt, values in self.factors.items():
-            edges = self.binEdges[mt]
+        for component, values in self.factors.items():
+            edges = self.binEdges[component]
             if len(values) != len(edges) - 1:
                 raise ValueError(
-                    f"MT{mt}: {len(values)} factor(s) on {len(edges) - 1} bin(s)"
+                    f"{component.describe()}: {len(values)} factor(s) on "
+                    f"{len(edges) - 1} bin(s)"
                 )
+        grouped = {component for group in self.groups for component in group}
+        if self.groups and grouped != set(self.factors):
+            raise ValueError(
+                f"the groups cover {len(grouped)} component(s) and the factors "
+                f"{len(self.factors)}; a realisation cannot say two different "
+                f"things about what it perturbs"
+            )
 
     # ------------------------------------------------------------------
     # From a draw
     # ------------------------------------------------------------------
 
     @classmethod
-    def fromDraw(cls, factors: Sequence[float],
-                 index: Mapping[Hashable, Mapping[str, Any]], *,
+    def fromDraw(cls, drawn, index: Mapping[Hashable, Mapping[str, Any]], *,
                  label: str, provenance: Optional[Dict[str, Any]] = None
                  ) -> "PerturbationSet":
-        """Cut one realisation out of a flat factor vector.
+        """Cut one realisation out of what a draw returned.
 
-        *index* is what :func:`~kika.sampling.mf33_sampling.loadCrossSectionBlocks`
-        returned, and *factors* one row of what
-        :func:`~kika.sampling.multigroup_draw.draw_relative_factors` returned
-        against it.
+        *index* is what :func:`~kika.sampling.joint_blocks.requestIndex`
+        returned. *drawn* is either ``{blockKey: one row of factors}`` -- sample
+        *i* of what :func:`~kika.sampling.core.draw_samples` produced, which is
+        the normal case -- or, when the index has exactly one block, that row on
+        its own.
 
-        ``widths`` is read rather than assumed. Under the shipped ``global``
-        union every component is ``stride`` wide and the two are the same
-        number; under ``per-component`` they are not, and the tail of each
-        component's stride is the zero padding a uniform stride implies. Slicing
-        by ``stride`` there would hand a reaction its neighbour's padding as if
-        it were its own factors.
+        ``widths`` is read rather than assumed. Under the ``global`` union every
+        component is ``stride`` wide and the two are the same number; under
+        ``per-component`` they are not, and the tail of each component's stride
+        is the zero padding a uniform stride implies. Slicing by ``stride``
+        there would hand a component its neighbour's padding as if it were its
+        own factors -- and a factor of zero is not a small perturbation, it is a
+        deleted cross section.
         """
-        if len(index) != 1:
+        if not isinstance(drawn, Mapping):
+            if len(index) != 1:
+                raise ValueError(
+                    f"a bare factor vector needs an index of one block, got "
+                    f"{len(index)}. With several blocks the rows have to say "
+                    f"which block they came from"
+                )
+            (onlyKey,) = index
+            drawn = {onlyKey: drawn}
+
+        missing = set(index) - set(drawn)
+        if missing:
             raise ValueError(
-                f"expected one covariance key, got {sorted(index)}. A "
-                f"PerturbationSet is one draw of one covariance"
+                f"{len(missing)} block(s) of the index were not drawn: a "
+                f"realisation that silently omits a block is perturbed in fewer "
+                f"places than its metadata claims"
             )
-        (indexKey, meta), = index.items()
-        pairs = list(meta["pairs"])
-        stride = int(meta["stride"])
-        widths = meta["widths"]
-        grids = meta["grids"]
 
-        values = np.asarray(factors, dtype=float).ravel()
-        expected = len(pairs) * stride
-        if values.size != expected:
+        factors: Dict[ComponentKey, np.ndarray] = {}
+        binEdges: Dict[ComponentKey, np.ndarray] = {}
+        groups: List[Tuple[ComponentKey, ...]] = []
+        for blockKey, meta in index.items():
+            components = list(meta.get("components") or meta.get("pairs")
+                              or meta.get("triplets"))
+            stride = int(meta["stride"])
+            widths, grids = meta["widths"], meta["grids"]
+            values = np.asarray(drawn[blockKey], dtype=float).ravel()
+            expected = len(components) * stride
+            if values.size != expected:
+                raise ValueError(
+                    f"block {blockKey}: {values.size} factor(s) for "
+                    f"{len(components)} component(s) x stride {stride} = "
+                    f"{expected}"
+                )
+            group: List[ComponentKey] = []
+            for position, component in enumerate(components):
+                component = cls._asComponentKey(component, blockKey)
+                lookup = components[position]
+                width = int(widths[lookup] if isinstance(widths, Mapping)
+                            else widths[position])
+                start = position * stride
+                factors[component] = values[start:start + width].copy()
+                grid = grids[lookup] if isinstance(grids, Mapping) else grids[position]
+                binEdges[component] = np.asarray(grid, dtype=float)
+                group.append(component)
+            groups.append(tuple(group))
+
+        return cls(label=label, factors=factors, binEdges=binEdges,
+                   groups=tuple(groups), provenance=dict(provenance or {}))
+
+    @staticmethod
+    def _asComponentKey(component, blockKey) -> ComponentKey:
+        """A component of any of the three index shapes, as one key.
+
+        ``requestIndex`` already gives :class:`ComponentKey`. The two
+        single-quantity indices predate it and give ``(ZA, MT)`` for MF33/MF31
+        and ``(ZA, MT, L)`` for MF34, so the MF has to come from the block key,
+        which is where those two put it.
+        """
+        if isinstance(component, ComponentKey):
+            return component
+        label = blockKey[1] if isinstance(blockKey, tuple) and len(blockKey) > 1 else ""
+        mf = int(str(label).replace("MF", "")) if str(label).startswith("MF") else 0
+        if len(component) == 3:
+            return ComponentKey(int(component[0]), 34, int(component[1]),
+                                int(component[2]))
+        if not mf:
             raise ValueError(
-                f"{values.size} factor(s) for an index of {len(pairs)} "
-                f"component(s) x stride {stride} = {expected}"
+                f"block key {blockKey!r} does not name an MF, so the component "
+                f"{component!r} cannot be placed. Use requestIndex, whose "
+                f"components carry it"
             )
+        return ComponentKey(int(component[0]), mf, int(component[1]), 0)
 
-        blockFactors: Dict[int, np.ndarray] = {}
-        blockEdges: Dict[int, np.ndarray] = {}
-        for position, pair in enumerate(pairs):
-            mt = int(pair[-1])
-            width = int(widths[pair] if isinstance(widths, Mapping) else widths[position])
-            start = position * stride
-            blockFactors[mt] = values[start:start + width].copy()
-            grid = grids[pair] if isinstance(grids, Mapping) else grids[position]
-            blockEdges[mt] = np.asarray(grid, dtype=float)
+    # ------------------------------------------------------------------
+    # What is in it
+    # ------------------------------------------------------------------
 
-        return cls(
-            label=label,
-            key=str(indexKey[1]) if isinstance(indexKey, tuple) else str(indexKey),
-            factors=blockFactors,
-            binEdges=blockEdges,
-            provenance=dict(provenance or {}),
-        )
+    def components(self) -> Tuple[ComponentKey, ...]:
+        """Every component this set perturbs, sorted."""
+        return tuple(sorted(self.factors))
+
+    def reactions(self) -> Tuple[int, ...]:
+        """The MTs this set perturbs, ascending, whatever the quantity."""
+        return tuple(sorted({component.mt for component in self.factors}))
+
+    def quantities(self) -> Tuple[str, ...]:
+        """The model nodes this set touches, e.g. ``('crossSection',)``."""
+        return tuple(sorted({component.quantity for component in self.factors}))
+
+    def block(self, mt: int, *, mf: int = 33, order: int = 0, za: Optional[int] = None):
+        """``(factors, binEdges)`` for one component, addressed the readable way.
+
+        A convenience for callers and tests that know which reaction they mean
+        but not which ZA the tape stated it under.
+        """
+        matches = [component for component in self.factors
+                   if component.mt == mt and component.mf == mf
+                   and component.index == order
+                   and (za is None or component.za == za)]
+        if not matches:
+            raise KeyError(
+                f"this PerturbationSet perturbs "
+                f"{[c.describe() for c in self.components()]}, not "
+                f"MF{mf}/MT{mt} index {order}"
+            )
+        if len(matches) > 1:
+            raise KeyError(
+                f"{len(matches)} components match MF{mf}/MT{mt} index {order} "
+                f"(different ZA); name the ZA"
+            )
+        return self.factors[matches[0]], self.binEdges[matches[0]]
+
+    def describe(self) -> str:
+        """One line per group, saying what was drawn with what."""
+        lines = [f"{self.label}: {len(self.factors)} component(s) in "
+                 f"{len(self.groups) or 1} draw(s), {', '.join(self.quantities())}"]
+        for number, group in enumerate(self.groups):
+            lines.append(f"  [{number}] " + ", ".join(c.describe() for c in group))
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Applying
     # ------------------------------------------------------------------
 
-    def reactions(self) -> Tuple[int, ...]:
-        """The MTs this set perturbs, ascending."""
-        return tuple(sorted(self.factors))
-
-    def apply(self, function1d, mt: int):
-        """Perturb *function1d* with this set's block for *mt*.
+    def apply(self, function1d, component: ComponentKey):
+        """Perturb *function1d* with this set's block for *component*.
 
         Returns ``(perturbed, diagnostics)``, the pair
         :func:`~kika.nuclear_data.model.perturbation.applyFactors` returns.
-        Raises :class:`KeyError` for an MT this set does not carry, rather than
-        returning the function unchanged: "no perturbation for this reaction"
+        Raises :class:`KeyError` for a component this set does not carry, rather
+        than returning the function unchanged: "no perturbation for this one"
         and "a perturbation of one" are different answers, and silently
         conflating them is how an ensemble comes to be narrower than it claims.
         """
         from kika.nuclear_data.model.perturbation import applyFactors
 
-        if mt not in self.factors:
+        if component not in self.factors:
             raise KeyError(
-                f"this PerturbationSet perturbs MT {list(self.reactions())}, "
-                f"not MT{mt}"
+                f"this PerturbationSet perturbs "
+                f"{[c.describe() for c in self.components()]}, not "
+                f"{component.describe()}"
             )
-        return applyFactors(function1d, self.factors[mt], self.binEdges[mt])
+        return applyFactors(function1d, self.factors[component],
+                            self.binEdges[component])
 
-    def applyToSuite(self, suite) -> Dict[int, Dict[str, float]]:
-        """Put a perturbed form under :attr:`label` on every reaction it covers.
+    def _crossSectionBlocks(self) -> Dict[Tuple[int, int], ComponentKey]:
+        """Which component perturbs each reaction's ``sigma(E)``, and the refusal.
+
+        Two components can claim the same cross section: MF33's own block, and
+        MF34's Legendre order 0, which is the *magnitude* -- in MF4 ``a_0`` is
+        identically 1 and the size lives in MF3, so an L=0 covariance is a
+        statement about ``sigma(E)`` on MF34's grid. Applying both would
+        multiply the cross section twice and neither factor would be what the
+        file said.
+
+        Refused rather than reconciled. Which of the two a run wants is a
+        modelling decision -- they are two estimates of the same uncertainty on
+        two grids -- and it belongs in the request, not in an applier picking
+        one silently.
+        """
+        claims: Dict[Tuple[int, int], List[ComponentKey]] = {}
+        for component in self.components():
+            isMagnitude = component.mf == 34 and component.index == 0
+            if component.mf == 33 or isMagnitude:
+                claims.setdefault((component.za, component.mt), []).append(component)
+
+        resolved = {}
+        for reaction, components in claims.items():
+            if len(components) > 1:
+                raise ValueError(
+                    f"ZA {reaction[0]} MT{reaction[1]}: "
+                    f"{[c.describe() for c in components]} all perturb the same "
+                    f"cross section -- MF33 states its uncertainty and MF34's "
+                    f"L=0 states the magnitude's, and applying both multiplies "
+                    f"sigma twice. Ask for one of them"
+                )
+            resolved[reaction] = components[0]
+        return resolved
+
+    def applyToSuite(self, suite) -> Dict[ComponentKey, Dict[str, Any]]:
+        """Put a perturbed form under :attr:`label` on every node this set covers.
 
         The evaluated form is left where it is and the realisation goes beside
         it, which is what §9.1's multi-form container and §9.3's ``realization``
         style are for -- and what ``encodeMF3MT(..., label=)`` then writes out.
-        Reactions this set does not cover are not touched and not reported as
+        Nodes this set does not cover are not touched and not reported as
         perturbed.
+
+        Three dispatches, by what the component *is* rather than by which file
+        it came from:
+
+        * ``crossSection`` -- MF33, and MF34's L=0 magnitude, which lands on the
+          same node. See :meth:`_crossSectionBlocks` for why both at once is
+          refused.
+        * ``angularDistribution`` -- MF34's L>=1, all orders of one reaction in
+          one call, because a Legendre vector is perturbed once and not once per
+          order.
+        * ``multiplicity`` -- MF31, which has no labelled path yet. Raised
+          rather than skipped, because a nu-bar silently left unperturbed inside
+          a realisation that claims to carry it is exactly the failure this
+          class exists to prevent.
         """
         from kika.nuclear_data.model import EVAL_LABEL
 
-        diagnostics: Dict[int, Dict[str, float]] = {}
-        for mt in self.reactions():
+        diagnostics: Dict[ComponentKey, Dict[str, Any]] = {}
+
+        multiplicities = [c for c in self.components() if c.mf == 31]
+        if multiplicities:
+            raise NotImplementedError(
+                f"{[c.describe() for c in multiplicities]}: a multiplicity has "
+                f"no labelled form to put a realisation under -- "
+                f"`Multiplicity` is not a `Component` (one form in the whole "
+                f"library, §17.3), so either it becomes one or a nu-bar "
+                f"realisation replaces the form on a copied node. That is a "
+                f"model decision, recorded as M5 in "
+                f"docs/library/perturbation_model_roadmap.md and D29 in "
+                f"library-gaps.md, and it is not an applier's to take"
+            )
+
+        # `reactionByENDF_MT` raises for an MT the suite does not have, and
+        # that is what should happen: a request named the reaction, so its
+        # absence is a mistake in the request or a tape that does not carry it,
+        # not something to skip past. It searches `sums` too, which is where the
+        # ENDF adapter now puts MT1 and MT4.
+        for (_za, mt), component in self._crossSectionBlocks().items():
             reaction = suite.reactionByENDF_MT(mt)
-            if reaction is None:
-                continue
-            perturbed, info = self.apply(reaction.crossSection[EVAL_LABEL], mt)
-            reaction.crossSection[self.label] = perturbed
-            diagnostics[mt] = info
+            perturbed, info = self.apply(reaction.crossSection[EVAL_LABEL],
+                                         component)
+            reaction.crossSection[self.label] = self._labelled(perturbed)
+            diagnostics[component] = info
+
+        byReaction: Dict[Tuple[int, int], Dict[int, ComponentKey]] = {}
+        for component in self.components():
+            if component.mf == 34 and component.index != 0:
+                byReaction.setdefault((component.za, component.mt), {})[
+                    component.index] = component
+        for (_za, mt), orders in byReaction.items():
+            reaction = suite.reactionByENDF_MT(mt)
+            product, angular = self._angularOf(reaction, mt)
+            perturbed, info = self._applyAngular(angular, orders)
+            self._putRealisation(product, perturbed)
+            for order, component in orders.items():
+                diagnostics[component] = {
+                    "n_inserted": info["n_inserted"],
+                    **info["per_order"].get(order, {}),
+                }
         return diagnostics
+
+    def _applyAngular(self, angular, orders: Mapping[int, ComponentKey]):
+        from kika.nuclear_data.model.perturbation import applyLegendreFactors
+
+        return applyLegendreFactors(
+            angular,
+            {order: self.factors[component] for order, component in orders.items()},
+            {order: self.binEdges[component] for order, component in orders.items()},
+        )
+
+    @staticmethod
+    def _angularOf(reaction, mt: int):
+        """The product whose evaluated distribution carries Legendre coefficients.
+
+        MF34 is a covariance of *the* angular distribution of the reaction, and
+        ENDF has one per MT; §17.2.1 hangs it on a product, so the product has
+        to be found. Raises rather than guessing when a channel has two
+        candidates -- a recoil and its partner both carry an angular
+        distribution, and perturbing the wrong one is invisible.
+        """
+        from kika.nuclear_data.model import EVAL_LABEL
+
+        channel = getattr(reaction, "outputChannel", None)
+        candidates = []
+        for product in (getattr(channel, "products", None) or ()):
+            distribution = getattr(product, "distribution", None)
+            if distribution is None:
+                continue
+            form = (distribution.get(EVAL_LABEL)
+                    if hasattr(distribution, "get") else distribution)
+            if form is not None and getattr(form, "angular", None) is not None:
+                candidates.append((product, form.angular))
+        if not candidates:
+            raise ValueError(
+                f"MT{mt} has no product carrying an evaluated angular "
+                f"distribution, so an MF34 perturbation has nothing to act on"
+            )
+        if len(candidates) > 1:
+            raise ValueError(
+                f"MT{mt} has {len(candidates)} products carrying an angular "
+                f"distribution and MF34 states one covariance; which one it is "
+                f"about is not in the file, so it is not for this to guess"
+            )
+        return candidates[0]
+
+    def _labelled(self, form):
+        """*form* carrying this realisation's label as its own.
+
+        **Not a formality, and the GNDS writer is what proves it.** A §9.1
+        container keys its forms by label, and a form also carries one; the
+        applier returns a node that kept the evaluated form's, so a realisation
+        stored under ``realization-0007`` still said ``eval`` about itself.
+        ``gnds/encode.py``'s ``crossSection`` writes ``_function(element, form)``
+        and that takes the label off the *form*, so both cross sections came out
+        as ``label="eval"`` -- two forms with one label, which no reader can
+        tell apart and which the schema does not allow. The ENDF path never saw
+        it: ``encodeMF3MT(..., label=)`` looks the form up by key and writes one
+        section. So the container and the form have to agree, and this is where
+        they are made to.
+        """
+        import dataclasses
+
+        if getattr(form, "label", None) == self.label:
+            return form
+        try:
+            return dataclasses.replace(form, label=self.label)
+        except TypeError:
+            return form
+
+    def _putRealisation(self, product, angular) -> None:
+        """The perturbed distribution, beside the evaluated one, under the label."""
+        import dataclasses
+
+        from kika.nuclear_data.model import EVAL_LABEL
+
+        distribution = product.distribution
+        form = distribution[EVAL_LABEL]
+        distribution[self.label] = self._labelled(
+            dataclasses.replace(form, angular=angular))
 
     # ------------------------------------------------------------------
     # On disk
@@ -215,17 +483,20 @@ class PerturbationSet:
         return {
             "format": _FORMAT_VERSION,
             "label": self.label,
-            "key": self.key,
             "semantics": self.semantics,
             "edgeRule": self.edgeRule,
             "provenance": dict(self.provenance),
-            "blocks": {
-                str(mt): {
-                    "factors": [float(v) for v in self.factors[mt]],
-                    "binEdges": [float(e) for e in self.binEdges[mt]],
+            "groups": [[list(component) for component in group]
+                       for group in self.groups],
+            "blocks": [
+                {
+                    "component": list(component),
+                    "quantity": component.quantity,
+                    "factors": [float(v) for v in self.factors[component]],
+                    "binEdges": [float(e) for e in self.binEdges[component]],
                 }
-                for mt in self.reactions()
-            },
+                for component in self.components()
+            ],
         }
 
     @classmethod
@@ -236,18 +507,18 @@ class PerturbationSet:
                 f"perturbation set format {version}, this kika writes and reads "
                 f"{_FORMAT_VERSION}"
             )
-        blocks = data["blocks"]
-        return cls(
-            label=data["label"],
-            key=data["key"],
-            factors={int(mt): np.asarray(b["factors"], dtype=float)
-                     for mt, b in blocks.items()},
-            binEdges={int(mt): np.asarray(b["binEdges"], dtype=float)
-                      for mt, b in blocks.items()},
-            semantics=data.get("semantics", SEMANTICS[0]),
-            edgeRule=data.get("edgeRule", EDGE_RULE),
-            provenance=dict(data.get("provenance", {})),
-        )
+        factors, binEdges = {}, {}
+        for block in data["blocks"]:
+            component = ComponentKey(*(int(v) for v in block["component"]))
+            factors[component] = np.asarray(block["factors"], dtype=float)
+            binEdges[component] = np.asarray(block["binEdges"], dtype=float)
+        groups = tuple(tuple(ComponentKey(*(int(v) for v in component))
+                             for component in group)
+                       for group in data.get("groups", ()))
+        return cls(label=data["label"], factors=factors, binEdges=binEdges,
+                   groups=groups, semantics=data.get("semantics", SEMANTICS[0]),
+                   edgeRule=data.get("edgeRule", EDGE_RULE),
+                   provenance=dict(data.get("provenance", {})))
 
     def write(self, path) -> Path:
         path = Path(path)
@@ -259,5 +530,6 @@ class PerturbationSet:
         return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
     def __repr__(self) -> str:
-        return (f"PerturbationSet({self.label!r}, {self.key}, "
-                f"MT={list(self.reactions())})")
+        return (f"PerturbationSet({self.label!r}, "
+                f"{len(self.factors)} component(s), "
+                f"{'+'.join(self.quantities())})")
