@@ -5,7 +5,8 @@ import numpy as np
 
 from .base import MF4MT
 from ....endf.utils import (
-    interpolate_1d_endf, segment_int_codes, interp_energy_values, project_tabulated_to_legendre
+    auto_trim_legendre_tail, evaluate_tabulated_pdf, interpolate_1d_endf,
+    segment_int_codes, interp_energy_values, project_tabulated_to_legendre
 )
 
 
@@ -104,35 +105,77 @@ class MF4MTTabulated(MF4MT):
         out_of_range : str
             Behavior outside energy grid: 'zero' or 'hold'
         """
+        # Shared with the tabulated branch of MF4MTMixed, which needs exactly
+        # this and used to have no way to say so.  "hold" rather than the
+        # caller's out_of_range: this path feeds the Legendre projection, which
+        # has always clamped to the end tables outside the energy grid, and the
+        # public evaluator is where the choice is made properly.
+        return evaluate_tabulated_pdf(
+            mu_points,
+            E,
+            energies=self._energies,
+            cosines=self._cosines,
+            probabilities=self._probabilities,
+            angular_interp=self._angular_interpolation,
+            energy_interp=self._interpolation,
+            out_of_range="hold",
+        )
+
+    def evaluate_angular_pdf(
+        self,
+        mu,
+        energy,
+        *,
+        out_of_range: str = "zero",
+    ) -> np.ndarray:
+        r"""The stored :math:`f(\mu, E)`, read rather than reconstructed.
+
+        Overrides the base class, which would project this table onto Legendre
+        and sum the projection back.  A truncated expansion is a real loss on a
+        forward-peaked distribution -- 26 % at the peak for JEFF-4.0 U-235
+        elastic at 18 MeV with 10 orders -- and there is nothing to gain by
+        paying it when the evaluator's own points are right here.
+        """
+        mu_arr = np.atleast_1d(np.asarray(mu, dtype=float))
+        e_arr = np.atleast_1d(np.asarray(energy, dtype=float))
+        out = np.empty((e_arr.size, mu_arr.size), dtype=float)
+        for k, e in enumerate(e_arr):
+            out[k] = evaluate_tabulated_pdf(
+                mu_arr,
+                float(e),
+                energies=self._energies,
+                cosines=self._cosines,
+                probabilities=self._probabilities,
+                angular_interp=self._angular_interpolation,
+                energy_interp=self._interpolation,
+                out_of_range=out_of_range,
+            )
+        return out
+
+    def native_cosine_grid(self, energy) -> Optional[np.ndarray]:
+        """The file's own cosines at *energy*.
+
+        At a grid energy that is the row itself.  Between two, it is the union
+        of the two bracketing rows, so no point either of them resolves is
+        lost on the way to the interpolated distribution.
+        """
         energies = np.asarray(self._energies, dtype=float)
         if energies.size == 0:
-            return np.zeros_like(mu_points, dtype=float)
+            return None
 
-        # locate bracketing energies
+        E = float(energy)
         if E <= energies[0]:
-            idx0, idx1 = 0, 0
+            rows = [0]
         elif E >= energies[-1]:
-            idx0, idx1 = len(energies) - 1, len(energies) - 1
+            rows = [energies.size - 1]
         else:
-            idx1 = int(np.searchsorted(energies, E, side="right"))
-            idx0 = idx1 - 1
+            hi = int(np.searchsorted(energies, E, side="right"))
+            rows = [hi - 1, hi]
 
-        def f_at_table(i: int) -> np.ndarray:
-            mu_i = np.asarray(self._cosines[i], dtype=float)
-            f_i = np.asarray(self._probabilities[i], dtype=float)
-            ang_pairs = self._angular_interpolation[i] if (i < len(self._angular_interpolation) and self._angular_interpolation[i]) else [(len(mu_i), 2)]
-            # angular interpolation (μ) using shared utils with consistent out_of_range
-            return interpolate_1d_endf(mu_i, f_i, ang_pairs, mu_points, out_of_range="hold")
-
-        f0 = f_at_table(idx0)
-        if idx1 == idx0:
-            fE = f0
-        else:
-            f1 = f_at_table(idx1)
-            code = self._energy_panel_code_for_pair(idx1)
-            fE = interp_energy_values(energies[idx0], f0, energies[idx1], f1, E, code)
-
-        return fE
+        grid = np.unique(
+            np.concatenate([np.asarray(self._cosines[i], dtype=float) for i in rows])
+        )
+        return grid if grid.size else None
 
     # ------------------------- public API -------------------------
     def extract_legendre_coefficients(
@@ -140,6 +183,8 @@ class MF4MTTabulated(MF4MT):
         energy: Union[float, np.ndarray],
         max_legendre_order: int = 10,
         *,
+        trim: bool = False,
+        trim_tol: float = 1e-6,
         quad_order: int = 96,
         out_of_range: str = "zero"
     ) -> Dict[int, Union[float, np.ndarray]]:
@@ -196,6 +241,9 @@ class MF4MTTabulated(MF4MT):
             # Store results
             for ell in range(max_legendre_order + 1):
                 out[ell][k] = coeffs[ell]
+
+        if trim:
+            out = auto_trim_legendre_tail(out, tol=trim_tol, min_order=0)
 
         # Return appropriate format
         if scalar_input:

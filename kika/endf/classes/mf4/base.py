@@ -79,6 +79,70 @@ class MF4MT(MT):
         else:
             raise ValueError(f"Invalid value for LCT: {self._lct}. Expected 1 or 2.")
     
+    def evaluate_angular_pdf(
+        self,
+        mu,
+        energy,
+        *,
+        out_of_range: str = "zero",
+    ) -> np.ndarray:
+        r"""The angular distribution :math:`f(\mu, E)` itself.
+
+        Returns an array of shape ``(n_energies, n_mu)``.
+
+        The observable every MF4 view is really after.  Legendre coefficients
+        are one *representation* of it, and only some evaluations use that one:
+        this method is the single question all four classes can answer, each in
+        the way its own representation makes exact.
+
+        The default here rebuilds it from the coefficients the section carries,
+        which *is* exact for LTT=0 and LTT=1 -- those files store the expansion,
+        so summing it back is reading them.  The classes that store
+        :math:`f(\mu)` as a table override this and read the table, instead of
+        projecting it onto Legendre and summing the projection back.
+        """
+        from kika.endf.dcs import angular_pdf, max_legendre_order
+
+        mu_arr = np.atleast_1d(np.asarray(mu, dtype=float))
+        e_arr = np.atleast_1d(np.asarray(energy, dtype=float))
+
+        order = max(1, max_legendre_order(self))
+        coeffs = self.extract_legendre_coefficients(
+            e_arr, max_legendre_order=order, out_of_range=out_of_range
+        )
+        # Not every class returns every order it was asked for: the mixed
+        # class trims its tail by default, so the orders present are whatever
+        # came back, and a missing one is a zero rather than a hole.
+        present = [l for l in coeffs if isinstance(l, (int, np.integer)) and l >= 1]
+        top = max(present) if present else 0
+
+        out = np.empty((e_arr.size, mu_arr.size), dtype=float)
+        for k in range(e_arr.size):
+            # a_0 is the normalization and is not part of the a_1..a_L the
+            # reconstruction takes.
+            a = [
+                float(np.atleast_1d(coeffs[l])[k]) if l in coeffs else 0.0
+                for l in range(1, top + 1)
+            ]
+            out[k] = angular_pdf(mu_arr, a)
+        return out
+
+    def native_cosine_grid(self, energy) -> Optional[np.ndarray]:
+        r"""The cosines this section stores at *energy*, or None if it stores none.
+
+        A section that tabulates :math:`f(\mu)` has a preferred grid and it is
+        not a uniform one: evaluators put their points where the distribution
+        turns, which for a forward-peaked elastic means a cluster against
+        :math:`\mu = 1`.  Resampling that onto a uniform grid throws the peak
+        away -- 45 % low at 18 MeV for JEFF-4.0 U-235 elastic against a
+        200-point uniform grid, which is worse than the truncated expansion it
+        would be replacing.  So the grid travels with the values.
+
+        None for a section stored as an expansion, which is defined at every
+        cosine and has no grid of its own to prefer.
+        """
+        return None
+
     def to_dense_plot_data(
         self,
         order: int,

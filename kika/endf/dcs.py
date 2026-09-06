@@ -28,7 +28,7 @@ Energies are in **eV** unless a name says ``_mev``; cross sections in **barns**;
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Mapping, Optional, Sequence, Tuple, Union
+from typing import Callable, Literal, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -55,6 +55,9 @@ __all__ = [
     "sigma_folded",
     "resolve_sigma",
     "max_legendre_order",
+    "legendre_provenance",
+    "LegendreProvenance",
+    "DEFAULT_PROJECTION_ORDER",
     "coefficients_at_energies",
     "coefficients_bin_averaged",
     "coefficients_folded",
@@ -561,6 +564,128 @@ def max_legendre_order(section) -> int:
         return 0
 
 
+DEFAULT_PROJECTION_ORDER = 20
+r"""Orders to offer for a distribution the file stores as :math:`f(\mu)`.
+
+A tabulated section carries no :math:`a_\ell`, so any order shown for it is one
+we computed by projection.  How far to go is a choice, not a property of the
+file: the projection is defined for every :math:`\ell` and the coefficients
+just get small.
+
+Twenty, because the forward peak is what sets the answer and it sharpens with
+energy.  Reconstructing JEFF-4.0 U-235 elastic from its own projection and
+comparing against the stored 91-point table, worst error relative to the peak:
+
+=========  ==========  ==========
+energy     L = 10      L = 20
+=========  ==========  ==========
+0.1 MeV    0.00 %      0.00 %
+1 MeV      0.03 %      0.04 %
+10 MeV     9.66 %      0.26 %
+18 MeV     25.73 %     0.47 %
+=========  ==========  ==========
+
+Ten is exact where the distribution is nearly flat and visibly wrong where it
+is not.  Past 20 nothing moves: the half-percent left at 18 MeV is the table's
+own kink structure, not a missing order.
+
+Deliberately *not* measured per file at parse time: that would mean projecting
+every tabulated section of every file the moment it is opened, on the read path
+that already dominates the cost of opening a heavy evaluation.
+"""
+
+
+@dataclass(frozen=True)
+class LegendreProvenance:
+    r"""Where an MF4 section's :math:`a_\ell(E)` come from.
+
+    A viewer built only around stored coefficients shows nothing for the half
+    of the evaluations that tabulate :math:`f(\mu)` instead, and shows a mixed
+    section as if its whole energy range were stored.  Both are answered by
+    carrying the provenance next to the numbers rather than inferring it.
+
+    Attributes
+    ----------
+    ltt
+        The file's own representation flag: 0 isotropic, 1 Legendre,
+        2 tabulated, 3 mixed.
+    kind
+        ``ltt`` as a name, for anything that has to say it out loud.
+    stored_max_order
+        Highest :math:`\ell` the file actually writes.  0 for a tabulated or
+        isotropic section, which store no coefficients at all.
+    max_order
+        Highest :math:`\ell` that can be *asked* for -- stored where the file
+        stores them, projected where it does not.  This is the one a list of
+        available orders should be built from.
+    projected
+        ``"none"``, ``"all"``, or ``"above_boundary"`` for a mixed section,
+        whose coefficients are read below ``boundary_energy`` and projected
+        above it.
+    boundary_energy
+        Where a mixed section switches representation, in eV; None otherwise.
+    """
+
+    ltt: int
+    kind: str
+    stored_max_order: int
+    max_order: int
+    projected: str
+    boundary_energy: Optional[float] = None
+
+    @property
+    def is_projected(self) -> bool:
+        return self.projected != "none"
+
+
+_LTT_KINDS = {0: "isotropic", 1: "legendre", 2: "tabulated", 3: "mixed"}
+
+
+def legendre_provenance(
+    section, *, projection_order: int = DEFAULT_PROJECTION_ORDER
+) -> LegendreProvenance:
+    r"""Describe what :math:`a_\ell(E)` a section can produce, and from what.
+
+    Pairs with :func:`max_legendre_order`, which stays a statement about the
+    file: this one is a statement about what can be shown.  For a tabulated
+    section the two differ by exactly the point of this function -- the file
+    stores nothing, and the projection can still give you :math:`a_\ell` up to
+    whatever order you ask for.
+    """
+    ltt = int(getattr(section, "ltt", 0) or 0)
+    stored = max_legendre_order(section)
+    kind = _LTT_KINDS.get(ltt, "legendre" if stored else "isotropic")
+
+    if ltt == 2:
+        return LegendreProvenance(
+            ltt=ltt,
+            kind=kind,
+            stored_max_order=0,
+            max_order=int(projection_order),
+            projected="all",
+        )
+    if ltt == 3:
+        legendre_energies = getattr(section, "legendre_energies", None) or []
+        boundary = float(legendre_energies[-1]) if legendre_energies else None
+        return LegendreProvenance(
+            ltt=ltt,
+            kind=kind,
+            stored_max_order=stored,
+            max_order=max(stored, int(projection_order)),
+            projected="above_boundary",
+            boundary_energy=boundary,
+        )
+    # LTT=0 stores nothing but needs nothing: f(mu) = 1/2 is a_0 = 1 exactly,
+    # and every higher order is zero rather than unknown.
+    return LegendreProvenance(
+        ltt=ltt,
+        kind=kind,
+        stored_max_order=stored,
+        max_order=stored,
+        projected="none",
+    )
+
+
 def _as_coefficient_matrix(
     coefficients: Union[Mapping[Union[int, str], Sequence[float]], np.ndarray],
     n_energies: int,
@@ -777,9 +902,10 @@ def differential_xs_factor(sigma, per_steradian: bool):
 
 def differential_xs_vs_angle(
     mu: Sequence[float],
-    a_coeffs: Sequence[float],
+    a_coeffs: Optional[Sequence[float]] = None,
     sigma: Optional[float] = None,
     *,
+    pdf_values: Optional[Sequence[float]] = None,
     per_steradian: bool = True,
     alpha: float = 0.0,
     native_frame: Frame = "cm",
@@ -794,9 +920,25 @@ def differential_xs_vs_angle(
     When ``output_frame`` differs from ``native_frame`` the curve is moved with
     :func:`transform_angular_curve` (elastic only), so the returned cosine grid
     is non-uniform and is returned alongside the values.
+
+    ``pdf_values`` short-circuits the reconstruction: a section that stores
+    :math:`f(\mu)` as a table can hand its own values in and skip the round
+    trip through a truncated expansion.  Everything after that point -- the
+    cross section factor, the frame transform, the units -- is a property of
+    the view and not of the representation, which is why the two paths meet
+    here rather than in two copies of this function.
     """
     mu = np.asarray(mu, dtype=float)
-    values = angular_pdf(mu, a_coeffs)
+    if pdf_values is not None:
+        values = np.asarray(pdf_values, dtype=float)
+        if values.shape != mu.shape:
+            raise ValueError(
+                f"pdf_values has shape {values.shape}, expected {mu.shape} to match mu"
+            )
+    elif a_coeffs is not None:
+        values = angular_pdf(mu, a_coeffs)
+    else:
+        raise ValueError("pass either a_coeffs or pdf_values")
     if sigma is not None:
         values = values * differential_xs_factor(sigma, per_steradian)
 
@@ -823,6 +965,7 @@ def differential_xs_vs_energy(
     query_energies_ev: Optional[Sequence[float]] = None,
     nbt_int_pairs: Optional[Sequence[Tuple[int, int]]] = None,
     max_order: Optional[int] = None,
+    pdf_at_energies: Optional[Callable[[float, np.ndarray], np.ndarray]] = None,
 ) -> dict:
     r""":math:`d\sigma/d\Omega` at a **fixed angle**, against incident energy.
 
@@ -846,6 +989,14 @@ def differential_xs_vs_energy(
         Output grid.  Defaults to the MF4 grid; a denser grid is interpolated
         through :func:`coefficients_at_energies` under ``nbt_int_pairs`` and
         clipped to the MF4 range.
+    pdf_at_energies
+        ``f(mu_native, energies) -> array``, for a section that stores the
+        distribution itself and would otherwise be routed through a truncated
+        expansion.  Given as a callable rather than an array because the output
+        grid is decided here -- it is clipped to where MF4 has data -- so only
+        this function knows the energies the values have to line up with.
+        Everything downstream (the sigma modes, the frame jacobian, the units)
+        is the same either way, which is why both representations meet here.
 
     Returns
     -------
@@ -876,18 +1027,30 @@ def differential_xs_vs_energy(
     # 2. Output grid, clipped to where MF4 actually has data.
     if query_energies_ev is None:
         out_e = grid.copy()
-        coeffs = _as_coefficient_matrix(coefficients, grid.size, max_order)
     else:
         out_e = np.asarray(query_energies_ev, dtype=float)
         out_e = out_e[(out_e >= grid[0]) & (out_e <= grid[-1])]
-        coeffs = coefficients_at_energies(
-            grid, coefficients, out_e, nbt_int_pairs=nbt_int_pairs, max_order=max_order
-        )
 
-    # 3. f(mu_native, E) for every energy: one Legendre basis, reused.
-    basis = legendre_basis(np.array([mu_native]), coeffs.shape[0])[:, 0]
-    orders = np.arange(1, coeffs.shape[0] + 1)
-    pdf = 0.5 * basis[0] + 0.5 * ((2 * orders + 1) * basis[1:]) @ coeffs
+    # 3. f(mu_native, E) for every energy.
+    if pdf_at_energies is not None:
+        # The section holds the distribution; ask it, and never build the
+        # expansion at all.
+        pdf = np.asarray(pdf_at_energies(mu_native, out_e), dtype=float).ravel()
+        if pdf.size != out_e.size:
+            raise ValueError(
+                f"pdf_at_energies returned {pdf.size} values for {out_e.size} energies"
+            )
+    else:
+        # One Legendre basis, reused across the sweep.
+        if query_energies_ev is None:
+            coeffs = _as_coefficient_matrix(coefficients, grid.size, max_order)
+        else:
+            coeffs = coefficients_at_energies(
+                grid, coefficients, out_e, nbt_int_pairs=nbt_int_pairs, max_order=max_order
+            )
+        basis = legendre_basis(np.array([mu_native]), coeffs.shape[0])[:, 0]
+        orders = np.arange(1, coeffs.shape[0] + 1)
+        pdf = 0.5 * basis[0] + 0.5 * ((2 * orders + 1) * basis[1:]) @ coeffs
 
     # 4. sigma(E) under the requested reconstruction mode.
     sigma = None

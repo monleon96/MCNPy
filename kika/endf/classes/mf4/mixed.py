@@ -1,12 +1,13 @@
 from dataclasses import dataclass, field
-from typing import List, Tuple, Dict, Union
+from typing import List, Tuple, Dict, Optional, Union
 import numpy as np
 from scipy import special  # retained in case you need elsewhere
 
 from .base import MF4MT
 from ....endf.utils import (
     get_interpolation_scheme_name, project_tabulated_to_legendre,
-    interpolate_1d_endf, auto_trim_legendre_tail, pick_mixed_branch,
+    interpolate_1d_endf, auto_trim_legendre_tail, evaluate_tabulated_pdf,
+    pick_mixed_branch,
 )
 
 @dataclass
@@ -391,6 +392,91 @@ class MF4MTMixed(MF4MT):
 
         return typed
     
+
+    def evaluate_angular_pdf(
+        self,
+        mu,
+        energy,
+        *,
+        out_of_range: str = "zero",
+    ) -> np.ndarray:
+        r"""The distribution itself, from whichever half of the file holds it.
+
+        LTT=3 is two representations glued at an energy, so the exact answer is
+        per energy and not per section: below the boundary the file stores the
+        expansion and summing it back is reading the file, above it the file
+        stores the table and the table is read directly.  The projection is
+        never in the path either way.
+        """
+        mu_arr = np.atleast_1d(np.asarray(mu, dtype=float))
+        e_arr = np.atleast_1d(np.asarray(energy, dtype=float))
+
+        E_leg = np.asarray(self._energies, dtype=float) if self._energies else np.array([])
+        E_tab = (
+            np.asarray(self._tabulated_energies, dtype=float)
+            if self._tabulated_energies
+            else np.array([])
+        )
+
+        out = np.empty((e_arr.size, mu_arr.size), dtype=float)
+        for k, e in enumerate(e_arr):
+            branch = pick_mixed_branch(float(e), E_leg, E_tab)
+            if branch == "tab" and E_tab.size:
+                out[k] = evaluate_tabulated_pdf(
+                    mu_arr,
+                    float(e),
+                    energies=self._tabulated_energies,
+                    cosines=self._tabulated_cosines,
+                    probabilities=self._tabulated_probabilities,
+                    angular_interp=self._angular_interpolation,
+                    energy_interp=self._tab_interpolation,
+                    out_of_range=out_of_range,
+                )
+            elif branch == "leg" and E_leg.size:
+                # The base class reads the stored expansion through
+                # extract_legendre_coefficients, which for a Legendre-branch
+                # energy interpolates the file's own a_l and projects nothing.
+                out[k] = super().evaluate_angular_pdf(
+                    mu_arr, np.array([float(e)]), out_of_range=out_of_range
+                )[0]
+            else:
+                # No data on either side: a_0 = 1 alone, which is f = 1/2.
+                out[k] = 0.5
+        return out
+
+    def native_cosine_grid(self, energy) -> Optional[np.ndarray]:
+        """The file's own cosines, above the boundary only.
+
+        Below it this section is an expansion and has no grid to prefer, which
+        is what None says: the same section answers differently at different
+        energies, because LTT=3 is two representations and not one.
+        """
+        E_leg = np.asarray(self._energies, dtype=float) if self._energies else np.array([])
+        E_tab = (
+            np.asarray(self._tabulated_energies, dtype=float)
+            if self._tabulated_energies
+            else np.array([])
+        )
+        if E_tab.size == 0:
+            return None
+        if pick_mixed_branch(float(energy), E_leg, E_tab) != "tab":
+            return None
+
+        E = float(energy)
+        if E <= E_tab[0]:
+            rows = [0]
+        elif E >= E_tab[-1]:
+            rows = [E_tab.size - 1]
+        else:
+            hi = int(np.searchsorted(E_tab, E, side="right"))
+            rows = [hi - 1, hi]
+
+        grid = np.unique(
+            np.concatenate(
+                [np.asarray(self._tabulated_cosines[i], dtype=float) for i in rows]
+            )
+        )
+        return grid if grid.size else None
 
     def get_interpolation_summary(self) -> str:
         """

@@ -891,6 +891,74 @@ def project_tabulated_to_legendre(
     return coeffs
 
 
+def evaluate_tabulated_pdf(
+    mu_points,
+    E: float,
+    *,
+    energies,
+    cosines,
+    probabilities,
+    angular_interp=None,
+    energy_interp=None,
+    out_of_range: str = "zero",
+) -> np.ndarray:
+    r"""Read :math:`f(\mu, E)` straight out of a tabulated MF4 distribution.
+
+    ENDF-correct 2D interpolation, in the order the format prescribes:
+
+    1. inside each energy's table, interpolate in :math:`\mu` under that
+       table's own ``(NBT, INT)``;
+    2. then interpolate between the two bracketing energies under the energy
+       ``(NBT, INT)``.
+
+    This is the distribution the evaluator wrote, not a reconstruction of it.
+    Shared by ``MF4MTTabulated`` and the tabulated branch of ``MF4MTMixed``
+    so the two cannot drift, which is the failure this module has already been
+    through once (see :mod:`kika.endf.dcs`).
+
+    ``out_of_range`` applies to the *energy* grid: ``"zero"`` returns zeros
+    outside it, ``"hold"`` clamps to the nearest end table.  Interpolation in
+    :math:`\mu` always holds, since a cosine outside a table's own range is
+    the table's endpoint and never an absence of data.
+    """
+    mu_points = np.asarray(mu_points, dtype=float)
+    energies = np.asarray(energies, dtype=float)
+    if energies.size == 0:
+        return np.zeros_like(mu_points, dtype=float)
+
+    E = float(E)
+    if out_of_range == "zero" and (E < energies[0] or E > energies[-1]):
+        return np.zeros_like(mu_points, dtype=float)
+
+    if E <= energies[0]:
+        idx0 = idx1 = 0
+    elif E >= energies[-1]:
+        idx0 = idx1 = energies.size - 1
+    else:
+        idx1 = int(np.searchsorted(energies, E, side="right"))
+        idx0 = idx1 - 1
+
+    angular_interp = angular_interp or []
+
+    def _table(i: int) -> np.ndarray:
+        mu_i = np.asarray(cosines[i], dtype=float)
+        f_i = np.asarray(probabilities[i], dtype=float)
+        pairs = (
+            angular_interp[i]
+            if i < len(angular_interp) and angular_interp[i]
+            else [(len(mu_i), 2)]
+        )
+        return interpolate_1d_endf(mu_i, f_i, pairs, mu_points, out_of_range="hold")
+
+    f0 = _table(idx0)
+    if idx1 == idx0:
+        return f0
+
+    pairs = energy_interp if energy_interp else [(energies.size, 2)]
+    code = int(segment_int_codes(energies.size, pairs)[idx1 - 1])
+    return interp_energy_values(energies[idx0], f0, energies[idx1], _table(idx1), E, code)
+
+
 def auto_trim_legendre_tail(
     coeffs_by_l: Dict[int, Union[float, np.ndarray]],
     tol: float = 1e-6,

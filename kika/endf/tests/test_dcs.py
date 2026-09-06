@@ -532,6 +532,60 @@ class TestMaxLegendreOrder:
         assert dcs.coefficients_at_energies([1.0, 2.0], wire, [1.0], max_order=order).shape[0] == 7
 
 
+class TestLegendreProvenance:
+    """What a section can *show* is not what the file stores.
+
+    ENDF lets an evaluation tabulate f(mu) instead of expanding it, and a
+    viewer that reads only the stored order shows such a section as isotropic
+    — which is what the app did to JEFF-4.0 U-235 elastic, a distribution with
+    real angular content out to l ~ 7.
+    """
+
+    class _Section:
+        def __init__(self, ltt, rows=None, legendre_energies=None):
+            self.ltt = ltt
+            if rows is not None:
+                self.legendre_coefficients = rows
+            if legendre_energies is not None:
+                self.legendre_energies = legendre_energies
+
+    def test_stored_legendre_reports_what_it_stores(self):
+        p = dcs.legendre_provenance(self._Section(ltt=1, rows=[[0.1] * 38]))
+        assert (p.kind, p.stored_max_order, p.max_order) == ("legendre", 38, 38)
+        assert p.projected == "none" and not p.is_projected
+
+    def test_tabulated_stores_nothing_and_is_still_showable(self):
+        p = dcs.legendre_provenance(self._Section(ltt=2, rows=[]))
+        assert p.kind == "tabulated"
+        assert p.stored_max_order == 0
+        assert p.max_order == dcs.DEFAULT_PROJECTION_ORDER
+        assert p.projected == "all" and p.is_projected
+
+    def test_the_projection_order_is_the_caller_s_choice(self):
+        p = dcs.legendre_provenance(self._Section(ltt=2), projection_order=20)
+        assert p.max_order == 20
+
+    def test_mixed_carries_the_energy_where_it_switches(self):
+        p = dcs.legendre_provenance(
+            self._Section(ltt=3, rows=[[0.1] * 6], legendre_energies=[1e-5, 1e6])
+        )
+        assert p.kind == "mixed"
+        assert p.stored_max_order == 6
+        # Stored below the boundary, projected above it, so the orders on offer
+        # are whichever side reaches further.
+        assert p.max_order == max(6, dcs.DEFAULT_PROJECTION_ORDER)
+        assert p.projected == "above_boundary"
+        assert p.boundary_energy == 1e6
+
+    def test_isotropic_needs_no_projection(self):
+        p = dcs.legendre_provenance(self._Section(ltt=0))
+        assert (p.kind, p.max_order, p.projected) == ("isotropic", 0, "none")
+        assert not p.is_projected
+
+    def test_a_section_without_an_ltt_is_read_as_far_as_it_goes(self):
+        assert dcs.legendre_provenance(object()).max_order == 0
+
+
 # --- explicit-width bins ----------------------------------------------------
 
 
