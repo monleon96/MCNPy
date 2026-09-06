@@ -104,6 +104,43 @@ MT_COMPOSITES = {
 # Order for computing composites (dependencies first)
 MT_COMPOSITE_ORDER = [4, 16, 18, 103, 104, 105, 106, 107, 101, 27, 3, 1]
 
+# ENDF-6 summation rules for MF3, used to rebuild a redundant cross section from
+# its partials after an edit (kika.endf.writers.redundant).
+#
+# Deliberately a second table rather than a reuse of MT_COMPOSITES above, which
+# serves ACE and answers a different question. There the rule *derives an MT the
+# file does not carry*, so a slightly wide component list costs nothing; here it
+# *overwrites an MT the file does carry*, so every difference matters:
+#
+#   MT4   ENDF-6 says MT51-91. MT_COMPOSITES starts at 50, which is (n,n0) --
+#         elastic under another name, and never given in MF3. Summing it would
+#         double-count elastic into the inelastic total.
+#   @refs Any component that is itself a summation MT is written '@MT', so a
+#         file giving MT600-649 but no MT103 still contributes (n,p) to MT101.
+#         MT_COMPOSITES writes those as bare integers and silently drops them.
+#
+# Read the pair together: if one changes and the other does not, say why.
+MF3_SUM_RULES = {
+    4:   (tuple(range(51, 92)), "total inelastic"),
+    16:  (tuple(range(875, 892)), "(n,2n) over discrete levels"),
+    18:  ((19, 20, 21, 38), "total fission"),
+    103: (tuple(range(600, 650)), "(n,p)"),
+    104: (tuple(range(650, 700)), "(n,d)"),
+    105: (tuple(range(700, 750)), "(n,t)"),
+    106: (tuple(range(750, 800)), "(n,3He)"),
+    107: (tuple(range(800, 850)), "(n,alpha)"),
+    101: ((102, '@103', '@104', '@105', '@106', '@107')
+          + tuple(range(108, 118)) + (155, 182, 191, 192, 193, 197),
+          "neutron disappearance"),
+    27:  (('@18', '@101'), "absorption"),
+    3:   (('@4', '@27', 5, 11, '@16', 17) + tuple(range(22, 26))
+          + tuple(range(28, 38)) + (41, 42, 44, 45), "non-elastic"),
+    1:   ((2, '@3'), "total"),
+}
+
+# Dependency order: a rule only ever references MTs that come before it here.
+MF3_SUM_ORDER = (4, 16, 18, 103, 104, 105, 106, 107, 101, 27, 3, 1)
+
 # Nu-bar decomposition: total (MT 452) = prompt (MT 456) + delayed (MT 455).
 # Kept separate from MT_COMPOSITES (which drives cross-section summation) because
 # this is a covariance double-counting concern, not a cross-section sum.

@@ -22,6 +22,11 @@ from .mf33_writer import (
 )
 from .update_directory import update_mf1_directory
 from .section_ops import remove_sections
+from .redundant import (
+    RedundantUpdate,
+    recompute_redundant_mf3,
+    resolve_sum_components,
+)
 
 __all__ = [
     # ENDF file modification
@@ -32,6 +37,10 @@ __all__ = [
     'update_mf1_directory',
     # Section operations
     'remove_sections',
+    # MF3 summation cross sections
+    'RedundantUpdate',
+    'recompute_redundant_mf3',
+    'resolve_sum_components',
     # MF34 covariance creation and manipulation
     'create_mf34_from_covariance',
     'write_mf34_to_file',
