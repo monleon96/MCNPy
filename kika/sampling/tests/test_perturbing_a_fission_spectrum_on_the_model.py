@@ -504,11 +504,13 @@ def test_the_written_tape_still_normalises(tmp_path):
 def test_the_run_records_the_band_of_every_block(tmp_path):
     """``run_metadata.json`` and the per-sample set both say where each block acts."""
     run = perturbFromModel(str(DATA / "micro_cf252_pfns.endf"), {35: None},
-                           nSamples=1, seed=11, outputDir=tmp_path)
+                           nSamples=1, seed=11, outputDir=tmp_path,
+                           writeSets=True)
     payload = json.loads((tmp_path / "run_metadata.json").read_text("utf-8"))
     assert len(payload["blocks"]) == 4, "one block per band"
 
     pset = PerturbationSet.read(run.samples[0]["files"]["perturbation-set"])
+    assert pset.outerDomains == PerturbationSet.fromRun(tmp_path, 0).outerDomains
     assert len(pset.outerDomains) == 4
     assert {c.index for c in pset.components()} == {0, 1, 2, 3}
 

@@ -60,10 +60,11 @@ from kika.sampling.model_blocks import (CROSS_SECTION_MF,
                                         _mf35_entries, _union_grids,
                                         assemble_joint, mf35_band_domains)
 
-__all__ = ["ComponentKey", "Selection", "QUANTITY_OF_MF", "SUPPORTED_MF",
-           "PER_SECTION_MF", "GROUPINGS", "collectEntries", "samplingGroups",
-           "requestIndex", "assembleRequest", "describeRequest",
-           "componentDomains"]
+__all__ = ["ComponentKey", "Selection", "QUANTITY_OF_MF", "MF_OF_QUANTITY",
+           "SUPPORTED_MF", "PER_SECTION_MF", "GROUPINGS", "collectEntries",
+           "samplingGroups", "requestIndex", "assembleRequest",
+           "describeRequest", "componentDomains", "normaliseRequest",
+           "rowFamilies"]
 
 
 #: What each covariance file is a covariance *of*, in the model's vocabulary
@@ -185,8 +186,161 @@ class Selection:
             )
 
 
+#: The model's name for each covariance file, inverted: what a request written
+#: in the model's vocabulary is keyed by. See :func:`normaliseRequest`.
+MF_OF_QUANTITY = {quantity: mf for mf, quantity in QUANTITY_OF_MF.items()}
+
+#: What the third coordinate is called, per quantity, in the model spelling.
+INDEX_NAME_OF_MF = {34: "order", 35: "band"}
+
+
+def _mtOfReaction(reaction, suite) -> int:
+    """An MT from either spelling of a reaction: its number, or its label."""
+    if isinstance(reaction, (int, np.integer)):
+        return int(reaction)
+    if not isinstance(reaction, str):
+        raise TypeError(
+            f"a reaction is named by MT number or by label, got {reaction!r}")
+    if suite is None:
+        raise ValueError(
+            f"reaction {reaction!r} is named by label, and resolving a label "
+            f"needs the ReactionSuite it lives in. Pass the suite to "
+            f"normaliseRequest, or name the reaction by MT"
+        )
+    lookups = [getattr(suite, "reactionByLabel", None)]
+    sums = getattr(getattr(suite, "sums", None), "reactions", None) or ()
+    for lookup in lookups:
+        if lookup is None:
+            continue
+        try:
+            found = lookup(reaction)
+        except KeyError:
+            found = None
+        if found is not None and getattr(found, "ENDF_MT", None) is not None:
+            return int(found.ENDF_MT)
+    for summed in sums:
+        if getattr(summed, "label", None) == reaction and \
+                getattr(summed, "ENDF_MT", None) is not None:
+            return int(summed.ENDF_MT)
+    raise KeyError(
+        f"no reaction labelled {reaction!r} in the suite; it holds "
+        f"{sorted(getattr(getattr(suite, 'reactions', None), 'labels', None) or [r.label for r in suite.reactions])}"
+    )
+
+
+def _selectionOfQuantity(quantity: str, value, suite) -> Optional[Selection]:
+    """One line of a model-vocabulary request, as the MF/MT selection it means.
+
+    Accepted shapes of *value*, for ``"crossSection"`` and the rest alike:
+    ``None``/``True`` for every reaction the file states; a reaction (MT
+    number or label) or a list of them; or a dict with ``reaction`` (same),
+    ``order`` (MF34) or ``band`` (MF35) -- ``index`` is accepted as the neutral
+    name -- and ``relative``.
+    """
+    mf = MF_OF_QUANTITY[quantity]
+    if value is None or value is True:
+        return None
+    if isinstance(value, Selection):
+        return value
+    if not isinstance(value, dict):
+        reactions = value if isinstance(value, (list, tuple)) else [value]
+        return Selection(mf=mf, mt=[_mtOfReaction(r, suite) for r in reactions])
+
+    fields = dict(value)
+    reaction = fields.pop("reaction", fields.pop("mt", None))
+    indexName = INDEX_NAME_OF_MF.get(mf)
+    index = fields.pop("index", None)
+    for name in ("order", "band"):
+        if name in fields:
+            if name != indexName:
+                raise ValueError(
+                    f"{quantity} has no {name!r}; "
+                    + (f"its third coordinate is {indexName!r}" if indexName
+                       else "it has no third coordinate")
+                )
+            index = fields.pop(name)
+    relative = fields.pop("relative", True)
+    if fields:
+        raise ValueError(
+            f"unknown field(s) {sorted(fields)} in the {quantity} selection; "
+            f"known: reaction, {indexName or 'index'}, relative"
+        )
+    mt = None
+    if reaction is not None:
+        reactions = reaction if isinstance(reaction, (list, tuple)) else [reaction]
+        mt = [_mtOfReaction(r, suite) for r in reactions]
+    return Selection(mf=mf, mt=mt, index=index, relative=relative)
+
+
+def normaliseRequest(request, suite=None):
+    """A request in the model's vocabulary, as the MF/MT spelling it means.
+
+    Two spellings are accepted everywhere a request is taken. The ENDF one
+    keys by covariance file and names reactions by MT::
+
+        {33: None, 34: {"mt": [2], "index": [1, 2, 3]}}
+
+    The model one keys by **quantity** and names reactions by MT *or by
+    label*, with the third coordinate called what it is::
+
+        {"crossSection": None,
+         "angularDistribution": {"reaction": "MT2", "order": [1, 2, 3]}}
+
+    The second is the one that makes sense of a GNDS source, where a reaction
+    is ``"n + Fe56"`` and nothing is called MF34. It resolves to the first
+    here, and the first is what the entry builders read -- a covariance link
+    still carries ``ENDF_MFMT`` in GNDS, so the mapping is the file's own.
+    Labels need *suite* (the :class:`ReactionSuite`) to resolve; MT numbers do
+    not. The two spellings may be mixed in one request, and a request that
+    is already in the first spelling comes back unchanged.
+    """
+    if isinstance(request, Selection) or not isinstance(request, dict):
+        return request
+    out: Dict[int, Any] = {}
+    for key, value in request.items():
+        if isinstance(key, str) and key in MF_OF_QUANTITY:
+            mf = MF_OF_QUANTITY[key]
+            selection = _selectionOfQuantity(key, value, suite)
+        else:
+            try:
+                mf = int(key)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"request key {key!r} is neither an MF number nor one of "
+                    f"the quantities {sorted(MF_OF_QUANTITY)}"
+                ) from None
+            selection = value
+        if mf in out:
+            raise ValueError(
+                f"the request names MF{mf} twice (once as "
+                f"{QUANTITY_OF_MF.get(mf, mf)!r}); say it once"
+            )
+        out[mf] = selection
+    return out
+
+
+def rowFamilies(index) -> Dict[Hashable, List[str]]:
+    """One label per row of each block: which component the row belongs to.
+
+    What :func:`kika.cov.conditioning.inspect_blocks` takes as *families*, so
+    that "this variance is an outlier" is judged against the bins of the same
+    reaction or the same Legendre order rather than against the whole joint,
+    and so that a definiteness finding can say which pair of components
+    carries the negative mass. Padding rows under a ``per-component`` union
+    get their component's label too; they are inert and the checks skip them.
+    """
+    families: Dict[Hashable, List[str]] = {}
+    for key, meta in index.items():
+        labels: List[str] = []
+        for component in meta["components"]:
+            labels += [component.describe()] * int(meta["stride"])
+        families[key] = labels
+    return families
+
+
 def _asSelections(request) -> List[Selection]:
     """A request in any of its accepted spellings, as a list of selections."""
+    request = normaliseRequest(request)
     if isinstance(request, Selection):
         return [request]
     if isinstance(request, dict):

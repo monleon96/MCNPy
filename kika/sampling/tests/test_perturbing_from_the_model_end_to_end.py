@@ -28,7 +28,7 @@ import numpy as np
 import pytest
 
 from kika.endf import read_endf
-from kika.sampling.model_perturbation import EMITTERS, perturbFromModel
+from kika.sampling.model_perturbation import TAPE_EMITTERS, perturbFromModel
 
 DATA = Path(__file__).resolve().parents[2] / "endf" / "tests" / "data"
 TAPE = str(DATA / "micro_fe56_xs_and_angular.endf")
@@ -59,7 +59,7 @@ def _blocks(path):
 def run(tmp_path_factory):
     return perturbFromModel(TAPE, REQUEST, 2, seed=20260906,
                             outputDir=tmp_path_factory.mktemp("run"),
-                            formats=EMITTERS)
+                            formats=TAPE_EMITTERS)
 
 
 # ----------------------------------------------------------------------

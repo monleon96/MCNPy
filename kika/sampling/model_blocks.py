@@ -260,6 +260,36 @@ def assemble_joint(entries, atol: float = 1e-12,
     return keys, joint, stride
 
 
+def _za_of(suite, section) -> int:
+    """The ZA a covariance section is about, from the section or from the suite.
+
+    An ENDF-decoded section carries it in its provenance. A GNDS-decoded one
+    carries **no** provenance -- §25 states no ZA on a section, the target is
+    a property of the suite -- so the key came out as ``ZA 0`` and a request
+    served from a GNDS file produced components that did not match the ones
+    the same request produced from the tape it was converted from. The suite's
+    ``target`` is a PoPs id (``"Fe56"``, ``"U235_e1"``), spelt to a ZA here the
+    way :func:`kika.nuclear_data.model.pops.zaFromPid` spells it, without
+    importing the model (see the module docstring for why not).
+    """
+    za = getattr(getattr(section, "provenance", None), "za", None)
+    if za:
+        return int(za)
+    target = getattr(suite, "target", None)
+    if isinstance(target, str) and target:
+        from kika._constants import SYMBOL_TO_ATOMIC_NUMBER
+
+        name = target.split("_e")[0]
+        if name.startswith("ZA") and name[2:].isdigit():
+            return int(name[2:])
+        symbol = name.rstrip("0123456789")
+        digits = name[len(symbol):]
+        z = SYMBOL_TO_ATOMIC_NUMBER.get(symbol)
+        if z is not None:
+            return 1000 * z + (int(digits) if digits else 0)
+    return 0
+
+
 def _endf_mfmt(link) -> Optional[Tuple[int, int]]:
     """``(MF, MT)`` from an ``ENDF_MFMT``, **whichever separator wrote it**.
 
@@ -400,7 +430,7 @@ def _mf34_entries(suite, mt=None, orders=None, relative=None):
         ):
             continue
 
-        za = int(getattr(section.provenance, "za", None) or 0)
+        za = _za_of(suite, section)
         rowGrid = np.asarray(form.rowGrid, dtype=float)
         colGrid = (rowGrid if form.columnGrid is None
                    else np.asarray(form.columnGrid, dtype=float))
@@ -469,7 +499,7 @@ def _mf35_sections(suite, mt=None, bands=None):
         rowData = section.rowData
         if not _is_endf_mf(rowData, 35):
             continue
-        za = int(getattr(section.provenance, "za", None) or 0)
+        za = _za_of(suite, section)
         section_mt = _endf_mt(rowData)
         index = counters.get((za, section_mt), 0)
         counters[(za, section_mt)] = index + 1
@@ -699,7 +729,7 @@ def _cross_section_entries(suite, mf: int = 33, mt=None, relative=None):
         ):
             continue
 
-        za = int(getattr(section.provenance, "za", None) or 0)
+        za = _za_of(suite, section)
         rowGrid = np.asarray(form.rowGrid, dtype=float)
         colGrid = (rowGrid if form.columnGrid is None
                    else np.asarray(form.columnGrid, dtype=float))

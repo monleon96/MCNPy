@@ -76,6 +76,7 @@ __all__ = [
     "inert_row_mask",
     "inspect_matrix",
     "inspect_blocks",
+    "negative_mass_by_family",
     "predict_psd_repairs",
     "APPLIABLE_REMEDIES",
     "INERT_VARIANCE_FLOOR",
@@ -127,6 +128,13 @@ OUTLIER_FACTOR = 1000.0
 #: Cf-252 MF35 band, -1.3e-06 on the Fe-56 MF34 joint), so nothing an evaluation
 #: actually states is anywhere near it.
 ROUNDOFF_RATIO = float(np.finfo(np.float64).eps)
+
+#: A correlation may exceed 1 by this much and still be the file's rounding
+#: rather than a defect: six significant figures put the last digit of a
+#: stated 1.0 at 1e-6, and the ratio of two rounded variances can move it by
+#: a few of those. Above it the matrix says something an evaluator did not
+#: mean, and the draw is refused. Measured: 2.1e-7 on U-235 JEFF-4.0 MF33.
+CORRELATION_ROUNDOFF = 1e-5
 
 #: ``max|Σ_j C_ij| / max|C|`` below this means the block carries a sum rule.
 #:
@@ -835,11 +843,29 @@ def _check_correlation_bound(matrix: np.ndarray) -> Optional[Finding]:
     if not count:
         return None
     worst = float(np.max(np.abs(correlation[bad])))
+    # ENDF writes six significant figures, so a correlation the evaluator
+    # stated as exactly 1 comes back as 1 + O(1e-6) and the 2x2 minor is
+    # negative by round-off. That is the definiteness check's business (it
+    # will find the tiny negative eigenvalue and recommend clip), not a reason
+    # to refuse the draw. Measured on U-235 JEFF-4.0 MF33: six correlations at
+    # 1.0000002, nothing else wrong with the matrix.
+    if worst - 1.0 <= CORRELATION_ROUNDOFF:
+        return Finding(
+            check="correlation_bound",
+            severity=NOTE,
+            summary=(
+                f"{count} correlation(s) above 1 by at most {worst - 1.0:.1e}: the "
+                f"file's six-figure rounding, left to the definiteness check"
+            ),
+            evidence={"n_out_of_range": count, "max_abs_correlation": worst,
+                      "roundoff": True},
+        )
     return Finding(
         check="correlation_bound",
         severity=BLOCKS,
         summary=f"{count} off-diagonal correlation(s) outside [-1, 1], worst |ρ| = {worst:.4f}",
-        evidence={"n_out_of_range": count, "max_abs_correlation": worst},
+        evidence={"n_out_of_range": count, "max_abs_correlation": worst,
+                  "roundoff": False},
         remedies=(
             Remedy(
                 name="renormalise",
@@ -876,6 +902,64 @@ def _spectrum(matrix: np.ndarray) -> Optional[np.ndarray]:
     return spectrum if spectrum.size else None
 
 
+def negative_mass_by_family(
+    matrix: np.ndarray,
+    families: Sequence[Hashable],
+    *,
+    tolerance: float = 0.0,
+) -> List[Dict[str, Any]]:
+    """Which pairs of families carry the negative modes, and how much each.
+
+    For every eigenvector ``v`` with eigenvalue below ``-tolerance``, the
+    quadratic form ``vᵀCv = λ`` splits exactly over family pairs as
+    ``Σ_ab v_aᵀ C_ab v_b``, where ``v_a`` is ``v`` restricted to family ``a``.
+    Summed over the negative modes, the ``(a, b)`` term is the *negative mass*
+    that pair contributes, and its share of the total says where the
+    indefiniteness lives: "91 % of it is in MT4×MT16" is a statement about
+    the evaluation that a human can act on -- by leaving MT16 out of the
+    request, or by fixing the file -- and a projection cannot make.
+
+    This is the *scoring* half of ``CrossSectionCovariance._autofix_covariance``
+    steps 3-4, kept as a diagnostic and stripped of the half that removed
+    blocks: which component to drop is a decision about the evaluation, and it
+    is taken in the request, not inside a repair.
+
+    Returns the pairs sorted by share, largest first, with ``share`` as a
+    fraction of the total negative mass (so the shares sum to one and a pair
+    that *reduces* the negativity shows a negative share). Empty when there is
+    no negative mode.
+    """
+    matrix = np.asarray(matrix, dtype=float)
+    labels = np.asarray(list(families), dtype=object)
+    if labels.shape[0] != matrix.shape[0]:
+        raise ValueError(
+            f"families has {labels.shape[0]} labels for a {matrix.shape[0]}-row block"
+        )
+    values, vectors = np.linalg.eigh((matrix + matrix.T) / 2.0)
+    negative = np.flatnonzero(values < -abs(tolerance))
+    if negative.size == 0:
+        return []
+    modes = vectors[:, negative]
+    total = float(values[negative].sum())
+    names = list(dict.fromkeys(labels.tolist()))
+    masks = {name: (labels == name) for name in names}
+    projected = {name: matrix @ (modes * masks[name][:, None]) for name in names}
+    pairs: List[Dict[str, Any]] = []
+    for i, a in enumerate(names):
+        left = modes * masks[a][:, None]
+        for b in names[i:]:
+            mass = float(np.einsum("ik,ik->", left, projected[b]))
+            if a != b:
+                mass *= 2.0  # the (a, b) and (b, a) terms of the symmetric split
+            pairs.append({
+                "pair": [str(a), str(b)],
+                "mass": mass,
+                "share": (mass / total) if total != 0.0 else 0.0,
+            })
+    pairs.sort(key=lambda p: p["share"], reverse=True)
+    return pairs
+
+
 def _check_definiteness(
     matrix: np.ndarray,
     *,
@@ -883,6 +967,7 @@ def _check_definiteness(
     predict: bool,
     candidates: Sequence[str],
     inert_floor: float,
+    families: Optional[Sequence[Hashable]] = None,
 ) -> Optional[Finding]:
     if spectrum is None:
         return None
@@ -899,6 +984,22 @@ def _check_definiteness(
     ratio = -smallest / largest
     if ratio <= order * ROUNDOFF_RATIO:
         return None
+
+    # Where the negativity lives, when the caller said which rows belong
+    # together. One more eigendecomposition, so it is gated like the remedy
+    # predictions: past PREDICT_MAX_ORDER the finding is still raised and the
+    # attribution is simply absent.
+    attribution: List[Dict[str, Any]] = []
+    located = ""
+    if families is not None and predict:
+        attribution = negative_mass_by_family(
+            matrix, families, tolerance=order * ROUNDOFF_RATIO * largest,
+        )
+        if attribution:
+            top = attribution[0]
+            where = (top["pair"][0] if top["pair"][0] == top["pair"][1]
+                     else f"{top['pair'][0]} × {top['pair'][1]}")
+            located = f"; {top['share']:.0%} of the negative mass sits in {where}"
 
     if not predict:
         remedies = [
@@ -938,7 +1039,7 @@ def _check_definiteness(
         severity=DISTORTS,
         summary=(
             f"not PSD: λ_min/λ_max = -{ratio:.3e} "
-            f"(psd_method='auto' would pick '{would_auto}')" + skipped
+            f"(psd_method='auto' would pick '{would_auto}')" + skipped + located
         ),
         evidence={
             "min_eigenvalue": smallest,
@@ -946,6 +1047,7 @@ def _check_definiteness(
             "negativity_ratio": ratio,
             "n_negative": int((spectrum < 0.0).sum()),
             "auto_would_choose": would_auto,
+            "negative_mass_by_family": attribution[:16],
         },
         remedies=tuple(remedies),
     )
@@ -1228,6 +1330,7 @@ def inspect_matrix(
         _check_definiteness(
             matrix, spectrum=spectrum, predict=do_predict,
             candidates=psd_candidates, inert_floor=inert_floor,
+            families=families,
         ),
         _check_variance_outliers(
             matrix, families=families, factor=outlier_factor,

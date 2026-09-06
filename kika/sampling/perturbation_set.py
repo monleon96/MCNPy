@@ -50,7 +50,8 @@ import numpy as np
 
 from kika.sampling.joint_blocks import ComponentKey
 
-__all__ = ["PerturbationSet", "SEMANTICS", "EDGE_RULE"]
+__all__ = ["PerturbationSet", "SEMANTICS", "EDGE_RULE", "FACTORS_STEM",
+           "writeFactorsTable", "readFactorsTable", "readFactorsIndex"]
 
 #: The ways a factor block can act on the quantity it perturbs. A closed set,
 #: because "the file says ``relative`` and the code assumed ``absolute``" is a
@@ -73,6 +74,11 @@ SEMANTICS_OF_MF = {31: SEMANTICS[0], 33: SEMANTICS[0], 34: SEMANTICS[0],
 #: Named rather than implied: a piecewise-constant block is silent about its own
 #: steps, so the rule lives in the applier and the set records which one.
 EDGE_RULE = "endf-step-duplicate"
+
+#: The stem of the run-level factors table, ``<stem>.parquet``: every drawn
+#: value of every sample, with the index that says what they are in the
+#: file's own metadata. See :func:`writeFactorsTable`.
+FACTORS_STEM = "factors"
 
 #: Bumped to 3 when a block learned to state its own semantics and its own
 #: outer domain, which is what a fission spectrum needs and the other three
@@ -857,7 +863,247 @@ class PerturbationSet:
     def read(cls, path) -> "PerturbationSet":
         return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
+    @classmethod
+    def fromRun(cls, directory, sample: int, *, name: str = FACTORS_STEM
+                ) -> "PerturbationSet":
+        """Realisation *sample* of a run, back from its factors table.
+
+        The one-file-per-run counterpart of :meth:`read`; see
+        :func:`writeFactorsTable`.
+        """
+        return readFactorsTable(directory, sample, name=name)
+
     def __repr__(self) -> str:
         return (f"PerturbationSet({self.label!r}, "
                 f"{len(self.factors)} component(s), "
                 f"{'+'.join(self.quantities())})")
+
+
+# ---------------------------------------------------------------------------
+# One file per run
+# ---------------------------------------------------------------------------
+
+_TABLE_FORMAT_VERSION = 1
+
+
+def _factorsIndex(sets: Sequence["PerturbationSet"]) -> Dict[str, Any]:
+    """What is true of every sample, written once.
+
+    Checks that it *is* true of every sample -- same components, same grids,
+    same semantics -- because a table whose rows mean different things in
+    different samples is exactly the file this format exists to prevent.
+    """
+    first = sets[0]
+    components = first.components()
+    for number, pset in enumerate(sets):
+        if pset.components() != components:
+            raise ValueError(
+                f"sample {number} ({pset.label}) perturbs "
+                f"{[c.describe() for c in pset.components()]}, sample 0 "
+                f"{[c.describe() for c in components]}: one table cannot hold "
+                f"realisations of different requests"
+            )
+        for component in components:
+            if not np.array_equal(pset.binEdges[component], first.binEdges[component]):
+                raise ValueError(
+                    f"sample {number}: {component.describe()} is stated on a "
+                    f"different grid from sample 0"
+                )
+            if pset.semanticsOf(component) != first.semanticsOf(component):
+                raise ValueError(
+                    f"sample {number}: {component.describe()} acts under "
+                    f"{pset.semanticsOf(component)!r}, sample 0 under "
+                    f"{first.semanticsOf(component)!r}"
+                )
+    shared = {key: value for key, value in first.provenance.items()
+              if key != "sample"}
+    for pset in sets[1:]:
+        for key, value in pset.provenance.items():
+            if key != "sample" and shared.get(key) != value:
+                shared.pop(key, None)
+    return {
+        "format": _TABLE_FORMAT_VERSION,
+        "setFormat": _FORMAT_VERSION,
+        "nSamples": len(sets),
+        "labels": [pset.label for pset in sets],
+        "semantics": first.semantics,
+        "edgeRule": first.edgeRule,
+        "provenance": shared,
+        "groups": [[list(component) for component in group]
+                   for group in first.groups],
+        "blocks": [
+            {
+                "component": list(component),
+                "quantity": component.quantity,
+                "describe": component.describe(),
+                "semantics": first.semanticsOf(component),
+                "nBins": int(first.factors[component].size),
+                "binEdges": [float(e) for e in first.binEdges[component]],
+                **({"outerDomain": list(first.outerDomains[component])}
+                   if component in first.outerDomains else {}),
+            }
+            for component in components
+        ],
+        "columns": {
+            "sample": "0-based sample number, the row of `labels`",
+            "za": "ZA of the component", "mf": "ENDF file the covariance came from",
+            "mt": "reaction", "index": "Legendre order (MF34) or band (MF35), else 0",
+            "bin": "0-based bin on `binEdges` of that component",
+            "value": "the drawn factor (multiplicative-relative) or delta (additive-absolute)",
+        },
+    }
+
+
+def writeFactorsTable(sets: Sequence["PerturbationSet"], directory, *,
+                      name: str = FACTORS_STEM) -> Tuple[Path, Path]:
+    """Every realisation of a run in **one** self-describing table.
+
+    ``<name>.parquet`` has one row per ``(sample, component, bin)`` with the
+    drawn value, zstd-compressed, and carries its **index** in the parquet
+    schema metadata: what a row means -- the bin edges, the semantics and the
+    outer domain per component, the groups, the shared provenance, and the
+    label of every sample. That is what :meth:`PerturbationSet.write` wrote
+    once per sample, with the part that never changes between samples written
+    once, inside the one file it describes. :func:`readFactorsIndex` reads it
+    back without touching a row.
+
+    Returns the table's path twice, for callers written when the index was a
+    sidecar file.
+
+    Why a table and not a thousand JSON files: a 1 000-sample run of the
+    Fe-56 MF33 request is 1 000 files of 13 KB each, and every one of them
+    repeats the same 125 bin edges and the same provenance. The shipped
+    pipelines wrote a single factors parquet per run for the same reason.
+    """
+    import pandas as pd
+
+    sets = list(sets)
+    if not sets:
+        raise ValueError("no realisations to write")
+    index = _factorsIndex(sets)
+    components = sets[0].components()
+
+    samples, zas, mfs, mts, indices, bins, values = [], [], [], [], [], [], []
+    for number, pset in enumerate(sets):
+        for component in components:
+            block = np.asarray(pset.factors[component], dtype=float)
+            n = block.size
+            samples.append(np.full(n, number, dtype=np.int32))
+            zas.append(np.full(n, component.za, dtype=np.int32))
+            mfs.append(np.full(n, component.mf, dtype=np.int16))
+            mts.append(np.full(n, component.mt, dtype=np.int16))
+            indices.append(np.full(n, component.index, dtype=np.int16))
+            bins.append(np.arange(n, dtype=np.int32))
+            values.append(block)
+    frame = pd.DataFrame({
+        "sample": np.concatenate(samples), "za": np.concatenate(zas),
+        "mf": np.concatenate(mfs), "mt": np.concatenate(mts),
+        "index": np.concatenate(indices), "bin": np.concatenate(bins),
+        "value": np.concatenate(values),
+    })
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    table = directory / f"{name}.parquet"
+    # The index travels *inside* the parquet, as schema metadata, so the table
+    # is one self-describing file rather than a file and a sidecar that can be
+    # separated. `pq.read_schema` gets it back without reading a row.
+    arrow = pa.Table.from_pandas(frame, preserve_index=False)
+    arrow = arrow.replace_schema_metadata({
+        **(arrow.schema.metadata or {}),
+        _INDEX_METADATA_KEY: json.dumps(index).encode("utf-8"),
+    })
+    pq.write_table(arrow, table, compression="zstd")
+    return table, table
+
+
+#: The parquet schema-metadata key under which the index is stored.
+_INDEX_METADATA_KEY = b"kika.factors_index"
+
+
+def readFactorsIndex(directory, *, name: str = FACTORS_STEM) -> Dict[str, Any]:
+    """The index of a run's factors table, read from the parquet's metadata.
+
+    *directory* may also be the path of the parquet itself.
+    """
+    import pyarrow.parquet as pq
+
+    path = Path(directory)
+    if path.is_dir():
+        path = path / f"{name}.parquet"
+    metadata = pq.read_schema(path).metadata or {}
+    if _INDEX_METADATA_KEY not in metadata:
+        raise ValueError(
+            f"{path.name} carries no kika factors index in its schema metadata; "
+            f"it was not written by writeFactorsTable")
+    data = json.loads(metadata[_INDEX_METADATA_KEY].decode("utf-8"))
+    version = int(data.get("format", 0))
+    if version != _TABLE_FORMAT_VERSION:
+        raise ValueError(
+            f"factors table format {version}; this kika reads "
+            f"{_TABLE_FORMAT_VERSION}"
+        )
+    return data
+
+
+def readFactorsTable(directory, sample: int, *, name: str = FACTORS_STEM
+                     ) -> "PerturbationSet":
+    """One realisation back from the table, as the set that was applied.
+
+    Reads only the rows of *sample* -- the parquet filter pushes down to the
+    row groups -- so picking sample 731 of a thousand does not load the other
+    999.
+    """
+    import pandas as pd
+
+    directory = Path(directory)
+    table = directory / f"{name}.parquet" if directory.is_dir() else directory
+    index = readFactorsIndex(table, name=name)
+    if not 0 <= int(sample) < int(index["nSamples"]):
+        raise IndexError(
+            f"sample {sample} of a run with {index['nSamples']} sample(s)")
+    frame = pd.read_parquet(table, filters=[("sample", "==", int(sample))])
+    if frame.empty:
+        raise ValueError(f"the table holds no rows for sample {sample}")
+
+    factors, binEdges, outerDomains, componentSemantics = {}, {}, {}, {}
+    setSemantics = index.get("semantics", SEMANTICS[0])
+    for block in index["blocks"]:
+        component = ComponentKey(*(int(v) for v in block["component"]))
+        rows = frame[(frame["za"] == component.za) & (frame["mf"] == component.mf)
+                     & (frame["mt"] == component.mt)
+                     & (frame["index"] == component.index)].sort_values("bin")
+        values = rows["value"].to_numpy(dtype=float)
+        if values.size != int(block["nBins"]):
+            raise ValueError(
+                f"sample {sample}: {component.describe()} has {values.size} "
+                f"value(s) in the table and {block['nBins']} in the index"
+            )
+        if not np.array_equal(rows["bin"].to_numpy(), np.arange(values.size)):
+            raise ValueError(
+                f"sample {sample}: {component.describe()} has bins missing or "
+                f"repeated in the table"
+            )
+        factors[component] = values
+        binEdges[component] = np.asarray(block["binEdges"], dtype=float)
+        semantics = block.get("semantics")
+        if semantics is not None and semantics != setSemantics:
+            componentSemantics[component] = semantics
+        domain = block.get("outerDomain")
+        if domain is not None:
+            outerDomains[component] = (float(domain[0]), float(domain[1]))
+    groups = tuple(tuple(ComponentKey(*(int(v) for v in component))
+                         for component in group)
+                   for group in index.get("groups", ()))
+    provenance = dict(index.get("provenance", {}))
+    provenance["sample"] = int(sample)
+    return PerturbationSet(label=index["labels"][int(sample)], factors=factors,
+                           binEdges=binEdges, groups=groups,
+                           semantics=setSemantics,
+                           componentSemantics=componentSemantics,
+                           outerDomains=outerDomains,
+                           edgeRule=index.get("edgeRule", EDGE_RULE),
+                           provenance=provenance)
