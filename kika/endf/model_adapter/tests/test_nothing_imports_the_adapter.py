@@ -168,6 +168,13 @@ PERMANENT_IMPORTERS = {
     "kika/sampling/mf35_sampling.py",
     "kika/sampling/endf_perturbation.py",
     "kika/sampling/mf33_sampling.py",
+    # The model-side pipeline. It is on this list for the same reason the three
+    # sampling modules above are -- a driver that perturbs the model has to
+    # decode a tape into it and encode sections back out -- and it costs the
+    # frozen build nothing new: `kika.endf.model_adapter` and
+    # `kika.nuclear_data.model` are already in kika-api.spec's hiddenimports
+    # (lines 198-200), and the desktop app does not call this module at all.
+    "kika/sampling/model_perturbation.py",
     "kika/endf/processing/reconstruct.py",
     "kika/endf/writers/assemble.py",
 }
