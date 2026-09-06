@@ -43,7 +43,12 @@ def test_the_fixture_has_sections_to_compare(decoded):
     """A tape with no MF3 would make every comparison below vacuous."""
     endf, suite, _ = decoded
     assert len(endf.mf[3].mt) >= 3
-    assert len(suite.reactions) == len(endf.mf[3].mt)
+    # Both containers: since the decoder learned §21.1, an MF3 section whose
+    # partials the file also gives lands in `sums` rather than in `reactions`.
+    # This assertion is "every MF3 section reached the model", and splitting
+    # them changed where they are, not how many there are.
+    assert len(suite.reactions) + len(suite.sums) == len(endf.mf[3].mt)
+    assert len(suite.sums), "the fixture is meant to carry a summation MT"
 
 
 def test_every_mf3_section_encodes_byte_identically_to_the_file(decoded):

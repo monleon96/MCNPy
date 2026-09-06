@@ -218,6 +218,32 @@ def decodeMF1MT451(mt451, report: Optional[ConversionReport] = None):
     return pops, style, provenance, report
 
 
+
+def _summationMTs(present) -> set:
+    """Which of *present* are §21.1 ``crossSectionSums`` rather than reactions.
+
+    **A summation MT is one the file states *and* gives the partials of.** MT1
+    is always one, because MT2 is always there. MT103 is one in an evaluation
+    that also writes MT600-649 and an ordinary reaction in one that does not --
+    the same MT number, two different things, decided by what the file carries
+    beside it. ENDF-6 does not mark them, so this is derived rather than read.
+
+    Why it matters, and it is not tidiness: §21 exists because a redundant
+    quantity has no independent content. Perturbing MT1 and MT2 as if they were
+    two reactions double-counts the elastic; re-deriving MT1 after MT2 moves is
+    the correct operation and it needs somewhere to look up "what is MT1 a sum
+    of". ``reactionByENDF_MT`` searches both containers, so nothing that asks
+    for an MT by number notices the move.
+
+    The rules are :data:`kika._constants.MF3_SUM_RULES`, shared with
+    :mod:`kika.endf.writers.redundant`, which rebuilds these same sections after
+    an edit. One table, so the two cannot disagree about what MT4 is made of.
+    """
+    from kika.endf.writers.redundant import resolve_sum_components
+
+    available = set(int(mt) for mt in present)
+    return {mt for mt in available if resolve_sum_components(mt, available)}
+
 def decodeReactionSuite(endf, report: Optional[ConversionReport] = None):
     """A parsed ``ENDF`` object → a :class:`ReactionSuite`, plus the report.
 
@@ -252,9 +278,14 @@ def decodeReactionSuite(endf, report: Optional[ConversionReport] = None):
 
     mf3 = endf.mf.get(3) if hasattr(endf, "mf") else None
     if mf3 is not None:
-        for mt in sorted(getattr(mf3, "mt", {})):
+        present = sorted(getattr(mf3, "mt", {}))
+        redundant = _summationMTs(present)
+        for mt in present:
             reaction, report = decodeMF3MT(mf3.mt[mt], report)
-            suite.reactions.append(reaction)
+            if mt in redundant:
+                suite.sums.append(reaction)
+            else:
+                suite.reactions.append(reaction)
     else:
         report.lost("no MF3: the evaluation carries no cross sections")
 

@@ -141,6 +141,19 @@ def _mf2Sections(suite, mat, report):
     return [(2, 151, section)], report
 
 
+
+def _mf3Bearing(suite):
+    """Every reaction that owns an MF3 section, in tape order.
+
+    ``reactions`` and ``sums`` -- §21.1's ``crossSectionSums`` are reactions in
+    every respect the ENDF writer cares about, and sorting by MT rather than
+    concatenating the two lists is what keeps the sections in the order a tape
+    states them, which is the order the round-trip gate compares.
+    """
+    both = list(suite.reactions) + list(suite.sums)
+    return sorted(both, key=lambda r: (r.ENDF_MT is None, r.ENDF_MT or 0))
+
+
 def _mf3And4And5Sections(suite, mat, report, label=None):
     """MF3 for every reaction with an MT, MF4 and MF5 for what states them.
 
@@ -158,7 +171,11 @@ def _mf3And4And5Sections(suite, mat, report, label=None):
 
     mf3, mf4, mf5 = [], [], []
     written, fellBack = [], []
-    for reaction in suite.reactions:
+    # `reactions` and `sums` both, because a tape's MF3 does not distinguish
+    # them: §21.1 is a statement about what MT1 *means*, not about whether it is
+    # in the file. Reading an evaluation and writing it back has to give the
+    # sections back, wherever the model chose to keep them.
+    for reaction in _mf3Bearing(suite):
         mt = reaction.ENDF_MT
         if mt is None:
             # §2.4, and it is irreducible: GNDS labels reactions and does not
@@ -291,7 +308,7 @@ def _mf6Sections(suite, mat, report):
     from ..model_adapter import encodeMF6MT
 
     sections = []
-    for reaction in suite.reactions:
+    for reaction in _mf3Bearing(suite):
         provenance = getattr(reaction, "provenance", None)
         header = getattr(provenance, "headerFields", None) or {}
         if "mf6" not in header:
