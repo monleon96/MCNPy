@@ -53,7 +53,8 @@ COVARIANCE_SUBDIRECTORY = "Covariances"
 
 
 def write(suite, path, format: str = "gnds", gnds: Optional[str] = None,
-          mat: Optional[int] = None, tapeId: Optional[str] = None):
+          mat: Optional[int] = None, tapeId: Optional[str] = None,
+          label: Optional[str] = None):
     """Write a :class:`ReactionSuite` out, and say what did not go with it.
 
     Parameters
@@ -82,6 +83,12 @@ def write(suite, path, format: str = "gnds", gnds: Optional[str] = None,
         ENDF only. The 66 text columns of the tape identification record.
         ``read_endf`` does not keep a tape's first line, so a round trip cannot
         reproduce the original and the default label says as much in the report.
+    label
+        ENDF only. Which §9.1 style label to write out of each multi-form
+        container; the default is ``'eval'``. Naming a ``realization`` label
+        (§9.3) writes the drawn sample rather than the evaluation it was drawn
+        from, falling back to ``'eval'`` for anything that carries no form under
+        it. GNDS needs no such parameter — it writes every form, with its label.
 
     Returns
     -------
@@ -106,7 +113,7 @@ def write(suite, path, format: str = "gnds", gnds: Optional[str] = None,
         from kika.endf.writers.assemble import writeEndfTape
 
         return writeEndfTape(suite, Path(os.fspath(path)), mat=mat,
-                             tapeId=tapeId)
+                             tapeId=tapeId, label=label)
     return _writeGnds(suite, Path(os.fspath(path)), gnds)
 
 

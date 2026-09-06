@@ -18,7 +18,7 @@ import numpy as np
 
 from kika.nuclear_data.model import EVAL_LABEL, ConversionReport, Reaction
 
-__all__ = ["encodeMF3MT", "encodeMF1MT451"]
+__all__ = ["encodeMF3MT", "encodeMF1MT451", "usableInterpolationRegions"]
 
 #: The MF1/451 header fields an encoder cannot invent. ``temp`` is deliberately
 #: not among them: a section may legitimately carry 0 K, and the decoder always
@@ -27,6 +27,43 @@ _MF1_REQUIRED_FIELDS = (
     "lrp", "lfi", "nlib", "nmod", "elis", "sta", "lis", "liso",
     "nfor", "awi", "emax", "lrel", "nsub", "nver", "ldrv",
 )
+
+
+def usableInterpolationRegions(kept, npoints: int):
+    """The file's own ``(NBT, INT)`` pairs — *if they still describe the table*.
+
+    The encoders prefer the pairs the decoder kept over the ones rebuilt from
+    the ``regions1d``, so that a round trip does not depend on the
+    reconstruction staying byte-faithful for every tape ever written. That is a
+    good reason and it holds exactly as long as nobody changes the table's
+    length, which is why this function exists: the moment a perturbation refines
+    the grid — and the MF33 factor application inserts a duplicate abscissa at
+    every bin edge *by construction* — the kept pairs describe a table that is
+    no longer there. ``NBT`` is cumulative and one-based, so the last pair is a
+    statement about the point count, and writing it beside a different ``NP``
+    produces a TAB1 whose final interpolation region does not reach the end of
+    its own table. It does not raise, and no schema sees it.
+
+    Returns the pairs when they are a self-consistent description of *npoints*,
+    and ``None`` when the caller should rebuild from the model instead.
+
+    **What it cannot catch**, said here rather than discovered later: an edit
+    that leaves the point count unchanged while moving where the regions break
+    — inserting one point and dropping another — passes this check and writes
+    the old partition. No applier does that, and the cheap test for it is the
+    one already in ``test_endf_round_trip.py``: the rebuilt pairs equal the
+    file's own.
+    """
+    if not kept:
+        return None
+    pairs = [(int(nbt), int(code)) for nbt, code in kept]
+    previous = 0
+    for nbt, _ in pairs:
+        if nbt <= previous:
+            return None
+        previous = nbt
+    return pairs if previous == int(npoints) else None
+
 
 #: ``EndfProvenance.evaluationInfo`` key → the ``MF1MT451`` attribute it fills.
 _MF1_EVALUATION_INFO = (
@@ -38,38 +75,65 @@ _MF1_EVALUATION_INFO = (
 
 
 def encodeMF3MT(reaction: Reaction, mat: Optional[int] = None,
-                report: Optional[ConversionReport] = None):
+                report: Optional[ConversionReport] = None, *,
+                label: str = EVAL_LABEL):
     """A :class:`Reaction` → an ``MF3MT``.
 
     Everything comes from the model or from the provenance the decoder kept;
     nothing is recomputed. In particular the ``(NBT, INT)`` pairs are the
     file's own, not a reconstruction from the regions — a reconstruction would
-    be correct and would still be a second source of truth.
+    be correct and would still be a second source of truth. Except when they no
+    longer describe the table: :func:`usableInterpolationRegions`.
+
+    ``label`` names which §9.1 form to write. It defaults to ``'eval'``, which
+    is what §16.1.1 requires of an evaluated file and what every caller wants
+    today, and it is a parameter because ENDF is otherwise the one door a
+    perturbed form cannot leave by. A ``crossSection`` is a
+    :class:`~kika.nuclear_data.model.component.Component` — several forms, each
+    tagged with a style label, which is how §9.3's ``realization`` puts a drawn
+    sample beside the evaluation it was drawn from. The GNDS writer walks all of
+    them (``kika/gnds/encode.py``); hard-coding ``'eval'`` here meant the same
+    suite came out perturbed through one door and unperturbed through the other,
+    silently.
     """
     from kika.endf.classes.mf3.mf3mt import MF3MT
 
     report = report if report is not None else ConversionReport()
     provenance = getattr(reaction, "provenance", None)
 
-    if EVAL_LABEL not in reaction.crossSection:
+    if label not in reaction.crossSection:
+        held = sorted(reaction.crossSection.keys())
         raise ValueError(
-            f"{reaction.label} has no {EVAL_LABEL!r} cross-section form; §16.1.1 "
-            f"requires one for an evaluated file, and there is nothing to write"
+            f"{reaction.label} has no {label!r} cross-section form; it holds "
+            f"{held}. §16.1.1 requires an {EVAL_LABEL!r} form for an evaluated "
+            f"file, and there is nothing to write"
         )
-    form = reaction.crossSection[EVAL_LABEL]
+    form = reaction.crossSection[label]
     if not hasattr(form, "toEndfRegions"):
         raise TypeError(
-            f"the {EVAL_LABEL!r} form of {reaction.label} is a "
+            f"the {label!r} form of {reaction.label} is a "
             f"{type(form).__name__}; MF3 needs a tabulated form (regions1d)"
         )
 
     energies, values, regions = form.toEndfRegions()
 
-    if provenance is not None and provenance.interpolationRegions:
+    kept = getattr(provenance, "interpolationRegions", None)
+    if kept:
         # Prefer the file's own pairs. They and the reconstructed ones agree --
         # a test asserts it -- but preferring the original means a round trip
         # does not depend on that agreement holding for every tape ever written.
-        regions = list(provenance.interpolationRegions)
+        # Only while they still describe this table: see
+        # `usableInterpolationRegions`.
+        usable = usableInterpolationRegions(kept, energies.size)
+        if usable is not None:
+            regions = usable
+        else:
+            report.warn(
+                f"{reaction.label}: the ENDF interpolation regions kept from the "
+                f"source describe {kept[-1][0]} point(s) and the cross section "
+                f"now has {energies.size}, so they are rebuilt from the "
+                f"regions1d. The model was edited after it was decoded"
+            )
 
     q = reaction.outputChannel.Q
     qi = q.value

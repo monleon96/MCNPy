@@ -429,7 +429,7 @@ def _tab1FromMultiplicity(multiplicity, mt: int):
     )
 
 
-def _fillNubarSection(section, multiplicity, mt: int, mat):
+def _fillNubarSection(section, multiplicity, mt: int, mat, report=None):
     """Populate an ``MF1MT452``/``455``/``456`` from the model. Shared by all three."""
     provenance = multiplicity.provenance
     header = (getattr(provenance, "headerFields", None)) or {}
@@ -450,11 +450,22 @@ def _fillNubarSection(section, multiplicity, mt: int, mat):
         interpolation, energies, values = _tab1FromMultiplicity(multiplicity, mt)
         # The file's own (NBT, INT) pairs when they were kept: the same argument
         # `encodeMF3MT` makes -- a round trip must not depend on the
-        # reconstruction from regions1d staying byte-for-byte faithful.
+        # reconstruction from regions1d staying byte-for-byte faithful -- and
+        # the same limit on it, through the same function. A nu-bar table that
+        # has been refined since it was decoded no longer matches the pairs the
+        # file stated, and MF31's factor application refines it.
+        from .encode import usableInterpolationRegions
+
         kept = getattr(provenance, "interpolationRegions", None)
-        section._interpolation = (
-            [(int(a), int(b)) for a, b in kept] if kept else interpolation
-        )
+        usable = usableInterpolationRegions(kept, len(energies))
+        if kept and usable is None and report is not None:
+            report.warn(
+                f"MF1/MT{mt}: the ENDF interpolation regions kept from the "
+                f"source describe {kept[-1][0]} point(s) and the nu-bar now has "
+                f"{len(energies)}, so they are rebuilt from the regions1d. The "
+                f"model was edited after it was decoded"
+            )
+        section._interpolation = usable if usable is not None else interpolation
         section._nr = len(section._interpolation)
         section._np = len(energies)
         section._energies = energies
@@ -471,7 +482,7 @@ def _encodeOne(cls, suite, mt: int, mat, report):
             f"be written from it"
         )
     section = cls()
-    _fillNubarSection(section, multiplicity, mt, mat)
+    _fillNubarSection(section, multiplicity, mt, mat, report)
     return section, report
 
 
@@ -510,7 +521,7 @@ def encodeMF1MT455(suite, mat: Optional[int] = None,
         )
 
     section = MF1MT455()
-    _fillNubarSection(section, multiplicity, 455, mat)
+    _fillNubarSection(section, multiplicity, 455, mat, report)
 
     header = getattr(multiplicity.provenance, "headerFields", None) or {}
     ldg = int(header.get("ldg") or 0)

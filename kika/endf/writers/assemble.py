@@ -141,7 +141,7 @@ def _mf2Sections(suite, mat, report):
     return [(2, 151, section)], report
 
 
-def _mf3And4And5Sections(suite, mat, report):
+def _mf3And4And5Sections(suite, mat, report, label=None):
     """MF3 for every reaction with an MT, MF4 and MF5 for what states them.
 
     **The provenance decides which sections are written, not the model's
@@ -154,7 +154,10 @@ def _mf3And4And5Sections(suite, mat, report):
 
     from ..model_adapter import encodeMF3MT, encodeMF4MT, encodeMF5MT
 
+    label = EVAL_LABEL if label is None else label
+
     mf3, mf4, mf5 = [], [], []
+    written, fellBack = [], []
     for reaction in suite.reactions:
         mt = reaction.ENDF_MT
         if mt is None:
@@ -167,11 +170,20 @@ def _mf3And4And5Sections(suite, mat, report):
             )
             continue
 
-        section, report = encodeMF3MT(reaction, mat, report)
+        # A reaction the caller did not perturb has no form under the
+        # realization's label. Falling back to `eval` keeps the tape complete;
+        # refusing would mean a partially perturbed suite could not be written
+        # at all, and writing only the perturbed sections would be a tape with
+        # holes in it.
+        formLabel = label if label in reaction.crossSection else EVAL_LABEL
+        (written if formLabel == label else fellBack).append(mt)
+        section, report = encodeMF3MT(reaction, mat, report, label=formLabel)
         mf3.append((3, mt, section))
 
         product = _neutronProduct(reaction)
-        form = _evaluatedForm(product, EVAL_LABEL)
+        form = _evaluatedForm(product, label)
+        if form is None and label != EVAL_LABEL:
+            form = _evaluatedForm(product, EVAL_LABEL)
         provenance = getattr(product, "provenance", None)
         header = getattr(provenance, "headerFields", None) or {}
 
@@ -183,6 +195,19 @@ def _mf3And4And5Sections(suite, mat, report):
         if "mf5" in header:
             section, report = encodeMF5MT(_mf5Form(form), provenance, mt, report)
             mf5.append((5, mt, section))
+
+    if label != EVAL_LABEL:
+        # **A mixed tape has to say it is mixed.** The fallback above is right --
+        # a partially perturbed suite must still produce a whole tape -- but the
+        # file it produces cannot be told apart from a fully perturbed one by
+        # reading it, and for an ensemble that distinction is the traceability.
+        # So the report states both halves, and states them even when the
+        # fallback did not fire: "0 fell back" is a claim, and its absence is not.
+        report.warn(
+            f"written with the {label!r} form where there is one: "
+            f"MT {written or 'none'} carry it, MT {fellBack or 'none'} fell back "
+            f"to {EVAL_LABEL!r} because they have no {label!r} form"
+        )
 
     return mf3 + mf4 + mf5, report
 
@@ -348,7 +373,8 @@ def _covarianceSections(suite, mat, report):
     return sections, report
 
 
-def encodeTapeSections(suite, mat: Optional[int] = None, report=None
+def encodeTapeSections(suite, mat: Optional[int] = None, report=None, *,
+                       label: Optional[str] = None
                        ) -> Tuple[List[Tuple[int, int, object]], object, int]:
     """A :class:`ReactionSuite` → ``[(MF, MT, section), …]`` in tape order.
 
@@ -364,7 +390,10 @@ def encodeTapeSections(suite, mat: Optional[int] = None, report=None
     sections: List[Tuple[int, int, object]] = []
     for build in (_mf1Sections, _mf2Sections, _mf3And4And5Sections,
                   _mf6Sections, _covarianceSections):
-        built, report = build(suite, mat, report)
+        if build is _mf3And4And5Sections:
+            built, report = build(suite, mat, report, label)
+        else:
+            built, report = build(suite, mat, report)
         sections.extend(built)
 
     written = {mf for mf, _, _ in sections}
@@ -408,7 +437,8 @@ def assembleTape(sections: Sequence[Tuple[int, int, object]], mat: int,
 
 
 def writeEndfTape(suite, path, mat: Optional[int] = None,
-                  tapeId: Optional[str] = None, report=None):
+                  tapeId: Optional[str] = None, report=None, *,
+                  label: Optional[str] = None):
     """Write *suite* out as an ENDF-6 tape. Returns the :class:`ConversionReport`.
 
     The directory is rebuilt **after** the file is on disk, by
@@ -417,10 +447,17 @@ def writeEndfTape(suite, path, mat: Optional[int] = None,
     the only place the true counts exist is the written file. ``encodeMF1MT451``
     writes back the directory it read, which is right for a tape whose sections
     have not changed length and wrong the moment one has.
+
+    ``label`` selects which §9.1 form of each cross section and distribution is
+    written; the default is ``'eval'``. A ``realization`` (§9.3) drawn beside
+    the evaluation is written by naming its label here. Reactions with no form
+    under that label fall back to ``'eval'``, so a tape written from a partially
+    perturbed suite carries the perturbed sections and the original ones rather
+    than only the first.
     """
     from .update_directory import update_mf1_directory
 
-    sections, report, mat = encodeTapeSections(suite, mat, report)
+    sections, report, mat = encodeTapeSections(suite, mat, report, label=label)
     if not sections:
         raise ValueError(
             "this reactionSuite produced no ENDF sections at all, so there is "
