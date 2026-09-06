@@ -325,3 +325,106 @@ def test_a_reaction_whose_partials_the_file_omits_is_not_a_sum():
                            seed=5)
     assert run.samples[0]["set"].reactions() == (4, 16)
     assert run.notes == []
+
+
+# ----------------------------------------------------------------------
+# The multiplicity, end to end
+# ----------------------------------------------------------------------
+
+NUBAR_TAPE = str(DATA / "micro_u235_nubar.endf")
+
+
+@pytest.fixture(scope="module")
+def nubarRun(tmp_path_factory):
+    return perturbFromModel(NUBAR_TAPE, {31: [455, 456]}, 2, seed=20260906,
+                            outputDir=tmp_path_factory.mktemp("nubar"),
+                            formats=("endf-delta",))
+
+
+def test_the_written_nubar_tape_satisfies_the_sum_rule(nubarRun):
+    """The whole reason the family rule had to be ported before this shipped.
+
+    Perturbing MT455 and MT456 and writing them is not enough: MT452 is the sum
+    of the two, so a delta that wrote only what the request named would leave a
+    tape stating a total that is not the sum of the parts it had just changed.
+    Measured before the rule existed: MT452 at 2.5178 at 1 MeV with a prompt
+    already moved to 2.4967.
+
+    The tolerance is the file's. ENDF stores six significant digits, so the
+    identity that holds to 1e-16 in the model is recoverable to about 1e-6 once
+    written.
+    """
+    tape = read_endf(str(nubarRun.samples[0]["files"]["endf-delta"]))
+    tables = {mt: (np.asarray(tape.get_file(1).sections[mt].energies, dtype=float),
+                   np.asarray(tape.get_file(1).sections[mt].nubar_values,
+                              dtype=float))
+              for mt in (452, 455, 456)}
+
+    probe = np.geomspace(1.0e-3, 1.0e7, 25)
+    total = np.interp(probe, *tables[452])
+    parts = (np.interp(probe, *tables[455]) + np.interp(probe, *tables[456]))
+    assert np.max(np.abs(total - parts) / np.abs(total)) < 5e-6
+
+
+def test_the_derived_total_is_rewritten_although_it_was_not_requested(nubarRun):
+    """A realisation writes what it changed, not what it was asked for.
+
+    The request names MT455 and MT456; the applier also rebuilds MT452, and the
+    emitter has to know. It learns it from the forms the applier displaced, not
+    from the request -- inferring it from the request is what left the total
+    stale in the first version of this.
+    """
+    before = read_endf(NUBAR_TAPE).get_file(1).sections[452]
+    after = read_endf(str(nubarRun.samples[0]["files"]["endf-delta"])
+                      ).get_file(1).sections[452]
+
+    assert len(after.energies) > len(before.energies), (
+        "MT452 was not rebuilt on the union of the perturbed components' grids")
+    baseline = np.interp(1.0e6, np.asarray(before.energies, dtype=float),
+                         np.asarray(before.nubar_values, dtype=float))
+    realised = np.interp(1.0e6, np.asarray(after.energies, dtype=float),
+                         np.asarray(after.nubar_values, dtype=float))
+    assert realised != baseline
+
+
+def test_a_nubar_run_leaves_the_rest_of_the_tape_alone(nubarRun):
+    source = _blocks(NUBAR_TAPE)
+    delta = _blocks(str(nubarRun.samples[0]["files"]["endf-delta"]))
+
+    for key in ((3, 18), (31, 452), (31, 455), (31, 456)):
+        assert delta[key] == source[key], f"MF{key[0]}/MT{key[1]} was rewritten"
+    for key in ((1, 452), (1, 455), (1, 456)):
+        assert delta[key] != source[key]
+
+
+def test_two_nubar_samples_differ_only_in_the_multiplicity(nubarRun):
+    first = _blocks(str(nubarRun.samples[0]["files"]["endf-delta"]))
+    second = _blocks(str(nubarRun.samples[1]["files"]["endf-delta"]))
+    differing = {key for key in set(first) | set(second)
+                 if first.get(key) != second.get(key)}
+    assert differing == {(1, 452), (1, 455), (1, 456)}, (
+        f"two samples of the same request differ in {sorted(differing)}")
+
+
+def test_the_evaluation_is_back_on_the_suite_after_each_sample(nubarRun):
+    """A nu-bar realisation replaces the evaluated form, so it has to be put back.
+
+    If it were not, sample 1 would be drawn on top of sample 0's nu-bar and the
+    ensemble would drift with the sample index -- and nothing in the output would
+    say so. The check is that the two samples' totals differ from each other but
+    both stay near the baseline, which a compounding error would not.
+    """
+    baseline = read_endf(NUBAR_TAPE).get_file(1).sections[452]
+    baselineNu = np.interp(1.0e6, np.asarray(baseline.energies, dtype=float),
+                           np.asarray(baseline.nubar_values, dtype=float))
+
+    realised = []
+    for sample in nubarRun.samples:
+        section = read_endf(str(sample["files"]["endf-delta"])).get_file(1).sections[452]
+        realised.append(float(np.interp(
+            1.0e6, np.asarray(section.energies, dtype=float),
+            np.asarray(section.nubar_values, dtype=float))))
+
+    assert realised[0] != realised[1]
+    for value in realised:
+        assert abs(value - baselineNu) / baselineNu < 0.10

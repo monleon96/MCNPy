@@ -846,3 +846,220 @@ def perturb_nubar_family(
             )
 
     return out, diags
+
+
+# ---------------------------------------------------------------------------
+# The same rule, on the model
+# ---------------------------------------------------------------------------
+
+def _modelNubarTable(form):
+    """``(energies, nu-bar)`` of a model multiplicity form, or empty arrays.
+
+    The model-side :func:`_nubar_as_tabulated`. A form that is not a table --
+    ENDF's LNU=1 polynomial, which the model holds as a polynomial and not as a
+    curve -- comes back empty, and the callers decide what that means, exactly
+    as they do for a section whose ``lnu`` is 1.
+    """
+    if form is None or not hasattr(form, "toEndfRegions"):
+        return np.asarray([], dtype=float), np.asarray([], dtype=float)
+    xs, ys, _pairs = form.toEndfRegions()
+    return np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)
+
+
+def _asLinLinForm(template, energies: np.ndarray, values: np.ndarray):
+    """One lin-lin region carrying *energies* and *values*, keeping the labels.
+
+    The model-side ``_set_nubar``: that function writes ``[(N, 2)]`` into the
+    section, and this writes the node that encodes to it.
+    """
+    from kika.nuclear_data.model.perturbation import _oneLinLinRegion
+
+    return _oneLinLinRegion(template, energies, values)
+
+
+def sumRuleResidualOnModel(forms: Dict[int, object],
+                           bins: Sequence[float]) -> Optional[Dict[str, float]]:
+    """How far the *input* nu-bar family is from nu_452 = nu_455 + nu_456.
+
+    The model-side :func:`sum_rule_residual`, cut down to what a run needs to
+    record: the largest per-bin relative residual and where it is. It exists
+    because deriving the redundant member **repairs** that residual as a side
+    effect, which moves the central value by something the perturbation never
+    asked for -- so a run that derives has to be able to say how much.
+
+    Only bins every member spans are scored. Where the delayed table stops short
+    of the prompt one -- JEFF-4.0 U-235 tabulates nu_d to 20 MeV and nu_p to
+    30 MeV -- there is no rule to check, and counting the missing nu_d as a
+    violation would report a discrepancy that is really absent data.
+
+    ``None`` when the family is incomplete: nothing is derived, so nothing is
+    repaired.
+    """
+    if not set(_NUBAR_MTS).issubset({int(mt) for mt in forms}):
+        return None
+    tables = {mt: _modelNubarTable(forms[mt]) for mt in _NUBAR_MTS}
+    if any(e.size == 0 for e, _ in tables.values()):
+        return None
+
+    edges = np.asarray(bins, dtype=float)
+    lo = max(float(e[0]) for e, _ in tables.values())
+    hi = min(float(e[-1]) for e, _ in tables.values())
+    covered = (edges[:-1] >= lo) & (edges[1:] <= hi)
+    if not covered.any():
+        return None
+
+    bar = {mt: _bin_average_xs(e, n, edges) for mt, (e, n) in tables.items()}
+    total = np.asarray(bar[NUBAR_TOTAL_MT], dtype=float)
+    parts = sum(np.asarray(bar[mt], dtype=float) for mt in NUBAR_COMPONENT_MTS)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        relative = np.where(total != 0.0, np.abs(total - parts) / np.abs(total),
+                            np.nan)
+    relative = np.where(covered, relative, np.nan)
+    if not np.isfinite(relative).any():
+        return None
+    return {
+        "max_bin_rel": float(np.nanmax(relative)),
+        "argmax_bin": int(np.nanargmax(relative)),
+        "n_bins_scored": int(np.isfinite(relative).sum()),
+        "n_bins_uncovered": int((~covered).sum()),
+    }
+
+
+def perturbNubarFamilyOnModel(
+    forms: Dict[int, object],
+    factor_blocks: Dict[int, np.ndarray],
+    bins: Sequence[float],
+    *,
+    derived_mt: Optional[int] = None,
+    logger=None,
+) -> Tuple[Dict[int, object], Dict[int, dict]]:
+    """:func:`perturb_nubar_family`, on model nodes instead of MF1 sections.
+
+    Same rule, same four coverage patterns, same derived member, and it lives
+    beside the original **on purpose**: they are one convention with two
+    implementations, and a reader who changes one has to see the other. The gate
+    is ``test_the_nubar_family_on_the_model_reproduces_the_sections``, which
+    compares the tables the two produce point for point.
+
+    *forms* maps ``MT -> the multiplicity's form`` for the members the suite
+    carries (452/455/456); *factor_blocks* maps ``MT -> per-bin factors`` for
+    the members that have MF31 covariance; *bins* is the MF31 union grid.
+
+    Returns ``({MT: perturbed form}, {MT: diagnostics})``. The derived member is
+    rebuilt from the others on the union of their grids -- exact, because
+    :func:`~kika.nuclear_data.model.perturbation.refineForNubar` inserts no
+    duplicate energies and a sum of lin-lin interpolants on the union of their
+    nodes is a lin-lin identity.
+
+    **What it does not do, and the original does not either:** repair the
+    residual quietly. Rebuilding the derived member also fixes whatever the input
+    evaluation was off by, which moves the central value by something the
+    perturbation never asked for. :func:`sum_rule_residual` puts a number on it;
+    for the JEFF-4.0 actinides it is <=0.15 of the MF31 1-sigma.
+    """
+    from kika.nuclear_data.model.perturbation import applyNubarFactors
+
+    bins_arr = np.asarray(bins, dtype=float)
+    n_groups = bins_arr.size - 1
+    derived = NUBAR_TOTAL_MT if derived_mt is None else int(derived_mt)
+    present = set(int(mt) for mt in forms)
+
+    if not present:
+        raise ValueError(
+            "no nu-bar nodes to perturb (MT 452/455/456 all absent); writing "
+            "the tape unchanged would report a perturbation that never happened"
+        )
+    orphan_blocks = sorted(int(mt) for mt in factor_blocks if int(mt) not in present)
+    if orphan_blocks:
+        raise ValueError(
+            f"MF31 covariance for MT(s) {orphan_blocks} but no matching nu-bar "
+            f"node (present: {sorted(present)})"
+        )
+
+    if derived == NUBAR_TOTAL_MT:
+        can_derive = (NUBAR_TOTAL_MT in present
+                      and set(NUBAR_COMPONENT_MTS).issubset(present))
+    else:
+        required = {NUBAR_TOTAL_MT} | (set(NUBAR_COMPONENT_MTS) - {derived})
+        can_derive = derived in present and required.issubset(present)
+
+    out: Dict[int, object] = {}
+    diags: Dict[int, dict] = {}
+
+    if not can_derive:
+        if logger is not None and len(present) > 1:
+            logger.warning(
+                f"  [MF31] incomplete nu-bar family {sorted(present)}: MT{derived} "
+                f"cannot be derived, perturbing each member directly."
+            )
+        for mt, form in forms.items():
+            if mt in factor_blocks:
+                out[mt], diags[mt] = applyNubarFactors(
+                    form, np.asarray(factor_blocks[mt], dtype=float), bins_arr)
+            else:
+                out[mt] = form
+        return out, diags
+
+    total_block = factor_blocks.get(NUBAR_TOTAL_MT)
+    block_for: Dict[int, Optional[np.ndarray]] = {}
+    for mt in present:
+        if mt == derived:
+            continue
+        if mt in factor_blocks:
+            block_for[mt] = np.asarray(factor_blocks[mt], dtype=float)
+        elif mt in NUBAR_COMPONENT_MTS and total_block is not None:
+            # "Perturb everything with the total": the components ride the
+            # total's factor, so all three scale together and the rule holds.
+            block_for[mt] = np.asarray(total_block, dtype=float)
+        else:
+            block_for[mt] = None
+
+    for mt in sorted(present):
+        if mt == derived:
+            continue
+        block = block_for[mt]
+        if block is None:
+            out[mt] = forms[mt]
+            continue
+        if block.size != n_groups:
+            raise ValueError(
+                f"factor block for MT={mt} has size {block.size}, expected "
+                f"n_groups={n_groups}")
+        out[mt], diags[mt] = applyNubarFactors(forms[mt], block, bins_arr)
+
+    if derived == NUBAR_TOTAL_MT:
+        contributors = [mt for mt in NUBAR_COMPONENT_MTS if mt in present]
+        signs = {mt: +1.0 for mt in contributors}
+    else:
+        contributors = [NUBAR_TOTAL_MT] + [
+            mt for mt in NUBAR_COMPONENT_MTS if mt != derived]
+        signs = {mt: (+1.0 if mt == NUBAR_TOTAL_MT else -1.0)
+                 for mt in contributors}
+
+    tables: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+    for mt in contributors:
+        e, n = _modelNubarTable(out.get(mt, forms.get(mt)))
+        if e.size == 0:
+            raise ValueError(
+                f"MT{derived} is derived from MT{mt}, but MT{mt} carries no "
+                f"usable nu-bar table (its form is a "
+                f"{type(forms.get(mt)).__name__}); perturb it too, or set "
+                f"derived_mt to a member that is")
+        tables[mt] = (e, n)
+
+    union_e = np.unique(np.concatenate([e for e, _ in tables.values()]))
+    nu_derived = np.zeros_like(union_e)
+    for mt, (e, n) in tables.items():
+        nu_derived = nu_derived + signs[mt] * np.interp(
+            union_e, e, n, left=n[0], right=n[-1])
+    out[derived] = _asLinLinForm(forms[derived], union_e, nu_derived)
+    residual = sumRuleResidualOnModel(forms, bins_arr)
+    diags[derived] = {"derived_from_sum_rule": True,
+                      "n_points": int(union_e.size),
+                      "contributors": sorted(contributors),
+                      "baseline_residual": residual}
+    if logger is not None:
+        logger.info(
+            f"  [MF31] MT{derived}: recomputed from sum rule on "
+            f"{union_e.size} points.")
+    return out, diags

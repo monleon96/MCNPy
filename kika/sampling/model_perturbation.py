@@ -138,6 +138,32 @@ def _redundancyNote(suite, pset) -> Optional[str]:
     )
 
 
+def _sumRuleNote(applied) -> Optional[str]:
+    """Whether this realisation rebuilt a nu-bar from the sum rule, and what it cost.
+
+    Rebuilding the redundant member repairs whatever the *input* evaluation was
+    off by, and that moves the central value by something the perturbation never
+    asked for. The rule is right and the repair is unavoidable; what is not
+    acceptable is it being invisible, so the size of it goes in the run's own
+    account of itself.
+    """
+    for component, info in applied.items():
+        if not info.get("derived_from_sum_rule"):
+            continue
+        residual = info.get("baseline_residual") or {}
+        size = residual.get("max_bin_rel")
+        return (
+            f"MT{component.mt} was rebuilt from the sum rule on "
+            f"{info.get('n_points')} points, from MT{info.get('contributors')}: "
+            f"its own factor block is discarded, which is the convention "
+            f"perturb_nubar_family states. Rebuilding also repairs the input "
+            f"file's own residual"
+            + (f", which was {size:.2e} at worst per bin" if size is not None
+               else " (not measurable on this family)")
+        )
+    return None
+
+
 def _readTape(source):
     """*source* as ``(ENDF object, path or None)``."""
     from kika.endf import read_endf
@@ -147,16 +173,25 @@ def _readTape(source):
     return source, None
 
 
-def _touchedFiles(pset: PerturbationSet) -> Dict[int, List[int]]:
+def _touchedFiles(pset: PerturbationSet, alsoChanged=()) -> Dict[int, List[int]]:
     """Which ENDF files a realisation changed, and which MTs of each.
 
     The mapping is from the *model node* back to ENDF, and it is not the MF the
     covariance came from: MF34's Legendre order 0 is the magnitude, it lands on
     the cross section, and therefore it changes **MF3**. Getting this wrong
     writes a tape whose MF3 is perturbed and whose MF1 directory says it is not.
+
+    *alsoChanged* is the components the **applier** moved that the request did
+    not name -- today exactly one thing: the nu-bar the sum rule derives. It has
+    to be here rather than inferred from the request, because a realisation that
+    perturbs MT455 and MT456 also rewrites MT452, and a delta that wrote only
+    what was asked for would leave the tape stating a total that is not the sum
+    of the parts it just changed. That was the first thing this emitter got
+    wrong, and it looked right: two files written, both perturbed, and the third
+    silently stale.
     """
     touched: Dict[int, set] = {}
-    for component in pset.components():
+    for component in list(pset.components()) + list(alsoChanged):
         if component.mf == 33 or (component.mf == 34 and component.index == 0):
             touched.setdefault(3, set()).add(component.mt)
         elif component.mf == 34:
@@ -166,7 +201,8 @@ def _touchedFiles(pset: PerturbationSet) -> Dict[int, List[int]]:
     return {mf: sorted(mts) for mf, mts in sorted(touched.items())}
 
 
-def _emitEndfDelta(suite, endfObj, sourcePath, pset, outPath, report) -> Path:
+def _emitEndfDelta(suite, endfObj, sourcePath, pset, outPath, report,
+                   alsoChanged=()) -> Path:
     """Re-encode the touched sections and patch them into the source tape.
 
     Everything not re-encoded is copied through as bytes, which is what keeps a
@@ -190,7 +226,7 @@ def _emitEndfDelta(suite, endfObj, sourcePath, pset, outPath, report) -> Path:
             "endf-tape, which builds the file from the model"
         )
 
-    touched = _touchedFiles(pset)
+    touched = _touchedFiles(pset, alsoChanged)
     if not touched:
         raise ValueError("this realisation touches nothing; there is no delta")
 
@@ -348,7 +384,8 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
                 if fmt == "endf-delta":
                     files[fmt] = _emitEndfDelta(
                         suite, endfObj, sourcePath, pset,
-                        sampleDir / f"{stem}_{number:04d}.endf", report)
+                        sampleDir / f"{stem}_{number:04d}.endf", report,
+                        alsoChanged=tuple(displaced))
                 elif fmt == "endf-tape":
                     files[fmt] = _emitWholeFile(
                         suite, pset, sampleDir / f"{stem}_{number:04d}.tape.endf",
@@ -361,11 +398,11 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
                 files["perturbation-set"] = pset.write(
                     sampleDir / "perturbation.json")
 
-        note = _redundancyNote(suite, pset)
-        if note is not None and note not in result.notes:
-            result.notes.append(note)
-            if logger is not None:
-                logger.warning(note)
+        for note in (_redundancyNote(suite, pset), _sumRuleNote(applied)):
+            if note is not None and note not in result.notes:
+                result.notes.append(note)
+                if logger is not None:
+                    logger.warning(note)
         result.samples.append({"label": label, "set": pset, "files": files,
                                "applied": applied})
         _forget(suite, pset, displaced)

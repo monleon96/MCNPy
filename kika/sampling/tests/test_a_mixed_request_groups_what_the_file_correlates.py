@@ -352,15 +352,20 @@ def test_a_multiplicity_stops_at_the_applier_and_says_why():
         pset.applyToSuite(reactions)
 
 
-def test_a_full_nubar_family_is_refused_until_the_sum_rule_is_ported():
-    """ENDF-6 requires nu_452 = nu_455 + nu_456, and half a port would break it.
+def test_a_full_nubar_family_comes_out_satisfying_the_sum_rule():
+    """ENDF-6 requires nu_452 = nu_455 + nu_456, and this is what enforces it.
 
-    ``perturb_nubar_family`` states the convention this project runs -- perturb
-    the components, derive the redundant member, discard its own factor block --
-    and the model side has the applier but not the derivation. Perturbing the
-    components without it writes a tape stating two different totals, so it is
-    refused. Measured on this tape before the refusal existed: MT455 and MT456
-    moved and MT452 stayed at 2.5178 at 1 MeV against a prompt of 2.4967.
+    Perturbing the components member by member does **not** satisfy it -- the
+    total would keep its own baseline while its parts moved, which is what this
+    path did before the family rule was ported and is why the numbers below are
+    worth pinning: MT452 stayed at 2.5178 at 1 MeV against a prompt that had gone
+    to 2.4967.
+
+    The rule is ``perturb_nubar_family``'s: perturb the components, derive the
+    redundant member from them, discard the derived member's own factor block.
+    Because no member carries a duplicate energy, the sum on the union of their
+    grids is a lin-lin identity, so the rule holds to machine precision rather
+    than approximately.
     """
     from kika.endf import read_endf
     from kika.endf.model_adapter import decodeReactionSuite
@@ -368,14 +373,132 @@ def test_a_full_nubar_family_is_refused_until_the_sum_rule_is_ported():
     from kika.sampling.perturbation_set import PerturbationSet
 
     reactions, _report = decodeReactionSuite(read_endf(NUBAR))
+    edges = np.geomspace(1.0e-5, 2.0e7, 8)
     components = [ComponentKey(92235, 31, mt) for mt in (455, 456)]
     pset = PerturbationSet(
         label="realization-0000",
-        factors={component: np.array([1.1]) for component in components},
-        binEdges={component: np.array([1.0e-5, 2.0e7]) for component in components},
+        factors={component: 1.0 + 0.05 * np.cos(np.arange(edges.size - 1,
+                                                          dtype=float) + n)
+                 for n, component in enumerate(components)},
+        binEdges={component: edges for component in components},
     )
-    with pytest.raises(NotImplementedError, match="two different totals"):
-        pset.applyToSuite(reactions, multiplicityResolver=nubarNode, displaced={})
+    displaced = {}
+    diagnostics = pset.applyToSuite(reactions, multiplicityResolver=nubarNode,
+                                    displaced=displaced)
+
+    total = ComponentKey(92235, 31, 452)
+    assert set(diagnostics) == set(components) | {total}, (
+        "the derived member is part of this realisation even though the request "
+        "did not name it -- it was rewritten, so it has to be reported and "
+        "emitted")
+    assert total in displaced, (
+        "the total was not rebuilt, so the tape would state a total that is not "
+        "the sum of the parts this realisation just moved")
+    assert diagnostics[total]["derived_from_sum_rule"] is True
+    assert diagnostics[total]["contributors"] == [455, 456]
+    # Rebuilding repairs the input file's own residual, which moves the central
+    # value by something nobody asked for. The size of it is on record.
+    assert 0.0 < diagnostics[total]["baseline_residual"]["max_bin_rel"] < 1e-4
+
+    def table(mt):
+        xs, ys, _pairs = nubarNode(reactions, mt).form.toEndfRegions()
+        return np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)
+
+    e452, v452 = table(452)
+    e455, v455 = table(455)
+    e456, v456 = table(456)
+    probe = np.geomspace(1.0e-3, 1.0e7, 25)
+    total = np.interp(probe, e452, v452)
+    parts = np.interp(probe, e455, v455) + np.interp(probe, e456, v456)
+    assert np.max(np.abs(total - parts)) / np.max(np.abs(total)) < 1e-14
+
+
+def test_the_family_rule_on_the_model_reproduces_the_one_on_the_sections():
+    """Two implementations of one convention, and they have to stay one.
+
+    ``perturb_nubar_family`` works on MF1 sections and
+    ``perturbNubarFamilyOnModel`` on model nodes; they live in the same file so
+    that a reader changing one sees the other, and this is what says they still
+    agree. Point for point, not approximately: both start from the same table --
+    the adapter's decode of MT452/455/456 is bit-identical to the section's
+    arrays -- and apply the same factors, so any difference is a difference of
+    rule.
+    """
+    from kika.endf import read_endf
+    from kika.endf.model_adapter import decodeReactionSuite
+    from kika.endf.model_adapter.multiplicity import nubarNode
+    from kika.sampling.mf31_sampling import (_modelNubarTable,
+                                             _nubar_as_tabulated,
+                                             perturbNubarFamilyOnModel,
+                                             perturb_nubar_family)
+
+    endf = read_endf(NUBAR)
+    reactions, _report = decodeReactionSuite(endf)
+    bins = np.geomspace(1.0e-5, 2.0e7, 12)
+    blocks = {455: 1.0 + 0.05 * np.cos(np.arange(bins.size - 1, dtype=float)),
+              456: 1.0 - 0.03 * np.sin(np.arange(bins.size - 1, dtype=float))}
+
+    sections = {mt: endf.get_file(1).sections[mt] for mt in (452, 455, 456)}
+    fromSections, _diagS = perturb_nubar_family(sections, blocks, bins)
+    forms = {mt: nubarNode(reactions, mt).form for mt in (452, 455, 456)}
+    fromModel, _diagM = perturbNubarFamilyOnModel(forms, blocks, bins)
+
+    for mt in (452, 455, 456):
+        e1, v1 = _nubar_as_tabulated(fromSections[mt])
+        e2, v2 = _modelNubarTable(fromModel[mt])
+        assert e1.size == e2.size, f"MT{mt}: {e1.size} points vs {e2.size}"
+        assert np.array_equal(e1, e2), f"MT{mt}: the energies differ"
+        assert np.array_equal(v1, v2), f"MT{mt}: the values differ"
+
+
+def test_a_component_with_no_block_of_its_own_rides_the_total():
+    """One of the four coverage patterns, and the one that is easy to get wrong.
+
+    When only MT452 carries covariance, its factor rides onto both components so
+    that all three scale together and the rule still holds -- "perturb everything
+    with the total". Perturbing the total alone and leaving the components would
+    break it in the other direction.
+    """
+    from kika.endf import read_endf
+    from kika.endf.model_adapter import decodeReactionSuite
+    from kika.endf.model_adapter.multiplicity import nubarNode
+    from kika.sampling.mf31_sampling import (_modelNubarTable,
+                                             perturbNubarFamilyOnModel)
+
+    reactions, _report = decodeReactionSuite(read_endf(NUBAR))
+    bins = np.array([1.0e-5, 1.0e6, 2.0e7])
+    forms = {mt: nubarNode(reactions, mt).form for mt in (452, 455, 456)}
+
+    out, diagnostics = perturbNubarFamilyOnModel(forms, {452: np.array([1.5, 0.5])},
+                                                 bins)
+
+    assert sorted(diagnostics) == [452, 455, 456], (
+        "the components are perturbed and the total derived, and all three are "
+        "reported -- the total because it was rewritten")
+    assert diagnostics[452]["derived_from_sum_rule"] is True
+    assert 455 in diagnostics[455] or "max_factor" in diagnostics[455], (
+        "the components should carry an applier's diagnostics, not a derivation")
+    assert "derived_from_sum_rule" not in diagnostics[456]
+    e452, v452 = _modelNubarTable(out[452])
+    e455, v455 = _modelNubarTable(out[455])
+    e456, v456 = _modelNubarTable(out[456])
+    probe = np.array([1.0e3, 5.0e6])
+    total = np.interp(probe, e452, v452)
+    parts = np.interp(probe, e455, v455) + np.interp(probe, e456, v456)
+    assert np.allclose(total, parts, rtol=1e-14)
+
+    # Against the sum of the *baseline components*, not against the baseline
+    # total: the file's own MT452 is not exactly nu_455 + nu_456 -- that is the
+    # residual `sum_rule_residual` measures and the rebuild repairs -- so
+    # comparing with it would be asserting that the repair did not happen.
+    baseParts = (np.interp(probe, *_modelNubarTable(forms[455]))
+                 + np.interp(probe, *_modelNubarTable(forms[456])))
+    assert total[0] == pytest.approx(1.5 * baseParts[0], rel=1e-6)
+    assert total[1] == pytest.approx(0.5 * baseParts[1], rel=1e-6)
+
+    # And the repair is small but not zero, which is why it is on record.
+    base452 = np.interp(probe, *_modelNubarTable(forms[452]))
+    assert 0.0 < abs(baseParts[0] - base452[0]) / base452[0] < 1e-4
 
 
 def test_a_family_that_cannot_be_derived_is_perturbed_member_by_member():

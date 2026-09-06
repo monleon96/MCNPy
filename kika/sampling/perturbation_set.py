@@ -432,10 +432,23 @@ class PerturbationSet:
           ``Component`` would remove, and it is what M5 exists to decide -- taken
           by nobody here.
 
-        Perturbing MT452 **and** one of its parts is refused: the total is the sum
-        of prompt and delayed (§21.3), so scaling both the sum and a summand
-        states two different totals and the file would carry whichever was
-        encoded last.
+        **The sum rule is enforced, not checked.** ENDF-6 requires
+        nu_452 = nu_455 + nu_456, so the family is not perturbed member by
+        member: it goes through
+        :func:`~kika.sampling.mf31_sampling.perturbNubarFamilyOnModel`, which is
+        the model-side twin of the rule this project already runs -- perturb the
+        components, **derive** the redundant member from them, and discard the
+        derived member's own factor block. A member with no block of its own
+        rides the total's when there is one, so "perturb everything with the
+        total" still holds the rule; a family that is not derivable, because the
+        tape does not carry every contributor, is perturbed member by member, as
+        it is there.
+
+        A consequence worth stating: rebuilding the derived member also repairs
+        whatever residual the input evaluation carried, which moves the central
+        value by something the perturbation did not ask for.
+        :func:`~kika.sampling.mf31_sampling.sum_rule_residual` is what puts a
+        number on that.
         """
         if resolver is None:
             raise NotImplementedError(
@@ -456,73 +469,70 @@ class PerturbationSet:
                 "be put back and the suite silently stops carrying it"
             )
 
-        self._refuseIfTheSumRuleWouldBreak(suite, components, resolver)
+        from kika.sampling.mf31_sampling import perturbNubarFamilyOnModel
 
-        diagnostics = {}
-        for component in components:
-            node = resolver(suite, component.mt)
-            if node is None or getattr(node, "form", None) is None:
-                raise ValueError(
-                    f"{component.describe()}: this suite carries no such nu-bar, "
-                    f"so there is nothing to perturb"
-                )
-            perturbed, info = self.apply(node.form, component)
-            displaced[component] = node.form
-            node.form = self._labelled(perturbed)
-            diagnostics[component] = info
-        return diagnostics
-
-
-    @staticmethod
-    def _refuseIfTheSumRuleWouldBreak(suite, components, resolver) -> None:
-        """ENDF-6 requires nu_452 = nu_455 + nu_456; this will not write a tape
-        where it does not hold.
-
-        The rule is not this module's to invent and it is not inventing one:
-        :func:`kika.sampling.mf31_sampling.perturb_nubar_family` already states
-        the convention this project runs -- perturb the components, **derive**
-        the redundant member, and discard its own factor block -- along with
-        ``sum_rule_residual`` to measure what the derivation repairs in the input
-        file. That derivation has not been ported to the model yet: it is a
-        union-grid recomposition with four coverage patterns and a choice of
-        which member is derived, and it needs its own gate against the function
-        above.
-
-        So the split is the same one that function makes. Where the family is
-        **derivable** -- the tape carries all three -- a perturbation that does
-        not re-derive the total would write a tape stating two different totals,
-        and this refuses. Where it is not derivable, direct perturbation of each
-        present member is exactly what that function does too, and it is allowed.
-
-        Measured on ``micro_u235_nubar.endf`` (2026-09-06): the tape carries all
-        three, so it is the refusing case, and perturbing MT455 and MT456 through
-        this path did leave MT452 at its baseline -- 2.5178 at 1 MeV against a
-        prompt that moved to 2.4967. That is the tape this refusal exists for.
-        """
-        present = set()
+        nodes = {}
         for mt in (452, 455, 456):
             try:
                 node = resolver(suite, mt)
             except (KeyError, ValueError):
                 node = None
             if node is not None and getattr(node, "form", None) is not None:
-                present.add(mt)
+                nodes[mt] = node
+        for component in components:
+            if component.mt not in nodes:
+                raise ValueError(
+                    f"{component.describe()}: this suite carries no such nu-bar, "
+                    f"so there is nothing to perturb"
+                )
 
-        if not ({452} <= present and {455, 456} <= present):
-            return
+        grid = self._familyGrid(components, self.binEdges)
+        blocks = {component.mt: self.factors[component] for component in components}
+        forms = {mt: node.form for mt, node in nodes.items()}
+        perturbed, info = perturbNubarFamilyOnModel(forms, blocks, grid)
 
-        asked = sorted({component.mt for component in components})
-        raise NotImplementedError(
-            f"this tape carries the whole nu-bar family {sorted(present)}, so "
-            f"ENDF-6 requires nu_452 = nu_455 + nu_456, and perturbing "
-            f"MT{asked} without re-deriving the redundant member would write a "
-            f"tape stating two different totals. The convention this project "
-            f"runs is mf31_sampling.perturb_nubar_family -- perturb the "
-            f"components, derive the total, discard the total's own factor block "
-            f"-- and it has not been ported to the model yet (M5 in "
-            f"docs/library/perturbation_model_roadmap.md). A tape whose family is "
-            f"not derivable is perturbed member by member, here as there"
-        )
+        byMT = {component.mt: component for component in components}
+        za = components[0].za
+        diagnostics = {}
+        for mt, form in perturbed.items():
+            if form is forms[mt]:
+                continue                      # untouched, and not reported as
+            # The derived member has no component in the request -- its own
+            # factor block is discarded by the rule -- and it is still part of
+            # this realisation: it was rewritten, it has to be emitted, and its
+            # diagnostics carry the residual the rebuild repaired. So it gets a
+            # key of its own rather than being dropped for not having been asked
+            # for.
+            component = byMT.get(mt) or ComponentKey(za, 31, mt)
+            displaced[component] = forms[mt]
+            nodes[mt].form = self._labelled(form)
+            diagnostics[component] = info.get(mt, {})
+        return diagnostics
+
+
+    @staticmethod
+    def _familyGrid(components, binEdges):
+        """The one grid the family is perturbed on, or a refusal.
+
+        :func:`~kika.sampling.mf31_sampling.perturbNubarFamilyOnModel` takes a
+        single ``bins`` array for the whole family, and it has to: the derived
+        member is rebuilt from the others, so "which bin is this factor for" must
+        mean the same thing for all of them. MF31 assembles under the ``global``
+        union, where every component is stated on the pooled grid, so this holds
+        by construction -- and it is checked rather than assumed, because a
+        per-component assembly would break it silently and the result would be a
+        total derived from parts perturbed on grids that do not line up.
+        """
+        grids = [np.asarray(binEdges[component], dtype=float)
+                 for component in components]
+        for grid in grids[1:]:
+            if grid.shape != grids[0].shape or not np.array_equal(grid, grids[0]):
+                raise ValueError(
+                    "the nu-bar family is perturbed on one grid and these blocks "
+                    "are stated on different ones; MF31 assembles under the "
+                    "'global' union for exactly this reason"
+                )
+        return grids[0]
 
 
     def _applyAngular(self, angular, orders: Mapping[int, ComponentKey]):

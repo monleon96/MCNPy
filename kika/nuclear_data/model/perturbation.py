@@ -56,7 +56,7 @@ from .functions.regions1d import Regions1d
 from .functions.xys1d import XYs1d
 
 __all__ = ["applyFactors", "refineAtBinEdges", "applyLegendreFactors",
-           "MAGNITUDE_ORDER"]
+           "MAGNITUDE_ORDER", "applyNubarFactors", "refineForNubar"]
 
 #: How close two abscissae must be to count as the repeated pair that ENDF-6
 #: uses for a step. The same value the format applier uses, and it is an
@@ -607,3 +607,184 @@ def applyLegendreFactors(angular, factors, binEdges, *, coverageEdges="step"):
                           if perOrder[order]["n_scaled"] == 0],
     }
     return rebuild(angular), diagnostics
+
+
+# ======================================================================
+# Multiplicities: the same arithmetic, and a different way of writing a step
+# ======================================================================
+
+#: How far below a bin edge the second inserted node goes, as a fraction of the
+#: edge. ``kika.sampling.mf31_sampling.NUBAR_STEP_SHOULDER``'s value, and it has
+#: to stay the same number: the two appliers are gated against each other.
+NUBAR_STEP_SHOULDER = 1.0e-3
+
+#: How close an inserted node may be to one already there, relatively, before it
+#: is dropped. Closer than this and ENDF's six digits would write the two as the
+#: same energy -- a duplicate abscissa, which is the one thing this construction
+#: exists to avoid.
+NUBAR_ENERGY_RTOL = 1.0e-6
+
+
+def refineForNubar(xs: ArrayLike, ys: ArrayLike, binEdges: ArrayLike, *,
+                   shoulder: float = NUBAR_STEP_SHOULDER):
+    """Resolve a nu-bar table against a factor block's bins, without duplicates.
+
+    **This is the other way of writing a step, and the reason there are two.**
+    A cross section says "the factor changes here" with a repeated abscissa --
+    :func:`refineAtBinEdges` -- because ENDF reads a repeat as a discontinuity.
+    A nu-bar may not: the family has to satisfy nu_452 = nu_455 + nu_456, and
+    that sum is only exact as a piecewise-linear identity if no member carries a
+    duplicate energy. NJOY's ACER has the second reason -- it reads MF1 into
+    fixed-size buffers and a bloated nu-bar table is not free.
+
+    So the step is approximated instead of stated: one node at each interior bin
+    edge, and one *shoulder* just below it, at ``edge * (1 - shoulder)``. The
+    ramp between the two factors is then confined to that sliver rather than
+    spanning the bin. ``kika.sampling.mf31_sampling._augment_nubar_grid``, which
+    this reproduces, measured what that is worth on the three JEFF-4.0 actinide
+    tapes with a worst-case alternating +-5 % block: the maximum per-bin factor
+    error falls from 0.050, with edges alone, to 5e-4 -- while the table grows
+    *less* than a uniform subdivision of every bin would make it.
+
+    Both kinds of node are valued by lin-lin interpolation on the **original**
+    table, so the baseline curve is preserved exactly.
+
+    Returns ``(xs, ys)``, one lin-lin region's worth.
+    """
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    if xs.size < 2:
+        return xs, ys
+
+    edges = np.asarray(binEdges, dtype=float)
+    lo, hi = float(xs[0]), float(xs[-1])
+
+    candidates: List[float] = []
+    for edge in edges[1:-1]:
+        edge = float(edge)
+        # ``edge == hi`` still wants a shoulder: the table's last point sits on
+        # a bin boundary and takes the *upper* bin's factor, so without one the
+        # whole top of that bin ramps towards its neighbour. The block's own
+        # last edge is excluded because the top-edge clamp below already pulls a
+        # point there back into the last bin -- there is no step to resolve.
+        if not (lo < edge <= hi):
+            continue
+        if edge < hi:
+            candidates.append(edge)
+        shoulderEnergy = edge * (1.0 - shoulder)
+        if shoulderEnergy > lo:
+            candidates.append(shoulderEnergy)
+
+    if not candidates:
+        return xs, ys
+
+    cand = np.unique(np.asarray(candidates, dtype=float))
+    cand = cand[(cand > lo) & (cand < hi)]
+    if cand.size:
+        nearest = np.searchsorted(xs, cand).clip(1, xs.size - 1)
+        keep = ~(np.isclose(cand, xs[nearest], rtol=NUBAR_ENERGY_RTOL, atol=0.0)
+                 | np.isclose(cand, xs[nearest - 1], rtol=NUBAR_ENERGY_RTOL,
+                              atol=0.0))
+        cand = cand[keep]
+    if not cand.size:
+        return xs, ys
+
+    newXs = np.concatenate([xs, cand])
+    newYs = np.concatenate([ys, np.interp(cand, xs, ys)])
+    order = np.argsort(newXs, kind="mergesort")
+    return newXs[order], newYs[order]
+
+
+def _oneLinLinRegion(template, xs, ys):
+    """A node of *template*'s kind holding one lin-lin region.
+
+    **A ``Regions1d`` stays a ``Regions1d`` even with one region**, and that is
+    not tidiness: ``_tab1FromMultiplicity`` writes MF1 from ``regions1d``
+    (LNU=2) or ``polynomial1d`` (LNU=1) and **refuses an ``XYs1d``**, so a
+    perturbed nu-bar returned as a bare curve is a realisation that cannot be
+    written back. Found by the encoder, which is the right place to find it.
+    """
+    from .enums import Interpolation
+    from .functions.regions1d import Regions1d
+    from .functions.xys1d import XYs1d
+
+    region = XYs1d(xs=np.asarray(xs, dtype=float),
+                   ys=np.asarray(ys, dtype=float),
+                   interpolation=Interpolation.linlin,
+                   axes=getattr(template, "axes", None))
+    if isinstance(template, Regions1d):
+        return Regions1d(function1ds=[region], axes=template.axes,
+                         label=template.label,
+                         outerDomainValue=template.outerDomainValue,
+                         index=template.index)
+    return XYs1d(xs=region.xs, ys=region.ys, interpolation=Interpolation.linlin,
+                 axes=getattr(template, "axes", None),
+                 label=getattr(template, "label", None),
+                 outerDomainValue=getattr(template, "outerDomainValue", None),
+                 index=getattr(template, "index", None))
+
+
+def applyNubarFactors(function1d, factors: ArrayLike, binEdges: ArrayLike, *,
+                      shoulder: float = NUBAR_STEP_SHOULDER
+                      ) -> Tuple[Any, dict]:
+    """Scale a multiplicity by a piecewise-constant factor per bin.
+
+    The nu-bar counterpart of :func:`applyFactors`, and it differs in exactly
+    two places, both of them forced:
+
+    * the refinement inserts **single** nodes and a shoulder rather than a
+      repeated abscissa -- see :func:`refineForNubar`;
+    * a point sitting exactly on the block's **last** edge takes the last bin's
+      factor rather than falling outside coverage. Without that, the top point
+      of a table whose domain ends where the covariance does comes back
+      unperturbed, which reads as a ramp to baseline over the final bin.
+
+    Returns ``(perturbed, diagnostics)``. The perturbed node is an
+    :class:`~kika.nuclear_data.model.functions.xys1d.XYs1d` with one lin-lin
+    region **whatever went in**, because that is what the format applier writes
+    (``_set_nubar`` passes ``[(N, 2)]``) and because the sum rule is stated on
+    lin-lin interpolants. A multi-region or non-lin-lin input is therefore
+    flattened, and ``regions_collapsed`` in the diagnostics says so rather than
+    it happening quietly.
+    """
+    from .enums import Interpolation
+
+    factors = np.asarray(factors, dtype=float)
+    edges = np.asarray(binEdges, dtype=float)
+    if edges.ndim != 1 or edges.size < 2:
+        raise ValueError(
+            f"binEdges must be at least two ascending energies, got shape "
+            f"{edges.shape}")
+    if factors.size != edges.size - 1:
+        raise ValueError(
+            f"{factors.size} factor(s) for {edges.size - 1} bin(s): a factor "
+            f"block and its grid have to describe the same binning")
+
+    regions = _regionsOf(function1d)
+    xs, ys, pairs = function1d.toEndfRegions()
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    collapsed = len(pairs) > 1 or any(
+        region.interpolation is not Interpolation.linlin for region in regions)
+
+    before = xs.size
+    xs, ys = refineForNubar(xs, ys, edges, shoulder=shoulder)
+
+    perPoint = _flatFactors(xs, factors, edges)
+    atTop = np.isclose(xs, edges[-1], rtol=1e-12, atol=0.0)
+    if atTop.any():
+        perPoint = np.where(atTop, factors[-1], perPoint)
+
+    covered = (np.searchsorted(edges, xs, side="right") - 1 >= 0) & (
+        np.searchsorted(edges, xs, side="right") - 1 < factors.size)
+    covered = covered | atTop
+
+    perturbed = _oneLinLinRegion(function1d, xs, ys * perPoint)
+    diagnostics = {
+        "min_factor": float(perPoint.min()) if perPoint.size else 1.0,
+        "max_factor": float(perPoint.max()) if perPoint.size else 1.0,
+        "frac_out_of_coverage": float(1.0 - covered.mean()) if xs.size else 0.0,
+        "n_inserted": int(xs.size - before),
+        "regions_collapsed": bool(collapsed),
+    }
+    return perturbed, diagnostics
