@@ -818,8 +818,27 @@ def _augment_with_step_duplicates(
 
     e_aug = list(map(float, e_orig))
     s_aug = list(map(float, s_orig))
-    # Apply in descending insert position so earlier positions remain valid.
-    for pos, n, sigma_b, E_b in sorted(plan, key=lambda p: p[0], reverse=True):
+    # Apply in descending insert position so earlier positions remain valid,
+    # and -- within one position -- in descending *energy*.
+    #
+    # The energy half of that key was missing until 2026-09-06, and its absence
+    # produced a non-monotonic table. Two bin edges that fall in the same
+    # original interval both get `insert_before` = that interval's index; the
+    # sort was stable on position alone, so the lower edge was inserted first
+    # and the higher one then landed in front of it. The section that came out
+    # was not merely different, it was an invalid TAB1: ENDF-6 requires
+    # ascending abscissae, and every consumer downstream -- NJOY's `lunion`
+    # first -- reads the result wrong or refuses it.
+    #
+    # Measured on the Fe-56 evaluation the thesis uses, its own MF33 grid (125
+    # edges) against its MF3 grids: 2 disordered insertions in MT1, 2 in MT102
+    # and 28 in MT2. Whether it fires in the live pipeline depends on the input:
+    # this applier is given a *PENDF*, whose grid is far denser in the resolved
+    # range, so two MF33 edges sharing an interval is rarer there than on the
+    # ENDF grid measured above -- see `docs/library/library-gaps.md` D31, which
+    # records the measurement that is still owed on a real PENDF.
+    for pos, n, sigma_b, E_b in sorted(plan, key=lambda p: (p[0], p[3]),
+                                       reverse=True):
         if n == 1:
             e_aug.insert(pos, E_b)
             s_aug.insert(pos, sigma_b)
