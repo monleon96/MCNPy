@@ -12,9 +12,10 @@ Pattern follows ``kika.cov.CrossSectionCovariance``: concrete dataclass with
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 if TYPE_CHECKING:
     from kika.ace.classes.ace import Ace
@@ -33,6 +34,33 @@ _ENDF_INTERP_TO_NAME = {
 }
 
 _NAME_TO_ENDF_INTERP = {v: k for k, v in _ENDF_INTERP_TO_NAME.items()}
+
+
+def _dominant_interpolation(regions: List[Tuple[int, int]]) -> str:
+    """The scheme covering the most points, as a simplified name.
+
+    ``regions`` is the raw ENDF ``(NBT, INT)`` list, where NBT is the 1-based
+    index of the *last* point of the region — cumulative, not a per-region
+    count (see ``_regionize`` in ``kika/endf/utils.py``). Region *i* therefore
+    spans ``NBT[i] - NBT[i-1]`` points, with ``NBT[-1] = 0``.
+
+    Taking ``max`` on NBT directly, as this used to, always picked the last
+    region: NBT increases by construction. On a grid that is 99% lin-lin with
+    a two-point histogram tail, that returned ``histogram``.
+
+    Ties go to the earlier region. An empty list gives ``linlin``.
+    """
+    if not regions:
+        return "linlin"
+
+    widest_int, widest_span, previous_nbt = regions[0][1], -1, 0
+    for nbt, int_code in regions:
+        span = nbt - previous_nbt
+        if span > widest_span:
+            widest_span, widest_int = span, int_code
+        previous_nbt = nbt
+
+    return _ENDF_INTERP_TO_NAME.get(widest_int, "linlin")
 
 
 @dataclass
@@ -78,6 +106,23 @@ class CrossSection:
     def from_endf(cls, mf3mt: "MF3MT") -> "CrossSection":
         """Create a ``CrossSection`` from an ENDF ``MF3MT`` object.
 
+        **This is the one flat class phase 3d did NOT route through the model,
+        and the reason is a measurement rather than a preference.**
+        ``NuclideInfo``, ``AngularDistribution`` and ``ResonanceParameters`` all
+        build their model and project back. Doing the same here costs 2.5x:
+        ``decodeMF3MT`` alone is 5.4 ms against this body's 3.3 ms for the
+        committed slice's three sections, and ``kika/processing/reconstruct.py``
+        constructs one ``CrossSection`` per MT per call, which the cluster runs
+        per sample per temperature. The plan's phase 3d gate names a 20% ceiling
+        and its documented fallback is exactly this: keep the fast constructor,
+        and expose the model lazily through :attr:`model`.
+
+        One thing did change, and it is the ``docs/library/library-gaps.md`` D1 fix: ZA
+        is **rounded** rather than truncated. ENDF's fixed-format floats do not
+        round-trip, so Th-232's ``9.023200+4`` reads back as
+        ``90231.99999999999`` and ``int()`` on that named Ac-231 — on all 57 of
+        that tape's sections.
+
         Parameters
         ----------
         mf3mt : MF3MT
@@ -90,20 +135,18 @@ class CrossSection:
         energies = np.asarray(mf3mt.energies, dtype=float)
         values = np.asarray(mf3mt.cross_sections, dtype=float)
 
-        # Determine dominant interpolation scheme
+        # Single scheme standing in for the whole grid, used only when the
+        # per-region detail is unavailable — the regions themselves survive in
+        # metadata below and win wherever they are present.
         interp_regions: List[Tuple[int, int]] = list(mf3mt.energy_interpolation)
-        if interp_regions:
-            # Use the scheme that covers the most points
-            dominant_int = max(interp_regions, key=lambda x: x[0])[1]
-            interp_name = _ENDF_INTERP_TO_NAME.get(dominant_int, "linlin")
-        else:
-            interp_name = "linlin"
+        interp_name = _dominant_interpolation(interp_regions)
 
         return cls(
             energies=energies,
             values=values,
             reaction=mf3mt.number,
-            nuclide_id=int(mf3mt.zaid) if mf3mt.zaid is not None else 0,
+            # Rounded, not truncated -- see the docstring and library-gaps D1.
+            nuclide_id=int(round(float(mf3mt.zaid))) if mf3mt.zaid is not None else 0,
             interpolation=interp_name,
             metadata={
                 "mat": getattr(mf3mt, "_mat", None),
@@ -115,25 +158,86 @@ class CrossSection:
             },
         )
 
-    def to_endf(self, mat: Optional[int] = None) -> "MF3MT":
+    def to_model(self, mf3mt: "MF3MT"):
+        """The GNDS ``Reaction`` for the section this object came from.
+
+        Built on demand, never in ``from_endf``. This is the phase 3d escape
+        hatch: the constructor is on the cluster's hot path and a model round
+        trip there costs 2.5x, so anything that actually wants the model pays
+        for it at the point of asking rather than everyone paying always.
+
+        It takes the section rather than reconstructing from ``self`` because
+        the flat fields have already lost what the model would want back — the
+        per-region interpolation survives only in ``metadata``, and a rebuilt
+        model would be a guess dressed as a decode.
+        """
+        from kika.endf.model_adapter import decodeMF3MT
+
+        reaction, _ = decodeMF3MT(mf3mt)
+        return reaction
+
+    def to_endf(
+        self,
+        mat: Optional[int] = None,
+        *,
+        qm: Optional[float] = None,
+        qi: Optional[float] = None,
+        lr: Optional[int] = None,
+    ) -> "MF3MT":
         """Convert back to an ENDF ``MF3MT`` object.
 
         Parameters
         ----------
         mat : int, optional
             MAT number.  If *None*, uses value from ``metadata``.
+        qm, qi : float, optional
+            Mass-difference and reaction Q values, in eV. Override
+            ``metadata``. Required when ``metadata`` carries neither.
+        lr : int, optional
+            Complex-breakup flag. Overrides ``metadata``.
 
         Returns
         -------
         MF3MT
+
+        Raises
+        ------
+        ValueError
+            If ``qm``/``qi``/``lr`` are neither given nor in ``metadata``.
+            A section built by :meth:`from_ace` still lands here, but for
+            ``qm`` and ``lr`` only: ACE's LQR block carries QI and
+            :meth:`from_ace` reads it. It used to default all three to zero
+            instead, writing a physically wrong MF3 header for every threshold
+            reaction without saying so.
         """
         from kika.endf.classes.mf3.mf3mt import MF3MT
 
         mat = mat if mat is not None else self.metadata.get("mat")
-        awr = self.metadata.get("awr", 0.0)
-        qm = self.metadata.get("qm", 0.0)
-        qi = self.metadata.get("qi", 0.0)
-        lr = self.metadata.get("lr", 0)
+        awr = self.metadata.get("awr", 0.0)  # ACE does carry this one
+
+        overrides = {"qm": qm, "qi": qi, "lr": lr}
+        missing = [
+            key for key, value in overrides.items()
+            if value is None and key not in self.metadata
+        ]
+        if missing:
+            source = self.metadata.get("source_format", "unknown")
+            # The old wording here said "ACE stores no reaction Q values",
+            # which is false — it stores QI, in the LQR block, and `from_ace`
+            # now reads it. QM and LR are the ones ACE has no counterpart for.
+            # `docs/library/library-gaps.md` D4.
+            raise ValueError(
+                f"CrossSection for MT{self.reaction} (source_format={source!r}) "
+                f"carries no {'/'.join(missing)}, so an ENDF MF3 header cannot "
+                f"be written for it. ACE carries QI but has no counterpart for "
+                f"QM (the mass-difference Q) or LR. Pass what is missing "
+                f"explicitly — to_endf(qm=..., qi=..., lr=...) — or build the "
+                f"section from ENDF, where they come from the file."
+            )
+        qm = qm if qm is not None else self.metadata["qm"]
+        qi = qi if qi is not None else self.metadata["qi"]
+        lr = lr if lr is not None else self.metadata["lr"]
+
         interp_regions = self.metadata.get("interpolation_regions")
 
         if not interp_regions:
@@ -164,43 +268,43 @@ class CrossSection:
         cls,
         endf: "ENDF",
         mt: int,
-        reconstruct: bool = True,
-        tolerance: float = 1e-3,
+        use_reconstructed: bool = True,
     ) -> "CrossSection":
-        """Create a ``CrossSection`` from an ENDF object, optionally reconstructing
-        resonance cross sections from MF2 parameters.
+        """Create a ``CrossSection`` from an ENDF object.
 
         Parameters
         ----------
         endf : ENDF
-            Parsed ENDF file (must have MF3; MF2 needed for reconstruction).
+            Parsed ENDF file (must have MF3).
         mt : int
             Reaction MT number.
-        reconstruct : bool
-            If True and MF2 data is available, reconstruct pointwise cross
-            sections via ``endf.reconstruct_xs()``.  Reconstructed data
-            includes resonance contributions added to the MF3 background.
-        tolerance : float
-            Linearization tolerance passed to ``reconstruct_xs()``.
+        use_reconstructed : bool
+            Prefer ``endf.pendf[mt]`` when the caller has populated it, which
+            is what carries resonance contributions on top of the MF3
+            background. Falls back to raw MF3 when it is absent — for a
+            threshold reaction the two are the same thing.
 
         Returns
         -------
         CrossSection
+
+        Notes
+        -----
+        This used to reconstruct on demand, via an in-Python reconstructor
+        documented as producing incorrect cross sections. It now only consumes
+        what the caller chose::
+
+            endf.pendf = kika.processing.njoy_reconstruct(path, njoy_executable=...)
         """
-        if reconstruct and 2 in endf.files:
-            if endf.pendf is None:
-                endf.reconstruct_xs(tolerance=tolerance)
-            if mt in endf.pendf:
-                return cls.from_endf(endf.pendf[mt])
-        # Fall back to raw MF3 (threshold reactions, or reconstruct=False)
+        if use_reconstructed and endf.pendf and mt in endf.pendf:
+            return cls.from_endf(endf.pendf[mt])
         return cls.from_endf(endf.mf[3].mt[mt])
 
     @classmethod
     def all_from_endf_file(
         cls,
         endf: "ENDF",
-        reconstruct: bool = True,
-        tolerance: float = 1e-3,
+        use_reconstructed: bool = True,
     ) -> Dict[int, "CrossSection"]:
         """Extract all available cross sections from an ENDF file.
 
@@ -208,27 +312,26 @@ class CrossSection:
         ----------
         endf : ENDF
             Parsed ENDF file.
-        reconstruct : bool
-            If True, reconstruct resonance cross sections from MF2.
-        tolerance : float
-            Linearization tolerance for reconstruction.
+        use_reconstructed : bool
+            Prefer ``endf.pendf`` per MT where the caller has populated it.
 
         Returns
         -------
         Dict[int, CrossSection]
-            Mapping of MT number to ``CrossSection``.
+            Mapping of MT number to ``CrossSection``. An MT whose MF3 section
+            cannot be converted is skipped.
         """
-        if reconstruct and 2 in endf.files:
-            if endf.pendf is None:
-                endf.reconstruct_xs(tolerance=tolerance)
-
         result: Dict[int, "CrossSection"] = {}
         for mt_num in endf.mf[3].mt:
             try:
                 result[mt_num] = cls.from_endf_file(
-                    endf, mt_num, reconstruct=reconstruct, tolerance=tolerance
+                    endf, mt_num, use_reconstructed=use_reconstructed
                 )
-            except Exception:
+            except (KeyError, AttributeError, ValueError, TypeError):
+                # A section this converter cannot read, not a reason to lose
+                # the rest. Narrower than the bare `except Exception` this
+                # replaced, which also swallowed KeyboardInterrupt-adjacent
+                # bugs in from_endf itself.
                 continue
         return result
 
@@ -255,8 +358,26 @@ class CrossSection:
         ------
         ValueError
             If the requested MT is not available.
+
+        Notes
+        -----
+        **ACE does carry a reaction Q value, and this reads it.** The LQR block
+        holds one QI per reaction, in MeV, positionally aligned with MTR; a
+        section whose MT has an entry there gets ``metadata["qi"]`` in eV. The
+        record said otherwise for a long time — see ``docs/library/library-gaps.md`` D4
+        — and callers were supplying by hand a number that was in the file.
+
+        What ACE genuinely has no counterpart for is **QM**, the mass-difference
+        Q, and **LR**. So :meth:`to_endf` still refuses on an ACE-sourced
+        section; it now refuses for the two fields that are really missing
+        rather than for three.
+
+        Composites (MT 4, 18, 101 …) are absent from MTR and get no ``qi``,
+        which is correct rather than a gap: a sum over reactions with different
+        Q values does not have one.
         """
         from kika._constants import BOLTZMANN_CONSTANT
+        from kika.ace.model_adapter.decode import qValuesByMT
 
         reaction = ace.cross_section._get_or_compute_reaction(mt)
         if reaction is None:
@@ -271,6 +392,22 @@ class CrossSection:
         kT_MeV = ace.header.temperature or 0.0
         temperature = kT_MeV / BOLTZMANN_CONSTANT if kT_MeV else 0.0
 
+        metadata = {
+            "source_format": "ace",
+            "ace_zaid": ace.header.zaid,
+            "ace_extension": ace.header.extension,
+            "awr": ace.header.atomic_weight_ratio,
+            "ace_comment": ace.header.comment,
+            "ace_date": ace.header.date,
+        }
+        # The alignment rules — LQR parallel to MTR, MeV, elastic filled in as
+        # the known zero it is by definition — live in the ACE adapter and are
+        # tested there. Reimplementing them here would be a second copy of a
+        # positional convention, which is the kind of duplication that drifts.
+        qi = qValuesByMT(ace).get(mt)
+        if qi is not None:
+            metadata["qi"] = qi
+
         return cls(
             energies=energies,
             values=values,
@@ -278,14 +415,7 @@ class CrossSection:
             nuclide_id=ace.header.zaid or 0,
             temperature=temperature,
             interpolation="linlin",
-            metadata={
-                "source_format": "ace",
-                "ace_zaid": ace.header.zaid,
-                "ace_extension": ace.header.extension,
-                "awr": ace.header.atomic_weight_ratio,
-                "ace_comment": ace.header.comment,
-                "ace_date": ace.header.date,
-            },
+            metadata=metadata,
         )
 
     @classmethod
@@ -380,7 +510,7 @@ class CrossSection:
 
     def get_cross_section(
         self,
-        energy: Union[float, "ArrayLike"],
+        energy: Union[float, ArrayLike],
         out_of_range: str = "zero",
     ) -> Union[float, np.ndarray]:
         """Interpolate σ(E) at one or more energies.
@@ -403,14 +533,14 @@ class CrossSection:
         float or np.ndarray
             Cross section(s) in barns.
         """
-        from kika.endf.utils import interpolate_1d_endf  # local import: avoid cycle
+        from kika.processing.interpolation import interpolate_1d  # local import: avoid cycle
 
         target = np.asarray(energy, dtype=float)
         scalar_input = np.ndim(target) == 0
 
         regions = self.metadata.get("interpolation_regions") if self.metadata else None
         if regions:
-            result = interpolate_1d_endf(
+            result = interpolate_1d(
                 list(self.energies),
                 list(self.values),
                 list(regions),

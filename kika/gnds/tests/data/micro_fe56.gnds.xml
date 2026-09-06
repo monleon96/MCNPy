@@ -1,0 +1,865 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<reactionSuite projectile="n" target="Fe56" evaluation="ENDF/B-8.1" format="2.0" projectileFrame="lab" interaction="nuclear">
+  <styles>
+    <evaluated label="eval" date="2022-10-01" library="ENDF/B" version="8.1.1">
+      <documentation>
+        <authors>
+          <author name="INDEN A.Trkov,R.Capote,M.Kostal+" />
+        </authors>
+        <dates>
+          <date value="2022-10-01" dateType="created" />
+        </dates>
+        <title>ENDF-6 file from ENDF/B version 8.1.1 translated to GNDS by FUDGE.</title>
+        <body>See the endfCompatible section.</body>
+        <endfCompatible> 26-Fe- 56 IAEA       Eval-Oct22 INDEN A.Trkov,R.Capote,M.Kostal+
+ fe56e80X29r61        DIST-AUG24 REV1-FEB24            20240830
+---- ENDF/B-VIII.1    MATERIAL 2631         REVISION 1
+----- INCIDENT-NEUTRON DATA
+------ ENDF-6
+
+A. Trkov, R. Capote, D. Bernard, et al., "Progress in the
+Evaluation and Validation of n+56;57Fe Cross Sections",
+[trimmed]</endfCompatible>
+      </documentation>
+      <temperature value="0" unit="K" />
+      <projectileEnergyDomain min="1e-5" max="1.5e8" unit="eV" />
+    </evaluated>
+    <crossSectionReconstructed label="recon" derivedFrom="eval" date="2016-11-06" />
+  </styles>
+  <PoPs name="protare_internal" version="1.0" format="2.0">
+    <aliases>
+      <alias id="a" pid="he4" />
+      <alias id="d" pid="h2" />
+      <alias id="t" pid="h3" />
+      <alias id="h" pid="he3" />
+    </aliases>
+    <gaugeBosons>
+      <gaugeBoson id="photon">
+        <mass>
+          <double label="eval" value="0." unit="amu" />
+        </mass>
+        <spin>
+          <fraction label="eval" value="1" unit="hbar" />
+        </spin>
+        <parity>
+          <integer label="eval" value="1" />
+        </parity>
+        <charge>
+          <integer label="eval" value="0" unit="e" />
+        </charge>
+        <halflife>
+          <string label="eval" value="stable" unit="s" />
+        </halflife>
+      </gaugeBoson>
+    </gaugeBosons>
+    <baryons>
+      <baryon id="n">
+        <mass>
+          <double label="eval" value="1.00866491574" unit="amu" />
+        </mass>
+        <spin>
+          <fraction label="eval" value="1/2" unit="hbar" />
+        </spin>
+        <parity>
+          <integer label="eval" value="1" />
+        </parity>
+        <charge>
+          <integer label="eval" value="0" unit="e" />
+        </charge>
+        <halflife>
+          <double label="eval" value="881.5" unit="s" />
+        </halflife>
+      </baryon>
+      <baryon id="p">
+        <mass>
+          <double label="eval" value="1.00727646662" unit="amu" />
+        </mass>
+        <spin>
+          <fraction label="eval" value="1/2" unit="hbar" />
+        </spin>
+        <parity>
+          <integer label="eval" value="1" />
+        </parity>
+        <charge>
+          <integer label="eval" value="1" unit="e" />
+        </charge>
+        <halflife>
+          <string label="eval" value="stable" unit="s" />
+        </halflife>
+      </baryon>
+    </baryons>
+    <chemicalElements>
+      <chemicalElement symbol="Fe" Z="26" name="Iron">
+        <isotopes>
+          <isotope symbol="Fe56" A="56">
+            <nuclides>
+              <nuclide id="Fe56">
+                <mass>
+                  <double label="eval" value="55.9349379634" unit="amu" />
+                </mass>
+                <charge>
+                  <integer label="eval" value="0" unit="e" />
+                </charge>
+                <nucleus id="fe56" index="0">
+                  <spin>
+                    <fraction label="eval" value="0" unit="hbar" />
+                  </spin>
+                  <charge>
+                    <integer label="eval" value="26" unit="e" />
+                  </charge>
+                  <energy>
+                    <double label="eval" value="0." unit="eV" />
+                  </energy>
+                </nucleus>
+              </nuclide>
+            </nuclides>
+          </isotope>
+          <isotope symbol="Fe57" A="57">
+            <nuclides>
+              <nuclide id="Fe57">
+                <charge>
+                  <integer label="eval" value="0" unit="e" />
+                </charge>
+                <nucleus id="fe57" index="0">
+                  <charge>
+                    <integer label="eval" value="26" unit="e" />
+                  </charge>
+                  <energy>
+                    <double label="eval" value="0." unit="eV" />
+                  </energy>
+                </nucleus>
+              </nuclide>
+            </nuclides>
+          </isotope>
+        </isotopes>
+      </chemicalElement>
+    </chemicalElements>
+  </PoPs>
+  <resonances>
+    <scatteringRadius>
+      <constant1d label="eval" value="5.444" domainMin="1e-5" domainMax="8.5e5">
+        <axes>
+          <axis index="1" label="energy_in" unit="eV" />
+          <axis index="0" label="radius" unit="fm" />
+        </axes>
+      </constant1d>
+    </scatteringRadius>
+    <resolved domainMin="1e-5" domainMax="8.5e5" domainUnit="eV">
+      <RMatrix label="eval" approximation="ReichMoore" boundaryCondition="EliminateShiftFunction">
+        <PoPs name="resolved resonances" version="1.0" format="2.0">
+          <chemicalElements>
+            <chemicalElement symbol="Fe" Z="26" name="Iron">
+              <isotopes>
+                <isotope symbol="Fe56" A="56">
+                  <nuclides>
+                    <nuclide id="Fe56">
+                      <mass>
+                        <double label="eval" value="55.9350085699" unit="amu" />
+                      </mass>
+                      <charge>
+                        <integer label="eval" value="0" unit="e" />
+                      </charge>
+                      <nucleus id="fe56" index="0">
+                        <spin>
+                          <fraction label="eval" value="0" unit="hbar" />
+                        </spin>
+                        <charge>
+                          <integer label="eval" value="26" unit="e" />
+                        </charge>
+                        <energy>
+                          <double label="eval" value="0." unit="eV" />
+                        </energy>
+                      </nucleus>
+                    </nuclide>
+                  </nuclides>
+                </isotope>
+              </isotopes>
+            </chemicalElement>
+          </chemicalElements>
+        </PoPs>
+        <resonanceReactions>
+          <resonanceReaction label="Fe57 + photon [inclusive]" ejectile="photon" eliminated="true">
+            <link href="/reactionSuite/reactions/reaction[@label='Fe57 + photon [inclusive]']" />
+          </resonanceReaction>
+          <resonanceReaction label="n + Fe56" ejectile="n">
+            <link href="/reactionSuite/reactions/reaction[@label='n + Fe56']" />
+          </resonanceReaction>
+        </resonanceReactions>
+        <spinGroups>
+          <spinGroup label="0" spin="1/2" parity="1">
+            <channels>
+              <channel label="0" resonanceReaction="Fe57 + photon [inclusive]" L="0" channelSpin="1" columnIndex="1" />
+              <channel label="1" resonanceReaction="n + Fe56" L="0" channelSpin="1/2" columnIndex="2" />
+            </channels>
+            <resonanceParameters>
+              <table rows="40" columns="3">
+                <columnHeaders>
+                  <column index="0" name="energy" unit="eV" />
+                  <column index="1" name="Fe57 + photon [inclusive] width" unit="eV" />
+                  <column index="2" name="n + Fe56 width" unit="eV" />
+                </columnHeaders>
+                <data>
+                 
+                 
+                      -4.73e5                           1     3.08e5
+                       -2.4e4                           1       2710
+                        -2440                        0.85        193
+                        27791                     1.28866     1409.3
+                        74029                     0.69561      611.5
+                        83628                     0.52883     1215.1
+                       129861                        0.62        588
+                       140479                        1.61       2735
+                       169275                        0.94        962
+                       187737                        1.05       3620
+                       220586                         1.5       1267
+                       244991                     0.70517        487
+                       277206                        1.15       3650
+                       317909                     3.36159     7117.9
+                       331447                     0.51171     327.58
+                       357263                         1.1       2205
+                       361078                         1.1       7775
+                       381360                        0.96      12330
+                       405408                        0.96       2329
+                       438296                        0.96       1918
+                       469934                        0.96       2566
+                       500194                        0.96       1726
+                       535921                        0.96      255.5
+                       545773                        0.96        268
+                       561015                        1.25       1500
+                       575212                        0.96       87.1
+                       613936                        0.54       2642
+                       665655                        0.96      27960
+                       693506                        0.96       1727
+                       710659                        0.96      20940
+                       741680                        0.96       5719
+                       752706                        0.96       2462
+                       769537                        0.96       3957
+                       787270                        0.96       1384
+                       825678                        0.96        263
+                       839308                        0.96       2411
+                       856200                        0.96       3470
+                       8.83e5                        0.96       2870
+                       8.93e5                        0.96      28200
+                      1.283e6                        0.96      7.4e5</data>
+              </table>
+            </resonanceParameters>
+          </spinGroup>
+          <spinGroup label="1" spin="1/2" parity="-1">
+            <channels>
+              <channel label="0" resonanceReaction="Fe57 + photon [inclusive]" L="1" channelSpin="1" columnIndex="1" />
+              <channel label="1" resonanceReaction="n + Fe56" L="1" channelSpin="1/2" columnIndex="2">
+                <scatteringRadius>
+                  <constant1d value="5.002" domainMin="1e-5" domainMax="8.5e5">
+                    <axes>
+                      <axis index="1" label="energy_in" unit="eV" />
+                      <axis index="0" label="radius" unit="fm" />
+                    </axes>
+                  </constant1d>
+                </scatteringRadius>
+                <hardSphereRadius>
+                  <constant1d value="5.002" domainMin="1e-5" domainMax="8.5e5">
+                    <axes>
+                      <axis index="1" label="energy_in" unit="eV" />
+                      <axis index="0" label="radius" unit="fm" />
+                    </axes>
+                  </constant1d>
+                </hardSphereRadius>
+              </channel>
+            </channels>
+            <resonanceParameters>
+              <table rows="63" columns="3">
+                <columnHeaders>
+                  <column index="0" name="energy" unit="eV" />
+                  <column index="1" name="Fe57 + photon [inclusive] width" unit="eV" />
+                  <column index="2" name="n + Fe56 width" unit="eV" />
+                </columnHeaders>
+                <data>
+                 
+                 
+                        1151                    0.572782     0.0617
+                       12450                        0.49     2.5e-3
+                       17750                        0.49      0.015
+                       22801                    0.972118      0.214
+                       53561                    0.595654       1.12
+                       77082                    0.326648       3.52
+                       96194                    0.547959       1.84
+                       96346                    0.567007       14.6
+                      121020                        0.49       5e-2
+                      122600                        0.49       0.14
+                      124187                      0.6375       10.2
+                      153945                    0.653167          5
+                      181080                    0.518919        6.4
+                      189970                    0.283305         24
+                      195747                    0.589197       72.7
+                      221844                    0.451415       17.4
+                      263641                    0.486608      125.6
+                      264340                    0.398602          1
+                      267693                    0.672374          7
+                      269772                    0.360821      158.3
+                      274690                        0.49       0.23
+                      283050                     0.55814        4.8
+                      290745                    0.608182        7.2
+                      293225                    0.576075      197.6
+                      306320                        0.49    0.23293
+                      310980                     1.06662      144.5
+                      312840                     0.54031        1.7
+                      324013                    0.350855       10.5
+                      393523                    0.997912       54.6
+                      428604                    0.818881       22.4
+                      439517                    0.373038       10.3
+                      448217                    0.500998        251
+                      457040                    0.351267         97
+                      485330                    0.608824       41.4
+                      508268                        0.49       24.7
+                      558854                    0.620451        854
+                      581068                      0.9675       12.9
+                      595136                        0.49        186
+                      598024                        0.49       12.4
+                      607945                    0.746227       11.3
+                      614873                        0.49        3e2
+                      623441                        0.49       14.9
+                      633473                        0.49      160.7
+                      641535                        0.49       58.1
+                      654900                        0.49       21.6
+                      655830                        0.49        165
+                      681473                        0.49       75.5
+                      688658                        0.49        9.7
+                      705197                        0.49         16
+                      717008                        0.49        708
+                      744980                        0.49         44
+                      765725                        0.49       38.9
+                      770225                        0.49       35.6
+                      779435                        0.49         34
+                      785270                        0.49        166
+                      786270                        0.49       1629
+                      795394                        0.49         89
+                      801419                        0.49         52
+                      814464                        0.49        453
+                      818540                        0.49         29
+                      819140                        0.49         63
+                      821504                        0.49         42
+                      833762                        0.49        245</data>
+              </table>
+            </resonanceParameters>
+          </spinGroup>
+          <spinGroup label="2" spin="3/2" parity="-1">
+            <channels>
+              <channel label="0" resonanceReaction="Fe57 + photon [inclusive]" L="1" channelSpin="1" columnIndex="1" />
+              <channel label="1" resonanceReaction="n + Fe56" L="1" channelSpin="1/2" columnIndex="2">
+                <scatteringRadius>
+                  <constant1d value="5.002" domainMin="1e-5" domainMax="8.5e5">
+                    <axes>
+                      <axis index="1" label="energy_in" unit="eV" />
+                      <axis index="0" label="radius" unit="fm" />
+                    </axes>
+                  </constant1d>
+                </scatteringRadius>
+                <hardSphereRadius>
+                  <constant1d value="5.002" domainMin="1e-5" domainMax="8.5e5">
+                    <axes>
+                      <axis index="1" label="energy_in" unit="eV" />
+                      <axis index="0" label="radius" unit="fm" />
+                    </axes>
+                  </constant1d>
+                </hardSphereRadius>
+              </channel>
+            </channels>
+            <resonanceParameters>
+              <table rows="78" columns="3">
+                <columnHeaders>
+                  <column index="0" name="energy" unit="eV" />
+                  <column index="1" name="Fe57 + photon [inclusive] width" unit="eV" />
+                  <column index="2" name="n + Fe56 width" unit="eV" />
+                </columnHeaders>
+                <data>
+                 
+                 
+                        34234                     1.60655       0.35
+                        36725                    0.243499      0.285
+                        38418                     0.66297      0.238
+                      46053.5                    0.265125       5.14
+                      52139.7                    0.387683      17.29
+                        59232                    0.445022       4.81
+                        63474                    0.494656        0.8
+                        90338                    0.414049         22
+                        92928                     0.43169       0.76
+                       102698                    0.339917       27.9
+                       122801                    0.283795       61.9
+                       142310                        0.49      0.295
+                       149830                        0.49       0.13
+                       173688                    0.226312       38.8
+                       179766                    0.264063       16.9
+                       207992                    0.390851       12.5
+                       208830                        0.49    0.11769
+                       215980                        0.49   0.111305
+                       225855                    0.433656       28.1
+                       243410                        0.49   0.076155
+                       276336                    0.215202        229
+                       290415                    0.370281       33.9
+                       293225                        0.49    0.16034
+                       302990                        0.49       0.13
+                       304493                    0.390082       18.3
+                       306990                    0.384083          1
+                       340770                    0.526429      132.8
+                       341766                    0.542857        3.8
+                       348904                    0.606784      256.2
+                       355200                        0.49      0.215
+                       362716                    0.654546       93.6
+                       370600                        0.49       0.26
+                       377247                    0.505604        5.1
+                       386849                    0.837735       89.9
+                       398803                        0.49      0.475
+                       403134                    0.355203        621
+                       414500                        0.49        0.8
+                       418183                    0.555412        748
+                       423100                    0.651116          3
+                       4.46e5                    0.555556          5
+                       451288                    0.811991       93.5
+                       458045                    0.370947        145
+                       468656                     1.06875        5.7
+                       4.76e5                        0.49      0.555
+                       489815                    0.340647        179
+                       511675                        0.49      512.1
+                       513201                        0.49        155
+                       533558                    0.316375       72.5
+                       538737                        0.49      459.6
+                       543980                        0.49      10.65
+                       544413                    0.875781      131.8
+                       561394                    0.626041        376
+                       567350                     1.15636       8.65
+                       577419                     1.00069       1456
+                       603591                    0.609421       83.4
+                       626694                        0.49       36.3
+                       629044                        0.49        7.3
+                       644187                        0.49       43.5
+                       645980                        0.49       58.9
+                       653540                        0.49      259.4
+                       656230                        0.49       22.6
+                       657826                        0.49        487
+                       665597                        0.49      121.9
+                       689605                        0.49        240
+                       696188                        0.49        599
+                       708155                        0.49        5.6
+                       715727                        0.49       63.1
+                       721877                        0.49      155.8
+                       737726                        0.49        646
+                       745685                        0.49      220.6
+                       750192                        0.49        690
+                       759175                        0.49       74.6
+                       766724                        0.49        835
+                       770916                        0.49      351.1
+                       785600                        0.49      134.4
+                       806575                        0.49      204.2
+                       816858                        0.49        314
+                       825860                        0.49        229</data>
+              </table>
+            </resonanceParameters>
+          </spinGroup>
+          <spinGroup label="3" spin="3/2" parity="1">
+            <channels>
+              <channel label="0" resonanceReaction="Fe57 + photon [inclusive]" L="2" channelSpin="1" columnIndex="1" />
+              <channel label="1" resonanceReaction="n + Fe56" L="2" channelSpin="1/2" columnIndex="2" />
+            </channels>
+            <resonanceParameters>
+              <table rows="75" columns="3">
+                <columnHeaders>
+                  <column index="0" name="energy" unit="eV" />
+                  <column index="1" name="Fe57 + photon [inclusive] width" unit="eV" />
+                  <column index="2" name="n + Fe56 width" unit="eV" />
+                </columnHeaders>
+                <data>
+                 
+                 
+                        2350                        0.72      2.2e-4
+                       20170                        0.72   4.3197e-3
+                       92708                    0.700386         1.8
+                       96630                    0.911596        2.16
+                      105942                    0.894259        3.46
+                      112719                    0.560954        6.59
+                      125175                    0.615917        12.9
+                      130170                        0.72        0.46
+                      141150                        0.72      0.3425
+                      161778                    0.603938         6.7
+                      169172                    0.880432        21.6
+                      173190                        0.72       0.115
+                      187088                    0.300536           6
+                      190020                    0.311695        14.2
+                      193015                    0.601161       31.35
+                      201581                    0.827041        32.8
+                      205950                    0.736458       2.115
+                      209720                        0.72     0.07862
+                      223690                    0.868334         1.3
+                      229910                        0.72       0.278
+                      232550                     1.08967        25.4
+                      256158                    0.546167         5.4
+                      280986                    0.914637         8.9
+                      288765                    0.619915        31.5
+                      299974                    0.768509        28.1
+                      321779                    0.663187         9.9
+                      331510                    0.437966          27
+                      341059                     0.56259        30.5
+                      344753                    0.698119        45.2
+                      350322                    0.879532        93.1
+                      353768                    0.724875        34.6
+                      356705                    0.387049         8.4
+                      373747                    0.911689         5.4
+                      379184                     0.66414        47.6
+                      401787                     1.11838       148.2
+                      431001                     1.08639         5.8
+                      434777                     0.56728       140.6
+                      438687                    0.726595        13.7
+                      473200                        0.72           1
+                      490568                    0.510623       418.1
+                      499316                     1.01933       110.3
+                      514705                        0.72        20.8
+                      523042                    0.867045         6.5
+                      556760                        0.72       0.935
+                      591424                        0.72         8.2
+                      595894                        0.72        65.2
+                      600500                        0.72       0.625
+                      613111                        0.72         8.4
+                      614141                        0.72        82.2
+                      615971                        0.72        19.9
+                      631138                        0.72       137.9
+                      636495                        0.72        35.3
+                      658559                        0.72         202
+                      663406                     1.36468           9
+                      668058                        0.72         6.7
+                      671281                        0.72       212.1
+                      672961                        0.72        51.7
+                      683944                        0.72        21.9
+                      695628                        0.72         496
+                      702345                        0.72        24.3
+                      714345                        0.72        61.7
+                      721336                        0.72       148.2
+                      739534                        0.72        52.6
+                      765013                        0.72       132.5
+                      772311                        0.72          52
+                      778081                        0.72         162
+                      780456                        0.72         489
+                      782840                        0.72         250
+                      786520                        0.72         113
+                      786970                        0.72          98
+                      794020                        0.72       185.9
+                      795944                        0.72        40.2
+                      798190                        0.72        11.3
+                      804532                        0.72         681
+                      816330                        0.72         182</data>
+              </table>
+            </resonanceParameters>
+          </spinGroup>
+          <spinGroup label="4" spin="5/2" parity="1">
+            <channels>
+              <channel label="0" resonanceReaction="Fe57 + photon [inclusive]" L="2" channelSpin="1" columnIndex="1" />
+              <channel label="1" resonanceReaction="n + Fe56" L="2" channelSpin="1/2" columnIndex="2" />
+            </channels>
+            <resonanceParameters>
+              <table rows="56" columns="3">
+                <columnHeaders>
+                  <column index="0" name="energy" unit="eV" />
+                  <column index="1" name="Fe57 + photon [inclusive] width" unit="eV" />
+                  <column index="2" name="n + Fe56 width" unit="eV" />
+                </columnHeaders>
+                <data>
+                 
+                 
+                       72988                     1.03009       0.28
+                       80842                    0.693013    11.7667
+                      103087                    0.642339   0.426667
+                      181185                    0.752225       29.2
+                      210699                    0.431508        5.9
+                      234893                    0.789064       31.7
+                      241625                     1.17978       11.6
+                      253556                     0.53927         42
+                      267044                    0.316183    78.6667
+                      283985                    0.479512        9.3
+                      285550                    0.653861       17.7
+                      314744                     1.08157       52.9
+                      334417                    0.676026        4.2
+                      366797                    0.937072       13.6
+                      385930                     2.16967          4
+                      419118                    0.849884       53.8
+                      448817                    0.722201      236.3
+                      455170                    0.797149    5.13333
+                      460275                     1.17091        4.6
+                      464379                    0.679663       72.3
+                      481158                     1.37744      133.1
+                      487560                     0.97422    6.46666
+                      493824                     1.39869    28.5333
+                      503405                        0.72      147.5
+                      513385                        0.72       52.3
+                      527396                    0.929502         90
+                      531855                    0.478985       98.5
+                      545653                        0.72      308.8
+                      552500                     1.00978         61
+                      558783                    0.939189      149.7
+                      565497                     0.52082       64.8
+                      569399                    0.391764       86.6
+                      579878                     1.03996      162.1
+                      590416                    0.744699       68.3
+                      610150                    0.805224       24.9
+                      623892                    0.735473       20.5
+                      637491                        0.72      163.7
+                      646665                        0.72    667.333
+                      655640                        0.72      169.8
+                      680675                        0.72       35.1
+                      685192                        0.72      204.4
+                      691108                        0.72      133.2
+                      727834                        0.72        671
+                      731818                        0.72       90.3
+                      737856                        0.72        329
+                      756281                        0.72       1039
+                      782850                        0.72         87
+                      788974                        0.72    997.667
+                      820144                        0.72      170.4
+                      828632                        0.72        679
+                      835798                        0.72      536.4
+                      838340                        0.72       44.5
+                      845452                        0.72        883
+                      850377                        0.72       63.4
+                      851920                        0.72       40.6
+                      865400                        0.72    267.333</data>
+              </table>
+            </resonanceParameters>
+          </spinGroup>
+        </spinGroups>
+      </RMatrix>
+    </resolved>
+  </resonances>
+  <reactions>
+    <reaction label="n + Fe56" ENDF_MT="2">
+      <crossSection>
+        <resonancesWithBackground label="eval">
+          <resonances href="/reactionSuite/resonances" />
+          <background>
+            <resolvedRegion>
+              <XYs1d>
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="crossSection" unit="b" />
+                </axes>
+                <values>1.00000000e-05 0.00000000e+00 2.53000000e-02 0.00000000e+00 1.00000000e+01 0.00000000e+00 3.00000000e+01 1.53000000e-04 3.56762100e+01 1.65000000e-04 4.06276700e+01 1.74640000e-04 4.47872300e+01 1.82210000e-04 5.18385400e+01 1.94210000e-04 6.00000000e+01 2.07000000e-04 6.81731600e+01 2.19350000e-04 7.50257000e+01 2.29100000e-04 8.66173700e+01 2.44530000e-04 1.00000000e+02 2.61000000e-04 1.18920700e+02 2.79730000e-04 1.35425600e+02 2.94650000e-04 1.49290800e+02 3.06380000e-04 1.72795100e+02 3.24820000e-04 2.00000000e+02 3.44380000e-04 2.21336400e+02 3.58620000e-04 2.57683700e+02 3.81100000e-04</values>
+              </XYs1d>
+            </resolvedRegion>
+            <fastRegion>
+              <XYs1d>
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="crossSection" unit="b" />
+                </axes>
+                <values>8.50000000e+05 1.39590000e+00 8.50160000e+05 1.51730000e+00 8.50272000e+05 1.72770000e+00 8.50328000e+05 1.88920000e+00 8.50384000e+05 2.16520000e+00 8.50496000e+05 3.00470000e+00 8.50552000e+05 3.29850000e+00 8.50608000e+05 3.14060000e+00 8.50664000e+05 2.60730000e+00 8.50720000e+05 2.17130000e+00 8.50832000e+05 1.54780000e+00 8.50889000e+05 1.32410000e+00 8.50945000e+05 1.31330000e+00 8.51001000e+05 1.12880000e+00 8.51057000e+05 1.16220000e+00 8.51225000e+05 1.09720000e+00 8.51505000e+05 9.26330000e-01 8.51674000e+05 1.05860000e+00 8.51730000e+05 1.31190000e+00 8.51786000e+05 1.62340000e+00</values>
+              </XYs1d>
+            </fastRegion>
+          </background>
+        </resonancesWithBackground>
+        <XYs1d label="recon">
+          <axes>
+            <axis index="1" label="energy_in" unit="eV" />
+            <axis index="0" label="crossSection" unit="b" />
+          </axes>
+          <values>1.00000000e-05 1.20984807e+01 1.40114354e+02 1.15680345e+01 2.80086595e+02 1.10992849e+01 4.17361398e+02 1.06891844e+01 5.66413026e+02 1.02906237e+01 7.22724650e+02 9.91664948e+00 8.97207200e+02 9.54383039e+00 1.10848971e+03 9.14568981e+00 1.13466209e+03 9.10660100e+00 1.14322760e+03 9.11982020e+00 1.14489311e+03 9.13951851e+00 1.14616207e+03 9.17232185e+00 1.14706621e+03 9.21881292e+00 1.14779587e+03 9.28918520e+00 1.14836690e+03 9.38980597e+00 1.14881104e+03 9.52747895e+00 1.14900138e+03 9.61568735e+00 1.14916000e+03 9.71034462e+00 1.14931862e+03 9.83191009e+00 1.14946138e+03 9.97333388e+00</values>
+        </XYs1d>
+      </crossSection>
+      <outputChannel genre="twoBody">
+        <Q>
+          <constant1d label="eval" value="0" domainMin="1e-5" domainMax="1.5e8">
+            <axes>
+              <axis index="1" label="energy_in" unit="eV" />
+              <axis index="0" label="Q" unit="eV" />
+            </axes>
+          </constant1d>
+        </Q>
+        <products>
+          <product pid="n" label="n">
+            <multiplicity>
+              <constant1d label="eval" value="1" domainMin="1e-5" domainMax="1.5e8">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+              </constant1d>
+            </multiplicity>
+            <distribution>
+              <angularTwoBody label="eval" productFrame="centerOfMass">
+                <regions2d>
+                  <axes>
+                    <axis index="2" label="energy_in" unit="eV" />
+                    <axis index="1" label="mu" unit="" />
+                    <axis index="0" label="P(mu|energy_in)" unit="" />
+                  </axes>
+                  <function2ds>
+                    <XYs2d index="0">
+                      <function1ds>
+                        <Legendre outerDomainValue="1e-5">
+                          <values>1 5.877681e-5 1.315562e-5 1.28475e-12 1.03793e-11 9.20038e-21 0</values>
+                        </Legendre>
+                        <Legendre outerDomainValue="5e3">
+                          <values>1 5.89281e-4 2.119866e-4 1.00149e-10 1.231904e-8 2.5813e-16 1.0936e-16 6.65094e-24 0</values>
+                        </Legendre>
+                        <Legendre outerDomainValue="1e4">
+                          <values>1 1.542063e-3 5.167644e-4 1.105931e-9 2.598255e-7 5.77867e-15 3.75311e-18 7.62587e-22 0</values>
+                        </Legendre>
+                        <Legendre outerDomainValue="1.1e4">
+                          <values>1 1.756558e-3 5.784115e-4 1.655324e-9 3.90365e-7 1.17337e-14 9.69385e-16 1.68058e-21 0</values>
+                        </Legendre>
+                        <Legendre outerDomainValue="1.2e4">
+                          <values>1 1.973845e-3 6.400291e-4 2.411889e-9 5.637059e-7 2.05212e-14 4.23354e-15 3.28976e-21 0</values>
+                        </Legendre>
+                        <Legendre outerDomainValue="1.3e4">
+                          <values>1 2.199726e-3 7.01653e-4 3.374163e-9 7.871988e-7 3.20503e-14 1.0103e-14 5.57968e-21 0</values>
+                        </Legendre>
+                      </function1ds>
+                    </XYs2d>
+                    <XYs2d index="1">
+                      <function1ds>
+                        <XYs1d outerDomainValue="4.5e7">
+                          <values>-1 4.752801e-4 -0.9993908 4.638156e-4 -0.997564 4.310835e-4 -0.9945219 3.816987e-4 -0.9902681 3.226314e-4 -0.9848077 2.622847e-4 -0.9781476 2.09203e-4 -0.9702957 1.708176e-4 -0.9612617 1.522832e-4 -0.9510565 1.55735e-4 -0.9396926 1.800141e-4 -0.9271839 2.21004e-4 -0.9135454 2.724823e-4 -0.8987941 3.272546e-4 -0.8829476 3.78384e-4 -0.8660254 4.202005e-4 -0.8480481 4.49028e-4 -0.8290375 4.634833e-4 -0.8090169 4.643971e-4 -0.7880107 4.548849e-4</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="4.8e7">
+                          <values>-1 3.222555e-4 -0.9993908 3.143501e-4 -0.997564 2.915791e-4 -0.9945219 2.566976e-4 -0.9902681 2.139793e-4 -0.9848077 1.68708e-4 -0.9781476 1.26531e-4 -0.9702957 9.267951e-5 -0.9612617 7.120927e-5 -0.9510565 6.440667e-5 -0.9396926 7.248982e-5 -0.9271839 9.367728e-5 -0.9135454 1.246082e-4 -0.8987941 1.611096e-4 -0.8829476 1.989723e-4 -0.8660254 2.346133e-4 -0.8480481 2.654109e-4 -0.8290375 2.896967e-4 -0.8090169 3.066022e-4 -0.7880107 3.15974e-4</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="5e7">
+                          <values>-1 2.554859e-4 -0.9993908 2.491389e-4 -0.997564 2.309265e-4 -0.9945219 2.032195e-4 -0.9902681 1.695217e-4 -0.9848077 1.339259e-4 -0.9781476 1.005045e-4 -0.9702957 7.27254e-5 -0.9612617 5.312746e-5 -0.9510565 4.310825e-5 -0.9396926 4.296409e-5 -0.9271839 5.203023e-5 -0.9135454 6.885707e-5 -0.8987941 9.144635e-5 -0.8829476 1.174835e-4 -0.8660254 1.446379e-4 -0.8480481 1.708272e-4 -0.8290375 1.944577e-4 -0.8090169 2.145601e-4 -0.7880107 2.307463e-4</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="5.25e7">
+                          <values>-1 1.824427e-4 -0.9993908 1.780931e-4 -0.997564 1.656092e-4 -0.9945219 1.465909e-4 -0.9902681 1.2341e-4 -0.9848077 9.87885e-5 -0.9781476 7.535289e-5 -0.9702957 5.524818e-5 -0.9612617 3.992291e-5 -0.9510565 3.012524e-5 -0.9396926 2.601277e-5 -0.9271839 2.734114e-5 -0.9135454 3.359263e-5 -0.8987941 4.405369e-5 -0.8829476 5.786274e-5 -0.8660254 7.407943e-5 -0.8480481 9.179243e-5 -0.8290375 1.102815e-4 -0.8090169 1.290331e-4 -0.7880107 1.477132e-4</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="5.5e7">
+                          <values>-1 1.19331e-4 -0.9993908 1.165516e-4 -0.997564 1.085967e-4 -0.9945219 9.653787e-5 -0.9902681 8.197633e-5 -0.9848077 6.671895e-5 -0.9781476 5.243417e-5 -0.9702957 4.031999e-5 -0.9612617 3.099674e-5 -0.9510565 2.457155e-5 -0.9396926 2.087641e-5 -0.9271839 1.96899e-5 -0.9135454 2.086415e-5 -0.8987941 2.432286e-5 -0.8829476 2.999289e-5 -0.8660254 3.774849e-5 -0.8480481 4.744063e-5 -0.8290375 5.898153e-5 -0.8090169 7.243206e-5 -0.7880107 8.794249e-5</values>
+                        </XYs1d>
+                        <XYs1d outerDomainValue="6e7">
+                          <values>-1 3.098946e-5 -0.9993908 3.043826e-5 -0.997564 2.886085e-5 -0.9945219 2.647985e-5 -0.9902681 2.363655e-5 -0.9848077 2.074086e-5 -0.9781476 1.82051e-5 -0.9702957 1.637848e-5 -0.9612617 1.548679e-5 -0.9510565 1.55733e-5 -0.9396926 1.644951e-5 -0.9271839 1.769874e-5 -0.9135454 1.878646e-5 -0.8987941 1.927059e-5 -0.8829476 1.903051e-5 -0.8660254 1.838962e-5 -0.8480481 1.805708e-5 -0.8290375 1.891384e-5 -0.8090169 2.175754e-5 -0.7880107 2.713185e-5</values>
+                        </XYs1d>
+                      </function1ds>
+                    </XYs2d>
+                  </function2ds>
+                </regions2d>
+              </angularTwoBody>
+            </distribution>
+          </product>
+          <product pid="Fe56" label="Fe56">
+            <multiplicity>
+              <constant1d label="eval" value="1" domainMin="1e-5" domainMax="1.5e8">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+              </constant1d>
+            </multiplicity>
+            <distribution>
+              <angularTwoBody label="eval" productFrame="centerOfMass">
+                <recoil href="../../../../product[@label='n']/distribution/angularTwoBody[@label='eval']" />
+              </angularTwoBody>
+            </distribution>
+          </product>
+        </products>
+      </outputChannel>
+    </reaction>
+    <reaction label="Fe57 + photon [inclusive]" ENDF_MT="102">
+      <crossSection>
+        <resonancesWithBackground label="eval">
+          <resonances href="/reactionSuite/resonances" />
+          <background>
+            <resolvedRegion>
+              <XYs1d>
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="crossSection" unit="b" />
+                </axes>
+                <values>1.00000000e-05 0.00000000e+00 2.53000000e-02 0.00000000e+00 1.00000000e+01 0.00000000e+00 3.00000000e+01 4.59000000e-04 3.56762100e+01 4.95015000e-04 4.06276700e+01 5.23905000e-04 4.47872300e+01 5.46645000e-04 5.18385400e+01 5.82630000e-04 6.00000000e+01 6.21000000e-04 6.81731600e+01 6.58042500e-04 7.50257000e+01 6.87285000e-04 8.66173700e+01 7.33590000e-04 1.00000000e+02 7.83000000e-04 1.18920700e+02 8.39175000e-04 1.35425600e+02 8.83950000e-04 1.49290800e+02 9.19125000e-04 1.72795100e+02 9.74475000e-04 2.00000000e+02 1.03312500e-03 2.21336400e+02 1.07587500e-03 2.57683700e+02 1.14330000e-03</values>
+              </XYs1d>
+            </resolvedRegion>
+            <fastRegion>
+              <XYs1d>
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="crossSection" unit="b" />
+                </axes>
+                <values>8.50000000e+05 5.51070000e-03 8.50160000e+05 5.50080000e-03 8.50272000e+05 5.49380000e-03 8.50328000e+05 5.49030000e-03 8.50384000e+05 5.48690000e-03 8.50496000e+05 5.47990000e-03 8.50552000e+05 5.47640000e-03 8.50608000e+05 5.47300000e-03 8.50664000e+05 5.46950000e-03 8.50720000e+05 5.46600000e-03 8.50832000e+05 5.45900000e-03 8.50889000e+05 5.45550000e-03 8.50945000e+05 5.45200000e-03 8.51001000e+05 5.44860000e-03 8.51057000e+05 5.44510000e-03 8.51225000e+05 5.43460000e-03 8.51505000e+05 5.41730000e-03 8.51674000e+05 5.40680000e-03 8.51730000e+05 5.40330000e-03 8.51786000e+05 5.39980000e-03</values>
+              </XYs1d>
+            </fastRegion>
+          </background>
+        </resonancesWithBackground>
+        <XYs1d label="recon">
+          <axes>
+            <axis index="1" label="energy_in" unit="eV" />
+            <axis index="0" label="crossSection" unit="b" />
+          </axes>
+          <values>1.00000000e-05 1.29596842e+02 1.09739051e-05 1.23712567e+02 1.16231752e-05 1.20207628e+02 1.22724453e-05 1.16984646e+02 1.34149711e-05 1.11892132e+02 1.46418072e-05 1.07101876e+02 1.58686433e-05 1.02878475e+02 1.68989468e-05 9.96929846e+01 1.79292503e-05 9.67861805e+01 1.94747056e-05 9.28664760e+01 2.12877390e-05 8.88238610e+01 2.25856206e-05 8.62339740e+01 2.38835022e-05 8.38581754e+01 2.51813839e-05 8.16685072e+01 2.76338117e-05 7.79603923e+01 2.92687637e-05 7.57516722e+01 3.09037156e-05 7.37206343e+01 3.37807536e-05 7.05114661e+01 3.68700967e-05 6.74927730e+01 3.99594397e-05 6.48312976e+01</values>
+        </XYs1d>
+      </crossSection>
+      <outputChannel genre="NBody" process="inclusive">
+        <Q>
+          <constant1d label="eval" value="7646430" domainMin="1e-5" domainMax="1.5e8">
+            <axes>
+              <axis index="1" label="energy_in" unit="eV" />
+              <axis index="0" label="Q" unit="eV" />
+            </axes>
+          </constant1d>
+        </Q>
+        <products>
+          <product pid="Fe57" label="Fe57">
+            <multiplicity>
+              <constant1d label="eval" value="1" domainMin="1e-5" domainMax="1.5e8">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+              </constant1d>
+            </multiplicity>
+            <distribution>
+              <unspecified label="eval" productFrame="lab" />
+            </distribution>
+          </product>
+          <product pid="photon" label="photon">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 2.141692 5e3 2.275642 1e4 2.32346 1.1e4 2.328428 1.2e4 2.332896 1.3e4 2.336697 1.4e4 2.339626 1.5e4 2.342088 1.6e4 2.344156 1.7e4 2.345892 1.8e4 2.347716 2e4 2.349881 2.2e4 2.35124 2.4e4 2.351987 2.6e4 2.352326 2.8e4 2.352262 3e4 2.351935 3.5e4 2.346235 4e4 2.347489 4.5e4 2.344418</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="centerOfMass">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <XYs2d interpolationQualifier="unitbase">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                    <function1ds>
+                      <XYs1d outerDomainValue="1e-5">
+                        <values>0 7.30111e-16 47533 6.742461e-7 95066 1.111949e-6 142599 1.92848e-11 190132 2.245912e-7 237664 1.140609e-7 285197 1.50274e-10 332730 2.877611e-6 380263 3.65717e-10 427796 2.338354e-9 475329 6.81489e-10 522862 3.056471e-8 570395 1.086535e-9 617927 8.582989e-9 665460 2.869563e-7 712993 2.076267e-9 760526 6.158632e-7 808059 3.188865e-9 855592 6.476895e-7 903125 4.85209e-8</values>
+                      </XYs1d>
+                      <XYs1d outerDomainValue="5e3">
+                        <values>0 2.93406e-15 47566 6.574964e-7 95132 1.24435e-6 142698 1.98995e-11 190264 2.136394e-7 237829 8.415498e-8 285395 1.57715e-10 332961 2.738694e-6 380527 3.90999e-10 428093 1.941936e-9 475659 7.31511e-10 523225 3.850898e-8 570791 1.167492e-9 618357 1.891772e-8 665923 3.628259e-7 713488 2.287134e-9 761054 8.37335e-7 808620 3.509915e-9 856186 5.206815e-7 903752 3.894451e-8</values>
+                      </XYs1d>
+                      <XYs1d outerDomainValue="1e4">
+                        <values>0 7.19854e-15 47607 6.559745e-7 95214 1.331288e-6 142822 2.04186e-11 190429 2.079686e-7 238036 7.249143e-8 285643 1.62383e-10 333250 2.667095e-6 380857 4.04047e-10 428465 1.809865e-9 476072 7.56144e-10 523679 4.387364e-8 571286 1.207132e-9 618893 2.848998e-8 666500 4.141556e-7 714108 2.388754e-9 761715 8.951339e-7 809322 3.670596e-9 856929 4.782026e-7 904536 3.581e-8</values>
+                      </XYs1d>
+                      <XYs1d outerDomainValue="1.1e4">
+                        <values>0 8.36418e-15 47615 6.565113e-7 95231 1.347327e-6 142846 2.05238e-11 190462 2.070461e-7 238077 7.101463e-8 285693 1.63207e-10 333308 2.655308e-6 380923 4.06078e-10 428539 1.796738e-9 476154 7.59849e-10 523770 4.489858e-8 571385 1.213055e-9 6.19e5 3.058632e-8 666616 4.239698e-7 714231 2.403779e-9 761847 8.981085e-7 809462 3.694991e-9 857078 4.739332e-7 904693 3.551279e-8</values>
+                      </XYs1d>
+                      <XYs1d outerDomainValue="1.2e4">
+                        <values>0 9.6085e-15 47624 6.571181e-7 95247 1.36324e-6 142871 2.06288e-11 190495 2.061142e-7 238118 6.966305e-8 285742 1.64001e-10 333366 2.643642e-6 380989 4.07952e-10 428613 1.785639e-9 476237 7.63245e-10 523860 4.592531e-8 571484 1.218511e-9 619108 3.275116e-8 666731 4.338121e-7 714355 2.417547e-9 761979 8.994796e-7 809602 3.717914e-9 857226 4.703339e-7 904850 3.526782e-8</values>
+                      </XYs1d>
+                      <XYs1d outerDomainValue="1.3e4">
+                        <values>0 1.09252e-14 47632 6.578713e-7 95264 1.379265e-6 142896 2.07349e-11 190528 2.051963e-7 238160 6.843263e-8 285792 1.64779e-10 333424 2.632001e-6 381055 4.09771e-10 428687 1.77665e-9 476319 7.66496e-10 523951 4.696547e-8 571583 1.223689e-9 619215 3.499329e-8 666847 4.437759e-7 714479 2.430671e-9 762111 8.993011e-7 809743 3.739622e-9 857375 4.673806e-7 905007 3.507364e-8</values>
+                      </XYs1d>
+                    </function1ds>
+                  </XYs2d>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+        </products>
+      </outputChannel>
+    </reaction>
+  </reactions>
+</reactionSuite>

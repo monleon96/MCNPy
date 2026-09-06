@@ -218,9 +218,15 @@ def parse_mt451(lines: List[str]) -> MF1MT451:
         if mt_val == 0:
             break
 
-        # Add valid entries to directory
-        if mf_val is not None and mt_val is not None and nc_val is not None and mod_val is not None:
-            mt451.add_directory_entry(mf_val, mt_val, nc_val, mod_val)
+        # Add valid entries to directory. The MOD (modification) field is
+        # frequently left blank in ENDF directories (e.g. JEFF-4.0 MF12 photon
+        # entries), which the line parser returns as None; treat a blank MOD as
+        # 0 rather than dropping the entry — dropping it corrupts the directory
+        # and makes NJOY lose the corresponding section.
+        if mf_val is not None and mt_val is not None and nc_val is not None:
+            mt451.add_directory_entry(
+                mf_val, mt_val, nc_val, mod_val if mod_val is not None else 0
+            )
             dir_entries_parsed += 1
 
     logger.debug(f"Parsed {dir_entries_parsed} directory entries")

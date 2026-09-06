@@ -20,8 +20,6 @@ _README.md
 scripts/*.md
 
 # Directories
-manuscript/
-myworkspace/
 kika/files/
 files/
 resources/
@@ -36,10 +34,23 @@ kika/sampling/testing/
 kika/endf/files/
 tmp_inspect/
 kika/cov/legacy/
-kika/cov/tests/test_new_plotting_implementations.ipynb
-kika/cov/tests/test_plotbuilder_direct.ipynb
-kika/plotting/tests/test_old_vs_new_covariance.ipynb
-kika/ace/work.ipynb
-kika/endf/classes/mf4/debug_example.ipynb
+
+# Library dev notebooks, scratch outputs & dev notes live in the private kika-workspace repo, not here
+kika/**/*.ipynb
+kika/**/*.md
+kika/**/output_directory/
+kika/**/test_output/
 nul
 dir
+# CLAUDE.md is a private symlink into kika-workspace (not distributed with the library)
+CLAUDE.md
+
+# AGENTS.md is the same private stub as CLAUDE.md, for the agents that read
+# that name instead. Both point into kika-workspace and neither is distributed.
+AGENTS.md
+
+# The IAEA catalogue snapshot: 2 MB of scraped directory listings, built on
+# demand into the user's cache directory, so neither in this history nor in the
+# wheel. Read kika/endf/remote/catalog.py; build it with
+#   python -m kika.scripts.build_endf_catalog
+kika/endf/remote/endf_catalog.json.gz

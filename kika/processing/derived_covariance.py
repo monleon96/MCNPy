@@ -12,11 +12,16 @@ as MT1 minus every partial) needs three ingredients:
 3. The bilinear sum-rule contraction, which
    :meth:`kika.endf.classes.mf33.mf33.MF33MT.resolve_nc_lty0` implements.
 
-This module wires them together. Resonance reconstruction uses kika's
-in-Python reconstructor by default (``endf.reconstruct_xs()``, which
-handles LRU=1 SLBW/MLBW/Reich-Moore). If a path to the NJOY binary is
-provided, ``njoy_reconstruct`` is used instead — useful when the
-in-Python reconstructor lacks a particular formalism.
+This module wires them together. Resonance reconstruction needs a path to
+the NJOY binary: pass ``njoy_executable=`` and ``njoy_reconstruct`` runs
+RECONR. Without it, the raw MF3 background is used and a warning says so —
+for a resolved-resonance MT that is a different cross section, and the
+caller should know which one the sum rule was resolved against.
+
+This used to fall back to an in-Python reconstructor, ``endf.reconstruct_xs()``,
+whose own docstring said it produced incorrect cross sections on real
+evaluations. It has been removed; ``kika.processing.reconstruct`` still exists
+and is still under test, but nothing calls it behind a caller's back.
 
 Callers that already have a preferred σ source (a pre-computed PENDF, an
 ACE file) can bypass this module and pass the map straight to
@@ -29,7 +34,6 @@ import logging
 from pathlib import Path
 from typing import Dict, Optional, Union
 
-from kika.endf.read_endf import read_endf
 
 _log = logging.getLogger(__name__)
 
@@ -76,20 +80,26 @@ def _build_xs_map(
         )
         return xs_map
 
-    try:
-        endf.reconstruct_xs(tolerance=tolerance)
-    except Exception as e:
-        _log.warning(
-            "In-Python resonance reconstruction failed (%s); "
-            "falling back to raw MF3 background. "
-            "Pass njoy_executable=... to use NJOY RECONR instead.",
-            e,
-        )
-        return xs_map
-
+    # No njoy_executable. Use whatever the caller already put on endf.pendf,
+    # and otherwise the raw MF3 background — which for a resolved-resonance MT
+    # is not the same cross section, hence the warning.
+    #
+    # This used to fall through to endf.reconstruct_xs(), an in-Python
+    # reconstructor whose own docstring said it produced incorrect cross
+    # sections on real evaluations. Silently resolving a sum rule against
+    # numbers known to be wrong is worse than resolving it against a background
+    # that is at least honestly labelled.
     pendf = getattr(endf, 'pendf', None)
     if pendf:
         xs_map.update(pendf)
+        return xs_map
+
+    _log.warning(
+        "MF2 is present but no reconstructed cross sections are available, so "
+        "the raw MF3 background is used for the sum rule. Pass "
+        "njoy_executable=... to reconstruct with NJOY RECONR, or set "
+        "endf.pendf yourself."
+    )
     return xs_map
 
 
@@ -134,6 +144,13 @@ def resolve_derived_covariance(
     """
     if isinstance(endf_or_path, (str, Path)):
         endf_path: Optional[Path] = Path(endf_or_path)
+        # Deferred on purpose: kika/processing must not pull kika.endf in at
+        # *import* time. A module-level import here makes kika.processing's
+        # __init__ depend on kika.endf, and then nothing in kika.endf can import
+        # from kika.processing at module scope -- which is what blocked moving
+        # interpolate_1d down in phase 2. Reading a PENDF tape genuinely needs
+        # the parser, so the dependency stays; only its timing changes.
+        from kika.endf.read_endf import read_endf
         endf = read_endf(str(endf_path))
     else:
         endf_path = None

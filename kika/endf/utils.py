@@ -4,6 +4,7 @@ Utility functions for ENDF file parsing and writing.
 Contains helper functions for handling the specific formatting requirements of ENDF files.
 """
 import re
+from dataclasses import dataclass
 from typing import Dict,Union, List, Optional, Tuple, Sequence, Any
 from .classes.mt import MT
 from .classes.mf1.mf1mt451 import MF1MT451
@@ -12,237 +13,102 @@ import numpy as np
 import math
 from numpy.typing import ArrayLike
 
-def format_endf_number(value: Union[int, float, None], width: int = 11) -> str:
+#: The fixed-width record grammar, re-exported from :mod:`kika._records`.
+#:
+#: It moved out of this module in phase 4's P4 because it is not ENDF's:
+#: COVERX/COVFIL/BOXER share the same 11-column convention, and
+#: ``kika/cov/parse_covmat.py`` importing it from here was the one import-time
+#: format dependency in ``kika/cov``. These names stay importable from
+#: ``kika.endf.utils`` -- ``test_library_export_surface.py`` pins
+#: ``parse_endf_id`` here as public surface, and every parser, writer and MF
+#: class in this package reaches them by this path.
+from .._records import (
+    ENDF_FORMAT_BLANK,
+    ENDF_FORMAT_FLOAT,
+    ENDF_FORMAT_INT,
+    ENDF_FORMAT_INT_ZERO,
+    ENDF_FORMAT_PRESERVE,
+    MAX_SEQUENCE_NUMBER,
+    format_endf_data_line,
+    format_endf_id_columns,
+    format_endf_number,
+    parse_endf_id,
+    parse_line,
+    parse_number,
+)
+
+
+
+
+#: Field types of a termination record's data part.
+#:
+#: ENDF-6 types the first two fields of SEND/FEND/MEND/TEND as floats (C1, C2)
+#: and the remaining four as integers, so a terminator reads
+#: ``" 0.000000+0 0.000000+0          0          0          0          0"``.
+#: Nine emitters used to build this by hand with ``[ENDF_FORMAT_INT] * 6``,
+#: rendering the two float fields as right-aligned integer zeros.
+_TERMINATION_FORMATS = [
+    ENDF_FORMAT_FLOAT, ENDF_FORMAT_FLOAT,
+    ENDF_FORMAT_INT, ENDF_FORMAT_INT, ENDF_FORMAT_INT, ENDF_FORMAT_INT,
+]
+
+#: Sequence number ENDF-6 requires on a SEND record, verbatim.
+SEND_SEQUENCE_NUMBER = 99999
+
+
+def format_endf_send_record(mat: int, mf: int) -> str:
+    """The SEND record closing a section: MT=0, sequence number 99999."""
+    return format_endf_data_line(
+        [0.0, 0.0, 0, 0, 0, 0], mat, mf, 0, SEND_SEQUENCE_NUMBER,
+        formats=_TERMINATION_FORMATS,
+    )
+
+
+def format_endf_fend_record(mat: int) -> str:
+    """The FEND record closing a file: MF=0, MT=0, sequence number 0."""
+    return format_endf_data_line(
+        [0.0, 0.0, 0, 0, 0, 0], mat, 0, 0, 0, formats=_TERMINATION_FORMATS,
+    )
+
+
+def format_endf_mend_record() -> str:
+    """The MEND record closing a material: MAT=0."""
+    return format_endf_data_line(
+        [0.0, 0.0, 0, 0, 0, 0], 0, 0, 0, 0, formats=_TERMINATION_FORMATS,
+    )
+
+
+def format_endf_tend_record() -> str:
+    """The TEND record closing a tape: MAT=-1."""
+    return format_endf_data_line(
+        [0.0, 0.0, 0, 0, 0, 0], -1, 0, 0, 0, formats=_TERMINATION_FORMATS,
+    )
+
+
+def record_width(lines: Sequence[str]) -> int:
+    """75 or 80, whichever *lines* use — the sequence-number field is optional.
+
+    ENDF-6 puts a five-digit sequence number in columns 76-80 and does not
+    require it. Most distributions carry it; ENDF/B-VIII.1's thermal-scattering
+    sublibrary does not, and JEFF-4.0's ``tsl/`` is mixed *within one directory*.
+    kika's emitters always write one, so anything that splices generated records
+    into an existing tape has to trim them back or leave a file whose record
+    width changes partway through — which NJOY reads without complaint and
+    processes wrongly.
+
+    Measured from the widest data line rather than the first, so blank lines and
+    terminators (which are shorter, and legitimately so) do not decide it.
     """
-    Format a number according to ENDF specifications.
-
-    The output is an 11-character field made up as follows:
-      - The first character is '-' if the number is negative or a blank if positive.
-      - The number is written in scientific notation without an 'E'.
-      - When the exponent (after normalization) has only one digit (|exponent| < 10),
-        the mantissa is printed with 6 decimal digits and the exponent with one digit.
-      - When the exponent has two digits (|exponent| >= 10), the mantissa is printed with 5 decimal digits and the exponent with two digits.
-      
-    For example:
-      - A number like -3.14159e-1 will be formatted as "-3.141590-1".
-      - A number like 1.234567e+5 will be formatted as " 1.234567+5".
-      - A number like 1.0e10 will be formatted as " 1.00000+10".
-
-    Args:
-        value: The number to be formatted. If None, returns a blank field.
-        width: The total field width (default is 11 characters).
-
-    Returns:
-        A string representing the formatted number in ENDF style.
-    """
-    if value is None:
-        return " " * width
-
-    # Special handling for zero: use exponent 0 (one-digit) and 6 decimal places.
-    if value == 0:
-        return " 0.000000+0"
-
-    if not math.isfinite(value):
-        raise ValueError(f"Cannot format non-finite ENDF value: {value}")
-
-    sign_char = "-" if value < 0 else " "
-    abs_val = abs(value)
-    exponent = int(math.floor(math.log10(abs_val)))
-    if abs(exponent) > 99:
-        return " 0.000000+0"
-    mantissa = abs_val / (10 ** exponent)
-
-    # Select the number of decimals based on the exponent.
-    # Use 6 decimals if |exponent| < 10, else use 5 decimals.
-    # Adjust the mantissa if rounding would push it to 10 or more.
-    prec = 6 if abs(exponent) < 10 else 5
-    mantissa_str = f"{mantissa:1.{prec}f}"
-    # Rounding overflow: e.g. 9.9999999 -> "10.000000" (length > prec + 2)
-    if len(mantissa_str) > prec + 2:
-        mantissa /= 10.0
-        exponent += 1
-        prec = 6 if abs(exponent) < 10 else 5
-        mantissa_str = f"{mantissa:1.{prec}f}"
-
-    # Format the exponent: one digit if |exponent| < 10, two digits otherwise.
-    if abs(exponent) < 10:
-        exp_str = f"{abs(exponent):d}"
-    else:
-        exp_str = f"{abs(exponent):02d}"
-    exp_sign = '+' if exponent >= 0 else '-'
-
-    formatted = f"{sign_char}{mantissa_str}{exp_sign}{exp_str}"
-    return formatted.rjust(width)
+    width = 0
+    for line in lines:
+        stripped = line.rstrip('\r\n')
+        if len(stripped) >= 75:
+            width = max(width, len(stripped.rstrip()))
+        if width >= 80:
+            return 80
+    return 75 if width <= 75 else 80
 
 
-# Format constants for ENDF data types
-ENDF_FORMAT_FLOAT = 'float'       # Scientific notation (e.g., " 1.234567+5")
-ENDF_FORMAT_INT = 'int'           # Integer format (e.g., "         11")
-ENDF_FORMAT_INT_ZERO = 'int_zero' # Integer with zero rendered as 0 (not blank)
-ENDF_FORMAT_BLANK = 'blank'       # Blank field
-ENDF_FORMAT_PRESERVE = 'preserve' # Use value's own type to determine format
-
-
-def format_endf_data_line(values: Sequence[Union[int, float, None]], 
-                         mat: int, mf: int, mt: int, line_num: int = 0,
-                         formats: Optional[List[str]] = None) -> str:
-    """
-    Format a complete ENDF line with both data and identification parts.
-    
-    Args:
-        values: Sequence of up to 6 numeric values for the data part
-        mat: Material number
-        mf: File number
-        mt: Section number
-        line_num: Line sequence number (optional)
-        formats: Optional list of format types for each value (ENDF_FORMAT_*)
-        
-    Returns:
-        Formatted 80-character ENDF line
-    """
-    # Format the data part (columns 1-66)
-    parts = []
-
-    # Apply formats if provided, otherwise use default formatting
-    if formats:
-        # Make sure formats list matches values length
-        format_list = formats + [ENDF_FORMAT_PRESERVE] * (len(values) - len(formats))
-        format_list = format_list[:len(values)]
-
-        for value, fmt in zip(values, format_list):
-            if fmt == ENDF_FORMAT_INT and value is not None:
-                parts.append(f"{int(value):11d}")
-            elif fmt == ENDF_FORMAT_INT_ZERO and value is not None:
-                parts.append(f"{int(value):11d}")
-            elif fmt == ENDF_FORMAT_BLANK or value is None:
-                parts.append("           ")
-            else:
-                parts.append(format_endf_number(value))
-    else:
-        for value in values[:6]:
-            parts.append(format_endf_number(value))
-
-    # Pad to 66 characters if needed
-    data_part = ''.join(parts).ljust(66)
-    
-    # Format the identification part (columns 67-80)
-    id_part = f"{mat:4d}{mf:2d}{mt:3d}{line_num:5d}"
-    
-    return data_part + id_part
-
-
-def parse_number(text: str) -> Union[float, int, None]:
-    """
-    Parse an ENDF-formatted number.
-    
-    ENDF uses a special format where numbers can be written in forms like:
-    "1.234+5" meaning 1.234×10^5
-    
-    Args:
-        text: The text representation of the number
-        
-    Returns:
-        Parsed number as float or int, or None if parsing fails
-    """
-    text = text.strip()
-    if not text:
-        return None
-    
-    try:
-        # Try standard float parsing first
-        value = float(text)
-        # Return as int if it's a whole number
-        if value.is_integer():
-            return int(value)
-        return value
-    except ValueError:
-        # Handle ENDF-specific format where "+" or "-" might be used instead of "E"
-        # For example, "1.234+5" instead of "1.234E+5"
-        match = re.search(r'([-+]?\d*\.\d*)([+-]\d+)', text)
-        if match:
-            try:
-                mantissa = float(match.group(1))
-                exponent = int(match.group(2))
-                value = mantissa * (10 ** exponent)
-                if value.is_integer():
-                    return int(value)
-                return value
-            except (ValueError, IndexError):
-                pass
-                
-        # If all parsing fails
-        return None
-
-
-def parse_line(line: str) -> Dict[str, Any]:
-    """
-    Parse a standard ENDF record line into its components.
-    
-    Args:
-        line: An 80-character ENDF line
-        
-    Returns:
-        Dictionary with parsed components
-    """
-    result = {}
-    
-    # Parse data fields (columns 1-66)
-    if len(line) >= 66:
-        data_part = line[:66]
-        # ENDF format typically has 6 fields of 11 characters each
-        for i in range(6):
-            field_name = f"C{i+1}"
-            start = i * 11
-            end = start + 11
-            if end <= len(data_part):
-                field_value = data_part[start:end].strip()
-                result[field_name] = parse_number(field_value)
-    
-    # Parse identification fields (columns 67-80)
-    if len(line) >= 75:
-        result["MAT"] = int(line[66:70]) if line[66:70].strip() else None
-        result["MF"] = int(line[70:72]) if line[70:72].strip() else None
-        result["MT"] = int(line[72:75]) if line[72:75].strip() else None
-        
-    if len(line) >= 80:
-        result["SEQ"] = int(line[75:80]) if line[75:80].strip() else None
-    
-    return result
-
-
-def parse_endf_id(line: str) -> Tuple[Optional[int], Optional[int], Optional[int]]:
-    """
-    Parse the identification fields from an ENDF line.
-    
-    ENDF format specifies:
-    - Columns 67-70 (0-indexed: 66-69): MAT number
-    - Columns 71-72 (0-indexed: 70-71): MF number
-    - Columns 73-75 (0-indexed: 72-74): MT number
-    
-    Args:
-        line: A line from an ENDF file
-        
-    Returns:
-        Tuple of (MAT, MF, MT) numbers
-    """
-    if len(line) < 75:
-        return None, None, None
-    
-    try:
-        # ENDF format has specific columns for MAT, MF, MT
-        mat_str = line[66:70].strip()
-        mf_str = line[70:72].strip()
-        mt_str = line[72:75].strip()
-        
-        # Convert to integers, handling empty strings
-        mat = int(mat_str) if mat_str else None
-        mf = int(mf_str) if mf_str else None
-        mt = int(mt_str) if mt_str else None
-        
-        return mat, mf, mt
-    except ValueError as e:
-        # This might happen if the fields contain non-numeric data
-        return None, None, None
 
 
 def group_lines_by_mt_with_positions(lines: List[str]) -> Tuple[Dict[int, List[str]], Dict[int, int]]:
@@ -354,200 +220,19 @@ def describe_interpolation_region(nbt, int_code):
 
 
 
-def _regionize(nbt_int_pairs: Sequence[Tuple[int, int]], np_len: int) -> List[Tuple[int, int, int]]:
-    """
-    Convert ENDF (NBT, INT) pairs into 0-based [start_idx, end_idx, INT] regions.
-    NBT is 1-based index of the *last* point in each region in ENDF.
-    """
-    if not nbt_int_pairs:
-        # single region with default linear
-        return [(0, np_len - 1, 2)]
-    regions: List[Tuple[int, int, int]] = []
-    start = 0
-    for nbt, int_code in nbt_int_pairs:
-        end = min(max(nbt - 1, 0), np_len - 1)
-        if end >= start:
-            regions.append((start, end, int_code))
-        start = min(max(nbt, 0), np_len)  # next region starts at nbt (1-based → 0-based)
-        if start >= np_len:
-            break
-    # Guard if list does not cover the tail
-    if regions and regions[-1][1] < np_len - 1:
-        regions.append((regions[-1][1], np_len - 1, regions[-1][2]))
-    if not regions:
-        regions = [(0, np_len - 1, 2)]
-    return regions
+# Moved to kika/processing/interpolation.py by phase 2 of the GNDS roadmap:
+# interpolation law codes 1-5 are shared with GNDS (§3.4.4) and are not
+# ENDF-specific. These are *live* re-exports -- eight call sites in kika/endf
+# import interpolate_1d_endf -- not shims awaiting deletion. The private names
+# come along because kika/endf/tests reaches for them.
+from kika.processing.interpolation import (
+    interpolate_1d as interpolate_1d_endf,
+    _regionize,
+    _base_int_code,
+    _interp_pair,
+    _interp_pair_vec,
+)
 
-
-def _base_int_code(int_code: int) -> int:
-    """Map 11–15 → 1–5 and 21–25 → 1–5 for 1-D use."""
-    if int_code >= 10:
-        return int_code % 10 if int_code % 10 != 0 else 5
-    return int_code
-
-
-def _interp_pair(x: float, x1: float, y1: float, x2: float, y2: float, int_code: int) -> float:
-    """
-    Interpolate y(x) between (x1,y1) and (x2,y2) using ENDF INT code semantics (1–5).
-    For INT=6 or unsupported codes → fall back to linear-linear.
-    """
-    if x1 == x2:
-        return y1
-    t = (x - x1) / (x2 - x1)
-    code = _base_int_code(int_code)
-    if code == 1:  # histogram/constant
-        return y1
-    elif code == 2:  # lin-lin
-        return (1.0 - t) * y1 + t * y2
-    elif code == 3:  # lin-log (y linear in ln x)
-        if x1 <= 0 or x2 <= 0 or x <= 0:
-            return (1.0 - t) * y1 + t * y2
-        lx1, lx2, lx = math.log(x1), math.log(x2), math.log(x)
-        tt = (lx - lx1) / (lx2 - lx1)
-        return (1.0 - tt) * y1 + tt * y2
-    elif code == 4:  # log-lin (ln y linear in x)
-        if y1 <= 0 or y2 <= 0:
-            return (1.0 - t) * y1 + t * y2
-        ln_y = (1.0 - t) * math.log(y1) + t * math.log(y2)
-        return math.exp(ln_y)
-    elif code == 5:  # log-log (ln y linear in ln x)
-        if y1 <= 0 or y2 <= 0 or x1 <= 0 or x2 <= 0 or x <= 0:
-            return (1.0 - t) * y1 + t * y2
-        lx1, lx2, lx = math.log(x1), math.log(x2), math.log(x)
-        tt = (lx - lx1) / (lx2 - lx1)
-        ln_y = (1.0 - tt) * math.log(y1) + tt * math.log(y2)
-        return math.exp(ln_y)
-    else:  # fallback for INT=6 etc.
-        return (1.0 - t) * y1 + t * y2
-
-
-def _interp_pair_vec(
-    xq: np.ndarray, x1: np.ndarray, y1: np.ndarray,
-    x2: np.ndarray, y2: np.ndarray, int_code: int,
-) -> np.ndarray:
-    """Vectorized interpolation between paired arrays using ENDF INT code."""
-    out = np.empty_like(xq, dtype=float)
-    same = x1 == x2
-    if same.all():
-        return y1.copy()
-    diff = ~same
-    dx = np.where(diff, x2 - x1, 1.0)
-    t = (xq - x1) / dx
-    code = _base_int_code(int_code)
-    if code == 1:
-        out[:] = y1
-    elif code == 2:
-        out[:] = (1.0 - t) * y1 + t * y2
-    elif code == 3:
-        safe = diff & (x1 > 0) & (x2 > 0) & (xq > 0)
-        out[:] = (1.0 - t) * y1 + t * y2  # fallback
-        if safe.any():
-            lx1 = np.log(x1[safe]); lx2 = np.log(x2[safe]); lx = np.log(xq[safe])
-            tt = (lx - lx1) / (lx2 - lx1)
-            out[safe] = (1.0 - tt) * y1[safe] + tt * y2[safe]
-    elif code == 4:
-        safe = diff & (y1 > 0) & (y2 > 0)
-        out[:] = (1.0 - t) * y1 + t * y2
-        if safe.any():
-            ln_y = (1.0 - t[safe]) * np.log(y1[safe]) + t[safe] * np.log(y2[safe])
-            out[safe] = np.exp(ln_y)
-    elif code == 5:
-        safe = diff & (x1 > 0) & (x2 > 0) & (xq > 0) & (y1 > 0) & (y2 > 0)
-        out[:] = (1.0 - t) * y1 + t * y2
-        if safe.any():
-            lx1 = np.log(x1[safe]); lx2 = np.log(x2[safe]); lx = np.log(xq[safe])
-            tt = (lx - lx1) / (lx2 - lx1)
-            ln_y = (1.0 - tt) * np.log(y1[safe]) + tt * np.log(y2[safe])
-            out[safe] = np.exp(ln_y)
-    else:
-        out[:] = (1.0 - t) * y1 + t * y2
-    if same.any():
-        out[same] = y1[same]
-    return out
-
-
-def interpolate_1d_endf(
-    x_grid: ArrayLike,
-    y_grid: ArrayLike,
-    nbt_int_pairs: Sequence[Tuple[int, int]],
-    xq: Union[float, ArrayLike],
-    out_of_range: str = "zero",
-) -> Union[float, np.ndarray]:
-    """
-    ENDF one-dimensional interpolation using (NBT, INT) regions (Table of INT codes).
-    - out_of_range: 'zero'  → return 0 outside grid
-                    'hold'  → hold edge value
-    """
-    x = np.asarray(x_grid, dtype=float)
-    y = np.asarray(y_grid, dtype=float)
-    scalar = np.ndim(xq) == 0
-    if x.size == 0:
-        return 0.0 if scalar else np.zeros_like(np.asarray(xq, dtype=float))
-    regions = _regionize(nbt_int_pairs, len(x))
-    xq_arr = np.atleast_1d(np.asarray(xq, dtype=float))
-    n = xq_arr.size
-
-    # Vectorized interval lookup
-    k = np.searchsorted(x, xq_arr, side="right") - 1
-    np.clip(k, 0, len(x) - 2, out=k)
-
-    # Out-of-range masks
-    lo_mask = xq_arr < x[0]
-    hi_mask = xq_arr > x[-1]
-    in_mask = ~(lo_mask | hi_mask)
-
-    out = np.empty(n, dtype=float)
-    if out_of_range == "zero":
-        out[lo_mask] = 0.0
-        out[hi_mask] = 0.0
-    else:
-        out[lo_mask] = y[0]
-        out[hi_mask] = y[-1]
-
-    if not in_mask.any():
-        return float(out[0]) if scalar else out
-
-    # In-range points
-    k_in = k[in_mask]
-    xq_in = xq_arr[in_mask]
-
-    # Fast path: single region
-    if len(regions) == 1:
-        _, _, ic = regions[0]
-        base_ic = _base_int_code(ic)
-        if base_ic == 2:
-            # Pure linear-linear → numpy builtin
-            out[in_mask] = np.interp(xq_in, x, y)
-        else:
-            out[in_mask] = _interp_pair_vec(
-                xq_in, x[k_in], y[k_in], x[k_in + 1], y[k_in + 1], ic
-            )
-    else:
-        # Assign INT codes per query point from regions
-        int_codes = np.full(k_in.size, 2, dtype=int)
-        for start, end, ic in regions:
-            rmask = (k_in + 1 >= start) & (k_in + 1 <= end)
-            int_codes[rmask] = ic
-        unique_codes = np.unique(int_codes)
-        if unique_codes.size == 1:
-            ic = int(unique_codes[0])
-            if _base_int_code(ic) == 2:
-                out[in_mask] = np.interp(xq_in, x, y)
-            else:
-                out[in_mask] = _interp_pair_vec(
-                    xq_in, x[k_in], y[k_in], x[k_in + 1], y[k_in + 1], ic
-                )
-        else:
-            result_in = np.empty(k_in.size, dtype=float)
-            for ic in unique_codes:
-                cm = int_codes == ic
-                ki = k_in[cm]
-                result_in[cm] = _interp_pair_vec(
-                    xq_in[cm], x[ki], y[ki], x[ki + 1], y[ki + 1], int(ic)
-                )
-            out[in_mask] = result_in
-
-    return float(out[0]) if scalar else out
 
 
 def parse_interp_pairs(lines, start, nr):
@@ -624,7 +309,116 @@ def parse_data_pairs(lines, start, np_count):
     return x_list, y_list, idx
 
 
-def format_data_values(values, mat, mf, mt, start_line, formats=None):
+#: How a writer fills the unused fields of a record's last, short line. Both
+#: are legal ENDF-6 and both occur: ENDF/B-VIII.1 and most of JEFF-4.0 leave
+#: them blank, while JEFF-4.0's own TSL evaluations write explicit zeros.
+PAD_BLANK = "blank"
+PAD_ZERO = "zero"
+
+
+@dataclass(frozen=True)
+class PadStyle:
+    """Padding convention per record kind, because it is not one convention.
+
+    ``tsl_4-Be.txt`` settles this. Inside a *single* MF7/MT2 section it ends the
+    TAB1's x/y body with blanks::
+
+        1.591491+0 9.636365-1                                              26 7  2  544
+
+    and the LIST body eleven records later with explicit zeros::
+
+        9.497413-1 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0  26 7  2  816
+
+    So a single flag per section is not enough to write the file back, and a
+    single flag per *tape* would be worse. The two bodies are tracked apart:
+    ``pairs`` for TAB1 x/y bodies, ``values`` for LIST bodies, ``interp`` for
+    the (NBT, INT) records of a TAB1 or TAB2.
+
+    **``interp`` was added when MF6 landed, and the claim it replaces was
+    wrong.** This docstring used to say interpolation records are always
+    blank-padded, measured on the TSL tapes — ``tsl_4-Be.txt`` writes
+    ``       1621          1`` followed by blanks on the same tape whose data
+    lines end in explicit zeros. ENDF/B-VIII.1's *neutron* tapes do the
+    opposite — O-16's MF6 ends its one-pair interpolation records with four
+    explicit zeros::
+
+        16          2          0          0          0          0
+
+    Fifty-two records of a single section, and every one of them re-written
+    wrongly by an emitter that had no way to say so.
+    """
+
+    pairs: str = PAD_BLANK
+    values: str = PAD_BLANK
+    interp: str = PAD_BLANK
+
+
+#: Fields in a record line, and their width.
+FIELDS_PER_LINE = 6
+FIELD_WIDTH = 11
+
+
+class PaddingProbe:
+    """Works out how this section's writer fills a short line's unused fields.
+
+    Both conventions are legal and both are in use, so re-emitting a section
+    faithfully means knowing which one it arrived in. The three record kinds are
+    probed apart because they disagree inside a single real section — see
+    :class:`PadStyle`.
+
+    The first short record of each kind decides it, and then that kind stops
+    being looked at: checking every record would cost a field lookup per line on a
+    file with a million of them, for a property that does not change within a
+    section. A body that fills all six fields tells us nothing and is skipped,
+    which is why a section can finish with a kind still unknown — that resolves
+    to blanks, the convention kika emitted before any of this existed.
+    """
+
+    def __init__(self) -> None:
+        self.pairs = None
+        self.values = None
+        self.interp = None
+
+    def _read(self, lines: List[str], end_idx: int, n_fields: int):
+        used = n_fields % FIELDS_PER_LINE
+        if used == 0 or end_idx <= 0 or end_idx > len(lines):
+            return None
+        field = lines[end_idx - 1][used * FIELD_WIDTH:(used + 1) * FIELD_WIDTH]
+        if not field.strip():
+            return PAD_BLANK
+        return PAD_ZERO if parse_number(field) == 0 else None
+
+    def observe_pairs(self, lines: List[str], end_idx: int, n_pairs: int) -> None:
+        """A TAB1 x/y body, which uses two fields per point."""
+        if self.pairs is None:
+            self.pairs = self._read(lines, end_idx, 2 * n_pairs)
+
+    def observe_values(self, lines: List[str], end_idx: int, n: int) -> None:
+        """A LIST body, one field per value."""
+        if self.values is None:
+            self.values = self._read(lines, end_idx, n)
+
+    def observe_interp(self, lines: List[str], end_idx: int, n_pairs: int) -> None:
+        """An interpolation record, which uses two fields per (NBT, INT) pair."""
+        if self.interp is None and n_pairs:
+            self.interp = self._read(lines, end_idx, 2 * n_pairs)
+
+    def resolve(self) -> PadStyle:
+        return PadStyle(pairs=self.pairs or PAD_BLANK,
+                        values=self.values or PAD_BLANK,
+                        interp=self.interp or PAD_BLANK)
+
+
+def _tail_format(pad: str) -> str:
+    return ENDF_FORMAT_FLOAT if pad == PAD_ZERO else ENDF_FORMAT_BLANK
+
+
+def _tail_value(pad: str):
+    return 0.0 if pad == PAD_ZERO else None
+
+
+def format_data_values(values, mat, mf, mt, start_line, formats=None,
+                       pad=PAD_BLANK):
     """
     Format N scalar values into ENDF LIST-record body lines (6 values per line).
 
@@ -641,6 +435,9 @@ def format_data_values(values, mat, mf, mt, start_line, formats=None):
     formats : list of str, optional
         Per-value format codes (ENDF_FORMAT_*).  If *None*, all values
         are written as floats.
+    pad : str, optional
+        :data:`PAD_BLANK` (default, unchanged behaviour) or :data:`PAD_ZERO`
+        for the unused fields of the final short line.
 
     Returns
     -------
@@ -662,8 +459,8 @@ def format_data_values(values, mat, mf, mt, start_line, formats=None):
             fmts = [ENDF_FORMAT_FLOAT] * len(chunk)
         # Pad chunk to 6 values
         while len(chunk) < 6:
-            chunk.append(None)
-            fmts.append(ENDF_FORMAT_BLANK)
+            chunk.append(_tail_value(pad))
+            fmts.append(_tail_format(pad))
         result_lines.append(format_endf_data_line(chunk, mat, mf, mt, line_num, formats=fmts))
         line_num += 1
         i += 6
@@ -705,6 +502,123 @@ def parse_data_values(lines, start, n_values):
     return values, idx
 
 
+# ----------------------------------------------------------------------
+# INTG records — the packed correlation matrix of an MF32 LCOMP=2 subsection
+# ----------------------------------------------------------------------
+
+#: NDIGIT → (NROW, field width, separator width after JJ).
+#:
+#: ENDF-102 §32.2.3 gives these as five Fortran FORMAT statements rather than a
+#: formula, and the widths are exactly what makes each line land on 66 columns:
+#:
+#:   NDIGIT=2  (I5, I5, 1X, 18I3, 1X)   10 + 1 + 54 + 1 = 66
+#:   NDIGIT=3  (I5, I5, 1X, 13I4, 3X)   10 + 1 + 52 + 3 = 66
+#:   NDIGIT=4  (I5, I5, 1X, 11I5)       10 + 1 + 55     = 66
+#:   NDIGIT=5  (I5, I5, 1X,  9I6, 1X)   10 + 1 + 54 + 1 = 66
+#:   NDIGIT=6  (I5, I5,      8I7)       10 +      56    = 66
+#:
+#: NDIGIT=6 is the only one with no ``1X`` after JJ, which is why the five cases
+#: are a table and not an arithmetic expression. Getting that wrong shifts every
+#: field of an NDIGIT=6 record by one column, and no tape on this machine uses
+#: NDIGIT=6 to catch it — see ``docs/library/mf32-notes.md``.
+_INTG_LAYOUT: Dict[int, Tuple[int, int, int]] = {
+    2: (18, 3, 1),
+    3: (13, 4, 1),
+    4: (11, 5, 1),
+    5: (9, 6, 1),
+    6: (8, 7, 0),
+}
+
+
+def intg_row_length(ndigit: int) -> int:
+    """How many correlation coefficients one INTG record of *ndigit* holds."""
+    try:
+        return _INTG_LAYOUT[ndigit][0]
+    except KeyError:
+        raise ValueError(
+            f"NDIGIT={ndigit} is not an ENDF-6 INTG width; §32.2.3 allows 2-6"
+        ) from None
+
+
+def parse_intg(lines: List[str], start: int, ndigit: int,
+               nm: int) -> Tuple[List[Tuple[int, int, List[int]]], int]:
+    """
+    Read *nm* INTG records — the packed correlation matrix of MF32 LCOMP=2.
+
+    Each record locates itself with ``(II, JJ)`` and then carries up to NROW
+    integers standing for the correlation coefficients ``C[II,JJ]``,
+    ``C[II,JJ+1]``, … A coefficient that mapped to zero may be written either as
+    a blank field or as an explicit ``0``; both read back as ``0`` here, so this
+    function is **not** enough on its own to rewrite a tape byte-identically.
+    The caller keeps the raw text for that — see
+    :class:`~kika.endf.classes.mf32.mf32mt151.IntgMatrix`.
+
+    Parameters
+    ----------
+    lines : list of str
+        ENDF lines.
+    start : int
+        Index of the first INTG record (the CONT carrying NDIGIT/NNN/NM is the
+        caller's to consume).
+    ndigit : int
+        Number of digits of the packed integers, 2-6.
+    nm : int
+        Number of INTG records to read.
+
+    Returns
+    -------
+    entries : list of (ii, jj, values)
+    next_idx : int
+    """
+    nrow, width, sep = _INTG_LAYOUT[ndigit] if ndigit in _INTG_LAYOUT else (
+        intg_row_length(ndigit), 0, 0)
+
+    entries: List[Tuple[int, int, List[int]]] = []
+    idx = start
+    for _ in range(nm):
+        if idx >= len(lines):
+            break
+        line = lines[idx]
+        idx += 1
+        ii = int(line[0:5]) if line[0:5].strip() else 0
+        jj = int(line[5:10]) if line[5:10].strip() else 0
+        values: List[int] = []
+        offset = 10 + sep
+        for n in range(nrow):
+            field = line[offset + n * width: offset + (n + 1) * width]
+            values.append(int(field) if field.strip() else 0)
+        entries.append((ii, jj, values))
+    return entries, idx
+
+
+def format_intg(entries: Sequence[Tuple[int, int, Sequence[int]]], ndigit: int,
+                mat: int, mf: int, mt: int,
+                start_line: int) -> Tuple[List[str], int]:
+    """
+    Write INTG records. Counterpart of :func:`parse_intg`.
+
+    Zeros are written as blank fields, which is what every evaluation measured
+    for ``docs/library/mf32-notes.md`` does; §32.2.3 permits an explicit ``0`` too, so a
+    tape written this way may differ from its source in whitespace alone. That
+    is why the round-trip path re-emits stored text instead of calling this —
+    this function is for covariance matrices kika *builds*, not ones it read.
+    """
+    nrow, width, sep = _INTG_LAYOUT[ndigit] if ndigit in _INTG_LAYOUT else (
+        intg_row_length(ndigit), 0, 0)
+
+    result_lines: List[str] = []
+    line_num = start_line
+    for ii, jj, values in entries:
+        fields = "".join(
+            (f"{int(v):{width}d}" if v else " " * width)
+            for v in list(values)[:nrow]
+        )
+        body = f"{int(ii):5d}{int(jj):5d}{' ' * sep}{fields}".ljust(66)
+        result_lines.append(f"{body}{mat:4d}{mf:2d}{mt:3d}{line_num:5d}")
+        line_num += 1
+    return result_lines, line_num
+
+
 def parse_tab1(lines, start):
     """
     Parse a complete TAB1 record starting at *start*.
@@ -741,9 +655,12 @@ def parse_tab1(lines, start):
     return header, interp_pairs, x_data, y_data, idx
 
 
-def format_interp_pairs(pairs, mat, mf, mt, start_line):
+def format_interp_pairs(pairs, mat, mf, mt, start_line, pad=PAD_BLANK):
     """
     Format NR interpolation (NBT, INT) pairs into ENDF lines.
+
+    *pad* fills the unused fields of the last line: blanks, or explicit integer
+    zeros. Both are in use — see :class:`PadStyle`.
 
     Returns
     -------
@@ -762,16 +679,19 @@ def format_interp_pairs(pairs, mat, mf, mt, start_line):
             values.extend([nbt, interp])
             fmts.extend([ENDF_FORMAT_INT, ENDF_FORMAT_INT])
         while len(values) < 6:
-            values.append(None)
-            fmts.append(ENDF_FORMAT_BLANK)
+            values.append(0 if pad == PAD_ZERO else None)
+            fmts.append(ENDF_FORMAT_INT if pad == PAD_ZERO else ENDF_FORMAT_BLANK)
         result_lines.append(format_endf_data_line(values, mat, mf, mt, line_num, formats=fmts))
         line_num += 1
     return result_lines, line_num
 
 
-def format_data_pairs(x_data, y_data, mat, mf, mt, start_line):
+def format_data_pairs(x_data, y_data, mat, mf, mt, start_line, pad=PAD_BLANK):
     """
     Format NP x/y data pairs into ENDF lines (3 pairs per line).
+
+    *pad* fills the unused fields of the final short line — see
+    :data:`PAD_BLANK`.
 
     Returns
     -------
@@ -782,23 +702,53 @@ def format_data_pairs(x_data, y_data, mat, mf, mt, start_line):
     line_num = start_line
     n = len(x_data)
     i = 0
+    tail, tail_fmt = _tail_value(pad), _tail_format(pad)
     while i < n:
         values = []
+        fmts = []
         for j in range(3):
             if i + j < n:
                 values.extend([x_data[i + j], y_data[i + j]])
+                fmts.extend([ENDF_FORMAT_FLOAT, ENDF_FORMAT_FLOAT])
             else:
-                values.extend([None, None])
-        fmts = [ENDF_FORMAT_FLOAT if v is not None else ENDF_FORMAT_BLANK for v in values]
+                values.extend([tail, tail])
+                fmts.extend([tail_fmt, tail_fmt])
         result_lines.append(format_endf_data_line(values, mat, mf, mt, line_num, formats=fmts))
         line_num += 1
         i += 3
     return result_lines, line_num
 
 
-def format_tab1(c1, c2, l1, l2, interp_pairs, x_data, y_data, mat, mf, mt, start_line):
+class NonMonotonicTable(ValueError):
+    """A TAB1's abscissae descend, so the record would not be a function.
+
+    ENDF-6 requires the x column of a TAB1 to be non-decreasing; a repeated
+    abscissa is how the format writes a step, and a *descending* one is not a
+    table at all. It is raised rather than warned because there is no reader
+    that recovers from it and no consumer that reports it:
+    :func:`kika.njoy.run_njoy.run_njoy_with_pendf` on a PENDF carrying one
+    returns ``0`` and writes an ACE built from the wrong numbers.
+
+    Carries the offending index and the two abscissae, because the useful
+    question is always *where*.
+    """
+
+    def __init__(self, message: str, *, mf: int = 0, mt: int = 0,
+                 index: int = -1, previous: float = 0.0, current: float = 0.0):
+        super().__init__(message)
+        self.mf, self.mt = mf, mt
+        self.index, self.previous, self.current = index, previous, current
+
+
+def format_tab1(c1, c2, l1, l2, interp_pairs, x_data, y_data, mat, mf, mt,
+                start_line, pad=PAD_BLANK, interp_pad=PAD_BLANK):
     """
     Format a complete TAB1 record to ENDF lines.
+
+    *pad* reaches the x/y body and *interp_pad* the interpolation record. They
+    are separate because the two disagree inside one section: ``tsl_4-Be.txt``
+    writes ``       1621          1`` followed by blanks on the same tape whose
+    data lines end in explicit zeros, and ENDF/B-VIII.1's O-16 does the reverse.
 
     Parameters
     ----------
@@ -810,12 +760,15 @@ def format_tab1(c1, c2, l1, l2, interp_pairs, x_data, y_data, mat, mf, mt, start
     x_data, y_data : list of float
     mat, mf, mt : int
     start_line : int
+    pad : str, optional
 
     Returns
     -------
     lines : list of str
     next_line_num : int
     """
+    _assertAscending(x_data, mf, mt)
+
     nr = len(interp_pairs)
     np_count = len(x_data)
     line_num = start_line
@@ -833,11 +786,13 @@ def format_tab1(c1, c2, l1, l2, interp_pairs, x_data, y_data, mat, mf, mt, start
 
     # Interpolation pairs
     if nr > 0:
-        ip_lines, line_num = format_interp_pairs(interp_pairs, mat, mf, mt, line_num)
+        ip_lines, line_num = format_interp_pairs(
+            interp_pairs, mat, mf, mt, line_num, pad=interp_pad)
         result_lines.extend(ip_lines)
 
     # Data pairs
-    dp_lines, line_num = format_data_pairs(x_data, y_data, mat, mf, mt, line_num)
+    dp_lines, line_num = format_data_pairs(x_data, y_data, mat, mf, mt,
+                                           line_num, pad=pad)
     result_lines.extend(dp_lines)
 
     return result_lines, line_num
@@ -874,7 +829,54 @@ def parse_tab2(lines, start):
     return header, interp_pairs, idx
 
 
-def format_tab2(c1, c2, l1, l2, interp_pairs, nz, mat, mf, mt, start_line):
+
+def _assertAscending(x_data, mf: int, mt: int) -> None:
+    """Refuse to write a TAB1 whose abscissae go backwards.
+
+    **This gate exists because of D31** (``docs/library/library-gaps.md``), and
+    the reason it sits *here* rather than in the code that had the defect is the
+    whole point. ``_augment_with_step_duplicates`` inserted step points at bin
+    edges in the wrong order when two edges fell in one interval; that produced a
+    descending table for every perturbed MT of every replica, NJOY accepted it
+    with ``returncode 0``, and the ACE that came out had elastic cross sections
+    up to 145% wrong between 10 and 30 MeV. Nothing anywhere said a word.
+
+    ``format_tab1`` is the one place every TAB1 in the library is written --
+    MF1, MF2, MF3, MF5, MF6 and MF7 all come through it -- so a check here
+    covers the defects nobody has written yet, which is the only kind worth
+    guarding against. Measured before it was turned into a hard error: of the
+    27 tapes available here, including the whole JEFF-4.0 Fe-56, **zero**
+    sections violate it, so this refuses nothing that a real evaluation writes.
+
+    The cost is one pass over the abscissae per section written. It is a
+    scan of a table that is about to be turned into text, which is orders more
+    work.
+    """
+    if x_data is None:
+        return
+    x = np.asarray(x_data, dtype=float)
+    if x.size < 2:
+        return
+    descending = np.flatnonzero(np.diff(x) < 0.0)
+    if descending.size == 0:
+        return
+
+    first = int(descending[0])
+    raise NonMonotonicTable(
+        f"MF{mf}/MT{mt}: the TAB1 abscissae descend at point {first + 1} of "
+        f"{x.size} -- {x[first]:.8g} is followed by {x[first + 1]:.8g}, and "
+        f"{descending.size} pair(s) go backwards in all. ENDF-6 requires a "
+        f"non-decreasing x column: a repeated abscissa is a step, a descending "
+        f"one is not a function. Nothing downstream reports this -- NJOY "
+        f"accepts such a tape and writes an ACE from it -- so it is refused "
+        f"here. If points were inserted into this table, they were inserted "
+        f"out of order",
+        mf=mf, mt=mt, index=first,
+        previous=float(x[first]), current=float(x[first + 1]),
+    )
+
+def format_tab2(c1, c2, l1, l2, interp_pairs, nz, mat, mf, mt, start_line,
+                interp_pad=PAD_BLANK):
     """
     Format a TAB2 record to ENDF lines.
 
@@ -890,6 +892,8 @@ def format_tab2(c1, c2, l1, l2, interp_pairs, nz, mat, mf, mt, start_line):
         Number of sub-records (written to C6).
     mat, mf, mt : int
     start_line : int
+    interp_pad : str, optional
+        How the interpolation record's unused fields are filled.
 
     Returns
     -------
@@ -911,7 +915,8 @@ def format_tab2(c1, c2, l1, l2, interp_pairs, nz, mat, mf, mt, start_line):
     line_num += 1
 
     if nr > 0:
-        ip_lines, line_num = format_interp_pairs(interp_pairs, mat, mf, mt, line_num)
+        ip_lines, line_num = format_interp_pairs(
+            interp_pairs, mat, mf, mt, line_num, pad=interp_pad)
         result_lines.extend(ip_lines)
 
     return result_lines, line_num
@@ -953,6 +958,74 @@ def project_tabulated_to_legendre(
         P_l = np.polynomial.legendre.legval(mu_q, [0] * l + [1])  # evaluate P_l(μ)
         coeffs[l] = float(np.sum(P_l * f_q * w_q))
     return coeffs
+
+
+def evaluate_tabulated_pdf(
+    mu_points,
+    E: float,
+    *,
+    energies,
+    cosines,
+    probabilities,
+    angular_interp=None,
+    energy_interp=None,
+    out_of_range: str = "zero",
+) -> np.ndarray:
+    r"""Read :math:`f(\mu, E)` straight out of a tabulated MF4 distribution.
+
+    ENDF-correct 2D interpolation, in the order the format prescribes:
+
+    1. inside each energy's table, interpolate in :math:`\mu` under that
+       table's own ``(NBT, INT)``;
+    2. then interpolate between the two bracketing energies under the energy
+       ``(NBT, INT)``.
+
+    This is the distribution the evaluator wrote, not a reconstruction of it.
+    Shared by ``MF4MTTabulated`` and the tabulated branch of ``MF4MTMixed``
+    so the two cannot drift, which is the failure this module has already been
+    through once (see :mod:`kika.endf.dcs`).
+
+    ``out_of_range`` applies to the *energy* grid: ``"zero"`` returns zeros
+    outside it, ``"hold"`` clamps to the nearest end table.  Interpolation in
+    :math:`\mu` always holds, since a cosine outside a table's own range is
+    the table's endpoint and never an absence of data.
+    """
+    mu_points = np.asarray(mu_points, dtype=float)
+    energies = np.asarray(energies, dtype=float)
+    if energies.size == 0:
+        return np.zeros_like(mu_points, dtype=float)
+
+    E = float(E)
+    if out_of_range == "zero" and (E < energies[0] or E > energies[-1]):
+        return np.zeros_like(mu_points, dtype=float)
+
+    if E <= energies[0]:
+        idx0 = idx1 = 0
+    elif E >= energies[-1]:
+        idx0 = idx1 = energies.size - 1
+    else:
+        idx1 = int(np.searchsorted(energies, E, side="right"))
+        idx0 = idx1 - 1
+
+    angular_interp = angular_interp or []
+
+    def _table(i: int) -> np.ndarray:
+        mu_i = np.asarray(cosines[i], dtype=float)
+        f_i = np.asarray(probabilities[i], dtype=float)
+        pairs = (
+            angular_interp[i]
+            if i < len(angular_interp) and angular_interp[i]
+            else [(len(mu_i), 2)]
+        )
+        return interpolate_1d_endf(mu_i, f_i, pairs, mu_points, out_of_range="hold")
+
+    f0 = _table(idx0)
+    if idx1 == idx0:
+        return f0
+
+    pairs = energy_interp if energy_interp else [(energies.size, 2)]
+    code = int(segment_int_codes(energies.size, pairs)[idx1 - 1])
+    return interp_energy_values(energies[idx0], f0, energies[idx1], _table(idx1), E, code)
 
 
 def auto_trim_legendre_tail(

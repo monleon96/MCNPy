@@ -1,0 +1,470 @@
+ ENDF/B-VIII.1                                                         0  0
+ 2.205000+4 4.951570+1          1          0          0          12237 1451
+ 0.000000+0 0.000000+0          0          0          0          62237 1451
+ 1.000000+0 2.000000+7          1          0         10          82237 1451
+ 0.000000+0 0.000000+0          0          0        306          32237 1451
+ 22-Ti- 50 LANL       EVAL-Feb09 T.Kawano, L. Leal, A.Kahler      2237 1451
+ NDS 148, 1 (2018)    DIST-AUG24 REV1-SEP23            20240830   2237 1451
+---- ENDF/B-VIII.1    MATERIAL 2237         REVISION 1            2237 1451
+----- INCIDENT-NEUTRON DATA                                       2237 1451
+------ ENDF-6                                                     2237 1451
+******************************************************************2237 1451
+                                                                  2237 1451
+  Updates of energy-angular distributions related to the emitted  2237 1451
+  charged particles ( AUG. 2023)                                  2237 1451
+                                                                  2237 1451
+  H.I. Kim (KAERI),                                               2237 1451
+  H.Y. Lee, T. Kawano, S.A. Kuvin, and M.W. Herman (LANL)         2237 1451
+                                                                  2237 1451
+  Energy-angular distributions of discrete and continuum levels   2237 1451
+  and photon transitions related to emitted charged particles     2237 1451
+  (proton, deuteron, triton, helium-3 and alpha)                  2237 1451
+  have been updated [1] using CoH3 [2] and formatted into         2237 1451
+  the ENDF-6 format using DeCE [3]. The Q-values have been        2237 1451
+  calculated using the mass data in Audi's 2012 mass table [4]    2237 1451
+  and FRDM2012 massess [5].                                       2237 1451
+                                                                  2237 1451
+  Summary of updated MF/MT                                        2237 1451
+  MF=6  MT= 104, 105, 106 were deleted.                           2237 1451
+  MF=3  MT= 600-608, 649, 650-659, 699, 700-709, 749, 750,        2237 1451
+            800-809, 849 were added.                              2237 1451
+  MF=6  MT= 600-608, 649, 650-659, 699, 700-709, 749, 750,        2237 1451
+            800-809, 849 were added.                              2237 1451
+                                                                  2237 1451
+***********                                                       2237 1451
+References                                                        2237 1451
+                                                                  2237 1451
+[1] H.I.Kim et al., Nucl. Instr. Method A 963, 163699 (2020)      2237 1451
+[2] T.Kawano, Springer Proceedings in Physics 254, pp.27  (2021)  2237 1451
+[3] T.Kawano, J. Nucl. Sci. Technol. 56, (11) 1029 (2019)         2237 1451
+[4] G.Audi et al., Nucl. Data Sheets 120, 1 (2014)                2237 1451
+[5] P.Moller et al., At. Data and Nucl. Data Tables 109, 1 (2012) 2237 1451
+******************************************************************2237 1451
+                                                                  2237 1451
+****************************************************************  2237 1451
+Missing exit distributions imported from TENDL2019                2237 1451
+by I.J. Thompson (LLNL) on 2023-04-21T20:59:08                    2237 1451
+                                                                  2237 1451
+Some neutron exit distributions, as noted, may be imported so all 2237 1451
+exit distributions have the same reference frame.                 2237 1451
+                                                                  2237 1451
+Changes by program patchGNDS.py:                                  2237 1451
+  H2 distribution for MT=104: H2 + Sc49 [inclusive].              2237 1451
+  H3 distribution for MT=105: H3 + Sc48 [inclusive].              2237 1451
+  He3 distribution for MT=106: He3 + Ca48 [inclusive].            2237 1451
+                                                                  2237 1451
+                                                                  2237 1451
+**************************** ENDF/B-VII.1 ************************2237 1451
+-------------------------------                                   2237 1451
+Resonance Parameter Information                                   2237 1451
+-------------------------------                                   2237 1451
+                                                                  2237 1451
+ COVARIANCE FILE: resonance parameters (MF 32)                    2237 1451
+ Author:  L. Leal, July, 2009  (ORNL)                             2237 1451
+                                                                  2237 1451
+ Resolved resonance covariance data were generate with the SAMMY  2237 1451
+ [ref1] code for Ti isotopes.  SAMMY was run with the option of   2237 1451
+ generating resonance-covariance retroactively using the          2237 1451
+ "propagated uncertainty parameter" option to include systematic  2237 1451
+ data uncertainties.[ref2, ref3].                                 2237 1451
+    [ref 1] N. M. Larson, "Updated Users' Guide for SAMMY," Oak   2237 1451
+             Ridge National Laboratory report  ORNL/TM-9179/R6    2237 1451
+             (2003)                                               2237 1451
+    [ref 2] L. C. Leal, N. M. Larson, H. Derrien, T. Kawano, and  2237 1451
+            M. B Chadwick, "A New Approach fo Nuclear Data        2237 1451
+            Covariances and Sensitivity Generation," International2237 1451
+            Conference on Nuclear Data for Science and Technology,2237 1451
+            " Santa Fe, New Mexico, September 26 - October 1,     2237 1451
+            2004.                                                 2237 1451
+    [ref 3] L. C. Leal, G. Arbanas, H. Derrien, N. M. Larson, and 2237 1451
+            B. Rearden, "Covariance data for U-233 in the Resolved2237 1451
+            Resonance Region for Criticality Safey Applicatioins,"2237 1451
+            Mathematics and Computation, Supercomputing, Reactor  2237 1451
+            Physics and Nuclear and Biological Applications,      2237 1451
+            Palais des Papes, Avignon, France, September 12-15,   2237 1451
+            2005.                                                 2237 1451
+                                                                  2237 1451
+                                                                  2237 1451
+------------------------------------                              2237 1451
+Cross Section Evaluation information                              2237 1451
+------------------------------------                              2237 1451
+                                                                  2237 1451
+   Revisions based on GEANIE experimental data, new GNASH         2237 1451
+   calculations, and updated resonance parameters [Oct. 2008]     2237 1451
+   T.Kawano, S.Y.Oh, A.Kahler (LANL)                              2237 1451
+                                                                  2237 1451
+1. Resolved Resonance Parameters                                  2237 1451
+                                                                  2237 1451
+The resolved resonance energy range extended to 363.28 keV, and   2237 1451
+the resonance parameters were updated [Oh08] based on             2237 1451
+Mughabghab's compilation [Mu06].                                  2237 1451
+                                                                  2237 1451
+2. Cross Sections, MF3, MT16, 22, 28, 102, 103, 107               2237 1451
+                                                                  2237 1451
+First GNASH calculation was performed to the Ti48(n,xng) data     2237 1451
+from GEANIE experiments [Da07], and extended the same             2237 1451
+parametrization to other isotopes. The level density              2237 1451
+parameters were often adjusted to reproduce experimental data     2237 1451
+of (n,2n), (n,p), and (n,alpha) reactions if available.           2237 1451
+                                                                  2237 1451
+The neutron radiative capture cross section was evaluated         2237 1451
+with the CoH and DSD codes. The gamma-ray strength function       2237 1451
+was renormalized to reproduce experimental data in the            2237 1451
+20 - 50 keV energy range.                                         2237 1451
+                                                                  2237 1451
+3. Covariances, MF33                                              2237 1451
+                                                                  2237 1451
+All covariance data were calculated with the KALMAN code.         2237 1451
+Typical uncertainties obtained are 1-3 % for the total,           2237 1451
+10-30 % for the capture, etc. The covariance data for             2237 1451
+(n,d) and (n,t) are not given, because they are very small        2237 1451
+cross sections.                                                   2237 1451
+                                                                  2237 1451
+4. Secondary particle spectra [Nov. 2010]                         2237 1451
+                                                                  2237 1451
+Since an energy balance problem has been reported, MF6, 12,       2237 1451
+and 14 were updated by calculating the particle and gamma-ray     2237 1451
+spectra with the CoH3 code.                                       2237 1451
+                                                                  2237 1451
+                                                                  2237 1451
+[Da07] D. Dashdorj et al. Phys. Rev. C 75, 054612 (2007).         2237 1451
+[Mu06] S.F. Mughabghab, Atlas of Neutron Resonances, Resonance    2237 1451
+       Parameters and Thermal Cross Sections Z=1-100, Elsevier    2237 1451
+[Oh08] S.Y. Oh et al, Proc. Compound-Nuclear Reactions and        2237 1451
+       Related Topics (CNR* 2007), AIP Conference Proceedings     2237 1451
+       1005, 34 (2008).                                           2237 1451
+                                                                  2237 1451
+***************************** ENDF/B-VII *************************2237 1451
+**                                                              **2237 1451
+**         Original data taken from:  JENDL-3.3                 **2237 1451
+**                                                              **2237 1451
+******************************************************************2237 1451
+HISTORY                                                           2237 1451
+88-09  Compiled by T.Asami(nedac)                                 2237 1451
+93-11  JENDL-3.2                                                  2237 1451
+       Data were mainly adopted from JENDL fusion file.           2237 1451
+       Compiled by T.Nakagawa                                     2237 1451
+00-03  Reevaluation was made by T.Asami.                          2237 1451
+01-07  Compiled by K.Shibata (ndc/jaeri)                          2237 1451
+                                                                  2237 1451
+     *****   modified parts for JENDL-3.3   ********************  2237 1451
+      (2,151)              modified                               2237 1451
+      (3,2)                re-calculated                          2237 1451
+      (3,102,107)          revised                                2237 1451
+      (3,104,105,106,203,207)  evaluated newly                    2237 1451
+      (3,251)              deleted                                2237 1451
+      (4,2)                revised                                2237 1451
+      (4,16,22,28,91)      deleted                                2237 1451
+      (5,16,22,28,91)      deleted                                2237 1451
+      (6,16,22,28,91)      taken from JENDL fusion file           2237 1451
+      (6,203, 207)         taken from JENDL fusion file           2237 1451
+      (12,16-107)          evaluated newly                        2237 1451
+      (14,16-107)          isotropic distributions                2237 1451
+      (15,16-107)          evaluated newly                        2237 1451
+     ***********************************************************  2237 1451
+                                                                  2237 1451
+                                                                  2237 1451
+mf=1  General information                                         2237 1451
+ mt=451  Descriptive data and dictionary                          2237 1451
+                                                                  2237 1451
+mf=2  Resonance parameters                                        2237 1451
+ mt=151  Resolved resonance parameters                            2237 1451
+   Resolved parameters for MLBW formula were given in the energy  2237 1451
+   region from 1.0e-5 eV to 300 keV.  Parameters were taken from  2237 1451
+   ref./5/, for positive resonances.  Parameters for negative     2237 1451
+   resonance were obtained so that the reproduced cross sections  2237 1451
+   for both scattering and capture gave the 2200 m/s value of     2237 1451
+   3.7+-0.3 and 0.179+-0.003 barns, respectively/5/.  The         2237 1451
+   scattering radius was assumed to be 4.5 fermi.  Calculated 22002237 1451
+   m/sec cross sections and resonance integrals are as follows:   2237 1451
+                                                                  2237 1451
+            2200 m/s cross section(b)     res. integral(b)        2237 1451
+    elastic        3.74                                           2237 1451
+    capture        0.18                     0.088                 2237 1451
+    total          3.92                                           2237 1451
+                                                                  2237 1451
+mf=3  Neutron cross sections                                      2237 1451
+  Below 300 keV, no background cross section was given.           2237 1451
+                                                                  2237 1451
+  The calculation with sincros-ii system/2/ was made by adopting  2237 1451
+  Walter-Guss omp modified by Yamamuro/2/ for neutron, Perey omp  2237 1451
+  /6/ for proton, Lemos omp modified by Arthur and Young/7/       2237 1451
+  for alpha, Lohr-Haeberli omp/8/ for deuteron, Becchettii-       2237 1451
+  Greenlees omp/9/ for triton and He-3, and standard level        2237 1451
+  density parameters of sincros-ii system.                        2237 1451
+                                                                  2237 1451
+ mt=1 Total                                                       2237 1451
+   Below 300 keV, created from the resonance parameters.          2237 1451
+   Above 300 keV, optical and statistical model calculation was   2237 1451
+   made with the casthy code/10/.                                 2237 1451
+   The optical potential parameters used are:                     2237 1451
+         V = 50.75 - 0.120*En,    Vso = 4.72   (MeV)              2237 1451
+        Ws = 10.9 - 0.234*En,      Wv = 0.0    (MeV)              2237 1451
+         r = 1.26,   rs = 1.02,   rso = 1.16    (fm)              2237 1451
+         a = 0.52,  aso = 0.52,     b = 0.40    (fm)              2237 1451
+                                                                  2237 1451
+ mt=2 Elastic scattering                                          2237 1451
+   Obtained by subtracting the sum of the partial cross sections  2237 1451
+   from the total cross section.                                  2237 1451
+                                                                  2237 1451
+ mt=4, 51-61, 91 Inelastic scattering                             2237 1451
+   The cross sections were taken from JENDL fusion file.  The     2237 1451
+   level scheme was based on ref./4/  Contributions of the        2237 1451
+   direct process were calculated for the levels marked with '*', 2237 1451
+   using deformation parameters compiled by Raman et al./11/ and  2237 1451
+   Spear/12/.                                                     2237 1451
+                                                                  2237 1451
+           no.      energy(MeV)    spin-parity (direct process)   2237 1451
+          g.s.      0.0                0 +                        2237 1451
+            1       1.5538             2 +         *              2237 1451
+            2       2.6749             4 +         *              2237 1451
+            3       3.1987             6 +         *              2237 1451
+            4       3.771              2 +                        2237 1451
+            5       3.8681             0 +                        2237 1451
+            6       3.9748             4 +                        2237 1451
+            7       4.1473             4 +         *              2237 1451
+            8       4.1718             3 +                        2237 1451
+            9       4.1723             2 +         *              2237 1451
+           10       4.311              2 +         *              2237 1451
+           11       4.4105             3 -         *              2237 1451
+  Levels above 4.411 MeV were assumed to be overlapping.          2237 1451
+                                                                  2237 1451
+ mt=16, 22, 28, 103 (n,2n), (n,na),(n,np), (n,p)                  2237 1451
+    Adopted from JENDL fusion file.  theoretical calculation was  2237 1451
+    made with sincros-ii.  The results were normalized to         2237 1451
+                                                                  2237 1451
+         (n,2n) 1.0    b at 14.9 MeV (systematics by Kasugai/13/),2237 1451
+         (n,p) 0.0134 b at 14.94 MeV measured by Ikeda et al./14/,2237 1451
+                                                                  2237 1451
+ mt=102      Capture                                              2237 1451
+    Below 300 keV, created from the resonance parameters.         2237 1451
+    Above 300 keV, calculated with the casthy code/10/ and        2237 1451
+    Normalized to 2.3 mb at 25 keV. Added the semidirect component2237 1451
+    calculated with  the quick  gnash code/17,18/.                2237 1451
+                                                                  2237 1451
+ mt=107     (n,a)                                                 2237 1451
+    Obtained from from the sincros-ii calculation made with the   2237 1451
+    the egnash code/2/.                                           2237 1451
+                                                                  2237 1451
+mf=4  Angular distributions of secondary neutrons                 2237 1451
+ mt=2                                                             2237 1451
+    Calculated with the casthy code/10/,newly for JENDL-3.3.      2237 1451
+ mt=51-61                                                         2237 1451
+    Taken from JENDL fusion file/1/.                              2237 1451
+    Calculated with the casthy code/10/.                          2237 1451
+                                                                  2237 1451
+mf=6  Energy-angle distributions of secondary particles           2237 1451
+    Taken from JENDL fusion file/1/.                              2237 1451
+      -  Energy distributions of secondary neutrons were replaced 2237 1451
+         by those calculated by egnash2.  The ddx's of the        2237 1451
+         continuum neutrons were calculated by Kumabe's systema-  2237 1451
+         tics /3/ using f15tob /1/.  The precompound/compound     2237 1451
+         ratio was calculated by the sincros-ii code system/2/.   2237 1451
+ mt=16, 22, 28, 91                                                2237 1451
+    Based on modified kumabe's systematics/3/.                    2237 1451
+ mt=203, 207                                                      2237 1451
+    Based on kalbach's 1988 systematics/15/.                      2237 1451
+                                                                  2237 1451
+mf=12  Photon production multiplicities and transition probability2237 1451
+         arrays                                                   2237 1451
+ mt=16, 22, 28, 51-61, 91,103, 104, 107                           2237 1451
+      mt=51-61 were given as the transition probability arrays.   2237 1451
+     mt=16, 22, 28, 91, 102, 103, 104, 107 were calculated with   2237 1451
+     the egnash code/2/ and processed by the gamfil2 code/16/.    2237 1451
+     mt=102 was calculated with the casthy code/10/.              2237 1451
+                                                                  2237 1451
+mf=14  Photon angular distributions                               2237 1451
+ mt=16, 22, 28, 51-61, 91, 102, 103, 104, 107                     2237 1451
+     Assumed to be isotropic distributions                        2237 1451
+                                                                  2237 1451
+mf=15  Continuous photon energy spectra                           2237 1451
+ mt=16, 22, 28, 91, 103, 104, 107                                 2237 1451
+     Calculated with the egnash code/2/.                          2237 1451
+ mt=102                                                           2237 1451
+     Calculated with the casthy code/10/.                         2237 1451
+                                                                  2237 1451
+                                                                  2237 1451
+References                                                        2237 1451
+ 1) Chiba, S. et al.: JAERI-M 92-027, p.35 (1992).                2237 1451
+ 2) Yamamuro, N.: JAERI-M 90-006 (1990).                          2237 1451
+ 3) Kumabe, I. et al.: Nucl. Sci. Eng., 104, 280 (1990).          2237 1451
+ 4) ENSDF: Evaluated Nuclear Structure Data File, BNL/NNDC.       2237 1451
+ 5) Mughabghab, S.F. et al. : " Neutron Cross Sections ", Vol.1,  2237 1451
+    Part a (1981).                                                2237 1451
+ 6) Perey, F.G.: Phys. Rev., 131, 745 (1963).                     2237 1451
+ 7) Arthur, E.D. and Young, P.G.: LA-8626-MS (1980).              2237 1451
+ 8) Lohr, J.M. and Haeberli W.: Nucl. Phys., A232, 381 (1974).    2237 1451
+ 9) Becchetti, F.D. Jr. and Greenlees G.W.: "Polarization         2237 1451
+    Phenomena in Nucl. Reactions," Univ. Wisconsin Press, p.682   2237 1451
+    (1971).                                                       2237 1451
+10) Igarasi, S. and Fukahori, T.: JAERI 1321 (1991).              2237 1451
+11) Raman, S., et al.: Atom. Data and Nucl. Data Tables 36, 1     2237 1451
+    (1987)                                                        2237 1451
+12) Spear, R.H.: Atom. Data and Nucl. Data Table, 42, 55 (1989).  2237 1451
+13) Kasugai, Y.: private communication (1993).                    2237 1451
+14) Ikeda, Y. et al.: JAERI 1312 (1988).                          2237 1451
+15) Kalbach C. : Phys. Rev. C37, 2350(1988).                      2237 1451
+16) Hida K.: JAERI-M 86-150 (1986) (in Japanese).                 2237 1451
+17) Young P.G. et al. : LA-12343-MS (1992).                       2237 1451
+18) Koning A.J. and Delaroche J.P. : ECN-RX-98-015 (1998).        2237 1451
+                                                                  2237 1451
+                                                                  2237 1451
+                                1        451        313          02237 1451
+                                3         17          4          02237 1451
+                                6         17         26          02237 1451
+ 0.000000+0 0.000000+0          0          0          0          02237 1  0
+                                                                  2237 0  0
+                                                                  2237 0  0
+ 2.205000+4 4.951570+1          0          0          0          02237 3 17
+-1.909140+7-1.909140+7          0          0          1          22237 3 17
+          2          2                                            2237 3 17
+ 1.947700+7 0.000000+0 2.000000+7 3.319470-4                      2237 3 17
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 3  0
+                                                                  2237 0  0
+                                                                  2237 0  0
+ 2.205000+4 4.951570+1          0          2          2          02237 6 17
+ 1.000000+0 1.000000+0          0          1          1          22237 6 17
+          2          2                                            2237 6 17
+ 1.947700+7 3.000000+0 2.000000+7 3.000000+0                      2237 6 17
+ 0.000000+0 0.000000+0          1          2          1          22237 6 17
+          2         22                                            2237 6 17
+ 0.000000+0 1.947700+7          0          0          6          32237 6 17
+ 0.000000+0 0.000000+0 5.000000-1 2.000000+0 1.000000+0 0.000000+02237 6 17
+ 0.000000+0 2.000000+7          0          4         48          82237 6 17
+ 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+02237 6 17
+ 2.500000+4 1.486409-6 0.000000+0 1.045827-8 0.000000+0 1.76579-112237 6 17
+ 1.000000+5 4.129347-6 2.300386-8 2.959906-8 7.11119-11 5.09208-112237 6 17
+ 2.000000+5 3.119357-6 1.801095-8 2.291487-8 5.70692-11 4.04090-112237 6 17
+ 3.000000+5 1.838392-6 1.125878-8 1.383638-8 3.65559-11 2.50036-112237 6 17
+ 4.000000+5 6.413088-7 4.170030-9 4.943821-9 1.38703-11 9.15255-122237 6 17
+ 5.000000+5 7.283763-8 5.03449-10 5.74969-10 1.71500-12 1.09020-122237 6 17
+ 5.223523+5 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+02237 6 17
+ 0.000000+0 0.000000+0          0          1          1          22237 6 17
+          2          2                                            2237 6 17
+ 1.947700+7 0.000000+0 2.000000+7 0.000000+0                      2237 6 17
+ 0.000000+0 0.000000+0          1          2          1          22237 6 17
+          2         22                                            2237 6 17
+ 0.000000+0 1.947700+7          0          0          6          32237 6 17
+ 0.000000+0 0.000000+0 5.000000-1 2.000000+0 1.000000+0 0.000000+02237 6 17
+ 0.000000+0 2.000000+7          0          0          6          32237 6 17
+ 0.000000+0 0.000000+0 5.000000-1 2.000000+0 1.000000+0 0.000000+02237 6 17
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 6  0
+                                                                  2237 0  0
+                                                                  2237 0  0
+                                                                  2237 0  0
+                                                                  2237 0  0
+                                                                  2237 0  0
+                                                                     0 0  0
+                                                                    -1 0  0

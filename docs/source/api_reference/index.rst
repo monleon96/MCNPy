@@ -13,6 +13,8 @@ KIKA is structured into several subpackages:
 * **kika.sensitivities**: For sensitivity analysis and SDF file generation
 * **kika.ace**: For parsing ACE format nuclear data files
 * **kika.cov**: For covariance matrix handling and visualization
+* **kika.UQ**: For strict sensitivity/covariance alignment, sandwich propagation, and c-k
+* **kika.benchmarks**: For DICE/ICSBEP SQLite profiles and benchmark ranking
 * **kika.endf**: For reading Evaluated Nuclear Data Files (ENDF)
 * **kika.energy_grids**: Predefined energy group structures
 
@@ -27,4 +29,6 @@ Module Reference
    sensitivities
    ace
    cov
+   uq
+   benchmarks
    endf

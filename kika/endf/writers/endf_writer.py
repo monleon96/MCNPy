@@ -10,7 +10,7 @@ from ..classes.mt import MT
 from ..classes.mf1.mf1mt451 import MF1MT451
 from ..classes.mf import MF
 from ..classes.mf4.base import MF4MT
-from ..utils import parse_endf_id
+from ..utils import NonMonotonicTable, parse_endf_id
 from ...utils import get_endf_logger
 from .update_directory import update_mf1_directory
 
@@ -35,6 +35,13 @@ class ENDFWriter:
         """
         self.original_filepath = original_filepath
         self.original_lines = None
+        #: What the last ``resum_redundant=True`` replacement did to the
+        #: summation MTs, one
+        #: :class:`~kika.endf.writers.redundant.RedundantUpdate` each. Empty
+        #: when the option was not used. It lives here rather than in the
+        #: return value because these methods answer ``bool``, and changing
+        #: that would break every caller for the sake of a diagnostic.
+        self.redundant_updates = []
         self._load_original_file()
     
     def _load_original_file(self):
@@ -177,13 +184,21 @@ class ENDFWriter:
 
             return True
 
+        except NonMonotonicTable:
+            # Deliberately not swallowed into the `bool`. "I could not write the
+            # file" and "the data you handed me is not a function" are different
+            # answers, and flattening the second into the first is how D31 got
+            # to run for months: the caller sees a failure with no cause, logs
+            # it, and moves on. Let the diagnosis reach whoever built the table.
+            raise
         except Exception as e:
             logger.error(f"Error replacing MF{modified_mf.number} section: {e}")
             return False
 
     def replace_mt_section(self, modified_mt: Union[MT, MF1MT451, MF4MT], mf_number: int,
                           output_filepath: Optional[str] = None,
-                          update_directory: bool = True) -> bool:
+                          update_directory: bool = True,
+                          resum_redundant: bool = False) -> bool:
         """
         Replace a specific MT section within an MF section.
 
@@ -192,9 +207,46 @@ class ENDFWriter:
             mf_number: The MF number containing this MT section
             output_filepath: Output file path (if None, overwrites original)
             update_directory: If True, update MF1/MT451 directory after writing
+            resum_redundant: MF3 only. Rebuild the summation cross sections
+                this replacement invalidated -- transfer MT52 in and MT4
+                changes, then MT3 and MT1 because MT4 did. What it did lands in
+                ``self.redundant_updates``; the rules are in
+                :func:`~kika.endf.writers.redundant.recompute_redundant_mf3`.
 
         Returns:
             True if replacement succeeded, False otherwise
+
+        ``resum_redundant`` is **off by default and has to stay off.** A
+        replacement is a byte operation on one section; a resummation restates
+        values the caller never named, and doing it silently would mean someone
+        who moved MT52 got MT1 moved too without being told.
+
+        When it is on, two guards come with it and neither is optional. The
+        replaced MT is **protected** from the rebuild -- transferring a total
+        explicitly and then overwriting it with the local sum would discard the
+        very section that was moved. And the file as it was **before** this
+        replacement is passed as the baseline, so a redundant MT is only rebuilt
+        where the invariant held beforehand: a tape cut down to a few sections
+        (``micro_fe56_structural.endf`` keeps MT1, MT2 and MT102 out of a full
+        Fe-56, and its MT1 sits 63% above MT2+MT102) is reported and left alone
+        instead of having its total replaced by a sum over the survivors.
+
+        **A transfer of several sections is safe one call at a time**, and it
+        is the baseline that makes it so rather than the protected set. Since
+        the protected set only ever holds this call's MT, moving MT4 in and then
+        editing MT52 with the option on looks like it should rebuild MT4 from
+        the partials and discard the MT4 just placed. It does not: the second
+        call's baseline is the file as that call found it, which already carries
+        the transferred MT4 stating a value its partials do not make, so the
+        "restore the invariant only where it held" rule declines to touch it. The two guards
+        look interchangeable and are not -- one is about what the caller named,
+        the other about what the file already claimed -- and only the second
+        sees across calls.
+
+        Not offered on :meth:`replace_mf_section`: replacing a whole MF3 makes
+        every MT dirty at once, so "which redundants did this invalidate" has no
+        answer narrower than "all of them". A caller who wants that can say it
+        outright, with ``changed_mts=None``.
         """
         try:
             # Find boundaries of the target MT section
@@ -229,15 +281,44 @@ class ENDFWriter:
             
             logger.debug(f"Successfully replaced MF{mf_number}/MT{modified_mt.number} section in {output_path}")
 
+            # Before the directory, not after: a resummation changes line
+            # counts, and the directory has to describe the file that is
+            # finally on disk.
+            self.redundant_updates = []
+            if resum_redundant and mf_number == 3:
+                self._resum_redundant(output_path, int(modified_mt.number))
+
             if update_directory:
                 update_mf1_directory(output_path)
 
             return True
 
+        except NonMonotonicTable:
+            raise  # see replace_mf_section
         except Exception as e:
             logger.error(f"Error replacing MF{mf_number}/MT{modified_mt.number} section: {e}")
             return False
 
+
+    def _resum_redundant(self, output_path: str, replaced_mt: int) -> None:
+        """Rebuild the summation MTs that replacing *replaced_mt* invalidated."""
+        from .redundant import recompute_redundant_mf3
+
+        with open(output_path, "r") as fh:
+            edited = fh.read()
+
+        rewritten, updates = recompute_redundant_mf3(
+            edited,
+            changed_mts=[replaced_mt],
+            protected_mts=[replaced_mt],
+            baseline_content="".join(self.original_lines),
+        )
+        self.redundant_updates = updates
+        for update in updates:
+            logger.info(update.describe())
+        if rewritten != edited:
+            with open(output_path, "w") as fh:
+                fh.write(rewritten)
 
 # Convenience functions for direct use without instantiating the class
 def replace_mf_section(original_filepath: str, modified_mf: MF,
@@ -261,7 +342,8 @@ def replace_mf_section(original_filepath: str, modified_mf: MF,
 
 def replace_mt_section(original_filepath: str, modified_mt: Union[MT, MF1MT451, MF4MT],
                       mf_number: int, output_filepath: Optional[str] = None,
-                      update_directory: bool = True) -> bool:
+                      update_directory: bool = True,
+                      resum_redundant: bool = False) -> bool:
     """
     Replace an MT section in an ENDF file.
 
@@ -271,9 +353,14 @@ def replace_mt_section(original_filepath: str, modified_mt: Union[MT, MF1MT451, 
         mf_number: The MF number containing this MT section
         output_filepath: Output file path (if None, overwrites original)
         update_directory: If True, update MF1/MT451 directory after writing
+        resum_redundant: MF3 only. Rebuild the summation cross sections this
+            replacement invalidated. :meth:`ENDFWriter.replace_mt_section`
+            explains why it is off by default; instantiate the class when you
+            want to read back what it did.
 
     Returns:
         True if replacement succeeded, False otherwise
     """
     writer = ENDFWriter(original_filepath)
-    return writer.replace_mt_section(modified_mt, mf_number, output_filepath, update_directory)
+    return writer.replace_mt_section(modified_mt, mf_number, output_filepath,
+                                     update_directory, resum_redundant)

@@ -1,0 +1,823 @@
+ ENDF/B-VIII.1                                                         0  0
+ 9.624400+4 2.419660+2          1          1          0          19637 1451    1
+ 0.000000+0 1.000000+0          0          0          0          69637 1451    2
+ 1.000000+0 2.000000+7          1          0         10          89637 1451    3
+ 0.000000+0 0.000000+0          0          0        450          39637 1451    4
+ 96-Cm-244 JAEA+      EVAL-JAN10 O.Iwamoto,T.Nakagawa,T.Ohsawa+   9637 1451    5
+ NDS 148, 1 (2018)    DIST-AUG24 REV1-NOV19            20240830   9637 1451    6
+---- ENDF/B-VIII.1    MATERIAL 9637         REVISION 1            9637 1451    7
+----- INCIDENT-NEUTRON DATA                                       9637 1451    8
+------ ENDF-6                                                     9637 1451    9
+                                                                  9637 1451   10
+ *****************************************************************9637 1451   11
+ MF1, MT456                                                       9637 1451   12
+   Madland-Nix model for prompt-nu calculated                     9637 1451   13
+   by R.Q. Wright (ORNL)                                          9637 1451   14
+ MF1, MT452                                                       9637 1451   15
+   sum of 455 and 456 recalculated                                9637 1451   16
+                                      T. Kawano (LANL), Oct. 2016 9637 1451   17
+                                                                  9637 1451   18
+ *****************************************************************9637 1451   19
+                         JENDL-4.0 adopted                        9637 1451   20
+ *****************************************************************9637 1451   21
+History                                                           9637 1451   22
+06-03 Fission cross section was evaluated with GMA.               9637 1451   23
+06-04 Resonance parameters were modified.                         9637 1451   24
+07-03 Fission spectra were evaluated.                             9637 1451   25
+07-05 New calculation was made with CCONE code.                   9637 1451   26
+07-07 Nu-p was revised.                                           9637 1451   27
+07-10 Nu-p was revised.                                           9637 1451   28
+07-12 Parameters of negative and 1st resonances were modified.    9637 1451   29
+08-03 Interpolation of (5,18) was changed.                        9637 1451   30
+      Data were compiled as JENDL/AC-2008/1/.                     9637 1451   31
+09-03 (1,452) and (1,455) were revised.                           9637 1451   32
+09-08 (MF1,MT458) was evaluated.                                  9637 1451   33
+10-01 Data of prompt gamma rays due to fission were given.        9637 1451   34
+10-03 Covariance data were given.                                 9637 1451   35
+                                                                  9637 1451   36
+                                                                  9637 1451   37
+MF= 1 General information                                         9637 1451   38
+  MT=452 Number of Neutrons per fission                           9637 1451   39
+    Sum of MT's=455 and 456.                                      9637 1451   40
+                                                                  9637 1451   41
+  MT=455 Delayed neutron data                                     9637 1451   42
+    Determined from nu-d of the following three nuclides and      9637 1451   43
+    partial fission cross sections calculated with CCONE code/2/. 9637 1451   44
+                                                                  9637 1451   45
+      Cm-245 = 0.004451                                           9637 1451   46
+      Cm-244 = 0.003064                                           9637 1451   47
+      Cm-243 = 0.002114                                           9637 1451   48
+                They are averages of systematics by Tuttle/3/,    9637 1451   49
+                Benedetti et al./4/ and Waldo et al./5/           9637 1451   50
+                                                                  9637 1451   51
+                                                                  9637 1451   52
+  MT=456 Number of prompt neutrons per fission                    9637 1451   53
+    The experimental data of 2.75+-0.08 measured by Zhuravlev et  9637 1451   54
+    al./6/ seems to be too small. A value of 3.00 at 0 eV         9637 1451   55
+    was assumed. An energy dependent term was based on the        9637 1451   56
+    systematics derived by Ohsawa/7/.                             9637 1451   57
+                                                                  9637 1451   58
+  MT=458 Components of energy release due to fission              9637 1451   59
+    Total energy and prompt energy were calculated from mass      9637 1451   60
+    balance using JENDL-4 fission yields data and mass excess     9637 1451   61
+    evaluation. Mass excess values were from Audi's 2009          9637 1451   62
+    evaluation/8/. Delayed energy values were calculated from     9637 1451   63
+    the energy release for infinite irradiation using JENDL FP    9637 1451   64
+    Decay Data File 2000 and JENDL-4 yields data. For delayed     9637 1451   65
+    neutron energy, as the JENDL FP Decay Data File 2000/9/ does  9637 1451   66
+    not include average neutron energy values, the average values 9637 1451   67
+    were calculated using the formula shown in the report by      9637 1451   68
+    T.R. England/10/. The fractions of prompt energy were         9637 1451   69
+    calculated using the fractions of Sher's evaluation/11/ when  9637 1451   70
+    they were provided. When the fractions were not given by Sher,9637 1451   71
+    averaged fractions were used.                                 9637 1451   72
+                                                                  9637 1451   73
+                                                                  9637 1451   74
+MF= 2 Resonance parameters                                        9637 1451   75
+  MT=151                                                          9637 1451   76
+  Resolved resonance parameters (MLBW: 1.0E-5 - 1000eV)           9637 1451   77
+    Resonance parameters given in JENDL-3.3 were based on the     9637 1451   78
+    data of Belanova et al./12/, Moore and Keyworth/13/ and       9637 1451   79
+    Maguire et al./14/                                            9637 1451   80
+                                                                  9637 1451   81
+    In the present work, negative and first resonances were       9637 1451   82
+    modified so as to reproduce thermal cross sections and        9637 1451   83
+    resonance integral. Background was given to the fission       9637 1451   84
+    cross section.                                                9637 1451   85
+                                                                  9637 1451   86
+    The thermal cross sections to be reproduced:                  9637 1451   87
+      Total   = 27.6 +- 1.4 b /15/                                9637 1451   88
+      Elastic = 11.6 +- 0.7 b /15/                                9637 1451   89
+      Fission = 1.02 +- 0.19 b                                    9637 1451   90
+         Benjamin et al. /16/, Zhuravlev et al./17/               9637 1451   91
+      Capture = 15.2 +- 1.2 b                                     9637 1451   92
+         Gavrilov and Goncharov/18/                               9637 1451   93
+      Resonance integral of capture = 626 +- 53 b                 9637 1451   94
+         Gavrilov and Goncharov/18/                               9637 1451   95
+                                                                  9637 1451   96
+  Unresolved resonance parameters (1 - 100 keV)                   9637 1451   97
+    Parameters (URP) were determined with ASREP code/19/ so as    9637 1451   98
+    to reproduce the cross sections in this energy range. URP are 9637 1451   99
+    used only for self-shielding calculations.                    9637 1451  100
+                                                                  9637 1451  101
+     Thermal cross sections and resonance integrals (at 300K)     9637 1451  102
+    -------------------------------------------------------       9637 1451  103
+                    0.0253 eV    reson. integ.(*)                 9637 1451  104
+                     (barns)       (barns)                        9637 1451  105
+    -------------------------------------------------------       9637 1451  106
+    total            28.65                                        9637 1451  107
+    elastic          12.39                                        9637 1451  108
+    fission           1.022           13.3                        9637 1451  109
+    capture          15.24           626                          9637 1451  110
+    -------------------------------------------------------       9637 1451  111
+         (*) In the energy range from 0.5 eV to 10 MeV.           9637 1451  112
+                                                                  9637 1451  113
+                                                                  9637 1451  114
+MF= 3 Neutron cross sections                                      9637 1451  115
+  Cross sections above the resolved resonance region except for   9637 1451  116
+  the elastic scattering (MT=2) and fission cross sections (MT=18,9637 1451  117
+  19, 20, 21, 38) were calculated with CCONE code/2/.             9637 1451  118
+                                                                  9637 1451  119
+  MT= 1 Total cross section                                       9637 1451  120
+    The cross section was calculated with CC OMP of Soukhovitskii 9637 1451  121
+    et al./20/                                                    9637 1451  122
+                                                                  9637 1451  123
+  MT= 2 Elastic scattering cross section                          9637 1451  124
+    Calculated as total - non-elastic scattering cross sections.  9637 1451  125
+                                                                  9637 1451  126
+  MT=18 Fission cross section                                     9637 1451  127
+    The following experimental data were analyzed in the energy   9637 1451  128
+    range above 1 keV with GMA code /21/:                         9637 1451  129
+                                                                  9637 1451  130
+       Authors        Energy range     Data points  Reference     9637 1451  131
+       Moore+         950eV - 2.83MeV       548      /13/         9637 1451  132
+       Fomushkin+     0.30 - 4.0MeV          17      /22/         9637 1451  133
+       Vorotnikov+    0.39 - 1.28MeV          8      /23/         9637 1451  134
+       Maguire Jr.+   0.94 - 79.5keV         49      /14/         9637 1451  135
+       Fomushkin+     14.1 MeV                1      /24/         9637 1451  136
+       Fursov+        0.169 - 6.842MeV       45      /25/(*1)     9637 1451  137
+                                                                  9637 1451  138
+        (*1) Relative to Pu-239 fission. These data were converted9637 1451  139
+             to cross sections using JENDL-3.3 data.              9637 1451  140
+                                                                  9637 1451  141
+    Between 7 and 20 MeV, data were determined by eye-guiding.    9637 1451  142
+                                                                  9637 1451  143
+    The results of GMA were used to determine the parameters in   9637 1451  144
+    the CCONE calculation.                                        9637 1451  145
+                                                                  9637 1451  146
+  MT=19, 20, 21, 38 Multi-chance fission cross sections           9637 1451  147
+    Calculated with CCONE code, and renormalized to the total     9637 1451  148
+    fission cross section (MT=18).                                9637 1451  149
+                                                                  9637 1451  150
+                                                                  9637 1451  151
+MF= 4 Angular distributions of secondary neutrons                 9637 1451  152
+  MT=2 Elastic scattering                                         9637 1451  153
+    Calculated with CCONE code.                                   9637 1451  154
+                                                                  9637 1451  155
+  MT=18 Fission                                                   9637 1451  156
+    Isotropic distributions in the laboratory system were assumed.9637 1451  157
+                                                                  9637 1451  158
+                                                                  9637 1451  159
+MF= 5 Energy distributions of secondary neutrons                  9637 1451  160
+  MT=18 Fission neutron spectra                                   9637 1451  161
+    Below 6 MeV, calculated by Ohsawa /26/ with modified          9637 1451  162
+    Madland-Nix formula considering multi-mode fission processes  9637 1451  163
+    (standard-1, standard-2, superlong).                          9637 1451  164
+    Above 7 MeV, calculated with CCONE code/2/.                   9637 1451  165
+                                                                  9637 1451  166
+                                                                  9637 1451  167
+MF= 6 Energy-angle distributions                                  9637 1451  168
+    Calculated with CCONE code.                                   9637 1451  169
+    Distributions from fission (MT=18) are not included.          9637 1451  170
+                                                                  9637 1451  171
+                                                                  9637 1451  172
+MF=12 Photon production multiplicities                            9637 1451  173
+  MT=18 Fission                                                   9637 1451  174
+    Calculated from the total energy released by the prompt       9637 1451  175
+    gamma-rays due to fission given in MF=1/MT=458 and the        9637 1451  176
+    average energy of gamma-rays.                                 9637 1451  177
+                                                                  9637 1451  178
+                                                                  9637 1451  179
+MF=14 Photon angular distributions                                9637 1451  180
+  MT=18 Fission                                                   9637 1451  181
+    Isotoropic distributions were assumed.                        9637 1451  182
+                                                                  9637 1451  183
+                                                                  9637 1451  184
+MF=15 Continuous photon energy spectra                            9637 1451  185
+  MT=18 Fission                                                   9637 1451  186
+    Experimental data measured by Verbinski et al./27/ for        9637 1451  187
+    Pu-239 thermal fission were adopted.                          9637 1451  188
+                                                                  9637 1451  189
+                                                                  9637 1451  190
+MF=31 Covariances of average number of neutrons per fission       9637 1451  191
+  MT=452 Number of neutrons per fission                           9637 1451  192
+    Combination of covariances for MT=455 and MT=456.             9637 1451  193
+                                                                  9637 1451  194
+  MT=455                                                          9637 1451  195
+    Error of 15% was assumed below 5 MeV and above 5 MeV,         9637 1451  196
+    respectively.                                                 9637 1451  197
+                                                                  9637 1451  198
+  MT=456                                                          9637 1451  199
+    Covariance was obtained by fitting a linear function to the   9637 1451  200
+    at 0.0 and 5.0 MeV with uncertainties of 8% and 7.5%,         9637 1451  201
+    respectively.                                                 9637 1451  202
+                                                                  9637 1451  203
+                                                                  9637 1451  204
+MF=32 Covariances of resonance parameters                         9637 1451  205
+    Format of LCOMP=0 was adopted.                                9637 1451  206
+                                                                  9637 1451  207
+    Standard deviations were adopted from Belanova et al./12/,    9637 1451  208
+    Moore and Keyworth/13/ and Maguire et al./14/                 9637 1451  209
+                                                                  9637 1451  210
+    For parameters having no information on uncertainties, the    9637 1451  211
+    following errors were assumed:                                9637 1451  212
+        0.1% to resonance energies                                9637 1451  213
+        10%  to other parameters                                  9637 1451  214
+                                                                  9637 1451  215
+MF=33 Covariances of neutron cross sections                       9637 1451  216
+  Covariances were given to all the cross sections by using       9637 1451  217
+  KALMAN code/28/ and the covariances of model parameters         9637 1451  218
+  used in the theoretical calculations.                           9637 1451  219
+                                                                  9637 1451  220
+  For the following cross sections, covariances were determined   9637 1451  221
+  by different methods.                                           9637 1451  222
+                                                                  9637 1451  223
+  MT=1, 2 Total and elastic scattering cross sections             9637 1451  224
+    In the resonance region (below 1 keV), uncertainty of 20%     9637 1451  225
+    was added.                                                    9637 1451  226
+                                                                  9637 1451  227
+  MT=18 Fission cross section                                     9637 1451  228
+    In the resonance region, the following errors were added:     9637 1451  229
+        1.0e-5 to 5eV   15%                                       9637 1451  230
+        5eV to 500eV    10%                                       9637 1451  231
+        500eV to 1keV   10%                                       9637 1451  232
+    Above the resonance region, cross section was evaluated with  9637 1451  233
+    GMA code/21/. Error of 5 % was added to the standard          9637 1451  234
+    deviations obatianed.                                         9637 1451  235
+                                                                  9637 1451  236
+  MT=102 Capture cross section                                    9637 1451  237
+    In the resonance region from 5 eV to 1 keV, addtional error   9637 1451  238
+    of 10 % was given.                                            9637 1451  239
+                                                                  9637 1451  240
+    Above 1 keV, covariance matrix was obtained with CCONE and    9637 1451  241
+    KALMAN codes/28/.                                             9637 1451  242
+                                                                  9637 1451  243
+                                                                  9637 1451  244
+MF=34 Covariances for Angular Distributions                       9637 1451  245
+  MT=2 Elastic scattering                                         9637 1451  246
+    Covariances were given only to P1 components.                 9637 1451  247
+                                                                  9637 1451  248
+                                                                  9637 1451  249
+MF=35 Covariances for Energy Distributions                        9637 1451  250
+  MT=18 Fission spectra                                           9637 1451  251
+    Below 6 MeV, covarinaces of Pu239 fission spectra given in    9637 1451  252
+    JENDL-3.3 were adopted after multiplying a factor of 9.       9637 1451  253
+    Above 6 MeV, estimated with CCONE and KALMAN codes.           9637 1451  254
+                                                                  9637 1451  255
+                                                                  9637 1451  256
+***************************************************************** 9637 1451  257
+  Calculation with CCONE code                                     9637 1451  258
+***************************************************************** 9637 1451  259
+                                                                  9637 1451  260
+  Models and parameters used in the CCONE/2/ calculation          9637 1451  261
+  1) Coupled channel optical model                                9637 1451  262
+     Levels in the rotational band were included. Optical model   9637 1451  263
+     potential and coupled levels are shown in Table 1.           9637 1451  264
+                                                                  9637 1451  265
+  2) Two-component exciton model/29/                              9637 1451  266
+    * Global parametrization of Koning-Duijvestijn/30/            9637 1451  267
+      was used.                                                   9637 1451  268
+    * Gamma emission channel/31/ was added to simulate direct     9637 1451  269
+      and semi-direct capture reaction.                           9637 1451  270
+                                                                  9637 1451  271
+  3) Hauser-Feshbach statistical model                            9637 1451  272
+    * Moldauer width fluctuation correction/32/ was included.     9637 1451  273
+    * Neutron, gamma and fission decay channel were included.     9637 1451  274
+    * Transmission coefficients of neutrons were taken from       9637 1451  275
+      coupled channel calculation in Table 1.                     9637 1451  276
+    * The level scheme of the target is shown in Table 2.         9637 1451  277
+    * Level density formula of constant temperature and Fermi-gas 9637 1451  278
+      model were used with shell energy correction and collective 9637 1451  279
+      enhancement factor. Parameters are shown in Table 3.        9637 1451  280
+    * Fission channel:                                            9637 1451  281
+      Double humped fission barriers were assumed.                9637 1451  282
+      Fission barrier penetrabilities were calculated with        9637 1451  283
+      Hill-Wheler formula/33/. Fission barrier parameters were    9637 1451  284
+      shown in Table 4. Transition state model was used and       9637 1451  285
+      continuum levels are assumed above the saddles. The level   9637 1451  286
+      density parameters for inner and outer saddles are shown in 9637 1451  287
+      Tables 5 and 6, respectively.                               9637 1451  288
+    * Gamma-ray strength function of Kopecky et al/34/,/35/       9637 1451  289
+      was used. The prameters are shown in Table 7.               9637 1451  290
+                                                                  9637 1451  291
+                                                                  9637 1451  292
+------------------------------------------------------------------9637 1451  293
+                              Tables                              9637 1451  294
+------------------------------------------------------------------9637 1451  295
+                                                                  9637 1451  296
+Table 1. Coupled channel calculation                              9637 1451  297
+  --------------------------------------------------              9637 1451  298
+  * rigid rotor model was applied                                 9637 1451  299
+  * coupled levels = 0,1,2,3,4 (see Table 2)                      9637 1451  300
+  * optical potential parameters /20/                             9637 1451  301
+    Volume:                                                       9637 1451  302
+      V_0       = 49.97    MeV                                    9637 1451  303
+      lambda_HF = 0.01004  1/MeV                                  9637 1451  304
+      C_viso    = 15.9     MeV                                    9637 1451  305
+      A_v       = 12.04    MeV                                    9637 1451  306
+      B_v       = 81.36    MeV                                    9637 1451  307
+      E_a       = 385      MeV                                    9637 1451  308
+      r_v       = 1.2568   fm                                     9637 1451  309
+      a_v       = 0.633    fm                                     9637 1451  310
+    Surface:                                                      9637 1451  311
+      W_0       = 17.2     MeV                                    9637 1451  312
+      B_s       = 11.19    MeV                                    9637 1451  313
+      C_s       = 0.01361  1/MeV                                  9637 1451  314
+      C_wiso    = 23.5     MeV                                    9637 1451  315
+      r_s       = 1.1803   fm                                     9637 1451  316
+      a_s       = 0.601    fm                                     9637 1451  317
+    Spin-orbit:                                                   9637 1451  318
+      V_so      = 5.75     MeV                                    9637 1451  319
+      lambda_so = 0.005    1/MeV                                  9637 1451  320
+      W_so      = -3.1     MeV                                    9637 1451  321
+      B_so      = 160      MeV                                    9637 1451  322
+      r_so      = 1.1214   fm                                     9637 1451  323
+      a_so      = 0.59     fm                                     9637 1451  324
+    Coulomb:                                                      9637 1451  325
+      C_coul    = 1.3                                             9637 1451  326
+      r_c       = 1.2452   fm                                     9637 1451  327
+      a_c       = 0.545    fm                                     9637 1451  328
+    Deformation:                                                  9637 1451  329
+      beta_2    = 0.213                                           9637 1451  330
+      beta_4    = 0.056                                           9637 1451  331
+      beta_6    = 0.0015                                          9637 1451  332
+                                                                  9637 1451  333
+  * Calculated strength function                                  9637 1451  334
+    S0= 1.01e-4 S1= 3.17e-4 R'=  9.16 fm (En=1 keV)               9637 1451  335
+  --------------------------------------------------              9637 1451  336
+                                                                  9637 1451  337
+Table 2. Level Scheme of Cm-244                                   9637 1451  338
+  -------------------                                             9637 1451  339
+  No.  Ex(MeV)   J PI                                             9637 1451  340
+  -------------------                                             9637 1451  341
+   0  0.00000   0  +  *                                           9637 1451  342
+   1  0.04297   2  +  *                                           9637 1451  343
+   2  0.14235   4  +  *                                           9637 1451  344
+   3  0.29621   6  +  *                                           9637 1451  345
+   4  0.50179   8  +  *                                           9637 1451  346
+   5  0.97000   3  -                                              9637 1451  347
+   6  0.98491   0  +                                              9637 1451  348
+   7  1.02076   2  +                                              9637 1451  349
+   8  1.03800   2  +                                              9637 1451  350
+   9  1.04019   6  +                                              9637 1451  351
+  10  1.08418   2  +                                              9637 1451  352
+  11  1.10591   2  -                                              9637 1451  353
+  -------------------                                             9637 1451  354
+  *) Coupled levels in CC calculation                             9637 1451  355
+                                                                  9637 1451  356
+Table 3. Level density parameters                                 9637 1451  357
+  --------------------------------------------------------        9637 1451  358
+  Nuclide      a*    Pair  Eshell       T      E0  Ematch         9637 1451  359
+            1/MeV     MeV     MeV     MeV     MeV     MeV         9637 1451  360
+  --------------------------------------------------------        9637 1451  361
+   Cm-245 18.8322  0.7667  1.4601  0.3623 -0.5771  2.6382         9637 1451  362
+   Cm-244 19.1414  1.5364  1.5347  0.3530  0.2436  3.3454         9637 1451  363
+   Cm-243 18.3259  0.7698  1.3577  0.3635 -0.5169  2.5698         9637 1451  364
+   Cm-242 18.6337  1.5428  1.3581  0.3517  0.3362  3.2428         9637 1451  365
+   Cm-241 18.5675  0.7730  1.0938  0.3935 -0.8080  2.9546         9637 1451  366
+  --------------------------------------------------------        9637 1451  367
+                                                                  9637 1451  368
+Table 4. Fission barrier parameters                               9637 1451  369
+  ----------------------------------------                        9637 1451  370
+  Nuclide     V_A    hw_A     V_B    hw_B                         9637 1451  371
+              MeV     MeV     MeV     MeV                         9637 1451  372
+  ----------------------------------------                        9637 1451  373
+   Cm-245   6.050   0.500   5.700   0.420                         9637 1451  374
+   Cm-244   6.100   0.900   5.100   0.600                         9637 1451  375
+   Cm-243   6.150   0.600   5.800   0.400                         9637 1451  376
+   Cm-242   6.200   1.040   4.900   0.600                         9637 1451  377
+   Cm-241   6.300   0.800   5.000   0.520                         9637 1451  378
+  ----------------------------------------                        9637 1451  379
+                                                                  9637 1451  380
+Table 5. Level density above inner saddle                         9637 1451  381
+  --------------------------------------------------------        9637 1451  382
+  Nuclide      a*    Pair  Eshell       T      E0  Ematch         9637 1451  383
+            1/MeV     MeV     MeV     MeV     MeV     MeV         9637 1451  384
+  --------------------------------------------------------        9637 1451  385
+   Cm-245 20.7155  0.8944  2.6000  0.3342 -1.6357  2.9944         9637 1451  386
+   Cm-244 20.6427  1.7925  2.6000  0.3275 -0.6303  3.7925         9637 1451  387
+   Cm-243 20.5699  0.8981  2.6000  0.3281 -1.5248  2.8981         9637 1451  388
+   Cm-242 20.4971  1.7999  2.6000  0.3288 -0.6230  3.7999         9637 1451  389
+   Cm-241 20.4242  0.9018  2.6000  0.3294 -1.5211  2.9018         9637 1451  390
+  --------------------------------------------------------        9637 1451  391
+                                                                  9637 1451  392
+Table 6. Level density above outer saddle                         9637 1451  393
+  --------------------------------------------------------        9637 1451  394
+  Nuclide      a*    Pair  Eshell       T      E0  Ematch         9637 1451  395
+            1/MeV     MeV     MeV     MeV     MeV     MeV         9637 1451  396
+  --------------------------------------------------------        9637 1451  397
+   Cm-245 20.7155  0.8944  0.7400  0.3596 -0.8163  2.8944         9637 1451  398
+   Cm-244 20.6427  1.7925  0.7000  0.3455  0.2502  3.5925         9637 1451  399
+   Cm-243 20.5699  0.8981  0.6600  0.3619 -0.8115  2.8981         9637 1451  400
+   Cm-242 20.4971  1.7999  0.6200  0.3631  0.0909  3.7999         9637 1451  401
+   Cm-241 20.4242  0.9018  0.5800  0.3643 -0.8066  2.9018         9637 1451  402
+  --------------------------------------------------------        9637 1451  403
+                                                                  9637 1451  404
+Table 7. Gamma-ray strength function for Cm-245                   9637 1451  405
+  --------------------------------------------------------        9637 1451  406
+  * E1: ER = 11.43 (MeV) EG = 2.73 (MeV) SIG = 326.80 (mb)        9637 1451  407
+        ER = 14.33 (MeV) EG = 4.20 (MeV) SIG = 424.50 (mb)        9637 1451  408
+  * M1: ER =  6.55 (MeV) EG = 4.00 (MeV) SIG =   1.45 (mb)        9637 1451  409
+  * E2: ER = 10.07 (MeV) EG = 3.17 (MeV) SIG =   7.06 (mb)        9637 1451  410
+  --------------------------------------------------------        9637 1451  411
+                                                                  9637 1451  412
+                                                                  9637 1451  413
+References                                                        9637 1451  414
+ 1) O.Iwamoto et al.: J. Nucl. Sci. Technol., 46, 510 (2009).     9637 1451  415
+ 2) O.Iwamoto: J. Nucl. Sci. Technol., 44, 687 (2007).            9637 1451  416
+ 3) R.J.Tuttle: INDC(NDS)-107/G+Special, p.29 (1979).             9637 1451  417
+ 4) G.Benedetti et al.: Nucl. Sci. Eng., 80, 379 (1982).          9637 1451  418
+ 5) R.Waldo et al.: Phys. Rev., C23, 1113 (1981).                 9637 1451  419
+ 6) K.D.Zhuravlev et al.: 1973 Kiev, Vol.4, p.57 (1973).          9637 1451  420
+ 7) T.Ohsawa: J. Nucl. Radiochem. Sci., 9, 19 (2008)              9637 1451  421
+ 8) G.Audi: Private communication (April 2009).                   9637 1451  422
+ 9) J.Katakura et al.: JAERI 1343 (2001).                         9637 1451  423
+10) T.R.England et al.: LA-11151-MS (1988).                       9637 1451  424
+11) R.Sher, C.Beck: EPRI NP-1771 (1981).                          9637 1451  425
+12) T.S.Belanova et al.: Sov. At. Energy, 39, 1020 (1975).        9637 1451  426
+13) M.S.Moore, G.A.Keyworth: Phys. Rev., C3, 1656 (1971).         9637 1451  427
+14) H.T.Maguire, Jr. et al.: Nucl. Sci. Eng., 89, 293 (1985).     9637 1451  428
+15) S.F.Mughabghab: "Atlas of Neutron Resonances," Elsevier       9637 1451  429
+    (2006).                                                       9637 1451  430
+16) R.W.Benjamin et al.: Nucl. Sci. Eng., 47, 203 (1972).         9637 1451  431
+17) K.D.Zhuravlev et al.: Sov. At. Energy, 39, 907 (1976).        9637 1451  432
+18) V.D.Gavrilov, V.A.Goncharov: Sov. At. Energy, 44, 274         9637 1451  433
+    (1978).                                                       9637 1451  434
+19) Y.Kikuchi et al.: JAERI-Data/Code 99-025 (1999) in Japanese.  9637 1451  435
+20) E.Sh.Soukhovitskii et al.: Phys. Rev. C72, 024604 (2005).     9637 1451  436
+21) W.P.Poenitz: BNL-NCS-51363, Vol.I, p.249 (1981).              9637 1451  437
+    S.Chiba, D.L.Smith: ANL/NDM-121 (1991).                       9637 1451  438
+22) E.F.Fomushkin et al.: Sov. J. Nucl. Phys., 31, 19 (1980).     9637 1451  439
+23) P.E.Vorotnikov et al.: Sov. At. Energy, 57, 504 (1985).       9637 1451  440
+24) E.F.Fomushkin et al.: 1991 Juelich, p.439 (1991).             9637 1451  441
+25) B.I.Fursov et al.: 1997 Trieste, Vol.1, p.488 (1997).         9637 1451  442
+26) T.Ohsawa: Private communication (2007).                       9637 1451  443
+27) V.V.Verbinski et al.: Phys. Rev., C7, 1173 (1973).            9637 1451  444
+28) T.Kawano, K.Shibata, JAERI-Data/Code 97-037 (1997) in         9637 1451  445
+    Japanese.                                                     9637 1451  446
+29) C.Kalbach: Phys. Rev. C33, 818 (1986).                        9637 1451  447
+30) A.J.Koning, M.C.Duijvestijn: Nucl. Phys. A744, 15 (2004).     9637 1451  448
+31) J.M.Akkermans, H.Gruppelaar: Phys. Lett. 157B, 95 (1985).     9637 1451  449
+32) P.A.Moldauer: Nucl. Phys. A344, 185 (1980).                   9637 1451  450
+33) D.L.Hill, J.A.Wheeler: Phys. Rev. 89, 1102 (1953).            9637 1451  451
+34) J.Kopecky, M.Uhl: Phys. Rev. C41, 1941 (1990).                9637 1451  452
+35) J.Kopecky, M.Uhl, R.E.Chrien: Phys. Rev. C47, 312 (1990).     9637 1451  453
+                                                                  9637 1451  454
+                                1        451        457          09637 1451  455
+                                2        151        137          09637 1451  456
+                               32        151        209          09637 1451  457
+ 0.000000+0 0.000000+0          0          0          0          09637 1  099999
+                                                                  9637 0  0
+ 9.624400+4 2.419660+2          0          0          1          09637 2151
+ 9.624400+4 1.000000+0          0          1          2          09637 2151
+ 1.000000-5 1.000000+3          1          2          0          09637 2151
+ 0.000000+0 1.120000+0          0          0          1          09637 2151
+ 2.419660+2 0.000000+0          0          0        408         689637 2151
+-6.650000+0 5.000000-1 4.760000-2 4.200000-3 3.700000-2 6.400000-39637 2151
+ 7.670000+0 5.000000-1 4.672400-2 9.600000-3 3.700000-2 1.240000-49637 2151
+ 1.677000+1 5.000000-1 4.035000-2 1.950000-3 3.700000-2 1.400000-39637 2151
+ 2.285000+1 5.000000-1 4.084000-2 8.400000-4 3.700000-2 3.000000-39637 2151
+ 3.499000+1 5.000000-1 4.440000-2 4.500000-3 3.700000-2 2.900000-39637 2151
+ 5.278000+1 5.000000-1 3.926000-2 5.600000-4 3.700000-2 1.700000-39637 2151
+ 6.799000+1 5.000000-1 4.067000-2 6.700000-4 3.700000-2 3.000000-39637 2151
+ 8.596000+1 5.000000-1 6.215000-2 2.450000-2 3.700000-2 6.500000-49637 2151
+ 9.612000+1 5.000000-1 4.584000-2 7.300000-3 3.700000-2 1.540000-39637 2151
+ 1.328000+2 5.000000-1 5.367000-2 1.550000-2 3.700000-2 1.170000-39637 2151
+ 1.391000+2 5.000000-1 4.230000-2 2.500000-3 3.700000-2 2.800000-39637 2151
+ 1.712000+2 5.000000-1 4.160000-2 3.300000-3 3.700000-2 1.300000-39637 2151
+ 1.816000+2 5.000000-1 4.910000-2 1.000000-2 3.700000-2 2.100000-39637 2151
+ 1.970000+2 5.000000-1 8.100000-2 4.300000-2 3.700000-2 1.000000-39637 2151
+ 2.098000+2 5.000000-1 7.952000-2 4.200000-2 3.700000-2 5.200000-49637 2151
+ 2.201000+2 5.000000-1 9.225000-2 5.400000-2 3.700000-2 1.250000-39637 2151
+ 2.305000+2 5.000000-1 6.740000-2 3.000000-2 3.700000-2 4.000000-49637 2151
+ 2.349000+2 5.000000-1 4.170000-2 3.800000-3 3.700000-2 9.000000-49637 2151
+ 2.427000+2 5.000000-1 4.050000-2 1.300000-3 3.700000-2 2.200000-39637 2151
+ 2.649000+2 5.000000-1 4.790000-2 1.000000-2 3.700000-2 9.000000-49637 2151
+ 2.741000+2 5.000000-1 5.360000-2 1.600000-2 3.700000-2 6.000000-49637 2151
+ 3.168000+2 5.000000-1 4.280000-2 5.500000-3 3.700000-2 3.000000-49637 2151
+ 3.295000+2 5.000000-1 4.389000-2 6.600000-3 3.700000-2 2.900000-49637 2151
+ 3.436000+2 5.000000-1 6.416000-2 2.600000-2 3.700000-2 1.160000-39637 2151
+ 3.531000+2 5.000000-1 1.392800-1 1.010000-1 3.700000-2 1.280000-39637 2151
+ 3.617000+2 5.000000-1 7.203000-2 3.400000-2 3.700000-2 1.030000-39637 2151
+ 3.644000+2 5.000000-1 4.910000-2 1.000000-2 3.700000-2 2.100000-39637 2151
+ 3.862000+2 5.000000-1 6.411000-2 2.600000-2 3.700000-2 1.110000-39637 2151
+ 3.976000+2 5.000000-1 6.066000-2 2.300000-2 3.700000-2 6.600000-49637 2151
+ 4.150000+2 5.000000-1 5.627000-2 1.900000-2 3.700000-2 2.700000-49637 2151
+ 4.206000+2 5.000000-1 1.308899-1 9.299990-2 3.700000-2 8.900000-49637 2151
+ 4.269000+2 5.000000-1 5.035000-2 1.300000-2 3.700000-2 3.500000-49637 2151
+ 4.434000+2 5.000000-1 1.238200-1 8.600000-2 3.700000-2 8.200000-49637 2151
+ 4.709000+2 5.000000-1 2.058400-1 1.670000-1 3.700000-2 1.840000-39637 2151
+ 4.889000+2 5.000000-1 5.250000-2 1.500000-2 3.700000-2 5.000000-49637 2151
+ 4.919000+2 5.000000-1 9.147000-2 5.400000-2 3.700000-2 4.700000-49637 2151
+ 5.124000+2 5.000000-1 2.372000-1 2.000000-1 3.700000-2 2.000000-49637 2151
+ 5.205000+2 5.000000-1 6.555000-2 2.600000-2 3.700000-2 2.550000-39637 2151
+ 5.964000+2 5.000000-1 5.500000-2 1.700000-2 3.700000-2 1.000000-39637 2151
+ 6.124000+2 5.000000-1 6.800000-2 3.000000-2 3.700000-2 1.000000-39637 2151
+ 6.200000+2 5.000000-1 6.480000-2 2.700000-2 3.700000-2 8.000000-49637 2151
+ 6.278000+2 5.000000-1 4.450000-2 7.000000-3 3.700000-2 5.000000-49637 2151
+ 6.379000+2 5.000000-1 4.770000-2 1.000000-2 3.700000-2 7.000000-49637 2151
+ 6.469000+2 5.000000-1 2.376800-1 2.000000-1 3.700000-2 6.800000-49637 2151
+ 6.524000+2 5.000000-1 1.181000-1 8.100000-2 3.700000-2 9.999990-59637 2151
+ 6.913000+2 5.000000-1 5.080000-2 1.300000-2 3.700000-2 8.000000-49637 2151
+ 6.953000+2 5.000000-1 5.370000-2 1.600000-2 3.700000-2 7.000000-49637 2151
+ 7.045000+2 5.000000-1 1.024999-1 6.399990-2 3.700000-2 1.500000-39637 2151
+ 7.128000+2 5.000000-1 5.720000-2 2.000000-2 3.700000-2 2.000000-49637 2151
+ 7.316000+2 5.000000-1 9.717000-2 6.000000-2 3.700000-2 1.700000-49637 2151
+ 7.460000+2 5.000000-1 4.260000-2 4.000000-3 3.700000-2 1.600000-39637 2151
+ 7.597000+2 5.000000-1 2.371700-1 2.000000-1 3.700000-2 1.700000-49637 2151
+ 7.786000+2 5.000000-1 1.107000-1 7.200000-2 3.700000-2 1.700000-39637 2151
+ 7.901000+2 5.000000-1 4.270000-2 4.000000-3 3.700000-2 1.700000-39637 2151
+ 7.975000+2 5.000000-1 4.270000-2 2.000000-3 3.700000-2 3.700000-39637 2151
+ 8.025000+2 5.000000-1 4.710000-2 7.000000-3 3.700000-2 3.100000-39637 2151
+ 8.158000+2 5.000000-1 5.100000-2 1.100000-2 3.700000-2 3.000000-39637 2151
+ 8.230000+2 5.000000-1 7.430000-2 2.800000-2 3.700000-2 9.300000-39637 2151
+ 8.463000+2 5.000000-1 4.470000-2 6.000000-3 3.700000-2 1.700000-39637 2151
+ 8.579000+2 5.000000-1 7.140000-2 3.300000-2 3.700000-2 1.400000-39637 2151
+ 8.656000+2 5.000000-1 5.610000-2 1.500000-2 3.700000-2 4.100000-39637 2151
+ 8.720000+2 5.000000-1 6.100000-2 2.300000-2 3.700000-2 1.000000-39637 2151
+ 8.849000+2 5.000000-1 9.920000-2 6.200000-2 3.700000-2 2.000000-49637 2151
+ 8.997000+2 5.000000-1 1.651400-1 1.280000-1 3.700000-2 1.400000-49637 2151
+ 9.140000+2 5.000000-1 2.371700-1 2.000000-1 3.700000-2 1.700000-49637 2151
+ 9.263000+2 5.000000-1 5.650000-2 1.900000-2 3.700000-2 5.000000-49637 2151
+ 9.469000+2 5.000000-1 7.140000-2 3.400000-2 3.700000-2 4.000000-49637 2151
+ 9.715000+2 5.000000-1 2.373500-1 2.000000-1 3.700000-2 3.500000-49637 2151
+ 1.000000+3 1.000000+5          2          2          0          09637 2151
+ 0.000000+0 9.413400-1          1          0          2          09637 2151
+ 2.419660+2 0.000000+0          0          0          1          09637 2151
+ 5.000000-1 0.000000+0          5          0        114         189637 2151
+ 0.000000+0 0.000000+0 0.000000+0 1.000000+0 0.000000+0 2.000000+09637 2151
+ 1.000000+3 1.267800+1 0.000000+0 1.158900-3 3.700000-2 2.545100-39637 2151
+ 1.500000+3 1.266500+1 0.000000+0 1.157700-3 3.700000-2 2.842700-39637 2151
+ 2.000000+3 1.265200+1 0.000000+0 1.156500-3 3.700000-2 3.044900-39637 2151
+ 3.000000+3 1.262700+1 0.000000+0 1.154200-3 3.700000-2 2.807900-39637 2151
+ 4.000000+3 1.260100+1 0.000000+0 1.151900-3 3.700000-2 3.057100-39637 2151
+ 5.000000+3 1.257600+1 0.000000+0 1.149500-3 3.700000-2 3.229600-39637 2151
+ 6.000000+3 1.255000+1 0.000000+0 1.147200-3 3.700000-2 3.235800-39637 2151
+ 8.000000+3 1.250000+1 0.000000+0 1.142600-3 3.700000-2 3.227400-39637 2151
+ 1.000000+4 1.244900+1 0.000000+0 1.138000-3 3.700000-2 3.214400-39637 2151
+ 1.500000+4 1.232400+1 0.000000+0 1.126600-3 3.700000-2 3.305600-39637 2151
+ 2.000000+4 1.220000+1 0.000000+0 1.115200-3 3.700000-2 3.379200-39637 2151
+ 2.500000+4 1.207800+1 0.000000+0 1.104000-3 3.700000-2 3.221500-39637 2151
+ 3.000000+4 1.195700+1 0.000000+0 1.093000-3 3.700000-2 3.113000-39637 2151
+ 4.000000+4 1.171800+1 0.000000+0 1.071100-3 3.700000-2 3.100700-39637 2151
+ 5.000000+4 1.148400+1 0.000000+0 1.049800-3 3.700000-2 3.231300-39637 2151
+ 6.000000+4 1.125500+1 0.000000+0 1.028800-3 3.700000-2 3.693100-39637 2151
+ 8.000000+4 1.081200+1 0.000000+0 9.882899-4 3.700000-2 4.575300-39637 2151
+ 1.000000+5 1.038600+1 0.000000+0 9.494000-4 3.700000-2 5.357500-39637 2151
+ 2.419660+2 0.000000+0          1          0          2          09637 2151
+ 5.000000-1 0.000000+0          5          0        114         189637 2151
+ 0.000000+0 0.000000+0 1.000000+0 1.000000+0 0.000000+0 2.000000+09637 2151
+ 1.000000+3 1.267800+1 0.000000+0 2.922300-3 3.700000-2 2.545100-39637 2151
+ 1.500000+3 1.266500+1 0.000000+0 2.919400-3 3.700000-2 2.842700-39637 2151
+ 2.000000+3 1.265200+1 0.000000+0 2.916400-3 3.700000-2 3.044900-39637 2151
+ 3.000000+3 1.262700+1 0.000000+0 2.910500-3 3.700000-2 2.807900-39637 2151
+ 4.000000+3 1.260100+1 0.000000+0 2.904600-3 3.700000-2 3.057100-39637 2151
+ 5.000000+3 1.257600+1 0.000000+0 2.898800-3 3.700000-2 3.229600-39637 2151
+ 6.000000+3 1.255000+1 0.000000+0 2.892900-3 3.700000-2 3.235800-39637 2151
+ 8.000000+3 1.250000+1 0.000000+0 2.881200-3 3.700000-2 3.227400-39637 2151
+ 1.000000+4 1.244900+1 0.000000+0 2.869600-3 3.700000-2 3.214400-39637 2151
+ 1.500000+4 1.232400+1 0.000000+0 2.840800-3 3.700000-2 3.305600-39637 2151
+ 2.000000+4 1.220000+1 0.000000+0 2.812200-3 3.700000-2 3.379200-39637 2151
+ 2.500000+4 1.207800+1 0.000000+0 2.784000-3 3.700000-2 3.221500-39637 2151
+ 3.000000+4 1.195700+1 0.000000+0 2.756100-3 3.700000-2 3.113000-39637 2151
+ 4.000000+4 1.171800+1 0.000000+0 2.701000-3 3.700000-2 3.100700-39637 2151
+ 5.000000+4 1.148400+1 4.844000-3 2.647200-3 3.700000-2 3.231300-39637 2151
+ 6.000000+4 1.125500+1 1.812700-2 2.594400-3 3.700000-2 3.693100-39637 2151
+ 8.000000+4 1.081200+1 5.332500-2 2.492100-3 3.700000-2 4.575300-39637 2151
+ 1.000000+5 1.038600+1 9.275100-2 2.394100-3 3.700000-2 5.357500-39637 2151
+ 1.500000+0 0.000000+0          5          0        114         189637 2151
+ 0.000000+0 0.000000+0 2.000000+0 1.000000+0 0.000000+0 2.000000+09637 2151
+ 1.000000+3 6.339000+0 0.000000+0 1.461200-3 3.700000-2 2.545100-39637 2151
+ 1.500000+3 6.332600+0 0.000000+0 1.459700-3 3.700000-2 2.842700-39637 2151
+ 2.000000+3 6.326200+0 0.000000+0 1.458200-3 3.700000-2 3.044900-39637 2151
+ 3.000000+3 6.313400+0 0.000000+0 1.455300-3 3.700000-2 2.807900-39637 2151
+ 4.000000+3 6.300700+0 0.000000+0 1.452300-3 3.700000-2 3.057100-39637 2151
+ 5.000000+3 6.287900+0 0.000000+0 1.449400-3 3.700000-2 3.229600-39637 2151
+ 6.000000+3 6.275200+0 0.000000+0 1.446500-3 3.700000-2 3.235800-39637 2151
+ 8.000000+3 6.249900+0 0.000000+0 1.440600-3 3.700000-2 3.227400-39637 2151
+ 1.000000+4 6.224700+0 0.000000+0 1.434800-3 3.700000-2 3.214400-39637 2151
+ 1.500000+4 6.162100+0 0.000000+0 1.420400-3 3.700000-2 3.305600-39637 2151
+ 2.000000+4 6.100200+0 0.000000+0 1.406100-3 3.700000-2 3.379200-39637 2151
+ 2.500000+4 6.039000+0 0.000000+0 1.392000-3 3.700000-2 3.221500-39637 2151
+ 3.000000+4 5.978300+0 0.000000+0 1.378000-3 3.700000-2 3.113000-39637 2151
+ 4.000000+4 5.859000+0 0.000000+0 1.350500-3 3.700000-2 3.100700-39637 2151
+ 5.000000+4 5.742100+0 4.844000-3 1.323600-3 3.700000-2 3.231300-39637 2151
+ 6.000000+4 5.627700+0 1.812700-2 1.297200-3 3.700000-2 3.693100-39637 2151
+ 8.000000+4 5.405900+0 5.332500-2 1.246100-3 3.700000-2 4.575300-39637 2151
+ 1.000000+5 5.193100+0 9.275100-2 1.197000-3 3.700000-2 5.357500-39637 2151
+                                                                  9637 2  0
+                                                                  9637 0  0
+                                                                  9637 0  0
+                                                                  9637 0  0
+                                                                  9637 0  0
+                                                                  9637 0  0
+                                                                  9637 0  0
+                                                                  9637 0  0
+                                                                  9637 0  0
+                                                                  9637 0  0
+ 9.624400+4 2.419660+2          0          0          1          0963732151
+ 9.624400+4 1.000000+0          0          1          1          0963732151
+ 1.000000-5 1.000000+3          1          2          0          0963732151
+ 0.000000+0 1.120000+0          0          0          1          0963732151
+ 2.419660+2 0.000000+0          0          0       1224         68963732151
+-6.650000+0 5.000000-1 4.760000-2 4.200000-3 3.700000-2 6.400000-3963732151
+ 4.422250-3 1.764000-7 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 4.096000-7 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 7.670000+0 5.000000-1 4.672400-2 9.600000-3 3.700000-2 1.240000-4963732151
+ 9.000000-4 1.600000-7 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.00000-10 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 1.677000+1 5.000000-1 4.035000-2 1.950000-3 3.700000-2 1.400000-3963732151
+ 6.400000-3 9.000000-8 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.600000-7 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 2.285000+1 5.000000-1 4.084000-2 8.400000-4 3.700000-2 3.000000-3963732151
+ 2.500000-3 1.000000-8 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.000000-6 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 3.499000+1 5.000000-1 4.440000-2 4.500000-3 3.700000-2 2.900000-3963732151
+ 2.500000-3 9.000000-8 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 3.600000-7 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 5.278000+1 5.000000-1 3.926000-2 5.600000-4 3.700000-2 1.700000-3963732151
+ 4.900000-3 6.400000-9 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 4.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 6.799000+1 5.000000-1 4.067000-2 6.700000-4 3.700000-2 3.000000-3963732151
+ 1.000000-2 4.900000-9 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 9.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 8.596000+1 5.000000-1 6.215000-2 2.450000-2 3.700000-2 6.500000-4963732151
+ 8.100000-3 5.290000-6 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 4.00000-10 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 9.612000+1 5.000000-1 4.584000-2 7.300000-3 3.700000-2 1.540000-3963732151
+ 1.210000-2 3.600000-7 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 2.500000-9 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 1.328000+2 5.000000-1 5.367000-2 1.550000-2 3.700000-2 1.170000-3963732151
+ 4.000000-2 4.000000-6 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.600000-9 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 1.391000+2 5.000000-1 4.230000-2 2.500000-3 3.700000-2 2.800000-3963732151
+ 4.000000-2 9.000000-8 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 9.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 1.712000+2 5.000000-1 4.160000-2 3.300000-3 3.700000-2 1.300000-3963732151
+ 9.000000-2 2.500000-7 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 4.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 1.816000+2 5.000000-1 4.910000-2 1.000000-2 3.700000-2 2.100000-3963732151
+ 9.000000-2 8.100000-7 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 1.970000+2 5.000000-1 8.100000-2 4.300000-2 3.700000-2 1.000000-3963732151
+ 9.000000-2 2.500000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 3.600000-9 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 2.098000+2 5.000000-1 7.952000-2 4.200000-2 3.700000-2 5.200000-4963732151
+ 9.000000-2 2.500000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.600000-9 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 2.201000+2 5.000000-1 9.225000-2 5.400000-2 3.700000-2 1.250000-3963732151
+ 1.600000-1 2.560000-4 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 2.560000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 2.305000+2 5.000000-1 6.740000-2 3.000000-2 3.700000-2 4.000000-4963732151
+ 1.600000-1 4.900000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 4.900000-9 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 2.349000+2 5.000000-1 4.170000-2 3.800000-3 3.700000-2 9.000000-4963732151
+ 5.517800-2 1.440000-6 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 9.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 2.427000+2 5.000000-1 4.050000-2 1.300000-3 3.700000-2 2.200000-3963732151
+ 5.890330-2 1.440000-6 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 4.840000-6 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 2.649000+2 5.000000-1 4.790000-2 1.000000-2 3.700000-2 9.000000-4963732151
+ 7.017200-2 2.500000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.600000-7 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 2.741000+2 5.000000-1 5.360000-2 1.600000-2 3.700000-2 6.000000-4963732151
+ 7.513080-2 4.900000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 4.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 3.168000+2 5.000000-1 4.280000-2 5.500000-3 3.700000-2 3.000000-4963732151
+ 1.003620-1 4.900000-7 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 4.900000-9 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 3.295000+2 5.000000-1 4.389000-2 6.600000-3 3.700000-2 2.900000-4963732151
+ 1.085700-1 1.960000-6 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 9.00000-10 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 3.436000+2 5.000000-1 6.416000-2 2.600000-2 3.700000-2 1.160000-3963732151
+ 1.180610-1 2.500000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 2.560000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 3.531000+2 5.000000-1 1.392800-1 1.010000-1 3.700000-2 1.280000-3963732151
+ 1.246800-1 5.290000-4 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.210000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 3.617000+2 5.000000-1 7.203000-2 3.400000-2 3.700000-2 1.030000-3963732151
+ 1.308270-1 6.400000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 2.560000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 3.644000+2 5.000000-1 4.910000-2 1.000000-2 3.700000-2 2.100000-3963732151
+ 1.327870-1 4.000000-6 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.600000-7 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 3.862000+2 5.000000-1 6.411000-2 2.600000-2 3.700000-2 1.110000-3963732151
+ 1.491500-1 9.000000-6 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 8.100000-9 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 3.976000+2 5.000000-1 6.066000-2 2.300000-2 3.700000-2 6.600000-4963732151
+ 1.580860-1 9.000000-6 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 6.400000-9 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 4.150000+2 5.000000-1 5.627000-2 1.900000-2 3.700000-2 2.700000-4963732151
+ 1.722250-1 4.000000-6 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 3.600000-9 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 4.206000+2 5.000000-1 1.308899-1 9.299990-2 3.700000-2 8.900000-4963732151
+ 1.769040-1 3.600000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 6.400000-9 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 4.269000+2 5.000000-1 5.035000-2 1.300000-2 3.700000-2 3.500000-4963732151
+ 1.822440-1 4.000000-6 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.440000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 4.434000+2 5.000000-1 1.238200-1 8.600000-2 3.700000-2 8.200000-4963732151
+ 1.966040-1 3.610000-4 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.210000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 4.709000+2 5.000000-1 2.058400-1 1.670000-1 3.700000-2 1.840000-3963732151
+ 2.217470-1 3.364000-3 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 2.560000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 4.889000+2 5.000000-1 5.250000-2 1.500000-2 3.700000-2 5.000000-4963732151
+ 2.390230-1 4.000000-6 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.690000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 4.919000+2 5.000000-1 9.147000-2 5.400000-2 3.700000-2 4.700000-4963732151
+ 2.419660-1 3.600000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 5.124000+2 5.000000-1 2.372000-1 2.000000-1 3.700000-2 2.000000-4963732151
+ 0.000000+0 4.000000-4 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.600000-9 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 5.205000+2 5.000000-1 6.555000-2 2.600000-2 3.700000-2 2.550000-3963732151
+ 2.709200-1 1.600000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 6.760000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 5.964000+2 5.000000-1 5.500000-2 1.700000-2 3.700000-2 1.000000-3963732151
+ 3.556930-1 1.600000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 2.500000-7 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 6.124000+2 5.000000-1 6.800000-2 3.000000-2 3.700000-2 1.000000-3963732151
+ 3.750340-1 4.840000-4 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 2.500000-7 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 6.200000+2 5.000000-1 6.480000-2 2.700000-2 3.700000-2 8.000000-4963732151
+ 3.844000-1 1.000000-4 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 4.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 6.278000+2 5.000000-1 4.450000-2 7.000000-3 3.700000-2 5.000000-4963732151
+ 3.941330-1 1.600000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 2.500000-7 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 6.379000+2 5.000000-1 4.770000-2 1.000000-2 3.700000-2 7.000000-4963732151
+ 4.069160-1 2.500000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.600000-7 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 6.469000+2 5.000000-1 2.376800-1 2.000000-1 3.700000-2 6.800000-4963732151
+ 4.184800-1 4.000000-2 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 6.524000+2 5.000000-1 1.181000-1 8.100000-2 3.700000-2 9.999990-5963732151
+ 4.256260-1 7.290000-4 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 9.999980-9 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 6.913000+2 5.000000-1 5.080000-2 1.300000-2 3.700000-2 8.000000-4963732151
+ 4.778960-1 2.500000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 9.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 6.953000+2 5.000000-1 5.370000-2 1.600000-2 3.700000-2 7.000000-4963732151
+ 4.834420-1 2.500000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 9.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 7.045000+2 5.000000-1 1.024999-1 6.399990-2 3.700000-2 1.500000-3963732151
+ 4.963200-1 7.840000-4 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 9.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 7.128000+2 5.000000-1 5.720000-2 2.000000-2 3.700000-2 2.000000-4963732151
+ 5.080840-1 4.900000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 4.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 7.316000+2 5.000000-1 9.717000-2 6.000000-2 3.700000-2 1.700000-4963732151
+ 5.352390-1 3.610000-4 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 8.100000-9 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 7.460000+2 5.000000-1 4.260000-2 4.000000-3 3.700000-2 1.600000-3963732151
+ 5.565160-1 4.000000-6 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.000000-6 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 7.597000+2 5.000000-1 2.371700-1 2.000000-1 3.700000-2 1.700000-4963732151
+ 5.771440-1 4.000000-2 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 7.786000+2 5.000000-1 1.107000-1 7.200000-2 3.700000-2 1.700000-3963732151
+ 6.062180-1 2.250000-4 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 4.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 7.901000+2 5.000000-1 4.270000-2 4.000000-3 3.700000-2 1.700000-3963732151
+ 6.242580-1 4.000000-6 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.000000-6 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 7.975000+2 5.000000-1 4.270000-2 2.000000-3 3.700000-2 3.700000-3963732151
+ 6.360060-1 4.000000-6 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.369000-5 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 8.025000+2 5.000000-1 4.710000-2 7.000000-3 3.700000-2 3.100000-3963732151
+ 6.440060-1 4.000000-6 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.440000-6 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 8.158000+2 5.000000-1 5.100000-2 1.100000-2 3.700000-2 3.000000-3963732151
+ 6.655300-1 4.000000-6 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 6.400000-7 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 8.230000+2 5.000000-1 7.430000-2 2.800000-2 3.700000-2 9.300000-3963732151
+ 6.773290-1 4.900000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 3.610000-6 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 8.463000+2 5.000000-1 4.470000-2 6.000000-3 3.700000-2 1.700000-3963732151
+ 7.162240-1 1.600000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.440000-6 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 8.579000+2 5.000000-1 7.140000-2 3.300000-2 3.700000-2 1.400000-3963732151
+ 7.359930-1 1.960000-4 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.600000-7 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 8.656000+2 5.000000-1 5.610000-2 1.500000-2 3.700000-2 4.100000-3963732151
+ 7.492630-1 8.100000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 4.000000-6 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 8.720000+2 5.000000-1 6.100000-2 2.300000-2 3.700000-2 1.000000-3963732151
+ 7.603840-1 8.100000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.600000-7 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 8.849000+2 5.000000-1 9.920000-2 6.200000-2 3.700000-2 2.000000-4963732151
+ 7.830480-1 8.410000-4 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 8.997000+2 5.000000-1 1.651400-1 1.280000-1 3.700000-2 1.400000-4963732151
+ 8.094600-1 3.844000-3 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 8.100000-9 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 9.140000+2 5.000000-1 2.371700-1 2.000000-1 3.700000-2 1.700000-4963732151
+ 8.353960-1 4.000000-2 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 4.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 9.263000+2 5.000000-1 5.650000-2 1.900000-2 3.700000-2 5.000000-4963732151
+ 8.580320-1 4.900000-5 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 2.500000-7 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 9.469000+2 5.000000-1 7.140000-2 3.400000-2 3.700000-2 4.000000-4963732151
+ 8.966200-1 3.600000-7 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 9.000000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+ 9.715000+2 5.000000-1 2.373500-1 2.000000-1 3.700000-2 3.500000-4963732151
+ 9.438120-1 4.000000-2 0.000000+0 1.369000-5 0.000000+0 0.000000+0963732151
+ 1.210000-8 0.000000+0 0.000000+0 0.000000+0 0.000000+0 0.000000+0963732151
+                                                                  963732  0
+                                                                  9637 0  0
+                                                                  9637 0  0
+                                                                  9637 0  0
+                                                                  9637 0  0
+                                                                     0 0  0
+                                                                    -1 0  0

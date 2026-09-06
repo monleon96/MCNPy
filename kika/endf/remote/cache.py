@@ -33,8 +33,12 @@ class ENDFCache:
         """
         self.cache_dir = cache_dir or get_cache_dir()
 
-    def _get_cache_path(self, zaid: int, library: str, particle: str = "n") -> Path:
-        """Get the cache file path for a given isotope."""
+    def _get_cache_path(self, zaid: int | str, library: str, particle: str = "n") -> Path:
+        """Get the cache file path for a given isotope.
+
+        ``zaid`` is the MCNP-style ZAID for a nuclide file; files that name no
+        nuclide (thermal scattering) use the server's filename stem instead.
+        """
         canonical_lib = normalize_library_name(library)
         return self.cache_dir / canonical_lib / particle / f"{zaid}.endf"
 
@@ -60,7 +64,7 @@ class ENDFCache:
             json.dumps(metadata, indent=2, default=str), encoding="utf-8"
         )
 
-    def get(self, zaid: int, library: str, particle: str = "n") -> Path | None:
+    def get(self, zaid: int | str, library: str, particle: str = "n") -> Path | None:
         """
         Get a cached file if it exists.
 
@@ -84,7 +88,7 @@ class ENDFCache:
         return None
 
     def put(
-        self, zaid: int, library: str, content: bytes, particle: str = "n"
+        self, zaid: int | str, library: str, content: bytes, particle: str = "n"
     ) -> Path:
         """
         Store content in the cache.
@@ -130,7 +134,7 @@ class ENDFCache:
         return cache_path
 
     def remove(
-        self, zaid: int | None = None, library: str | None = None
+        self, zaid: int | str | None = None, library: str | None = None
     ) -> int:
         """
         Remove cached files.
@@ -160,7 +164,7 @@ class ENDFCache:
                     should_remove = False
 
             if zaid is not None:
-                if info["zaid"] != zaid:
+                if str(info["zaid"]) != str(zaid):
                     should_remove = False
 
             if should_remove:

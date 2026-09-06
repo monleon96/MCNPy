@@ -9,6 +9,7 @@ from typing import List, Sequence, Optional, Tuple, Dict, Any
 from kika.cov.cross_section_covariance import CrossSectionCovariance
 from kika.cov.decomposition import (
     cap_variance_congruence,
+    flag_outlier_variance_bins,
     flag_threshold_bins,
     rescale_threshold_bins_congruence,
     cholesky_decomposition as _cholesky_decomposition,
@@ -326,13 +327,14 @@ def _pca_decomposition_sampling(
 # ----------------------------------------------------------------------
 #  Custom Exceptions
 # ----------------------------------------------------------------------
-class CovarianceFixError(Exception):
-    """Exception raised when covariance matrix cannot be fixed to meet eigenvalue threshold."""
-    pass
-
-class SoftAutofixWarning(Exception):
-    """Warning raised when soft autofix doesn't meet threshold but decomposition should still be attempted."""
-    pass
+# Defined in ``errors`` and re-exported here. This module is being retired and
+# the callers that catch these have already moved to ``multigroup_draw``; one
+# object under both names is what lets a caller that imports either one catch
+# what the other raises while the two draws coexist.
+from kika.sampling.errors import (  # noqa: E402,F401
+    CovarianceFixError,
+    SoftAutofixWarning,
+)
 
 
 # ----------------------------------------------------------------------
@@ -510,6 +512,7 @@ def generate_samples(
     # residual outliers and Higham gets a cleaner input.
     threshold_flag_info: Optional[Dict[str, Any]] = None
     threshold_rescale_info: Optional[Dict[str, Any]] = None
+    threshold_flagged: List[int] = []
     if mt_thresholds and num_groups > 0 and len(param_pairs) > 0:
         flagged_indices, targets, detection_log = flag_threshold_bins(
             cov_mat, mt_thresholds, param_pairs, num_groups, bins,
@@ -525,6 +528,7 @@ def generate_samples(
                 param_pairs=param_pairs, num_groups=num_groups, bins=bins,
                 verbose=verbose, logger=logger, label=label,
             )
+        threshold_flagged = list(flagged_indices)
         # Greppable summary metrics
         n_resc = threshold_rescale_info["n_actually_rescaled"] if threshold_rescale_info else 0
         if logger is not None:
@@ -533,7 +537,40 @@ def generate_samples(
             logger.info(f">> threshold_bins_rescaled{ctx} = {n_resc}")
 
     # ------------------------------------------------------------------
-    # 2b. Cap extreme variances (threshold-reaction spikes, etc.)
+    # 2a-bis. Statistical-outlier rescale. Flags any non-threshold bin
+    # whose σ² exceeds 1000× the per-MT median; rescales to the median
+    # via the same congruence transform as threshold bins. Catches
+    # evaluator-written placeholder variances in lumped MTs (e.g.
+    # JEFF-4.0 Mn-55 MT=856 in filler bins above ~22 MeV) before they
+    # saturate the global cap and contaminate correlation structure.
+    outlier_flag_info: Optional[Dict[str, Any]] = None
+    outlier_rescale_info: Optional[Dict[str, Any]] = None
+    if num_groups > 0 and len(param_pairs) > 0:
+        outlier_flagged, outlier_targets, outlier_log = flag_outlier_variance_bins(
+            cov_mat, param_pairs, num_groups, bins,
+            outlier_factor=1000.0,
+            skip_indices=threshold_flagged,
+            space=space, verbose=verbose, logger=logger, label=label,
+        )
+        outlier_flag_info = {
+            "n_flagged": len(outlier_flagged),
+            "detection_log": outlier_log,
+        }
+        if outlier_flagged:
+            cov_mat, outlier_rescale_info = rescale_threshold_bins_congruence(
+                cov_mat, outlier_flagged, outlier_targets,
+                param_pairs=param_pairs, num_groups=num_groups, bins=bins,
+                verbose=verbose, logger=logger, label=label,
+            )
+        n_outl = outlier_rescale_info["n_actually_rescaled"] if outlier_rescale_info else 0
+        if logger is not None:
+            ctx = f" [{label}]" if label else ""
+            logger.info(f">> outlier_bins_flagged{ctx} = {len(outlier_flagged)}")
+            logger.info(f">> outlier_bins_rescaled{ctx} = {n_outl}")
+
+    # ------------------------------------------------------------------
+    # 2b. Cap extreme variances (defense-in-depth fallback for anything
+    # that escaped 2a / 2a-bis).
     if max_relative_std is not None and max_relative_std > 0:
         if space == "log":
             max_log_var = np.log(1.0 + max_relative_std ** 2)
@@ -784,7 +821,31 @@ def generate_endf_samples(
     # 1. Get covariance matrix and parameter information
     cov_lin = mf34_cov.covariance_matrix  # (p,p)
     p = cov_lin.shape[0]
-    
+
+    # When the caller explicitly opted out of PSD repair (psd_method="none"),
+    # SVD will silently fold negative eigenvalues to their magnitude. We
+    # warn whenever the negative spectrum is non-trivial so the user can see
+    # what the sampler did with the raw matrix.
+    if str(psd_method).lower() == "none" and p > 0:
+        try:
+            eigvals = np.linalg.eigvalsh((cov_lin + cov_lin.T) * 0.5)
+            lam_min = float(eigvals.min())
+            lam_max = float(eigvals.max())
+            if lam_max > 0 and lam_min < 0 and abs(lam_min) / lam_max > 1e-8:
+                msg = (
+                    "[WARN] [DECOMPOSITION] psd_method='none': input "
+                    f"covariance has |λ_min|/λ_max = {abs(lam_min)/lam_max:.3e} "
+                    f"(λ_min={lam_min:.3e}, λ_max={lam_max:.3e}); SVD will "
+                    "fold negative eigenvalues to their magnitude. Pass "
+                    "higham_projection=True or psd_method='auto'/'higham' to repair."
+                )
+                if logger:
+                    logger.warning(msg)
+                elif verbose:
+                    print(msg)
+        except np.linalg.LinAlgError:
+            pass  # eigendecomp failed → fall through; SVD will error out cleanly
+
     # For MF34 data, create parameter triplets and simplified param_pairs for diagnostics
     param_triplets = mf34_cov._get_param_triplets()  # List of (isotope, mt, legendre) triplets
     

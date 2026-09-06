@@ -257,12 +257,17 @@ def _parse_resolved_resonances(
     cont = parse_line(lines[idx])
     idx += 1
 
+    # CONT: SPI, AP, LAD, 0, NLS, NLSC
     spi = cont.get("C1", 0.0)
     ap = cont.get("C2", 0.0)
+    lad = int(cont.get("C3", 0) or 0)
     nls = int(cont.get("C5", 0) or 0)
     nlsc = int(cont.get("C6", 0) or 0)
 
-    logger.debug(f"      LRU=1/LRF={lrf}: SPI={spi}, AP={ap}, NLS={nls}, NLSC={nlsc}")
+    logger.debug(
+        f"      LRU=1/LRF={lrf}: SPI={spi}, AP={ap}, LAD={lad}, "
+        f"NLS={nls}, NLSC={nlsc}"
+    )
 
     l_values: List[LValueBlock] = []
     for _ in range(nls):
@@ -272,6 +277,7 @@ def _parse_resolved_resonances(
     return ResolvedResonanceRange(
         spi=spi,
         ap=ap,
+        lad=lad,
         nls=nls,
         nlsc=nlsc,
         l_values=l_values,
@@ -286,10 +292,18 @@ def _parse_l_value_block(
     idx += 1
 
     awri = cont.get("C1", 0.0)
+    # C2 and C4 were dropped entirely, and the writer re-emitted both as 0.
+    # C2 is APL under LRF=3 (Reich-Moore) — the l-dependent scattering radius,
+    # 0.5002 fm on the L=1 block of JEFF-4.0 Fe-56 against AP = 0.5444 — and QX,
+    # the competitive-reaction Q, under LRF=1/2. C4 is LRX. Both are kept raw
+    # here because their meaning depends on the parent range's LRF, which this
+    # function does not see; ResolvedResonanceRange resolves it.
+    apl_or_qx = cont.get("C2", 0.0)
     l = int(cont.get("C3", 0) or 0)
+    lrx = int(cont.get("C4", 0) or 0)
     nrs = int(cont.get("C6", 0) or 0)
 
-    logger.debug(f"        l={l}, NRS={nrs}, AWRI={awri}")
+    logger.debug(f"        l={l}, NRS={nrs}, AWRI={awri}, C2={apl_or_qx}, LRX={lrx}")
 
     resonances: List[Resonance] = []
     for _ in range(nrs):
@@ -309,6 +323,8 @@ def _parse_l_value_block(
         l=l,
         num_resonances=nrs,
         resonances=resonances,
+        apl_or_qx=apl_or_qx,
+        lrx=lrx,
     ), idx
 
 
@@ -506,7 +522,14 @@ def _parse_rml(
 
     logger.debug(f"      RML: IFG={ifg}, KRM={krm}, NJS={njs}, KRL={krl}")
 
-    # Particle pairs LIST: SPI, AP, 0, 0, 12*NPP, 2*NPP
+    # Particle pairs LIST: 0.0, 0.0, NPP, 0, 12*NPP, 2*NPP
+    #
+    # NPP is taken from C6 (2*NPP) rather than from C3, which is where the
+    # manual puts it. The two agree on every real file, and deriving it from the
+    # word count means a section whose C3 disagrees with its own body is read
+    # the way its body says. C1/C2 are 0.0 for LRF=7 -- an RML scattering radius
+    # is per channel, not per range -- so `spi`/`ap` here are round-trip
+    # ballast rather than physics.
     pp_hdr = parse_line(lines[idx])
     idx += 1
     spi = pp_hdr.get("C1", 0.0)

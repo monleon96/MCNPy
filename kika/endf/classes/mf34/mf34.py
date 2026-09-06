@@ -578,6 +578,14 @@ class MF34MT(MT):
         reaction = self.number
         ang_covmat = LegendreCovariance(energy_unit=energy_unit)
 
+        # Preserve MF34 provenance so the section can be reconstructed.
+        ang_covmat.mt_metadata[(isotope, reaction)] = {
+            'za': self._za,
+            'awr': self._awr,
+            'mat': self._mat,
+            'ltt': self._ltt,
+        }
+
         # Process each subsection (MT1)
         logger.debug(f"Found {len(self._subsections)} subsections (MT1).")
         for subsec_idx, subsection in enumerate(self._subsections):
@@ -898,7 +906,7 @@ class MF34MT(MT):
 
             if l_order in coeffs_dict:
                 vals_2d = np.asarray(coeffs_dict[l_order], dtype=float).reshape(n_cells, n_sub)
-                cell_avg = np.trapz(vals_2d, sub_e_2d, axis=1) / (grid[1:] - grid[:-1])
+                cell_avg = np.trapezoid(vals_2d, sub_e_2d, axis=1) / (grid[1:] - grid[:-1])
             else:
                 cell_avg = np.zeros(n_cells, dtype=float)
 

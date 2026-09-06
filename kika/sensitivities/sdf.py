@@ -8,17 +8,117 @@ from kika.energy_grids.utils import _identify_energy_grid
 from kika.plotting import MultigroupCrossSectionPlotData, UncertaintyBand
 
 
+def sensitivity_to_plot_data(
+    pert_energies,
+    sensitivity,
+    error=None,
+    zaid: int = None,
+    mt: int = None,
+    nuclide: str = None,
+    reaction_name: str = None,
+    per_lethargy: bool = True,
+    uncertainty: bool = True,
+    sigma: float = 1.0,
+    uncertainty_style: str = 'errorbar',
+    label: str = None,
+    **styling_kwargs,
+) -> Union['MultigroupCrossSectionPlotData', Tuple['MultigroupCrossSectionPlotData', 'UncertaintyBand']]:
+    """Build PlotData objects from raw sensitivity arrays.
+
+    Shared core behind :meth:`SDFReactionData.to_plot_data`; usable directly on
+    plain arrays (e.g. the dicts returned by
+    :meth:`kika.benchmarks.database.BenchmarksDatabase.get_profile_vector`) so
+    both SDF objects and benchmark profiles render through the same code path.
+
+    Produces a :class:`~kika.plotting.MultigroupCrossSectionPlotData` step plot
+    and, when *uncertainty* is True and per-group absolute standard deviations
+    are available, an
+    :class:`~kika.plotting.UncertaintyBand`, both suitable for
+    :class:`~kika.plotting.PlotBuilder`.
+
+    :param pert_energies: Energy bin boundaries (n+1 values, ascending, MeV).
+    :param sensitivity: Per-group sensitivity coefficients (n values).
+    :param error: Per-group absolute standard deviations (n values). If ``None`` (or
+        *uncertainty* is False) no uncertainty band is returned.
+    :param zaid: ZAID, used for the plot metadata and the default label.
+    :param mt: MT reaction number, used for metadata and the default label.
+    :param nuclide: Nuclide symbol for the default label (e.g. ``"Fe-56"``).
+    :param reaction_name: Reaction label for the default label (e.g. ``"(n,el)"``).
+    :param per_lethargy: Normalise by the lethargy width of each bin (default True).
+    :param uncertainty: Return an ``UncertaintyBand`` when error data is present.
+    :param sigma: Sigma multiplier for the uncertainty band.
+    :param uncertainty_style: ``'errorbar'`` (default) or ``'band'``.
+    :param label: Legend label; auto-generated from nuclide/reaction when None.
+    :param styling_kwargs: Forwarded to ``MultigroupCrossSectionPlotData``.
+    :returns: ``MultigroupCrossSectionPlotData`` alone when no uncertainty band is
+        produced, otherwise ``(MultigroupCrossSectionPlotData, UncertaintyBand)``.
+    """
+    energies = np.asarray(pert_energies, dtype=float)
+    sens = np.asarray(sensitivity, dtype=float)
+
+    if per_lethargy:
+        lethargy = np.log(energies[1:] / energies[:-1])
+        y_vals = sens / lethargy
+    else:
+        y_vals = sens.copy()
+
+    # Step plot: n+1 x-points, repeat last y value.
+    x = energies
+    y = np.append(y_vals, y_vals[-1])
+
+    if label is None:
+        parts = [
+            nuclide or (f"ZAID {zaid}" if zaid is not None else ""),
+            reaction_name or (f"MT{mt}" if mt is not None else ""),
+        ]
+        label = " ".join(p for p in parts if p).strip() or None
+
+    plot_data = MultigroupCrossSectionPlotData(
+        x=x,
+        y=y,
+        label=label,
+        plot_type='step',
+        step_where='post',
+        zaid=zaid,
+        mt=mt,
+        energy_bins=energies,
+        **styling_kwargs,
+    )
+
+    # No uncertainty band when not requested or when no per-group errors exist
+    # (e.g. compact SDF dialect / benchmark reactions stored without errors).
+    if not uncertainty or error is None:
+        return plot_data
+
+    std = np.asarray(error, dtype=float)
+    if std.shape != sens.shape:
+        raise ValueError("sensitivity and error must have the same length")
+    if per_lethargy:
+        std = std / lethargy
+    std_extended = np.append(std, std[-1])
+
+    band = UncertaintyBand(
+        x=x,
+        y_lower=y - sigma * std_extended,
+        y_upper=y + sigma * std_extended,
+        sigma=1.0,
+        label=f"{label} ({sigma}σ)" if sigma != 1.0 else None,
+        style=uncertainty_style,
+    )
+    return plot_data, band
+
+
 @dataclass
 class SDFReactionData:
     """Container for sensitivity data for a specific nuclide and reaction.
-    
+
     :ivar zaid: ZAID of the nuclide
     :type zaid: int
     :ivar mt: MT reaction number
     :type mt: int
     :ivar sensitivity: List of sensitivity coefficients
     :type sensitivity: List[float]
-    :ivar error: List of relative errors
+    :ivar error: List of absolute one-sigma standard deviations
     :type error: List[float]
     :ivar nuclide: Nuclide symbol (calculated from ZAID)
     :type nuclide: str
@@ -33,7 +133,13 @@ class SDFReactionData:
     # reaction_name can be provided (e.g. for unknown MT numbers not in mapping);
     # if None it's inferred from MT_TO_REACTION in __post_init__.
     reaction_name: str | None = None
-    
+    # SCALE unit/region indices from the profile's first metadata line. (0, 0)
+    # denotes a region-integrated (system-total) profile; other values are
+    # per-region/per-mixture breakdowns. None for KIKA-written files without the
+    # information. Used by the benchmarks subpackage to keep only system totals.
+    unit: int | None = None
+    region: int | None = None
+
     def __post_init__(self):
         """Calculate and store nuclide symbol and reaction name after initialization.
 
@@ -43,15 +149,33 @@ class SDFReactionData:
         cause parsing to fail. When a custom ``reaction_name`` is supplied
         (e.g. by the parser reading the legacy file), it is preserved as is.
         """
+        sensitivity = np.asarray(self.sensitivity, dtype=float)
+        error = np.asarray(self.error, dtype=float)
+        if sensitivity.ndim != 1 or error.ndim != 1:
+            raise ValueError("sensitivity and error must be one-dimensional")
+        if sensitivity.size != error.size:
+            raise ValueError(
+                "sensitivity and error must have the same length "
+                f"({sensitivity.size} != {error.size})"
+            )
+        if not np.all(np.isfinite(sensitivity)):
+            raise ValueError("sensitivity values must be finite")
+        if not np.all(np.isfinite(error)):
+            raise ValueError("error values must be finite")
+        if np.any(error < 0):
+            raise ValueError("error values must be non-negative absolute standard deviations")
+        self.sensitivity = sensitivity.tolist()
+        self.error = error.tolist()
+
         # Calculate nuclide symbol
         z = self.zaid // 1000
         a = self.zaid % 1000
-        
+
         if z not in ATOMIC_NUMBER_TO_SYMBOL:
             raise KeyError(f"Atomic number {z} not found in ATOMIC_NUMBER_TO_SYMBOL dictionary")
-            
+
         self.nuclide = f"{ATOMIC_NUMBER_TO_SYMBOL[z]}-{a}"
-        
+
         # Calculate reaction name
         if self.reaction_name is None:
             if self.mt in MT_TO_REACTION:
@@ -59,13 +183,53 @@ class SDFReactionData:
             else:
                 # Fallback: preserve unknown MT with generic name
                 self.reaction_name = f"MT{self.mt}"
-    
+
+    @classmethod
+    def from_relative_errors(
+        cls,
+        *,
+        zaid: int,
+        mt: int,
+        sensitivity,
+        relative_error,
+        reaction_name: str | None = None,
+        unit: int | None = None,
+        region: int | None = None,
+    ) -> "SDFReactionData":
+        """Build reaction data from relative one-sigma errors."""
+        sensitivity_array = np.asarray(sensitivity, dtype=float)
+        relative_array = np.asarray(relative_error, dtype=float)
+        if sensitivity_array.shape != relative_array.shape:
+            raise ValueError("sensitivity and relative_error must have the same shape")
+        if not np.all(np.isfinite(relative_array)) or np.any(relative_array < 0):
+            raise ValueError("relative_error values must be finite and non-negative")
+        return cls(
+            zaid=zaid,
+            mt=mt,
+            sensitivity=sensitivity_array.tolist(),
+            error=(np.abs(sensitivity_array) * relative_array).tolist(),
+            reaction_name=reaction_name,
+            unit=unit,
+            region=region,
+        )
+
+    @property
+    def relative_error(self) -> List[float]:
+        """Return the relative standard deviation for each sensitivity group."""
+        sensitivity = np.asarray(self.sensitivity, dtype=float)
+        error = np.asarray(self.error, dtype=float)
+        relative = np.zeros_like(error)
+        nonzero = sensitivity != 0.0
+        relative[nonzero] = error[nonzero] / np.abs(sensitivity[nonzero])
+        relative[~nonzero & (error != 0.0)] = np.inf
+        return relative.tolist()
+
     def __repr__(self) -> str:
         """Returns a formatted string representation of the reaction data.
-        
+
         This method is called when the object is evaluated in interactive environments
         like Jupyter notebooks or the Python interpreter.
-        
+
         :return: Formatted string representation of the reaction data
         :rtype: str
         """
@@ -74,38 +238,38 @@ class SDFReactionData:
         header = "=" * header_width + "\n"
         header += f"{'SDF Reaction Data':^{header_width}}\n"
         header += "=" * header_width + "\n\n"
-        
+
         # Create aligned key-value pairs with consistent width
         label_width = 25  # Width for labels
-        
+
         info_lines = []
         info_lines.append(f"{'Nuclide:':{label_width}} {self.nuclide} (ZAID {self.zaid})")
         info_lines.append(f"{'Reaction:':{label_width}} {self.reaction_name} (MT {self.mt})")
         info_lines.append(f"{'Energy groups:':{label_width}} {len(self.sensitivity)}")
-        
+
         stats = "\n".join(info_lines)
-        
+
         # Data preview - show first few and last few sensitivity values
         data_preview = "\n\nSensitivity coefficients (preview):\n"
-        data_preview += "  Group      Sensitivity       Rel. Error\n"
+        data_preview += "  Group      Sensitivity        Abs. Std\n"
         data_preview += "  -----    --------------    ------------\n"
-        
+
         # Show first 3 and last 3 groups, if available
         n_groups = len(self.sensitivity)
         preview_count = min(3, n_groups)
-        
+
         for i in range(preview_count):
             data_preview += f"  {i+1:<5d}    {self.sensitivity[i]:14.6e}    {self.error[i]:12.6e}\n"
-            
+
         # Add ellipsis if there are more than 6 groups
         if n_groups > 6:
             data_preview += "  ...\n"
-            
+
         # Show last 3 groups if there are more than 3 groups
         if n_groups > 3:
             for i in range(max(preview_count, n_groups-3), n_groups):
                 data_preview += f"  {i+1:<5d}    {self.sensitivity[i]:14.6e}    {self.error[i]:12.6e}\n"
-        
+
         return header + stats + data_preview
 
     def to_plot_data(
@@ -146,60 +310,27 @@ class SDFReactionData:
             or ``(MultigroupCrossSectionPlotData, UncertaintyBand)`` when *uncertainty=True*.
         :rtype: MultigroupCrossSectionPlotData or Tuple[MultigroupCrossSectionPlotData, UncertaintyBand]
         """
-        energies = np.asarray(pert_energies, dtype=float)
-        sens = np.asarray(self.sensitivity, dtype=float)
-        n = len(sens)
-
-        if per_lethargy:
-            lethargy = np.log(energies[1:] / energies[:-1])
-            y_vals = sens / lethargy
-        else:
-            y_vals = sens.copy()
-
-        # Step plot: n+1 x-points, repeat last y value
-        x = energies
-        y = np.append(y_vals, y_vals[-1])
-
-        if label is None:
-            label = f"{self.nuclide} {self.reaction_name}"
-
-        plot_data = MultigroupCrossSectionPlotData(
-            x=x,
-            y=y,
-            label=label,
-            plot_type='step',
-            step_where='post',
+        return sensitivity_to_plot_data(
+            pert_energies,
+            self.sensitivity,
+            error=self.error,
             zaid=self.zaid,
             mt=self.mt,
-            energy_bins=energies,
+            nuclide=self.nuclide,
+            reaction_name=self.reaction_name,
+            per_lethargy=per_lethargy,
+            uncertainty=uncertainty,
+            sigma=sigma,
+            uncertainty_style=uncertainty_style,
+            label=label,
             **styling_kwargs,
         )
-
-        if not uncertainty:
-            return plot_data
-
-        # Build UncertaintyBand from relative errors.
-        # self.error stores relative errors (fractional) on the raw sensitivity.
-        # We need relative errors on the plotted y values. Since per-lethargy
-        # divides by a constant per bin, the *relative* error is unchanged.
-        rel_err = np.asarray(self.error, dtype=float)
-        rel_err_extended = np.append(rel_err, rel_err[-1])
-
-        band = UncertaintyBand(
-            x=x,
-            relative_uncertainty=rel_err_extended,
-            sigma=sigma,
-            label=f"{label} ({sigma}\u03c3)" if sigma != 1.0 else None,
-            style=uncertainty_style,
-        )
-
-        return plot_data, band
 
 
 @dataclass
 class SDFData:
     """Container for SDF data.
-    
+
     :ivar title: Title of the SDF dataset
     :type title: str
     :ivar energy: Energy value or label
@@ -208,7 +339,7 @@ class SDFData:
     :type pert_energies: List[float]
     :ivar r0: Unperturbed tally result (reference response value)
     :type r0: float
-    :ivar e0: Relative error of the unperturbed tally result (σ/μ)
+    :ivar e0: Absolute one-sigma uncertainty of the unperturbed tally result
     :type e0: float
     :ivar data: List of reaction-specific sensitivity data
     :type data: List[SDFReactionData]
@@ -220,12 +351,89 @@ class SDFData:
     e0: float = None
     data: List[SDFReactionData] = field(default_factory=list)
 
+    @property
+    def relative_response_error(self) -> float | None:
+        """Return the relative response uncertainty ``e0 / abs(r0)``."""
+        if self.e0 is None:
+            return None
+        if self.r0 in (None, 0):
+            return 0.0 if self.e0 == 0 else float("inf")
+        return abs(self.e0 / self.r0)
+
+    def __post_init__(self) -> None:
+        self._validate()
+
+    def _validate(self) -> None:
+        energies = np.asarray(self.pert_energies, dtype=float)
+        if energies.ndim != 1 or energies.size < 2:
+            raise ValueError("pert_energies must be a one-dimensional boundary grid")
+        if not np.all(np.isfinite(energies)) or np.any(energies < 0):
+            raise ValueError("pert_energies must contain finite non-negative values")
+        differences = np.diff(energies)
+        if not (np.all(differences > 0) or np.all(differences < 0)):
+            raise ValueError("pert_energies must be strictly monotonic")
+        ngroups = energies.size - 1
+        for reaction in self.data:
+            if len(reaction.sensitivity) != ngroups:
+                raise ValueError(
+                    f"ZAID={reaction.zaid} MT={reaction.mt} has "
+                    f"{len(reaction.sensitivity)} groups; expected {ngroups}"
+                )
+        if self.r0 is not None and not np.isfinite(self.r0):
+            raise ValueError("r0 must be finite")
+        if self.e0 is not None and not np.isfinite(self.e0):
+            raise ValueError("e0 must be finite")
+        if self.e0 is not None and self.e0 < 0:
+            raise ValueError("e0 must be a non-negative absolute standard deviation")
+
+    def to_sensitivity_profile(self) -> "SensitivityProfile":
+        """Return the system-total data as a format-neutral sensitivity profile.
+
+        SDF entries with non-zero ``unit`` or ``region`` identify auxiliary
+        mixture/region profiles and are deliberately excluded from UQ vectors.
+        """
+        from kika.sensitivities.profile import SensitivityProfile, SensitivityReaction
+
+        energies = np.asarray(self.pert_energies, dtype=float)
+        reverse = bool(energies[0] > energies[-1])
+        if reverse:
+            energies = energies[::-1]
+
+        reactions = []
+        for reaction in self.data:
+            if (reaction.unit or 0) != 0 or (reaction.region or 0) != 0:
+                continue
+            sensitivity = np.asarray(reaction.sensitivity, dtype=float)
+            uncertainty = np.asarray(reaction.error, dtype=float)
+            if reverse:
+                sensitivity = sensitivity[::-1]
+                uncertainty = uncertainty[::-1]
+            reactions.append(
+                SensitivityReaction(
+                    zaid=reaction.zaid,
+                    mt=reaction.mt,
+                    sensitivity=sensitivity,
+                    uncertainty=uncertainty,
+                    label=reaction.reaction_name,
+                )
+            )
+
+        return SensitivityProfile(
+            energy_grid=energies,
+            energy_unit="MeV",
+            reactions=tuple(reactions),
+            response=self.r0,
+            response_uncertainty=self.e0,
+            label=self.title,
+            metadata={"source": "SDFData", "energy_label": self.energy},
+        )
+
     def __repr__(self) -> str:
         """Returns a detailed formatted string representation of the SDF data.
-        
+
         This method is called when the object is evaluated in interactive environments
         like Jupyter notebooks or the Python interpreter.
-        
+
         :return: Formatted string representation of the SDF data
         :rtype: str
         """
@@ -235,47 +443,47 @@ class SDFData:
         header += f"{'SDF Data: ' + self.title:^{header_width}}\n"
         header += f"{'Energy range: ' + self.energy:^{header_width}}\n"
         header += "=" * header_width + "\n\n"
-        
+
         # Create aligned key-value pairs with consistent width
         label_width = 25  # Width for labels
-        
+
         # Basic information section
         info_lines = []
-        info_lines.append(f"{'Response value:':{label_width}} {self.r0:.6e} ± {self.e0*100:.2f}% (rel)")
+        info_lines.append(f"{'Response value:':{label_width}} {self.r0:.6e} ± {self.e0:.6e} (abs. std)")
         info_lines.append(f"{'Energy groups:':{label_width}} {len(self.pert_energies) - 1}")
-        
+
         # Add energy grid structure identification
         grid_name = _identify_energy_grid(self.pert_energies)
         if grid_name:
             info_lines.append(f"{'Energy structure:':{label_width}} {grid_name}")
-            
+
         info_lines.append(f"{'Sensitivity profiles:':{label_width}} {len(self.data)}")
-        
+
         # Count unique nuclides
         nuclides = {react.nuclide for react in self.data}
         info_lines.append(f"{'Unique nuclides:':{label_width}} {len(nuclides)}")
-        
+
         stats = "\n".join(info_lines)
-        
+
         # Energy grid preview
         energy_preview = "\n\nEnergy grid (preview):"
         energy_grid = "  " + ", ".join(f"{e:.6e}" for e in self.pert_energies[:3])
-        
+
         if len(self.pert_energies) > 6:
-            energy_grid += ", ... , " 
+            energy_grid += ", ... , "
             energy_grid += ", ".join(f"{e:.6e}" for e in self.pert_energies[-3:])
         elif len(self.pert_energies) > 3:
             energy_grid += ", " + ", ".join(f"{e:.6e}" for e in self.pert_energies[3:])
-            
+
         energy_preview += "\n  " + energy_grid
-        
+
         # Data summary - most important nuclides and reactions with indices
         data_summary = "\n\nNuclides and reactions (with access indices):\n"
-        
+
         # Group by nuclide
         nuclide_reactions = {}
         nuclide_indices = {}
-        
+
         # Store all reaction data with their indices
         for idx, react in enumerate(self.data):
             if react.nuclide not in nuclide_reactions:
@@ -283,23 +491,23 @@ class SDFData:
                 nuclide_indices[react.nuclide] = []
             nuclide_reactions[react.nuclide].append((react.reaction_name, react.mt))
             nuclide_indices[react.nuclide].append(idx)
-        
+
         # Determine width for consistent alignment
         reaction_width = 30  # Base width for reaction name + MT
-        
+
         # Show data for each nuclide (limit to first 5 nuclides)
         for i, nuclide in enumerate(sorted(nuclide_reactions.keys())):
             if i >= 5:
                 data_summary += f"\n  ... ({len(nuclides) - 5} more nuclides) ...\n"
                 break
-                
+
             data_summary += f"\n  {nuclide}:\n"
             reactions = nuclide_reactions[nuclide]
             indices = nuclide_indices[nuclide]
-            
+
             # Sort by MT number but keep track of original indices
             sorted_data = sorted(zip(reactions, indices), key=lambda x: x[0][1])
-            
+
             for j, ((name, mt), idx) in enumerate(sorted_data):
                 if j >= 10:  # Limit to 10 reactions per nuclide
                     data_summary += f"    ... ({len(reactions) - 10} more reactions) ...\n"
@@ -307,7 +515,7 @@ class SDFData:
                 # Format the reaction info with consistent alignment for the "access with" part
                 reaction_info = f"{name} (MT={mt})"
                 data_summary += f"    {reaction_info:{reaction_width}} access with .data[{idx}]\n"
-        
+
         # Footer with available methods
         footer = "\n\nAvailable methods:\n"
         footer += "- .to_plot_data() - Get PlotData for use with PlotBuilder\n"
@@ -413,7 +621,7 @@ class SDFData:
         :param r0: Override response value. If *None*, uses the common value
             when all inputs agree, otherwise raises ``ValueError``.
         :type r0: Optional[float]
-        :param e0: Override relative error. If *None*, uses the common value
+        :param e0: Override absolute response uncertainty. If *None*, uses the common value
             when all inputs agree, otherwise raises ``ValueError``.
         :type e0: Optional[float]
         :returns: A new merged SDFData instance.
@@ -511,7 +719,7 @@ class SDFData:
         :type energy: Optional[str]
         :param r0: Override response value (same as in :meth:`merge`).
         :type r0: Optional[float]
-        :param e0: Override relative error (same as in :meth:`merge`).
+        :param e0: Override absolute response uncertainty (same as in :meth:`merge`).
         :type e0: Optional[float]
         :returns: ``(True, "")`` if the merge would succeed, or
             ``(False, reason)`` with a human-readable explanation otherwise.
@@ -537,67 +745,70 @@ class SDFData:
 
     def write_file(self, output_dir: Optional[str] = None):
         """
-        Write the SDF data to a file using the legacy format.
-        
+        Write the SDF data using the standard SCALE uncertainty convention.
+
         :param output_dir: Directory where the SDF file will be written. If None, uses current directory.
         :type output_dir: Optional[str]
         """
+        self._validate()
         # Use current directory if output_dir is not provided
         if output_dir is None:
             output_dir = os.getcwd()
-        
+
         # Ensure directory exists
         os.makedirs(output_dir, exist_ok=True)
-        
+
         # Create a clean filename from title and energy
         filename = f"{self.title}_{self.energy}.sdf"
         # Ensure filename is valid by removing problematic characters
         filename = filename.replace(' ', '_').replace('/', '_').replace('\\', '_')
-        
+
         # Create full path to file
         filepath = os.path.join(output_dir, filename)
-        
+
         ngroups = len(self.pert_energies) - 1
         nprofiles = len(self.data)
-        
+        n_integrated = sum((reaction.unit or 0, reaction.region or 0) == (0, 0) for reaction in self.data)
+
         # Sort the data by ZAID and then by MT number
         sorted_data = sorted(self.data, key=lambda x: (x.zaid, x.mt))
-        
+
         with open(filepath, 'w', encoding='utf-8') as file:
             # Write header
-            file.write(f"{self.title} MCNP to SCALE sdf {ngroups}gr\n")
+            file.write(f"{self.title}\n")
             file.write(f"       {ngroups} number of neutron groups\n")
-            file.write(f"       {nprofiles}  number of sensitivity profiles         {nprofiles} are region integrated\n")
-            
+            file.write(f"       {nprofiles}  number of sensitivity profiles         {n_integrated} are region integrated\n")
+
             # Ensure r0 and e0 are properly formatted
             r0_value = 0.0 if self.r0 is None else self.r0
             e0_value = 0.0 if self.e0 is None else self.e0
             file.write(f"  {r0_value:.6E} +/-   {e0_value:.6E}\n")
-            
+
             # Write energy grid data - reversed to be in descending order
             file.write("energy boundaries:\n")
             energy_lines = ""
             # Create reversed list of energies for writing in descending order
-            descending_energies = list(reversed(self.pert_energies))
+            # SCALE SDF energy boundaries are written in eV; KIKA stores MeV.
+            descending_energies = [energy * 1.0e6 for energy in reversed(self.pert_energies)]
             for idx, energy in enumerate(descending_energies):
                 if idx > 0 and idx % 5 == 0:
                     energy_lines += "\n"
                 energy_lines += f"{energy: >14.6E}"
             energy_lines += "\n"
             file.write(energy_lines)
-            
+
             # Write sensitivity coefficient and standard deviations data for each reaction
             # using the sorted data
             for reaction in sorted_data:
                 file.write(self._format_reaction_data(reaction))
-        
+
         # Add print message indicating where the file was saved
         print(f"SDF file saved successfully: {filepath}")
 
     def _format_reaction_data(self, reaction: SDFReactionData) -> str:
         """
         Format a single SDFReactionData block to match the legacy file structure.
-        
+
         :param reaction: The reaction data to format
         :type reaction: SDFReactionData
         :returns: Formatted string for the reaction data block
@@ -606,55 +817,69 @@ class SDFData:
         # Use the properties to get the nuclide symbol and reaction name
         form = reaction.nuclide
         reac = reaction.reaction_name
-        
+
         # Format the header line for this reaction
         block = f"{form:<13}{reac:<17}{reaction.zaid:>5}{reaction.mt:>7}\n"
-        block += "      0      0\n"
+        unit = int(reaction.unit or 0)
+        region = int(reaction.region or 0)
+        block += f"{unit:7d}{region:7d}\n"
         block += "  0.000000E+00  0.000000E+00      0      0\n"
-        
+
         # Calculate the 5 scalar values according to SDF specification
         # 1. Energy-integrated sensitivity coefficient (sum of groupwise sensitivities)
         s_int = sum(reaction.sensitivity)
-        
-        # 2. Standard deviation of S_int (error propagation for sum)
-        # For absolute errors: σ_total = sqrt(Σ σ_i²)
-        s_int_std = (sum(err**2 for err in reaction.error))**0.5
-        
+
+        # 2. Standard deviation of S_int (error propagation for sum).
+        # reaction.error stores absolute per-group standard deviations.
+
+        s_int_std = sum(err**2 for err in reaction.error) ** 0.5
+
         # 3. Sum of absolute values of groupwise sensitivities
         sum_abs = sum(abs(s) for s in reaction.sensitivity)
-        
-        # 4. "osc" = sum of sensitivities with sign opposite to S_int
-        if s_int == 0:
-            # If S_int is zero, all terms contribute to oscillation
-            osc = sum_abs
+
+        # 4. "osc" = sum of sensitivities with sign opposite to S_int.
+        # Strict comparisons keep zero-valued groups (and their uncertainty)
+        # out of the oscillating subset.
+        if s_int > 0.0:
+            oscillates = [s < 0.0 for s in reaction.sensitivity]
+        elif s_int < 0.0:
+            oscillates = [s > 0.0 for s in reaction.sensitivity]
         else:
-            # Collect terms with opposite sign to S_int
-            s_int_sign = 1 if s_int >= 0 else -1
-            osc = sum(s for s in reaction.sensitivity if (s >= 0) != (s_int_sign > 0))
-        
-        # 5. Standard deviation of "osc" (error propagation for the oscillating terms)
-        if s_int == 0:
-            # If S_int is zero, all errors contribute to osc uncertainty
-            osc_std = s_int_std
-        else:
-            # Only include errors for terms that contribute to osc
-            s_int_sign = 1 if s_int >= 0 else -1
-            osc_std = (sum(err**2 for s, err in zip(reaction.sensitivity, reaction.error) 
-                          if (s >= 0) != (s_int_sign > 0)))**0.5
-        
+            # SCALE does not define an opposite sign for an exactly zero
+            # integral. Select the negative side deterministically, matching
+            # the signed OSC representation used by ordinary profiles.
+            use_negative = any(s < 0.0 for s in reaction.sensitivity)
+            oscillates = [
+                s < 0.0 if use_negative else s > 0.0
+                for s in reaction.sensitivity
+            ]
+        osc = sum(
+            s for s, include in zip(reaction.sensitivity, oscillates)
+            if include
+        )
+
+        # 5. Standard deviation of OSC (quadrature over the same subset).
+        osc_std = (
+            sum(
+                err**2
+                for err, include in zip(reaction.error, oscillates)
+                if include
+            )
+        )**0.5
+
         block += f"{s_int:>14.6E}{s_int_std:>14.6E}{sum_abs:>14.6E}{osc:>14.6E}{osc_std:>14.6E}\n"
-        
+
         # Reverse sensitivity and error arrays to match the descending energy order
         reversed_sensitivity = list(reversed(reaction.sensitivity))
         reversed_error = list(reversed(reaction.error))
-        
+
         # Write sensitivity coefficients with 5 per line (in reversed order)
         for idx, sens in enumerate(reversed_sensitivity):
             if idx > 0 and idx % 5 == 0:
                 block += "\n"
             block += f"{sens:>14.6E}"
         block += "\n"
-        
+
         # Write standard deviations with 5 per line (in reversed order)
         for idx, err in enumerate(reversed_error):
             if idx > 0 and idx % 5 == 0:
@@ -665,10 +890,10 @@ class SDFData:
 
     def group_inelastic_reactions(self, replace: bool = False, remove_originals: bool = True) -> None:
         """Group inelastic reactions (MT 51-91) into MT 4 for each nuclide.
-        
-        This method combines all inelastic scattering reactions (MT 51-91) into 
+
+        This method combines all inelastic scattering reactions (MT 51-91) into
         the total inelastic scattering reaction (MT 4) for each nuclide.
-        
+
         :param replace: If True, replace existing MT 4 data if present.
                         If False, raise an error when MT 4 is already present.
         :type replace: bool, optional
@@ -683,7 +908,7 @@ class SDFData:
             if react.zaid not in nuclide_reactions:
                 nuclide_reactions[react.zaid] = []
             nuclide_reactions[react.zaid].append(react)
-        
+
         # Process each nuclide
         for zaid, reactions in nuclide_reactions.items():
             # Find MT 4 if it exists
@@ -694,14 +919,14 @@ class SDFData:
                     mt4_exists = True
                     mt4_reaction = react
                     break
-            
+
             # Find inelastic reactions (MT 51-91)
             inelastic_reactions = [r for r in reactions if 51 <= r.mt <= 91]
-            
+
             # Skip if no inelastic reactions found for this nuclide
             if not inelastic_reactions:
                 continue
-            
+
             # Handle existing MT 4 reaction
             if mt4_exists and not replace:
                 # Calculate the nuclide symbol for more informative error message
@@ -709,36 +934,24 @@ class SDFData:
                 a = zaid % 1000
                 symbol = ATOMIC_NUMBER_TO_SYMBOL.get(z, f"unknown_{z}")
                 nuclide = f"{symbol}-{a}"
-                
+
                 raise ValueError(
                     f"MT 4 already exists for nuclide {nuclide} (ZAID {zaid}). "
                     f"Set replace=True to overwrite."
                 )
-            
-            # Sum sensitivity and error values from all inelastic reactions
+
+            # Sum sensitivities and combine absolute standard deviations.
             n_groups = len(inelastic_reactions[0].sensitivity)
             summed_sensitivity = [0.0] * n_groups
-            summed_error_squared = [0.0] * n_groups  
-            
+            summed_error_squared = [0.0] * n_groups
+
             for react in inelastic_reactions:
                 for i in range(n_groups):
                     summed_sensitivity[i] += react.sensitivity[i]
-                    # Convert relative error to absolute error (multiply by sensitivity), then square
-                    absolute_error = react.sensitivity[i] * react.error[i]
-                    summed_error_squared[i] += absolute_error ** 2 
-            
-            # Take square root of summed squared errors and convert back to relative errors
-            summed_error = []
-            for i in range(n_groups):
-                absolute_error = summed_error_squared[i] ** 0.5
-                # Convert back to relative error (divide by sensitivity)
-                # Handle potential division by zero
-                if summed_sensitivity[i] != 0:
-                    relative_error = absolute_error / abs(summed_sensitivity[i])
-                else:
-                    relative_error = 0.0
-                summed_error.append(relative_error)
-            
+                    summed_error_squared[i] += react.error[i] ** 2
+
+            summed_error = [value ** 0.5 for value in summed_error_squared]
+
             # Create or update MT 4 reaction
             if mt4_exists:
                 mt4_reaction.sensitivity = summed_sensitivity
@@ -753,11 +966,11 @@ class SDFData:
                 )
                 self.data.append(new_mt4)
                 print(f"Created MT 4 for {new_mt4.nuclide} (ZAID {zaid})")
-            
+
             # Remove original MT 51-91 reactions if requested
             if remove_originals:
                 mt_values = [r.mt for r in inelastic_reactions]
                 print(f"Removed MT {', '.join(map(str, mt_values))} for {inelastic_reactions[0].nuclide} (ZAID {zaid})")
-                
+
                 # Remove the reactions from self.data
                 self.data = [r for r in self.data if not (r.zaid == zaid and 51 <= r.mt <= 91)]

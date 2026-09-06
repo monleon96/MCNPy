@@ -1,0 +1,1155 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<reactionSuite projectile="n" target="Ta182" evaluation="ENDF/B-8.1" format="2.0" projectileFrame="lab" interaction="nuclear">
+  <styles>
+    <evaluated label="eval" date="1971-04-01" library="ENDF/B" version="8.1.1">
+      <documentation>
+        <authors>
+          <author name="J.Otter,C.Dunford and E.Ottewitte" />
+        </authors>
+        <dates>
+          <date value="1971-04-01" dateType="created" />
+        </dates>
+        <title>ENDF-6 file from ENDF/B version 8.1.1 translated to GNDS by FUDGE.</title>
+        <body>See the endfCompatible section.</body>
+        <endfCompatible> 73-Ta-182 AI         EVAL-APR71 J.Otter,C.Dunford and E.Ottewitte
+ AI-AEC-12990 (1971)  DIST-AUG24 REV1-AUG23            20240830
+---- ENDF/B-VIII.1    MATERIAL 7331         REVISION 1
+----- INCIDENT-NEUTRON DATA
+------ ENDF-6
+
+****************************************************************
+Missing exit distributions imported from TENDL2019
+[trimmed]</endfCompatible>
+      </documentation>
+      <temperature value="0" unit="K" />
+      <projectileEnergyDomain min="1e-5" max="2e7" unit="eV" />
+    </evaluated>
+    <crossSectionReconstructed label="recon" derivedFrom="eval" date="2016-11-06" />
+  </styles>
+  <PoPs name="protare_internal" version="1.0" format="2.0">
+    <aliases>
+      <alias id="a" pid="he4" />
+    </aliases>
+    <gaugeBosons>
+      <gaugeBoson id="photon">
+        <mass>
+          <double label="eval" value="0." unit="amu" />
+        </mass>
+        <spin>
+          <fraction label="eval" value="1" unit="hbar" />
+        </spin>
+        <parity>
+          <integer label="eval" value="1" />
+        </parity>
+        <charge>
+          <integer label="eval" value="0" unit="e" />
+        </charge>
+        <halflife>
+          <string label="eval" value="stable" unit="s" />
+        </halflife>
+      </gaugeBoson>
+    </gaugeBosons>
+    <baryons>
+      <baryon id="n">
+        <mass>
+          <double label="eval" value="1.00866491574" unit="amu" />
+        </mass>
+        <spin>
+          <fraction label="eval" value="1/2" unit="hbar" />
+        </spin>
+        <parity>
+          <integer label="eval" value="1" />
+        </parity>
+        <charge>
+          <integer label="eval" value="0" unit="e" />
+        </charge>
+        <halflife>
+          <double label="eval" value="881.5" unit="s" />
+        </halflife>
+      </baryon>
+    </baryons>
+    <chemicalElements>
+      <chemicalElement symbol="Ta" Z="73" name="Tantalum">
+        <isotopes>
+          <isotope symbol="Ta182" A="182">
+            <nuclides>
+              <nuclide id="Ta182">
+                <mass>
+                  <double label="eval" value="181.950038156" unit="amu" />
+                </mass>
+                <charge>
+                  <integer label="eval" value="0" unit="e" />
+                </charge>
+                <nucleus id="ta182" index="0">
+                  <spin>
+                    <fraction label="eval" value="3" unit="hbar" />
+                  </spin>
+                  <charge>
+                    <integer label="eval" value="73" unit="e" />
+                  </charge>
+                  <halflife>
+                    <string label="eval" value="unstable" unit="s" />
+                  </halflife>
+                  <energy>
+                    <double label="eval" value="0." unit="eV" />
+                  </energy>
+                </nucleus>
+              </nuclide>
+            </nuclides>
+          </isotope>
+          <isotope symbol="Ta183" A="183">
+            <nuclides>
+              <nuclide id="Ta183">
+                <charge>
+                  <integer label="eval" value="0" unit="e" />
+                </charge>
+                <nucleus id="ta183" index="0">
+                  <charge>
+                    <integer label="eval" value="73" unit="e" />
+                  </charge>
+                  <energy>
+                    <double label="eval" value="0." unit="eV" />
+                  </energy>
+                </nucleus>
+              </nuclide>
+            </nuclides>
+          </isotope>
+        </isotopes>
+      </chemicalElement>
+    </chemicalElements>
+  </PoPs>
+  <resonances>
+    <scatteringRadius>
+      <constant1d label="eval" value="8.1271" domainMin="1e-5" domainMax="1e4">
+        <axes>
+          <axis index="1" label="energy_in" unit="eV" />
+          <axis index="0" label="radius" unit="fm" />
+        </axes>
+      </constant1d>
+    </scatteringRadius>
+    <resolved domainMin="1e-5" domainMax="35" domainUnit="eV">
+      <BreitWigner label="eval" approximation="MultiLevel" calculateChannelRadius="true">
+        <resonanceParameters>
+          <table rows="10" columns="6">
+            <columnHeaders>
+              <column index="0" name="energy" unit="eV" />
+              <column index="1" name="L" unit="" />
+              <column index="2" name="J" unit="" />
+              <column index="3" name="totalWidth" unit="eV" />
+              <column index="4" name="neutronWidth" unit="eV" />
+              <column index="5" name="captureWidth" unit="eV" />
+            </columnHeaders>
+            <data>
+             
+                     -20   0   2.5        0.697           0.63          0.067
+                   0.147   0   3.5     0.067315       3.151e-4          0.067
+                    1.82   0   2.5     0.068354      1.3537e-3          0.067
+                    5.98   0   3.5     0.067406       4.062e-4          0.067
+                   12.93   0   2.5     0.067671        6.71e-4          0.067
+                    21.5   0   3.5      0.06842      1.4201e-3          0.067
+                   26.66   0   2.5     0.070915      3.9153e-3          0.067
+                    29.4   0   3.5     0.068328      1.3282e-3          0.067
+                   32.97   0   2.5     0.080398       0.013398          0.067
+                   34.65   0   2.5        0.094          0.027          0.067</data>
+          </table>
+        </resonanceParameters>
+      </BreitWigner>
+    </resolved>
+    <unresolved domainMin="35" domainMax="1e4" domainUnit="eV">
+      <tabulatedWidths label="eval" approximation="SingleLevelBreitWigner">
+        <resonanceReactions>
+          <resonanceReaction label="n + Ta182">
+            <link href="/reactionSuite/reactions/reaction[@label='n + Ta182']" />
+          </resonanceReaction>
+          <resonanceReaction label="Ta183 + photon [inclusive]">
+            <link href="/reactionSuite/reactions/reaction[@label='Ta183 + photon [inclusive]']" />
+          </resonanceReaction>
+        </resonanceReactions>
+        <Ls>
+          <L label="0" value="0">
+            <Js>
+              <J label="0" value="5/2">
+                <levelSpacing>
+                  <XYs1d>
+                    <axes>
+                      <axis index="1" label="energy_in" unit="eV" />
+                      <axis index="0" label="levelSpacing" unit="eV" />
+                    </axes>
+                    <values>35 7.697 50 7.697 70 7.697 1e2 7.697 2e2 7.697 3e2 7.697 5e2 7.697 7e2 7.697 1e3 7.697 2e3 7.697 3e3 7.697 5e3 7.697 7e3 7.697 1e4 7.697</values>
+                  </XYs1d>
+                </levelSpacing>
+                <widths>
+                  <width label="0" resonanceReaction="n + Ta182" degreesOfFreedom="1">
+                    <XYs1d>
+                      <axes>
+                        <axis index="1" label="energy_in" unit="eV" />
+                        <axis index="0" label="average width" unit="eV" />
+                      </axes>
+                      <values>35 1.379e-3 50 1.379e-3 70 1.379e-3 1e2 1.379e-3 2e2 1.379e-3 3e2 1.379e-3 5e2 1.379e-3 7e2 1.379e-3 1e3 1.379e-3 2e3 1.379e-3 3e3 1.379e-3 5e3 1.379e-3 7e3 1.379e-3 1e4 1.379e-3</values>
+                    </XYs1d>
+                  </width>
+                  <width label="1" resonanceReaction="Ta183 + photon [inclusive]" degreesOfFreedom="0">
+                    <XYs1d>
+                      <axes>
+                        <axis index="1" label="energy_in" unit="eV" />
+                        <axis index="0" label="average width" unit="eV" />
+                      </axes>
+                      <values>35 0.067 50 0.067 70 0.067 1e2 0.067 2e2 0.067 3e2 0.067 5e2 0.067 7e2 0.067 1e3 0.067 2e3 0.067 3e3 0.067 5e3 0.067 7e3 0.067 1e4 0.067</values>
+                    </XYs1d>
+                  </width>
+                </widths>
+              </J>
+              <J label="1" value="7/2">
+                <levelSpacing>
+                  <XYs1d>
+                    <axes>
+                      <axis index="1" label="energy_in" unit="eV" />
+                      <axis index="0" label="levelSpacing" unit="eV" />
+                    </axes>
+                    <values>35 5.773 50 5.773 70 5.773 1e2 5.773 2e2 5.773 3e2 5.773 5e2 5.773 7e2 5.773 1e3 5.773 2e3 5.773 3e3 5.773 5e3 5.773 7e3 5.773 1e4 5.773</values>
+                  </XYs1d>
+                </levelSpacing>
+                <widths>
+                  <width label="0" resonanceReaction="n + Ta182" degreesOfFreedom="1">
+                    <XYs1d>
+                      <axes>
+                        <axis index="1" label="energy_in" unit="eV" />
+                        <axis index="0" label="average width" unit="eV" />
+                      </axes>
+                      <values>35 1.034e-3 50 1.034e-3 70 1.034e-3 1e2 1.034e-3 2e2 1.034e-3 3e2 1.034e-3 5e2 1.034e-3 7e2 1.034e-3 1e3 1.034e-3 2e3 1.034e-3 3e3 1.034e-3 5e3 1.034e-3 7e3 1.034e-3 1e4 1.034e-3</values>
+                    </XYs1d>
+                  </width>
+                  <width label="1" resonanceReaction="Ta183 + photon [inclusive]" degreesOfFreedom="0">
+                    <XYs1d>
+                      <axes>
+                        <axis index="1" label="energy_in" unit="eV" />
+                        <axis index="0" label="average width" unit="eV" />
+                      </axes>
+                      <values>35 0.067 50 0.067 70 0.067 1e2 0.067 2e2 0.067 3e2 0.067 5e2 0.067 7e2 0.067 1e3 0.067 2e3 0.067 3e3 0.067 5e3 0.067 7e3 0.067 1e4 0.067</values>
+                    </XYs1d>
+                  </width>
+                </widths>
+              </J>
+            </Js>
+          </L>
+          <L label="1" value="1">
+            <Js>
+              <J label="0" value="3/2">
+                <levelSpacing>
+                  <XYs1d>
+                    <axes>
+                      <axis index="1" label="energy_in" unit="eV" />
+                      <axis index="0" label="levelSpacing" unit="eV" />
+                    </axes>
+                    <values>35 11.547 50 11.547 70 11.547 1e2 11.547 2e2 11.547 3e2 11.547 5e2 11.547 7e2 11.547 1e3 11.547 2e3 11.547 3e3 11.547 5e3 11.547 7e3 11.547 1e4 11.547</values>
+                  </XYs1d>
+                </levelSpacing>
+                <widths>
+                  <width label="0" resonanceReaction="n + Ta182" degreesOfFreedom="1">
+                    <XYs1d>
+                      <axes>
+                        <axis index="1" label="energy_in" unit="eV" />
+                        <axis index="0" label="average width" unit="eV" />
+                      </axes>
+                      <values>35 6.375e-4 50 6.375e-4 70 6.375e-4 1e2 6.375e-4 2e2 6.375e-4 3e2 6.375e-4 5e2 6.375e-4 7e2 6.375e-4 1e3 6.375e-4 2e3 6.375e-4 3e3 6.375e-4 5e3 6.375e-4 7e3 6.375e-4 1e4 6.375e-4</values>
+                    </XYs1d>
+                  </width>
+                  <width label="1" resonanceReaction="Ta183 + photon [inclusive]" degreesOfFreedom="0">
+                    <XYs1d>
+                      <axes>
+                        <axis index="1" label="energy_in" unit="eV" />
+                        <axis index="0" label="average width" unit="eV" />
+                      </axes>
+                      <values>35 0.067 50 0.067 70 0.067 1e2 0.067 2e2 0.067 3e2 0.067 5e2 0.067 7e2 0.067 1e3 0.067 2e3 0.067 3e3 0.067 5e3 0.067 7e3 0.067 1e4 0.067</values>
+                    </XYs1d>
+                  </width>
+                </widths>
+              </J>
+              <J label="1" value="5/2">
+                <levelSpacing>
+                  <XYs1d>
+                    <axes>
+                      <axis index="1" label="energy_in" unit="eV" />
+                      <axis index="0" label="levelSpacing" unit="eV" />
+                    </axes>
+                    <values>35 7.697 50 7.697 70 7.697 1e2 7.697 2e2 7.697 3e2 7.697 5e2 7.697 7e2 7.697 1e3 7.697 2e3 7.697 3e3 7.697 5e3 7.697 7e3 7.697 1e4 7.697</values>
+                  </XYs1d>
+                </levelSpacing>
+                <widths>
+                  <width label="0" resonanceReaction="n + Ta182" degreesOfFreedom="2">
+                    <XYs1d>
+                      <axes>
+                        <axis index="1" label="energy_in" unit="eV" />
+                        <axis index="0" label="average width" unit="eV" />
+                      </axes>
+                      <values>35 4.248e-4 50 4.248e-4 70 4.248e-4 1e2 4.248e-4 2e2 4.248e-4 3e2 4.248e-4 5e2 4.248e-4 7e2 4.248e-4 1e3 4.248e-4 2e3 4.248e-4 3e3 4.248e-4 5e3 4.248e-4 7e3 4.248e-4 1e4 4.248e-4</values>
+                    </XYs1d>
+                  </width>
+                  <width label="1" resonanceReaction="Ta183 + photon [inclusive]" degreesOfFreedom="0">
+                    <XYs1d>
+                      <axes>
+                        <axis index="1" label="energy_in" unit="eV" />
+                        <axis index="0" label="average width" unit="eV" />
+                      </axes>
+                      <values>35 0.067 50 0.067 70 0.067 1e2 0.067 2e2 0.067 3e2 0.067 5e2 0.067 7e2 0.067 1e3 0.067 2e3 0.067 3e3 0.067 5e3 0.067 7e3 0.067 1e4 0.067</values>
+                    </XYs1d>
+                  </width>
+                </widths>
+              </J>
+              <J label="2" value="7/2">
+                <levelSpacing>
+                  <XYs1d>
+                    <axes>
+                      <axis index="1" label="energy_in" unit="eV" />
+                      <axis index="0" label="levelSpacing" unit="eV" />
+                    </axes>
+                    <values>35 5.773 50 5.773 70 5.773 1e2 5.773 2e2 5.773 3e2 5.773 5e2 5.773 7e2 5.773 1e3 5.773 2e3 5.773 3e3 5.773 5e3 5.773 7e3 5.773 1e4 5.773</values>
+                  </XYs1d>
+                </levelSpacing>
+                <widths>
+                  <width label="0" resonanceReaction="n + Ta182" degreesOfFreedom="2">
+                    <XYs1d>
+                      <axes>
+                        <axis index="1" label="energy_in" unit="eV" />
+                        <axis index="0" label="average width" unit="eV" />
+                      </axes>
+                      <values>35 3.187e-4 50 3.187e-4 70 3.187e-4 1e2 3.187e-4 2e2 3.187e-4 3e2 3.187e-4 5e2 3.187e-4 7e2 3.187e-4 1e3 3.187e-4 2e3 3.187e-4 3e3 3.187e-4 5e3 3.187e-4 7e3 3.187e-4 1e4 3.187e-4</values>
+                    </XYs1d>
+                  </width>
+                  <width label="1" resonanceReaction="Ta183 + photon [inclusive]" degreesOfFreedom="0">
+                    <XYs1d>
+                      <axes>
+                        <axis index="1" label="energy_in" unit="eV" />
+                        <axis index="0" label="average width" unit="eV" />
+                      </axes>
+                      <values>35 0.067 50 0.067 70 0.067 1e2 0.067 2e2 0.067 3e2 0.067 5e2 0.067 7e2 0.067 1e3 0.067 2e3 0.067 3e3 0.067 5e3 0.067 7e3 0.067 1e4 0.067</values>
+                    </XYs1d>
+                  </width>
+                </widths>
+              </J>
+              <J label="3" value="9/2">
+                <levelSpacing>
+                  <XYs1d>
+                    <axes>
+                      <axis index="1" label="energy_in" unit="eV" />
+                      <axis index="0" label="levelSpacing" unit="eV" />
+                    </axes>
+                    <values>35 4.619 50 4.619 70 4.619 1e2 4.619 2e2 4.619 3e2 4.619 5e2 4.619 7e2 4.619 1e3 4.619 2e3 4.619 3e3 4.619 5e3 4.619 7e3 4.619 1e4 4.619</values>
+                  </XYs1d>
+                </levelSpacing>
+                <widths>
+                  <width label="0" resonanceReaction="n + Ta182" degreesOfFreedom="1">
+                    <XYs1d>
+                      <axes>
+                        <axis index="1" label="energy_in" unit="eV" />
+                        <axis index="0" label="average width" unit="eV" />
+                      </axes>
+                      <values>35 2.55e-4 50 2.55e-4 70 2.55e-4 1e2 2.55e-4 2e2 2.55e-4 3e2 2.55e-4 5e2 2.55e-4 7e2 2.55e-4 1e3 2.55e-4 2e3 2.55e-4 3e3 2.55e-4 5e3 2.55e-4 7e3 2.55e-4 1e4 2.55e-4</values>
+                    </XYs1d>
+                  </width>
+                  <width label="1" resonanceReaction="Ta183 + photon [inclusive]" degreesOfFreedom="0">
+                    <XYs1d>
+                      <axes>
+                        <axis index="1" label="energy_in" unit="eV" />
+                        <axis index="0" label="average width" unit="eV" />
+                      </axes>
+                      <values>35 0.067 50 0.067 70 0.067 1e2 0.067 2e2 0.067 3e2 0.067 5e2 0.067 7e2 0.067 1e3 0.067 2e3 0.067 3e3 0.067 5e3 0.067 7e3 0.067 1e4 0.067</values>
+                    </XYs1d>
+                  </width>
+                </widths>
+              </J>
+            </Js>
+          </L>
+        </Ls>
+      </tabulatedWidths>
+    </unresolved>
+  </resonances>
+  <reactions>
+    <reaction label="n + Ta182" ENDF_MT="2">
+      <crossSection>
+        <resonancesWithBackground label="eval">
+          <resonances href="/reactionSuite/resonances" />
+          <background>
+            <resolvedRegion>
+              <XYs1d>
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="crossSection" unit="b" />
+                </axes>
+                <values>
+                  1.00000000e-05 0.00000000e+00 3.50000000e+01 0.00000000e+00</values>
+              </XYs1d>
+            </resolvedRegion>
+            <unresolvedRegion>
+              <XYs1d>
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="crossSection" unit="b" />
+                </axes>
+                <values>
+                  3.50000000e+01 0.00000000e+00 1.00000000e+04 0.00000000e+00</values>
+              </XYs1d>
+            </unresolvedRegion>
+            <fastRegion>
+              <regions1d>
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="crossSection" unit="b" />
+                </axes>
+                <function1ds>
+                  <XYs1d index="0" interpolation="log-log">
+                    <values>
+                      1.00000000e+04 1.33312000e+01 2.00000000e+04 1.12570000e+01 5.00000000e+04 9.55700000e+00 9.75000000e+04 8.19800000e+00</values>
+                  </XYs1d>
+                  <XYs1d index="1">
+                    <values>9.75000000e+04 8.19800000e+00 1.00000000e+05 7.93500000e+00 1.14600000e+05 7.49700000e+00 1.50000000e+05 6.85100000e+00 1.74000000e+05 6.53000000e+00 2.00000000e+05 6.17700000e+00 2.38300000e+05 5.75900000e+00 2.71500000e+05 5.56900000e+00 2.93600000e+05 5.37900000e+00 3.00000000e+05 5.21700000e+00 3.16700000e+05 5.06800000e+00 3.62000000e+05 4.79700000e+00 4.00000000e+05 4.43600000e+00 5.00000000e+05 4.08000000e+00 6.00000000e+05 3.84000000e+00 7.00000000e+05 3.70600000e+00 8.00000000e+05 3.63700000e+00 9.00000000e+05 3.60700000e+00 1.00000000e+06 3.59800000e+00 1.20000000e+06 3.61200000e+00</values>
+                  </XYs1d>
+                </function1ds>
+              </regions1d>
+            </fastRegion>
+          </background>
+        </resonancesWithBackground>
+        <XYs1d label="recon">
+          <axes>
+            <axis index="1" label="energy_in" unit="eV" />
+            <axis index="0" label="crossSection" unit="b" />
+          </axes>
+          <values>1.00000000e-05 2.88685240e+01 9.92088744e-03 2.95104453e+01 1.91015000e-02 3.03150968e+01 2.31754375e-02 3.07545620e+01 2.75791264e-02 3.12985546e+01 3.22951969e-02 3.19733256e+01 3.59302500e-02 3.25687532e+01 4.01771848e-02 3.33607188e+01 4.43446250e-02 3.42545130e+01 4.77103750e-02 3.50738056e+01 5.13709280e-02 3.60785759e+01 5.61247500e-02 3.75892690e+01 5.94905000e-02 3.88229146e+01 6.28562500e-02 4.02150415e+01 6.62220000e-02 4.17890549e+01 6.95877500e-02 4.35723321e+01 7.29535000e-02 4.55969505e+01 7.63192500e-02 4.79005436e+01 7.96850000e-02 5.05272956e+01 8.30507500e-02 5.35290792e+01</values>
+        </XYs1d>
+      </crossSection>
+      <outputChannel genre="twoBody">
+        <Q>
+          <constant1d label="eval" value="0" domainMin="1e-5" domainMax="2e7">
+            <axes>
+              <axis index="1" label="energy_in" unit="eV" />
+              <axis index="0" label="Q" unit="eV" />
+            </axes>
+          </constant1d>
+        </Q>
+        <products>
+          <product pid="n" label="n">
+            <multiplicity>
+              <constant1d label="eval" value="1" domainMin="1e-5" domainMax="2e7">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+              </constant1d>
+            </multiplicity>
+            <distribution>
+              <angularTwoBody label="eval" productFrame="centerOfMass">
+                <XYs2d>
+                  <axes>
+                    <axis index="2" label="energy_in" unit="eV" />
+                    <axis index="1" label="mu" unit="" />
+                    <axis index="0" label="P(mu|energy_in)" unit="" />
+                  </axes>
+                  <function1ds>
+                    <Legendre outerDomainValue="1e-5">
+                      <values>1 0 0</values>
+                    </Legendre>
+                    <Legendre outerDomainValue="1e4">
+                      <values>1 0 0</values>
+                    </Legendre>
+                    <Legendre outerDomainValue="1.5e4">
+                      <values>1 6.06444e-3 4.15402e-4</values>
+                    </Legendre>
+                    <Legendre outerDomainValue="3e4">
+                      <values>1 0.0241949 1.7e-3</values>
+                    </Legendre>
+                    <Legendre outerDomainValue="7e4">
+                      <values>1 0.0709749 6.08162e-3 3.47091e-5 4.50294e-6</values>
+                    </Legendre>
+                    <Legendre outerDomainValue="1e5">
+                      <values>1 0.103067 0.0111933 1.81095e-4 2.38098e-5 8.38363e-8 2.93555e-8 2.03073e-9 1.89759e-10</values>
+                    </Legendre>
+                  </function1ds>
+                </XYs2d>
+              </angularTwoBody>
+            </distribution>
+          </product>
+          <product pid="Ta182" label="Ta182">
+            <multiplicity>
+              <constant1d label="eval" value="1" domainMin="1e-5" domainMax="2e7">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+              </constant1d>
+            </multiplicity>
+            <distribution>
+              <angularTwoBody label="eval" productFrame="centerOfMass">
+                <recoil href="../../../../product[@label='n']/distribution/angularTwoBody[@label='eval']" />
+              </angularTwoBody>
+            </distribution>
+          </product>
+        </products>
+      </outputChannel>
+    </reaction>
+    <reaction label="Ta183 + photon [inclusive]" ENDF_MT="102">
+      <crossSection>
+        <resonancesWithBackground label="eval">
+          <resonances href="/reactionSuite/resonances" />
+          <background>
+            <resolvedRegion>
+              <XYs1d>
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="crossSection" unit="b" />
+                </axes>
+                <values>
+                  1.00000000e-05 0.00000000e+00 3.50000000e+01 0.00000000e+00</values>
+              </XYs1d>
+            </resolvedRegion>
+            <unresolvedRegion>
+              <XYs1d>
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="crossSection" unit="b" />
+                </axes>
+                <values>
+                  3.50000000e+01 0.00000000e+00 1.00000000e+04 0.00000000e+00</values>
+              </XYs1d>
+            </unresolvedRegion>
+            <fastRegion>
+              <regions1d>
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="crossSection" unit="b" />
+                </axes>
+                <function1ds>
+                  <XYs1d index="0" interpolation="log-log">
+                    <values>
+                      1.00000000e+04 2.02280000e+00 2.00000000e+04 1.19900000e+00 5.00000000e+04 7.29000000e-01 9.75000000e+04 6.03000000e-01</values>
+                  </XYs1d>
+                  <XYs1d index="1">
+                    <values>9.75000000e+04 6.03000000e-01 1.00000000e+05 5.77000000e-01 1.05000000e+05 5.12000000e-01 1.50000000e+05 4.20000000e-01 1.74000000e+05 3.71000000e-01 2.00000000e+05 3.27000000e-01 2.38300000e+05 2.76000000e-01 2.71500000e+05 2.45000000e-01 2.93600000e+05 2.28000000e-01 3.00000000e+05 2.24000000e-01 3.16700000e+05 2.12000000e-01 3.62000000e+05 1.84000000e-01 4.00000000e+05 1.68000000e-01 5.00000000e+05 1.22000000e-01 6.00000000e+05 9.13000000e-02 7.00000000e+05 7.40000000e-02 8.00000000e+05 6.30000000e-02 9.00000000e+05 5.50000000e-02 1.00000000e+06 4.90000000e-02 1.20000000e+06 4.10000000e-02</values>
+                  </XYs1d>
+                </function1ds>
+              </regions1d>
+            </fastRegion>
+          </background>
+        </resonancesWithBackground>
+        <XYs1d label="recon">
+          <axes>
+            <axis index="1" label="energy_in" unit="eV" />
+            <axis index="0" label="crossSection" unit="b" />
+          </axes>
+          <values>1.00000000e-05 2.92162545e+05 1.09152276e-05 2.79648917e+05 1.15253793e-05 2.72148071e+05 1.21355310e-05 2.65220334e+05 1.28201397e-05 2.58043887e+05 1.35792055e-05 2.50730362e+05 1.47178041e-05 2.40840118e+05 1.59490318e-05 2.31360877e+05 1.73655176e-05 2.21728224e+05 1.87820034e-05 2.13207095e+05 1.98415635e-05 2.07439032e+05 2.10163597e-05 2.01560822e+05 2.27785540e-05 1.93611639e+05 2.39533502e-05 1.88806897e+05 2.54148679e-05 1.83301105e+05 2.68763857e-05 1.78250849e+05 2.83379035e-05 1.73596599e+05 2.97994212e-05 1.69289175e+05 3.16176380e-05 1.64353283e+05 3.34358548e-05 1.59825797e+05</values>
+        </XYs1d>
+      </crossSection>
+      <outputChannel genre="NBody" process="inclusive">
+        <Q>
+          <constant1d label="eval" value="6.93e6" domainMin="1e-5" domainMax="2e7">
+            <axes>
+              <axis index="1" label="energy_in" unit="eV" />
+              <axis index="0" label="Q" unit="eV" />
+            </axes>
+          </constant1d>
+        </Q>
+        <products>
+          <product pid="Ta183" label="Ta183">
+            <multiplicity>
+              <constant1d label="eval" value="1" domainMin="1e-5" domainMax="2e7">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+              </constant1d>
+            </multiplicity>
+            <distribution>
+              <unspecified label="eval" productFrame="lab" />
+            </distribution>
+          </product>
+          <product pid="photon" label="photon">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 3.289367 1e3 3.289839 2e3 3.2903 6e3 3.292307 1e4 3.29463 2e4 3.300569 6e4 3.334332 1e5 3.366926 2e5 3.418983 4e5 3.500858 6e5 3.57152 8e5 3.651502 1e6 3.710074 1.4e6 3.828612 1.8e6 3.918593 2.2e6 3.99549 2.6e6 4.059752 3e6 4.119849 3.4e6 4.190771 3.8e6 4.255428</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <XYs2d>
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                    <function1ds>
+                      <XYs1d outerDomainValue="1e-5" interpolation="flat">
+                        <values>5e2 4.98663e-11 1500 7.25304e-11 3500 1.40513e-10 7500 2.53819e-10 1.5e4 4.72935e-10 3.5e4 1.637352e-9 7.5e4 4.257064e-9 1.5e5 2.570005e-8 2.5e5 4.842012e-8 3.5e5 8.676236e-8 4.5e5 1.394923e-7 5.5e5 1.841936e-7 6.5e5 2.246214e-7 7.5e5 2.852134e-7 8.5e5 3.720892e-7 9.5e5 3.98394e-7 1.05e6 4.149097e-7 1.15e6 4.252561e-7 1.25e6 4.293377e-7 1.35e6 4.28526e-7</values>
+                      </XYs1d>
+                      <XYs1d outerDomainValue="1e3" interpolation="flat">
+                        <values>5e2 4.98663e-11 1500 7.25304e-11 3500 1.40513e-10 7500 2.53819e-10 1.5e4 4.72935e-10 3.5e4 1.637352e-9 7.5e4 4.257064e-9 1.5e5 2.570005e-8 2.5e5 4.842012e-8 3.5e5 8.676236e-8 4.5e5 1.394923e-7 5.5e5 1.841936e-7 6.5e5 2.246214e-7 7.5e5 2.852134e-7 8.5e5 3.720892e-7 9.5e5 3.98394e-7 1.05e6 4.149097e-7 1.15e6 4.252561e-7 1.25e6 4.293377e-7 1.35e6 4.28526e-7</values>
+                      </XYs1d>
+                      <XYs1d outerDomainValue="2e3" interpolation="flat">
+                        <values>5e2 5.06294e-11 1500 7.34923e-11 3500 1.42069e-10 7500 2.56362e-10 1.5e4 4.77223e-10 3.5e4 1.652699e-9 7.5e4 4.274197e-9 1.5e5 2.571117e-8 2.5e5 4.842665e-8 3.5e5 8.675403e-8 4.5e5 1.394509e-7 5.5e5 1.841392e-7 6.5e5 2.245831e-7 7.5e5 2.852172e-7 8.5e5 3.720604e-7 9.5e5 3.983717e-7 1.05e6 4.148939e-7 1.15e6 4.252445e-7 1.25e6 4.293341e-7 1.35e6 4.285208e-7</values>
+                      </XYs1d>
+                      <XYs1d outerDomainValue="6e3" interpolation="flat">
+                        <values>5e2 2.68067e-11 1500 5.36205e-11 3500 1.34051e-10 7500 2.68102e-10 1.5e4 5.09106e-10 3.5e4 1.736235e-9 7.5e4 4.370542e-9 1.5e5 2.585477e-8 2.5e5 4.856456e-8 3.5e5 8.686813e-8 4.5e5 1.395125e-7 5.5e5 1.841667e-7 6.5e5 2.246436e-7 7.5e5 2.853713e-7 8.5e5 3.720677e-7 9.5e5 3.983519e-7 1.05e6 4.148733e-7 1.15e6 4.251904e-7 1.25e6 4.292939e-7 1.35e6 4.284582e-7</values>
+                      </XYs1d>
+                      <XYs1d outerDomainValue="1e4" interpolation="flat">
+                        <values>5e2 6.08551e-11 1500 8.63278e-11 3500 1.62724e-10 7500 2.90055e-10 1.5e4 5.33879e-10 3.5e4 1.85663e-9 7.5e4 4.50934e-9 1.5e5 2.608571e-8 2.5e5 4.879489e-8 3.5e5 8.708884e-8 4.5e5 1.397027e-7 5.5e5 1.843247e-7 6.5e5 2.248348e-7 7.5e5 2.856512e-7 8.5e5 3.72168e-7 9.5e5 3.984001e-7 1.05e6 4.148952e-7 1.15e6 4.251626e-7 1.25e6 4.292621e-7 1.35e6 4.283873e-7</values>
+                      </XYs1d>
+                      <XYs1d outerDomainValue="2e4" interpolation="flat">
+                        <values>5e2 7.70407e-11 1500 1.06559e-10 3500 1.95104e-10 7500 3.42682e-10 1.5e4 6.21888e-10 3.5e4 2.173204e-9 7.5e4 4.868259e-9 1.5e5 2.671846e-8 2.5e5 4.948371e-8 3.5e5 8.780416e-8 4.5e5 1.404728e-7 5.5e5 1.850503e-7 6.5e5 2.255732e-7 7.5e5 2.864516e-7 8.5e5 3.72538e-7 9.5e5 3.985788e-7 1.05e6 4.149602e-7 1.15e6 4.2506e-7 1.25e6 4.291242e-7 1.35e6 4.28133e-7</values>
+                      </XYs1d>
+                    </function1ds>
+                  </XYs2d>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__a">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 4.792935e-5 1e3 4.793622e-5 2e3 4.785116e-5 6e3 4.759928e-5 1e4 4.73388e-5 2e4 4.693726e-5 6e4 4.456186e-5 1e5 4.346736e-5 2e5 4.644646e-5 4e5 4.347206e-5 6e5 3.958736e-5 8e5 3.72915e-5 1e6 3.564108e-5 1.4e6 3.331139e-5 1.8e6 3.153024e-5 2.2e6 3.025434e-5 2.6e6 2.935313e-5 3e6 2.859588e-5 3.4e6 2.776592e-5 3.8e6 2.704422e-5</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="856929" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__b">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 1.341236e-6 1e3 1.341428e-6 2e3 1.348622e-6 6e3 1.375928e-6 1e4 1.409117e-6 2e4 1.474067e-6 6e4 1.913498e-6 1e5 2.234264e-6 2e5 2.181542e-6 4e5 2.496886e-6 6e5 3.024159e-6 8e5 3.463875e-6 1e6 3.842394e-6 1.4e6 4.568854e-6 1.8e6 5.218776e-6 2.2e6 5.79447e-6 2.6e6 6.305725e-6 3e6 6.828019e-6 3.4e6 7.425635e-6 3.8e6 7.973755e-6</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="806420" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__c">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 0.0267761 1e3 0.02677994 2e3 0.02673237 6e3 0.02659177 1e4 0.02644627 2e4 0.02622183 6e4 0.02489486 1e5 0.02428334 2e5 0.02594765 4e5 0.02428605 6e5 0.02211568 8e5 0.02083318 1e6 0.01991112 1.4e6 0.01860966 1.8e6 0.01761459 2.2e6 0.01690182 2.6e6 0.01639834 3e6 0.01597533 3.4e6 0.01551163 3.8e6 0.01510847</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="783755" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__d">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 0.01669675 1e3 0.01669914 2e3 0.01678242 6e3 0.01708754 1e4 0.01745891 2e4 0.01819363 6e4 0.023404 1e5 0.02725158 2e5 0.02660301 4e5 0.03040035 6e5 0.0367332 8e5 0.04200868 1e6 0.04656995 1.4e6 0.05536478 1.8e6 0.06328038 2.2e6 0.07032076 2.6e6 0.07658538 3e6 0.08298071 3.4e6 0.09030709 3.8e6 0.09698971</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="735060" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__e">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 7.025538e-7 1e3 7.026546e-7 2e3 7.064189e-7 6e3 7.207226e-7 1e4 7.381086e-7 2e4 7.72131e-7 6e4 1.002309e-6 1e5 1.170331e-6 2e5 1.142711e-6 4e5 1.307894e-6 6e5 1.584079e-6 8e5 1.814414e-6 1e6 2.012687e-6 1.4e6 2.393209e-6 1.8e6 2.733643e-6 2.2e6 3.035197e-6 2.6e6 3.302997e-6 3e6 3.576583e-6 3.4e6 3.889624e-6 3.8e6 4.176734e-6</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="663220.1" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__f">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 0.1834096 1e3 0.1834359 2e3 0.1832497 6e3 0.1828694 1e4 0.1825606 2e4 0.1825064 6e4 0.1803828 1e5 0.1807463 2e5 0.194186 4e5 0.1866333 6e5 0.1748586 8e5 0.1695935 1e6 0.1663533 1.4e6 0.1632149 1.8e6 0.1613107 2.2e6 0.1605945 2.6e6 0.1606794 3e6 0.161202 3.4e6 0.1619912 3.8e6 0.1626435</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="459070" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__g">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 4.682838e-3 1e3 4.683509e-3 2e3 4.676593e-3 6e3 4.659297e-3 1e4 4.642413e-3 2e4 4.62365e-3 6e4 4.449145e-3 1e5 4.375284e-3 2e5 4.731871e-3 4e5 4.438093e-3 6e5 4.01684e-3 8e5 3.785073e-3 1e6 3.622637e-3 1.4e6 3.395085e-3 1.8e6 3.218137e-3 2.2e6 3.088417e-3 2.6e6 2.993318e-3 3e6 2.908295e-3 3.4e6 2.816917e-3 3.8e6 2.72909e-3</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="402370" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__h">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 1.400798e-3 1e3 1.400999e-3 2e3 1.398517e-3 6e3 1.391153e-3 1e4 1.383541e-3 2e4 1.371803e-3 6e4 1.302377e-3 1e5 1.270388e-3 2e5 1.357457e-3 4e5 1.270527e-3 6e5 1.15699e-3 8e5 1.089893e-3 1e6 1.041653e-3 1.4e6 9.735699e-4 1.8e6 9.215142e-4 2.2e6 8.842237e-4 2.6e6 8.578828e-4 3e6 8.357508e-4 3.4e6 8.114962e-4 3.8e6 7.904027e-4</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="397859" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__i">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 0.0690467 1e3 0.06905661 2e3 0.06898655 6e3 0.06884339 1e4 0.06872709 2e4 0.06870696 6e4 0.06790747 1e5 0.06804395 2e5 0.0731039 4e5 0.0702605 6e5 0.06582795 8e5 0.06384564 1e6 0.06262563 1.4e6 0.06144408 1.8e6 0.06072761 2.2e6 0.06045775 2.6e6 0.06048956 3e6 0.06068664 3.4e6 0.06098369 3.8e6 0.06122915</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="315870" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__j">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 3.820534e-4 1e3 3.821082e-4 2e3 3.814306e-4 6e3 3.794242e-4 1e4 3.773477e-4 2e4 3.741458e-4 6e4 3.552107e-4 1e5 3.464859e-4 2e5 3.702315e-4 4e5 3.465239e-4 6e5 3.155577e-4 8e5 2.972578e-4 1e6 2.841013e-4 1.4e6 2.655315e-4 1.8e6 2.513333e-4 2.2e6 2.411633e-4 2.6e6 2.339795e-4 3e6 2.279426e-4 3.4e6 2.213276e-4 3.8e6 2.155739e-4</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="311359" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__k">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 0.051084 1e3 0.05109133 2e3 0.05101177 6e3 0.0508251 1e4 0.05065213 2e4 0.05050548 6e4 0.04888068 1e5 0.04836303 2e5 0.0531305 4e5 0.04982876 6e5 0.04475314 8e5 0.04205388 1e6 0.04019936 1.4e6 0.03763679 1.8e6 0.03566802 2.2e6 0.03423925 2.6e6 0.03320784 3e6 0.03229983 3.4e6 0.03128313 3.8e6 0.03025546</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="295116" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__l">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 1.622006e-4 1e3 1.622239e-4 2e3 1.61936e-4 6e3 1.610836e-4 1e4 1.602022e-4 2e4 1.588425e-4 6e4 1.508044e-4 1e5 1.471001e-4 2e5 1.571817e-4 4e5 1.471158e-4 6e5 1.339694e-4 8e5 1.262002e-4 1e6 1.206148e-4 1.4e6 1.127308e-4 1.8e6 1.06703e-4 2.2e6 1.02385e-4 2.6e6 9.933524e-5 3e6 9.677276e-5 3.4e6 9.396428e-5 3.8e6 9.152171e-5</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="284114" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__m">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 5.109488e-8 1e3 5.110221e-8 2e3 5.137592e-8 6e3 5.24163e-8 1e4 5.368085e-8 2e4 5.615479e-8 6e4 7.289519e-8 1e5 8.511497e-8 2e5 8.310635e-8 4e5 9.51197e-8 6e5 1.15206e-7 8e5 1.319574e-7 1e6 1.463773e-7 1.4e6 1.740518e-7 1.8e6 1.988106e-7 2.2e6 2.207418e-7 2.6e6 2.402181e-7 3e6 2.60115e-7 3.4e6 2.828819e-7 3.8e6 3.037626e-7</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="233605" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__n">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 0.06626955 1e3 0.06627906 2e3 0.06617585 6e3 0.06593372 1e4 0.06570922 2e4 0.06551909 6e4 0.06341114 1e5 0.06273978 2e5 0.06892435 4e5 0.06464116 6e5 0.05805679 8e5 0.05455516 1e6 0.05214957 1.4e6 0.04882479 1.8e6 0.04627094 2.2e6 0.04441736 2.6e6 0.04307945 3e6 0.04190152 3.4e6 0.04058249 3.8e6 0.03924922</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="225090" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__o">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 0.05317962 1e3 0.05318725 2e3 0.05315989 6e3 0.05326509 1e4 0.05349126 2e4 0.05430641 6e4 0.05867605 1e5 0.06299042 2e5 0.07178895 4e5 0.07121273 6e5 0.06914028 8e5 0.07010818 1e6 0.0717384 1.4e6 0.07630699 1.8e6 0.08095618 2.2e6 0.08545684 2.6e6 0.08973497 3e6 0.09421404 3.4e6 0.09925647 3.8e6 0.1036834</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="158105" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__p">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 0.2736259 1e3 0.2736652 2e3 0.2737165 6e3 0.2739107 1e4 0.2741415 2e4 0.2745656 6e4 0.2771794 1e5 0.2789802 2e5 0.2794598 4e5 0.2812097 6e5 0.2818892 8e5 0.2833933 1e6 0.2838016 1.4e6 0.2855811 1.8e6 0.2859162 2.2e6 0.2863482 2.6e6 0.2864724 3e6 0.2864266 3.4e6 0.286873 3.8e6 0.286962</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="143200" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__q">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 0.1071633 1e3 0.1071787 2e3 0.10714 6e3 0.1071533 1e4 0.1072455 2e4 0.1077124 6e4 0.1099969 1e5 0.1125716 2e5 0.1193535 4e5 0.1181374 6e5 0.1153558 8e5 0.1154271 1e6 0.1160711 1.4e6 0.1188788 1.8e6 0.1217804 2.2e6 0.1248353 2.6e6 0.1278981 3e6 0.1312606 3.4e6 0.1352368 3.8e6 0.1388978</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="113745" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__r">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 0.05900501 1e3 0.05901348 2e3 0.05892636 6e3 0.05870837 1e4 0.05849528 2e4 0.05825912 6e4 0.05606043 1e5 0.05512979 2e5 0.05962258 4e5 0.05592111 6e5 0.05061327 8e5 0.04769283 1e6 0.04564644 1.4e6 0.04277897 1.8e6 0.04054938 2.2e6 0.03891488 2.6e6 0.03771658 3e6 0.03664524 3.4e6 0.0354939 3.8e6 0.03438712</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="86500.02" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__s">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 0.01277164 1e3 0.01277347 2e3 0.01284183 6e3 0.01310193 1e4 0.01341796 2e4 0.0140364 6e4 0.01822079 1e5 0.0212753 2e5 0.02077318 4e5 0.02377596 6e5 0.02879683 8e5 0.03298387 1e6 0.03658826 1.4e6 0.0435058 1.8e6 0.04969447 2.2e6 0.05517634 2.6e6 0.06004469 3e6 0.06501803 3.4e6 0.07070872 3.8e6 0.07592794</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="75500.01" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+          <product pid="photon" label="photon__t">
+            <multiplicity>
+              <XYs1d label="eval">
+                <axes>
+                  <axis index="1" label="energy_in" unit="eV" />
+                  <axis index="0" label="multiplicity" unit="" />
+                </axes>
+                <values>1e-5 0.2598728 1e3 0.2599101 2e3 0.2600221 6e3 0.260212 1e4 0.2603657 2e4 0.2603157 6e4 0.2626188 1e5 0.263269 2e5 0.2551503 4e5 0.2609258 6e5 0.2675729 8e5 0.2713138 1e6 0.272608 1.4e6 0.2748404 1.8e6 0.2749099 2.2e6 0.2747529 2.6e6 0.2739742 3e6 0.2727525 3.4e6 0.2718518 3.8e6 0.2709303</values>
+              </XYs1d>
+            </multiplicity>
+            <distribution>
+              <uncorrelated label="eval" productFrame="lab">
+                <angular>
+                  <isotropic2d />
+                </angular>
+                <energy>
+                  <discreteGamma value="73174" domainMin="1e-5" domainMax="2e7">
+                    <axes>
+                      <axis index="2" label="energy_in" unit="eV" />
+                      <axis index="1" label="energy_out" unit="eV" />
+                      <axis index="0" label="P(energy_out|energy_in)" unit="1/eV" />
+                    </axes>
+                  </discreteGamma>
+                </energy>
+              </uncorrelated>
+            </distribution>
+          </product>
+        </products>
+      </outputChannel>
+    </reaction>
+  </reactions>
+</reactionSuite>

@@ -1928,53 +1928,88 @@ class PlotBuilder:
 
             self.ax.legend(**legend_kwargs)
 
-            # Adjust layout to prevent legend-content overlap
+            # Outside legend layout: keep the user-requested figure size as
+            # the *plot box* dimensions, and grow the figure perpendicular to
+            # the legend so the legend gets its own dedicated strip without
+            # squeezing the axes. The legend's anchor stays valid:
+            #   - right/left are anchored to axes coords, so they follow when
+            #     the axes is repositioned;
+            #   - top/bottom are anchored to fig.transFigure at the edges,
+            #     so they stay pinned to the new figure edges after resize.
             if _outside_dir is not None:
                 _outside_legend_layout = True
-                if _outside_dir in ('top', 'bottom'):
-                    # Legend is pinned to figure edge; measure it, then
-                    # constrain axes into the remaining space.
+                legend = self.ax.get_legend()
+                try:
+                    # 1) Measure the placed legend in inches.
+                    self.fig.canvas.draw()
+                    renderer = self.fig.canvas.get_renderer()
+                    leg_disp = legend.get_window_extent(renderer)
+                    leg_w_in = leg_disp.width / self.fig.dpi
+                    leg_h_in = leg_disp.height / self.fig.dpi
+
+                    orig_w_in, orig_h_in = self.fig.get_size_inches()
+                    # Cap so a runaway legend can't blow up the saved image.
+                    leg_w_in = min(leg_w_in, 3.0 * orig_w_in)
+                    leg_h_in = min(leg_h_in, 3.0 * orig_h_in)
+
+                    # 2) Compute the natural axes margins for the original
+                    #    figure size as if no legend were present, so the
+                    #    plot box keeps its expected dimensions.
+                    legend.set_visible(False)
                     try:
-                        self.fig.canvas.draw()
-                        renderer = self.fig.canvas.get_renderer()
-                        leg_bb = self.ax.get_legend().get_window_extent(renderer) \
-                            .transformed(self.fig.transFigure.inverted())
-                        if _outside_dir == 'top':
-                            self.fig.tight_layout(rect=[0, 0, 1, leg_bb.y0 - 0.01])
-                        else:
-                            self.fig.tight_layout(rect=[0, leg_bb.y1 + 0.03, 1, 1])
+                        self.fig.tight_layout()
                     except Exception:
-                        rect = [0, 0, 1, 0.82] if _outside_dir == 'top' \
-                            else [0, 0.20, 1, 1]
-                        try:
-                            self.fig.tight_layout(rect=rect)
-                        except Exception:
-                            pass
-                else:  # right / left
-                    # Measure the legend in figure coords and give the axes
-                    # the remaining space. Clamp to a 0.3-wide axes floor so
-                    # a wildly large legend can't collapse the plot to zero;
-                    # past that point, switch to the "Legend Only" export.
+                        pass
+                    ax_pos = self.ax.get_position()
+                    ax_x0_in = ax_pos.x0 * orig_w_in
+                    ax_y0_in = ax_pos.y0 * orig_h_in
+                    ax_w_in = ax_pos.width * orig_w_in
+                    ax_h_in = ax_pos.height * orig_h_in
+                    legend.set_visible(True)
+
+                    pad_in = 0.2
+                    if _outside_dir == 'right':
+                        new_w_in = orig_w_in + leg_w_in + pad_in
+                        new_h_in = orig_h_in
+                        new_ax_x0_in = ax_x0_in
+                        new_ax_y0_in = ax_y0_in
+                    elif _outside_dir == 'left':
+                        new_w_in = orig_w_in + leg_w_in + pad_in
+                        new_h_in = orig_h_in
+                        new_ax_x0_in = ax_x0_in + leg_w_in + pad_in
+                        new_ax_y0_in = ax_y0_in
+                    elif _outside_dir == 'top':
+                        new_w_in = orig_w_in
+                        new_h_in = orig_h_in + leg_h_in + pad_in
+                        new_ax_x0_in = ax_x0_in
+                        new_ax_y0_in = ax_y0_in
+                    else:  # bottom
+                        new_w_in = orig_w_in
+                        new_h_in = orig_h_in + leg_h_in + pad_in
+                        new_ax_x0_in = ax_x0_in
+                        new_ax_y0_in = ax_y0_in + leg_h_in + pad_in
+
+                    self.fig.set_size_inches(new_w_in, new_h_in)
+                    self.ax.set_position([
+                        new_ax_x0_in / new_w_in,
+                        new_ax_y0_in / new_h_in,
+                        ax_w_in / new_w_in,
+                        ax_h_in / new_h_in,
+                    ])
+                except Exception:
+                    # Fallback to the older shrink-into-remainder strategy.
+                    if _outside_dir == 'right':
+                        rect = [0, 0, 0.78, 1]
+                    elif _outside_dir == 'left':
+                        rect = [0.22, 0, 1, 1]
+                    elif _outside_dir == 'top':
+                        rect = [0, 0, 1, 0.82]
+                    else:  # bottom
+                        rect = [0, 0.20, 1, 1]
                     try:
-                        self.fig.canvas.draw()
-                        renderer = self.fig.canvas.get_renderer()
-                        leg_bb = self.ax.get_legend().get_window_extent(renderer) \
-                            .transformed(self.fig.transFigure.inverted())
-                        if _outside_dir == 'right':
-                            self.fig.tight_layout(
-                                rect=[0, 0, max(leg_bb.x0 - 0.01, 0.3), 1]
-                            )
-                        else:  # left
-                            self.fig.tight_layout(
-                                rect=[min(leg_bb.x1 + 0.01, 0.7), 0, 1, 1]
-                            )
+                        self.fig.tight_layout(rect=rect)
                     except Exception:
-                        rect = [0, 0, 0.78, 1] if _outside_dir == 'right' \
-                            else [0.22, 0, 1, 1]
-                        try:
-                            self.fig.tight_layout(rect=rect)
-                        except Exception:
-                            pass
+                        pass
         
         # Apply tick parameters if specified
         if hasattr(self, '_tick_params') and self._tick_params:

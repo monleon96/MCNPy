@@ -6,10 +6,15 @@ Two representations:
   LNU=2  tabulated    TAB1 record of (E, nu_p) pairs
 """
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
+
+import numpy as np
+from numpy.typing import ArrayLike
 
 from ..mt import MT
+from .mf1mt452 import evaluate_nubar
 from ...utils import (
+    format_endf_send_record,
     format_endf_data_line,
     format_tab1,
     format_data_values,
@@ -83,6 +88,20 @@ class MF1MT456(MT):
     def interpolation(self) -> List[Tuple[int, int]]:
         return self._interpolation
 
+    # --- methods ---
+
+    def get_nubar(
+        self,
+        energy: Union[float, ArrayLike],
+        out_of_range: str = "hold",
+    ) -> Union[float, np.ndarray]:
+        """Prompt nu-bar at one or more incident energies. See
+        :func:`~kika.endf.classes.mf1.mf1mt452.evaluate_nubar`."""
+        return evaluate_nubar(
+            self._lnu, self._coefficients, self._energies, self._nubar,
+            self._interpolation, energy, out_of_range=out_of_range,
+        )
+
     # --- serialization ---
 
     def __str__(self) -> str:
@@ -131,11 +150,7 @@ class MF1MT456(MT):
             lines.extend(tab1_lines)
 
         # SEND
-        send = format_endf_data_line(
-            [0, 0, 0, 0, 0, 0],
-            mat, mf, 0, 99999,
-            formats=[ENDF_FORMAT_INT] * 6,
-        )
+        send = format_endf_send_record(mat, mf)
         lines.append(send)
 
         return "\n".join(lines)

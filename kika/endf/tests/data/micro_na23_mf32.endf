@@ -1,0 +1,290 @@
+ ENDF/B-VIII.1                                                         0  0
+ 1.102300+4 2.279200+1          1          0          0          11125 1451    1
+ 0.000000+0 0.000000+0          0          0          0          61125 1451    2
+ 1.000000+0 2.000000+7          1          0         10          81125 1451    3
+ 0.000000+0 0.000000+0          0          0        181          31125 1451    4
+ 11-Na- 23 ORNL       EVAL-DEC77 D.C.Larson                       1125 1451    5
+ NDS 148, 1 (2018)    DIST-AUG24 REV1-JUL23            20240830   1125 1451    6
+---- ENDF/B-VIII.1    MATERIAL 1125         REVISION 1            1125 1451    7
+----- INCIDENT-NEUTRON DATA                                       1125 1451    8
+------ ENDF-6                                                     1125 1451    9
+                                                                  1125 1451   10
+****************************************************************  1125 1451   11
+Missing exit distributions imported from TENDL2019                1125 1451   12
+by I.J. Thompson (LLNL) on 2023-04-21T20:56:01                    1125 1451   13
+                                                                  1125 1451   14
+Some neutron exit distributions, as noted, may be imported so all 1125 1451   15
+exit distributions have the same reference frame.                 1125 1451   16
+                                                                  1125 1451   17
+Changes by program patchGNDS.py:                                  1125 1451   18
+  H1 distribution for MT=103: H1 + Ne23 [inclusive].              1125 1451   19
+  He4 distribution for MT=107: He4 + F20 [inclusive].             1125 1451   20
+                                                                  1125 1451   21
+                                                                  1125 1451   22
+ **************************************************************** 1125 1451   23
+                                                                  1125 1451   24
+ ENDF/B-VII  CONVERTED FROM ENDF/B-VI BY NNDC OCT 2004            1125 1451   25
+             Only high quality covariance data (MF=32) migrated   1125 1451   26
+             from ENDF/B-VI.8 (M. Herman).                        1125 1451   27
+                                                                  1125 1451   28
+             Covariance data for ENDF/B-VII.1                     1125 1451   29
+                                                                  1125 1451   30
+ ENDF/B-VI.8 MF32 rel uncertainties adjusted to the those from    1125 1451   31
+ the Atlas of Neutron Resonances [1]. Thermal uncertainties for   1125 1451   32
+ capture and elastic were added using file 33. Elastic was set    1125 1451   33
+ to 5.5%, as half the difference between the thermal value in     1125 1451   34
+ this evaluation and the value in the Atlas. The capture thermal  1125 1451   35
+ unc was taken from the Atlas.                                    1125 1451   36
+                                                                  1125 1451   37
+ In the fast neutron region the sensitivity calculations were     1125 1451   38
+ performed with the EMPIRE code. The spherical optical model      1125 1451   39
+ provided total cross sections and neutron scattering,            1125 1451   40
+ Hauser-Feshbach statistical model described the bulk of particle 1125 1451   41
+ emission, and the exciton pre-equilibrium model described major  1125 1451   42
+ features of fast particle emission at higher incident energies.  1125 1451   43
+ Altogether, 21 model parameters were varied. The Bayesian        1125 1451   44
+ update procedure was performed by the KALMAN [2] code by taking  1125 1451   45
+ into account the sensitivity calculations and selected           1125 1451   46
+ experimental data.                                               1125 1451   47
+                                                                  1125 1451   48
+[1] S. F. Mughabghab, "Atlas of Neutron Resonances: Thermal       1125 1451   49
+    Cross Sections and Resonance Parameters", Elsevier,           1125 1451   50
+    Amsterdam, 2006.                                              1125 1451   51
+[2] D. Rochman, M. Herman, P. Oblozinsky, and S. F. Mughabghab,   1125 1451   52
+    "Preliminary Cross Section Covariances for WPEC Subgroup 26," 1125 1451   53
+    Rep. BNL-77407-2007-IR, Brookhaven National Laboratory (2007) 1125 1451   54
+                                                                  1125 1451   55
+ **************************************************************** 1125 1451   56
+                                                                  1125 1451   57
+ ENDF/B-VII.1 Evaluation, August 2015, B. W. Sleaford (LLNL)      1125 1451   58
+            R. F. Firestone (LBNL)                                1125 1451   59
+                                                                  1125 1451   60
+ The prompt gamma-ray spectrum for thermal radiative capture      1125 1451   61
+ (MF12 MT102) has been updated with new experimental data [Fi07], 1125 1451   62
+ [IAEA07]. This entailed installing new capture lines and scaling 1125 1451   63
+ the yields using the total thermal cross section in (MF3  MT102) 1125 1451   64
+ to conserve total decay energy compared to the thermal Q value.  1125 1451   65
+                                                                  1125 1451   66
+****************************************************************  1125 1451   67
+                                                                  1125 1451   68
+ ENDF/B-VI MOD 1 Revision, July 1991, V. McLane (NNDC)            1125 1451   69
+                                                                  1125 1451   70
+ REVISION 1 CORRECTION                                            1125 1451   71
+                                                                  1125 1451   72
+ Corrected number of energy ranges in File 32, MT = 151 to be 1.  1125 1451   73
+                                                                  1125 1451   74
+****************************************************************  1125 1451   75
+                                                                  1125 1451   76
+ ENDF/B-VI MOD 0, January 1990 (NNDC)                             1125 1451   77
+                                                                  1125 1451   78
+ ENDF/B-V Material 1311 converted to ENDF-6 format by NNDC.       1125 1451   79
+                                                                  1125 1451   80
+****************************************************************  1125 1451   81
+                                                                  1125 1451   82
+ ENDF/B-V Evaluation, December 1977, D. C. Larson (ORNL)          1125 1451   83
+                                                                  1125 1451   84
+MF=2                                                              1125 1451   85
+   Resonance parameters are used from 600 eV to 500 keV.  The     1125 1451   86
+ thermal capture cross section is given as 528 mb, in agreement   1125 1451   87
+ with the experimental results of 526.9+-4.5 mb [RY71], as well   1125 1451   88
+ as earlier results summarized in [RY71].  Using resonance        1125 1451   89
+ parameters E=2.81 keV, GN=376 eV, and GG=0.353 eV for the large  1125 1451   90
+ 2.81 keV resonance gives the correct thermal capture value using 1125 1451   91
+ a Breit-Wigner shape, and this form is used to calculate the     1125 1451   92
+ capture crposs section from 1.0E-5 to 600 eV.  The capture       1125 1451   93
+ width GG=0.353 eV is consistent with a recent result by Wilson   1125 1451   94
+ [WI77] where they find 0.24<GG<0.4 eV with a 90% confidence      1125 1451   95
+ level, and with a recent preliminary result of Macklin [MA76]    1125 1451   96
+ where he found GG=0.385+-0.04 eV.  The GN and ER values are      1125 1451   97
+ taken from Seltzer [SE74].  From 600 eV to 500 keV, the capture  1125 1451   98
+ cross section is generated from resonance areas reported by      1125 1451   99
+ Musgrove [MU77], and neutron widths and spins obtained from      1125 1451  100
+ a multilevel analysis of the transmission data of Larson [LA76]. 1125 1451  101
+                                                                  1125 1451  102
+MF=3                                                              1125 1451  103
+   MT=1  Resonance parameters + data of Larson [LA76].            1125 1451  104
+   MT=2  MT=1 - MT=3                                              1125 1451  105
+   MT=3  SUM 3/4+3/16+3/102+3/103+3/107                           1125 1451  106
+   MT=4  SUM 3/51-68,91                                           1125 1451  107
+   MT=102  As discussed above, the shape of the capture cross     1125 1451  108
+     section from 1.E-5 eV to 600 eV was taken from a single      1125 1451  109
+     level Breit-Wigner form from 600 eV to 500 keV, File 3 gives 1125 1451  110
+     no contribution.  From 500 keV to 20 MeV the capture file is 1125 1451  111
+     the same as the ENDF/B-IV file by Pitterle and Paik [PI72].  1125 1451  112
+   MT=103  Taken from ENDF4 - Modified >8 MeV                     1125 1451  113
+     Based on 2 step Hauser-Feshbach calculations                 1125 1451  114
+   MT=107  Taken from ENDF/B-IV                                   1125 1451  115
+MF=4                                                              1125 1451  116
+   MT=2  Taken mainly from [KI76], ENDF/B-IV and Optical Model    1125 1451  117
+     calculations. All other angular distributions assumed        1125 1451  118
+     isotropic.                                                   1125 1451  119
+MF=5                                                              1125 1451  120
+   MT=16  Taken from ENDF/B-IV.                                   1125 1451  121
+   MT=91  Temperatures adjusted to fit neutron production         1125 1451  122
+         data of Hermsdorf [HE75].                                1125 1451  123
+MF=8                                                              1125 1451  124
+   Data from Reich and Endt and from Vander Leun                  1125 1451  125
+MF=12                                                             1125 1451  126
+   MT=102  Data taken from ENDF/B-IV.                             1125 1451  127
+MF=13                                                             1125 1451  128
+   MT=3  n,xgamma data from [LA77].                               1125 1451  129
+MF=14                                                             1125 1451  130
+   All angular distributions assumed isotropic.                   1125 1451  131
+MF=15                                                             1125 1451  132
+   MT=3  n,xg distributions from [LA77] n,xgamma measurement.     1125 1451  133
+MF=32                                                             1125 1451  134
+   Uncertainty files for the resonance parameters below 32 keV    1125 1451  135
+ are estimated from the literature for the 2.81 keV resonance,    1125 1451  136
+ and an area analysis for the 7.6 keV resonance.  Results from    1125 1451  137
+ the multilevel analysis, capture areas, and area analysis form   1125 1451  138
+ the basis for the remainder of the resonance parameter errors.   1125 1451  139
+ The uncertainties in the resonance parameters are most useful    1125 1451  140
+ in self-shielding work.                                          1125 1451  141
+                                                                  1125 1451  142
+***************************************************************** 1125 1451  143
+                                                                  1125 1451  144
+REFERENCES                                                        1125 1451  145
+                                                                  1125 1451  146
+[FI07] Data derived from the Evaluated Gamma-ray Activation File  1125 1451  147
+   (EGAF) as described in "Database of Prompt Gamma Rays from     1125 1451  148
+   Slow Neutron Capture for Elemental Analysis", R.B. Firestone,  1125 1451  149
+   H.D. Choi, R.M. Lindstrom, G.L. Molnar, S.F. Mughabghab,       1125 1451  150
+   R. Paviotti-Corcuera, Zs. Revay, V. Zerkin, and C.M. Zhou,     1125 1451  151
+   IAEA Technical Report Series, STI/PUB/1263. (2007)             1125 1451  152
+[HE75] Hermsdorf et al., Report INDC(GDR)-2/L                     1125 1451  153
+[KI76] W.E. Kinney and F.G. Perey, private communication          1125 1451  154
+[LA76] D.C. Larson, J. Harvey and Hill, Oak Ridge National        1125 1451  155
+   report ORNL-TM-5614 (1976)                                     1125 1451  156
+[LA77] D.C. Larson and G.L. Morgan, to be published               1125 1451  157
+[MA76] R.L. Macklin, private communication (1976)                 1125 1451  158
+[MU77] Musgrove, Allen, and R.L. Macklin, preprint (1977)         1125 1451  159
+[PI72] Pitterle and Paik, report WARD 3045T4B-2, Appendix A (1972)1125 1451  160
+[RY71] T.B. Ryves, 71 Canterbury Conference p. 139                1125 1451  161
+[SE74] J. Seltzer and F.W.K. Firk, Nucl.Sci.Eng. 53, 415 (1974)   1125 1451  162
+[WI77] Wilson, Jackson, and Thomas, Nucl.Sci.Eng. 63, 55 (1977)   1125 1451  163
+                                                                  1125 1451  164
+ ************************ C O N T E N T S *********************** 1125 1451  165
+ **************** Program DICTIN (VERSION 2012-1) ****************1125 1451  166
+ ***************** Program LINEAR (VERSION 2017-1) ***************1125 1451  167
+ For All Data Greater than 1.0000E-10 barns in Absolute Value     1125 1451  168
+ Data Linearized to Within an Accuracy of .100000000 per-cent     1125 1451  169
+ ***************** Program FIXUP (Version 2017-1) ****************1125 1451  170
+ Corrected ZA/AWR in All Sections-----------------------------Yes 1125 1451  171
+ Corrected Thresholds-----------------------------------------No  1125 1451  172
+ Extended Cross Sections to 20 MeV----------------------------No  1125 1451  173
+ Allow Cross Section Deletion---------------------------------No  1125 1451  174
+ Allow Cross Section Reconstruction---------------------------Yes 1125 1451  175
+ Make All Cross Sections Non-Negative-------------------------Yes 1125 1451  176
+ Delete Energies Not in Ascending Order-----------------------Yes 1125 1451  177
+ Deleted Duplicate Points-------------------------------------Yes 1125 1451  178
+ Check for Ascending MAT/MF/MT Order--------------------------Yes 1125 1451  179
+ Check for Legal MF/MT Numbers--------------------------------Yes 1125 1451  180
+ Allow Creation of Missing Sections---------------------------No  1125 1451  181
+ Allow Insertion of Energy Points-----------------------------No  1125 1451  182
+ Uniform Energy Grid for ALL MT-------------------------------No  1125 1451  183
+ Delete Section if Cross Section =0 at All Energies-----------Yes 1125 1451  184
+ **************** Program DICTIN (VERSION 2018-1) ****************1125 1451  185
+                                1        451        188          01125 1451  186
+                                2        151         30          01125 1451  187
+                               32        151         52          01125 1451  188
+ 0.000000+0 0.000000+0          0          0          0          01125 1  099999
+ 0.000000+0 0.000000+0          0          0          0          01125 0  0
+ 1.102300+4 2.279200+1          0          0          1          01125 2151
+ 1.102300+4 1.000000+0          0          0          1          01125 2151
+ 6.000000+2 5.000000+5          1          2          0          01125 2151
+ 1.500000+0 5.410000-1          0          0          3          01125 2151
+ 2.279200+1 0.000000+0          0          0         24          41125 2151
+ 2.810000+3 1.000000+0 3.763400+2 3.760000+2 3.530000-1 0.000000+01125 2151
+ 2.429700+5 1.000000+0 3.295000+2 3.280000+2 1.500000+0 0.000000+01125 2151
+ 2.983200+5 2.000000+0 2.039000+3 2.038000+3 1.020000+0 0.000000+01125 2151
+ 5.385700+5 1.000000+0 6.278000+4 6.277000+4 1.014000+1 0.000000+01125 2151
+ 2.279200+1 0.000000+0          1          0         72         121125 2151
+ 7.617000+3 2.000000+0 6.058000-1 5.800000-3 6.000000-1 0.000000+01125 2151
+ 3.539000+4 1.000000+0 3.500000+0 1.600000+0 1.900000+0 0.000000+01125 2151
+ 5.322000+4 2.000000+0 1.112800+3 1.112000+3 7.850000-1 0.000000+01125 2151
+ 1.174300+5 1.000000+0 3.103000+1 2.680000+1 4.230000+0 0.000000+01125 2151
+ 1.431300+5 0.000000+0 2.360000+1 1.650000+1 7.100000+0 0.000000+01125 2151
+ 2.011500+5 1.000000+0 4.927900+3 4.925000+3 2.940000+0 0.000000+01125 2151
+ 2.143000+5 0.000000+0 1.428500+4 1.428000+4 4.640000+0 0.000000+01125 2151
+ 2.390500+5 2.000000+0 5.350200+3 5.349000+3 1.200000+0 0.000000+01125 2151
+ 2.994100+5 1.000000+0 1.325600+2 1.300000+2 2.560000+0 0.000000+01125 2151
+ 3.923200+5 1.000000+0 2.277000+4 2.276000+4 9.870000+0 0.000000+01125 2151
+ 5.980000+5 1.000000+0 2.580000+4 2.580000+4 0.000000+0 0.000000+01125 2151
+ 7.270000+5 3.000000+0 4.500000+4 4.500000+4 0.000000+0 0.000000+01125 2151
+ 2.279200+1 0.000000+0          2          0         42          71125 2151
+ 1.900600+5 0.000000+0 2.750000+1 1.820000+1 9.300000+0 0.000000+01125 2151
+ 2.367100+5 2.000000+0 6.679000+1 6.520000+1 1.590000+0 0.000000+01125 2151
+ 3.052000+5 0.000000+0 7.800000+1 6.830000+1 9.700000+0 0.000000+01125 2151
+ 4.309000+5 0.000000+0 4.005300+3 4.000000+3 5.290000+0 0.000000+01125 2151
+ 4.488200+5 2.000000+0 7.029500+3 7.026000+3 3.520000+0 0.000000+01125 2151
+ 6.970000+5 4.000000+0 6.000000+4 6.000000+4 0.000000+0 0.000000+01125 2151
+ 7.800000+5 4.000000+0 4.400000+4 4.400000+4 0.000000+0 0.000000+01125 2151
+ 0.000000+0 0.000000+0          0          0          0          01125 2  0
+ 0.000000+0 0.000000+0          0          0          0          01125 0  0
+ 0.000000+0 0.000000+0          0          0          0          01125 0  0
+ 0.000000+0 0.000000+0          0          0          0          01125 0  0
+ 0.000000+0 0.000000+0          0          0          0          01125 0  0
+ 0.000000+0 0.000000+0          0          0          0          01125 0  0
+ 0.000000+0 0.000000+0          0          0          0          01125 0  0
+ 0.000000+0 0.000000+0          0          0          0          01125 0  0
+ 0.000000+0 0.000000+0          0          0          0          01125 0  0
+ 0.000000+0 0.000000+0          0          0          0          01125 0  0
+ 0.000000+0 0.000000+0          0          0          0          01125 0  0
+ 1.102300+4 2.279200+1          0          0          1          0112532151
+ 1.102300+4 1.000000+0          0          0          1          0112532151
+ 6.000000+2 5.000000+5          1          2          0          0112532151
+ 1.500000+0 5.410000-1          0          2          0          0112532151
+ 2.279200+1 0.000000+0          0          0        276         23112532151
+ 2.810000+3 1.000000+0 3.763400+2 3.760000+2 3.530000-1 0.000000+0112532151
+ 4.013280+0 0.000000+0 0.000000+0 6.998690+0 6.800100-3 0.000000+0112532151
+ 7.617000+3 2.000000+0 6.058000-1 5.800000-3 6.000000-1 0.000000+0112532151
+ 1.142550+1 0.000000+0 0.000000+0 4.640000-4 6.000000-2 0.000000+0112532151
+ 3.539000+4 1.000000+0 3.500000+0 1.600000+0 1.900000+0 0.000000+0112532151
+ 2.117700+0 0.000000+0 0.000000+0 1.730000-1 2.100000-1 0.000000+0112532151
+ 5.322000+4 2.000000+0 1.112800+3 1.112000+3 7.850000-1 0.000000+0112532151
+ 4.979462+1 0.000000+0 0.000000+0 3.500280+1 7.800000-2 0.000000+0112532151
+ 1.174300+5 1.000000+0 3.103000+1 2.680000+1 4.230000+0 0.000000+0112532151
+ 1.100659+2 0.000000+0 0.000000+0 1.145000+1 7.100000-1 0.000000+0112532151
+ 1.431300+5 0.000000+0 2.360000+1 1.650000+1 7.100000+0 0.000000+0112532151
+ 1.402086+2 0.000000+0 0.000000+0 2.250000+0 4.900000-1 0.000000+0112532151
+ 1.900600+5 0.000000+0 2.750000+1 1.820000+1 9.300000+0 0.000000+0112532151
+ 1.901000+2 0.000000+0 0.000000+0 5.216000+0 1.268000+0 0.000000+0112532151
+ 2.011500+5 1.000000+0 4.927900+3 4.925000+3 2.940000+0 0.000000+0112532151
+ 2.010000+2 0.000000+0 0.000000+0 3.760036+2 9.550000-1 0.000000+0112532151
+ 2.143000+5 0.000000+0 1.428500+4 1.428000+4 4.640000+0 0.000000+0112532151
+ 2.093280+2 0.000000+0 0.000000+0 8.867000+2 7.600000-1 0.000000+0112532151
+ 2.367100+5 2.000000+0 6.679000+1 6.520000+1 1.590000+0 0.000000+0112532151
+ 2.391377+2 0.000000+0 0.000000+0 1.210000+1 3.000000-1 0.000000+0112532151
+ 2.390500+5 2.000000+0 5.350200+3 5.349000+3 1.200000+0 0.000000+0112532151
+ 2.391500+2 0.000000+0 0.000000+0 9.980000+1 2.060020-1 0.000000+0112532151
+ 2.429700+5 1.000000+0 3.295000+2 3.280000+2 1.500000+0 0.000000+0112532151
+ 2.405601+2 0.000000+0 0.000000+0 1.620000+1 4.130000-1 0.000000+0112532151
+ 2.983200+5 2.000000+0 2.039000+3 2.038000+3 1.020000+0 0.000000+0112532151
+ 2.986500+2 0.000000+0 0.000000+0 4.875000+1 1.342000-1 0.000000+0112532151
+ 2.994100+5 1.000000+0 1.325600+2 1.300000+2 2.560000+0 0.000000+0112532151
+ 2.995400+2 0.000000+0 0.000000+0 6.724000+0 4.270000-1 0.000000+0112532151
+ 3.052000+5 0.000000+0 7.800000+1 6.830000+1 9.700000+0 0.000000+0112532151
+ 2.993018+2 0.000000+0 0.000000+0 9.820000+0 1.940000+0 0.000000+0112532151
+ 3.923200+5 1.000000+0 2.277000+4 2.276000+4 9.870000+0 0.000000+0112532151
+ 3.909906+2 0.000000+0 0.000000+0 2.276000-1 2.700037+0 0.000000+0112532151
+ 4.309000+5 0.000000+0 4.005300+3 4.000000+3 5.290000+0 0.000000+0112532151
+ 4.315300+2 0.000000+0 0.000000+0 6.780000+2 6.970000-1 0.000000+0112532151
+ 4.488200+5 2.000000+0 7.029500+3 7.026000+3 3.520000+0 0.000000+0112532151
+ 4.497200+2 0.000000+0 0.000000+0 1.400000-1 5.860140-1 0.000000+0112532151
+ 5.385700+5 1.000000+0 6.278000+4 6.277000+4 1.014000+1 0.000000+0112532151
+ 4.411600+2 0.000000+0 0.000000+0 4.135000+4 2.000014+0 0.000000+0112532151
+ 5.980000+5 1.000000+0 2.580000+4 2.580000+4 0.000000+0 0.000000+0112532151
+ 2.990000+3 0.000000+0 0.000000+0 3.800048+3 0.000000+0 0.000000+0112532151
+ 6.970000+5 4.000000+0 6.000000+4 6.000000+4 0.000000+0 0.000000+0112532151
+ 3.418000+3 0.000000+0 0.000000+0 9.600000+3 0.000000+0 0.000000+0112532151
+ 7.270000+5 3.000000+0 4.500000+4 4.500000+4 0.000000+0 0.000000+0112532151
+ 3.598613+3 0.000000+0 0.000000+0 7.200000+3 0.000000+0 0.000000+0112532151
+ 7.800000+5 4.000000+0 4.400000+4 4.400000+4 0.000000+0 0.000000+0112532151
+ 3.888800+3 0.000000+0 0.000000+0 7.040000+3 0.000000+0 0.000000+0112532151
+ 0.000000+0 0.000000+0          3         69          0          0112532151
+ 0.000000+0 0.000000+0          0          0          0          0112532  0
+ 0.000000+0 0.000000+0          0          0          0          01125 0  0
+ 0.000000+0 0.000000+0          0          0          0          01125 0  0
+ 0.000000+0 0.000000+0          0          0          0          01125 0  0
+ 0.000000+0 0.000000+0          0          0          0          0   0 0  0
+ 0.000000+0 0.000000+0          0          0          0          0  -1 0  0

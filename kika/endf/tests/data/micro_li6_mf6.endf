@@ -1,0 +1,1010 @@
+ ENDF/B-VIII.1                                                         0  0
+ 3.006000+3 5.963450+0          0          0          0          1 325 1451
+ 0.000000+0 0.000000+0          0          0          0          6 325 1451
+ 1.000000+0 2.000000+7          1          0         10          8 325 1451
+ 0.000000+0 0.000000+0          0          0        481          7 325 1451
+  3-Li-  6 LANL       EVAL-JUN20 G.M. Hale, M.W. Paris             325 1451
+ CP2020               DIST-AUG24 REV1-JUN24            20240830    325 1451
+---- ENDF/B-VIII.1    MATERIAL  325         REVISION 1             325 1451
+----- INCIDENT-NEUTRON DATA                                        325 1451
+------ ENDF-6                                                      325 1451
+ ****************************************************************  325 1451
+               MODIFIED FILE for CP2020//ENDF/B-VIII.1beta0        325 1451
+               G. M. Hale & M. W. Paris (2022-10-28)               325 1451
+                                                                   325 1451
+This evaluation is based on an extension of the R-matrix analysis  325 1451
+to 8 MeV neutron energy, and the addition of the two-body channels 325 1451
+n+6Li*(2.186), n+6Li**(3.563), and p+6He.  Experimental data for   325 1451
+reactions involving those channels clarified the properties of two 325 1451
+3/2- levels that show up as interference effects in the 4-6 MeV    325 1451
+region.  The mf=3 cross sections were matched in the region 5-8    325 1451
+MeV to experimental data and the previous evaluation at energies   325 1451
+above 8 MeV.  The reason for the broad matching region is that     325 1451
+the calculated (n,n')d alpha breakup cross section (mt=32) was     325 1451
+under-predicted by the analysis due to the two-body assumption     325 1451
+made for the d+5He and n+6Li* channels.  The data given for mt=32  325 1451
+represent the sum of the (n,n')d alpha continuum cross section     325 1451
+and the cross section for 6Li(n,n')6Li* (what would normally be    325 1451
+mt=51 and was actually included in previous versions, going back   325 1451
+to ENDF/B-VI [see below] as mt=53).  The inelastic cross section   325 1451
+in mt=52, previously recorded in mt=57 in ENDF/B-VI and later) is  325 1451
+for the second excited (T=1) state of 6Li, which decays only by    325 1451
+gamma emission.                                                    325 1451
+                                                                   325 1451
+The total cross section in mt=1 was chosen to follow the precise   325 1451
+data of Abfalterer et al. at energies above 5.3 MeV, and is there- 325 1451
+fore somewhat lower than the previous evaluation in that region.   325 1451
+Other data references will be given in a more detailed file-1      325 1451
+description at a later date.                                       325 1451
+                                                                   325 1451
+The mt=32 energy-angle spectra in mf=6 for the (n,n'd)alpha re-    325 1451
+action have been retained from the previous version, and may be    325 1451
+updated at a later time.  The Legendre coefficients in mf=6 for    325 1451
+elastic scattering (mt=2), inelastic scattering to the second      325 1451
+level (mt=52), and for the (n,p) and (n,t) reactions (mt=103 and   325 1451
+700) were extrapolated to energies above the range of the analysis 325 1451
+to 20 MeV, and should be used with caution above 8 MeV.            325 1451
+                                                                   325 1451
+The COMMARA covariances in mf=33 have been removed for the CP2020  325 1451
+version of this evaluation; these and mf=36 will be updated and    325 1451
+given in more detail in a future version of the evaluation.        325 1451
+                                                                   325 1451
+Addendum [2021-05-13]: 6/32 has been modified to obtain exact      325 1451
+energy conservation; the first and second moments of the distrib-  325 1451
+utions were scaled by incident-energy dependent (secondary-        325 1451
+energy independent) scaling factors. -M.W. Paris                   325 1451
+                                                                   325 1451
+Addendum [2023-02-14]: Corrections have been applied to account    325 1451
+for revisions suggested by I. Thompson during the NNDC phase1      325 1451
+review: MF=6, MT=105 INT: 0-->2; double counting of photons:       325 1451
+removed MF=12/14 MT=52 (keeping MF=6 MT=52), removed MF=6 MT=102   325 1451
+(keeping MF=12/14 MT=102). -M.W. Paris                             325 1451
+                                                                   325 1451
+Addendum [2023-04-14]: Reverted MF=3 MT=105 to ENDF/B-VIII.0 std   325 1451
+-M.W. Paris                                                        325 1451
+                                                                   325 1451
+Addendum [2023-06-28]: Reverted MF=4 MT=2 to ENDF/B-VIII.0;        325 1451
+for En > 8.0 MeV, according to the note above, MF=4 MT=2 was       325 1451
+extrapolated beyond fitted data; testing shows ENDF/B-VIII.0 is    325 1451
+preferred. -M.W. Paris                                             325 1451
+                                                                   325 1451
+Addendum [2024-05-25]: Covariances MF=33 MT=2 MT1=2,105 extended   325 1451
+to 20 MeV, based on data, assuming uncertainty constant from       325 1451
+3.85 MeV. -M.W. Paris                                              325 1451
+                                                                   325 1451
+ ****************************************************************  325 1451
+           MODIFICATIONS FOR ENDF/B-VIII.0_beta-7                  325 1451
+                       G. M. Hale (4/19/18)                        325 1451
+                                                                   325 1451
+ The representation of the outgoing-particle energy-angle distri-  325 1451
+ butions for the three-body breakup reaction (n,n'd alpha) was     325 1451
+ changed from the "pseudo-levels" in MT=51-81 of the previous file 325 1451
+ to tabulated energy distributions for each of the three outgoing  325 1451
+ particles in MF=6 for MT=32.  The sections for MT=57, the second  325 1451
+ excited state of 6Li(0+,T=1) at Ex=3.562 MeV, were retained and   325 1451
+ renamed MT=51, because it decays only by gamma emission.  The 3   325 1451
+ other low-lying excited T=0 levels of 6Li, 3+, 2+, and 1+, res-   325 1451
+ pectively, were included explicitly in the continuum spectra cal- 325 1451
+ culated from a 3-body resonance model that included also contri-  325 1451
+ butions from the first two resonances (3/2- and 1/2-) of 5He.     325 1451
+ These calculations were fitted to measured lab spectra at En=4.8  325 1451
+ and 14.1 MeV.                                                     325 1451
+                                                                   325 1451
+ ****************************************************************  325 1451
+           MODIFICATIONS FOR ENDF/B-VIII.0_beta-4                  325 1451
+                       G. M. Hale (2/7/17)                         325 1451
+                                                                   325 1451
+ Results from a new R-matrix analysis of the 7Li system, done up   325 1451
+ to 4 MeV neutron energy, were included in this evaluation for     325 1451
+ MF=3, MT=1,2,105.  The results were obtained by fitting the (n,t) 325 1451
+ cross section that resulted from the 2016 GMA standards evalua-   325 1451
+ tion, along with data from other reactions in the 7Li sytem.      325 1451
+ The cross sections were joined at 3.8 MeV to the existing ENDF/B  325 1451
+ VII.1 file, and the total cross section was re-summed to be con-  325 1451
+ sistent with the partials (2+4+24+102+103+105) at all energies.   325 1451
+ Covariances (MF=33), and a more detailed description will be ad-  325 1451
+ ded to the file in a later version of ENDF/B-VIII.                325 1451
+                                                                   325 1451
+ ****************************************************************  325 1451
+                                                                   325 1451
+          MODIFICATION OF ENDF/B-VII EVALUATION FOR NEW DATA       325 1451
+                           G. M. Hale (3/9/09)                     325 1451
+                                                                   325 1451
+    Results of new R-matrix analysis that included absolute WNR    325 1451
+    measurements of the 6Li(n,t)4He differential cross section     325 1451
+    made in 2008 were used for MF=3, MT=105 above the standards    325 1451
+    range (0.94 <= E <= 4) MeV.  In the range (4 <= E <= 8)        325 1451
+    MeV, the (n,t) cross section was obtained from Legendre fits   325 1451
+    to the new WNR data, matched smoothly to the previous cross    325 1451
+    section above 8 MeV.  The differences with the previous (n,t)  325 1451
+    cross section above about 1 MeV were distributed between the   325 1451
+    elastic (MT=2) and inelastic (MT=58) cross sections, so that   325 1451
+    the same total cross section was preserved.                    325 1451
+                                                                   325 1451
+ ****************************************************************  325 1451
+                                                                   325 1451
+          MODIFICATION OF ENDF/B-VI EVALUATION FOR ENDF/B-VII      325 1451
+                  G. M. Hale and P. G. Young (4/12/06)             325 1451
+                                                                   325 1451
+ 1. Standard cross sections for MT=105 from the ENDF/B-VII         325 1451
+    international standards analysis were incorporated below       325 1451
+    2.8 MeV. The previous evaluation (ENDF/B-VI) was smoothed      325 1451
+    slightly between 2.8-3.4 MeV for a smooth join of the data.    325 1451
+                                                                   325 1451
+ 2. MF=4, MT=2 elastic angular distributions from the ENDF/B-VII   325 1451
+    R-Matrix analysis were added below 2.8 MeV.                    325 1451
+                                                                   325 1451
+ 3. MF=6, MT=105 angular distributions were added from the         325 1451
+    ENDF/B-VII R-Matrix analysis below 2.8 MeV.                    325 1451
+                                                                   325 1451
+ 4. MF=33, MT=105 data from the ENDF/B-VII international           325 1451
+    standards analysis were incorporated into the evaluation.      325 1451
+                                                                   325 1451
+ ****************************************************************  325 1451
+                                                                   325 1451
+ ENDF/B-VII  CONVERTED FROM ENDF/B-VI BY NNDC OCT 2004             325 1451
+                                                                   325 1451
+ ****************************************************************  325 1451
+                                                                   325 1451
+                  MOD1 OF ENDF/B-VI                                325 1451
+                                                                   325 1451
+     The following revisions were made for MOD1 of ENDF/B-VI:      325 1451
+                                                                   325 1451
+ 1. MF=1,MT=451 - Comments were added regarding estimated          325 1451
+    (expanded) covariance for the Standards Cross Sections.        325 1451
+ 2. MF=3,MT=53 - LF flag and Q-value corrected.                    325 1451
+                                                                   325 1451
+ ***************************************************************** 325 1451
+                                                                   325 1451
+                                                                   325 1451
+                        ENDF/VI EVALUATION                         325 1451
+                     G. M. Hale and P. G. Young                    325 1451
+                                                                   325 1451
+ MAJOR CHANGES FROM VERSION V OF ENDF/B ARE:                       325 1451
+                                                                   325 1451
+   1. Inclusion of the ENDF/B-VI standard (n,t) cross section      325 1451
+      from the simultaneous standards analysis (ca85) over the     325 1451
+      energy range thermal to 1 MeV.                               325 1451
+   2. Replacement of all major cross sections and elastic angular  325 1451
+      distributions at energies between 10E-5 eV and 3 MeV with    325 1451
+      results from the R-matrix analysis performed in conjunction  325 1451
+      with the simultaneous standards analysis.                    325 1451
+   3. Revision of the elastic cross sections and angular distri-   325 1451
+      butions at energies between 3 and 20 MeV to match recent     325 1451
+      experimental data, resulting in a general decrease of the    325 1451
+      elastic cross section in this energy range.                  325 1451
+   4. Revision of the (n,n')d cross sections to account for        325 1451
+      recent measurements, resulting in a general increase in      325 1451
+      the total (n,n')d cross section that tends to offset the     325 1451
+      decrease in the elastic cross section and maintain about     325 1451
+      the same total cross section as before.                      325 1451
+                                                                   325 1451
+                                                                   325 1451
+****************************************************************** 325 1451
+                                                                   325 1451
+                        STANDARDS COVARIANCES                      325 1451
+                                                                   325 1451
+ Phase 1 reviewers of the ENDF/B-VI standards cross sections have  325 1451
+ expressed the concern that the uncertainties resulting from the   325 1451
+ combination of R-matrix and simultaneous evaluations might have   325 1451
+ led to uncertainties that are too small.  As a result, the        325 1451
+ Standards Subcommittee produced (at the May, 1990 CSEWG meeting)  325 1451
+ a set of expanded covariance estimates for the standard cross     325 1451
+ section reactions.  These uncertainties are estimates such that   325 1451
+ if a modern day experiment were performed on a given standard     325 1451
+ cross section using the best techniques, approximately 2/3 of     325 1451
+ the results should fall within these expanded uncertainties. The  325 1451
+ expanded uncertainties for the Li-6(n,t) cross section are given  325 1451
+ in the following table and are compared to values from the        325 1451
+ combined output of the standards covariance analysis:             325 1451
+                                                                   325 1451
+    Energy Range    Estimated Uncertainty    Combined Analysis     325 1451
+      (keV)              (percent)               (percent)         325 1451
+                                                                   325 1451
+ 1.0E-08 - 0.1               0.3                     0.14          325 1451
+     0.1 - 1.0               0.5                                   325 1451
+     1.0 - 10.               0.7                     0.14          325 1451
+     10. - 50.               0.9                                   325 1451
+     50. - 90.               1.1                     0.25          325 1451
+     90. - 150               1.5                                   325 1451
+     150 - 450               2.0                     0.29          325 1451
+     450 - 650               5.0                                   325 1451
+     650 - 800               2.0                     0.36          325 1451
+     800 - 1000              5.0                                   325 1451
+                                                                   325 1451
+ ****************************************************************  325 1451
+                                                                   325 1451
+                 COMMARA 2.0 covariances                           325 1451
+                                                                   325 1451
+The covariance data from COMMARA-2.0 were added to this file       325 1451
+in July, 2011. The existing covariances for (n,t) as described     325 1451
+above were left in place, but the COMMARA covariance data for      325 1451
+other reactions were adopted. The following is a taken from the    325 1451
+COMMARA (AFCI) 2.0 report for this material.                       325 1451
+                                                                   325 1451
+Covariances are supplied for several reaction channels, two strong 325 1451
+channels are obtained by sophisticated method, the rest stems from 325 1451
+simple estimate.                                                   325 1451
+                                                                   325 1451
+Elastic scattering (n+6Li scattering) and 6Li(n,t)4He reaction     325 1451
+were obtained at LANL by state of the art R-matrix analysis [1]    325 1451
+of the 7-Li system. This system contains data for all possible     325 1451
+reactions among t+4He and n+6Li at energies extending from the     325 1451
+t+4He threshold (well below the n+6-Li threshold) up to energies   325 1451
+corresponding to 4 MeV incident neutrons. Also included are        325 1451
+n+6Li* channels to simulate the effects of n+d+ breakup. A very    325 1451
+good fit is obtained to the more than 3300 data points, with a     325 1451
+chi-square per degree of freedom of 1.164.                         325 1451
+                                                                   325 1451
+Of particular note is the excellent fit to the t+4He scattering    325 1451
+data, which have very small uncertainties. This is true in         325 1451
+particular at energies near the obvious resonance structure        325 1451
+in the 6-Li(n,t) reaction. These high-precision charged-particle   325 1451
+elastic scattering measurements put stringent constraints on       325 1451
+fitting the neutron data through the unitarity of the              325 1451
+scattering matrix.                                                 325 1451
+                                                                   325 1451
+References:                                                        325 1451
+[1] G.M. Hale, "Covariances from light-element R-matrix            325 1451
+analyzes", Nuclear Data Sheets, 109, 2812 (2008).                  325 1451
+                                                                   325 1451
+ ****************************************************************  325 1451
+                                                                   325 1451
+                                                                   325 1451
+ mf=2 --------- resonance parameters ----------------------------  325 1451
+                                                                   325 1451
+   mt=151  effective scattering radius = 2.31175e-13 cm.           325 1451
+                                                                   325 1451
+ mf=3 --------- smooth cross sections ---------------------------  325 1451
+                                                                   325 1451
+      the 2200 m/s cross sections are as follows:                  325 1451
+          mt=1     sigma = 941.6928  barns                         325 1451
+          mt=2     sigma = 0.67157   barns                         325 1451
+          mt=102   sigma = 0.03850   barns                         325 1451
+          mt=105   sigma = 940.9827  barns                         325 1451
+                                                                   325 1451
+   mt=1        total cross section                                 325 1451
+       below 3 mev, the values are taken from an r-matrix          325 1451
+          analysis by hale, dodder, and witte (ha84) which takes   325 1451
+          into account data from all reactions possible in 7li     325 1451
+          up to 4 mev neutron energy. total cross section data     325 1451
+          considered in this analysis were those of ha75 and sm77. 325 1451
+          between 3 and 20 mev, the total was taken to be the      325 1451
+          sum of mt=2,4,24,102,103, and 105, which generally       325 1451
+          follows the measurements of sm82, ke79, kn77, go72,      325 1451
+          and fo71.                                                325 1451
+   mt=2        elastic cross section                               325 1451
+       below 3 mev, the values are taken from the r-matrix         325 1451
+          analysis cited for mt=1, which includes the elastic      325 1451
+          measurements of sm82 and la61. above 3 mev, the curve    325 1451
+          is a smooth representation of the data of kn79 and ba63  325 1451
+          up to 7.5 mev, and of that of ho79 between 7.5 and 13    325 1451
+          mev.  the curve passes through the average of several    325 1451
+          measurements at 14 mev, and is extrapolated to 20 mev    325 1451
+          using the shape of an optical model calculation.         325 1451
+   mt=4        total inelastic cross section                       325 1451
+       sum of mt=51 through mt=81.                                 325 1451
+   mt=24       (n,2n)alpha cross section                           325 1451
+       passes through the point of mather and paine (ma69) at      325 1451
+       14 mev, taking into account the measurements of as63.       325 1451
+   mt=51,52,54-56,58-81  (n,n')d continuum                         325 1451
+       represented by continuum-level contributions in 6li,        325 1451
+          binned in .5-mev intervals.  The energy-angle spectra    325 1451
+          are determined by a 3-body phase-space calculation,      325 1451
+          assuming isotropic center-of mass distributions.  at     325 1451
+          each energy, the sum of the continuum-level              325 1451
+          contributions is normalized to an assumed energy-angle   325 1451
+          integrated continuum cross section which approximates    325 1451
+          the difference of the nonelastic sigma and the           325 1451
+          contribution from the first and second levels in 6li.    325 1451
+          the steep rise of the pseudo-level cross sections from   325 1451
+          their thresholds and the use of fixed bin widths over    325 1451
+          finite angles produces anomolous structure in the        325 1451
+          individual cross sections which is especially apparent   325 1451
+          near the thresholds.  some effort has been made to       325 1451
+          smooth out these effects, but they remain to some        325 1451
+          extent.                                                  325 1451
+   mt=53        (n,n1)d discrete level cross section               325 1451
+       has p-wave penetrability energy dependence from threshold   325 1451
+          to 3.2 mev.  matched at higher energies to a curve       325 1451
+          through fitted legendre coefficients from experimental   325 1451
+          data of sa82, ho79, sm80, ho68, ba63.                    325 1451
+   mt=57        (n,n2)gamma cross section                          325 1451
+       is based on the available experimental data, especially     325 1451
+          that of ho79, li80, sm82, ho68.                          325 1451
+          gradually to 20 mev.  smooth curve drawn through data    325 1451
+          of pr69 and be75.                                        325 1451
+   mt=102       (n,gamma) cross section                            325 1451
+       unchanged from version v, which was based on the thermal    325 1451
+          measurement of jurney (ju73) and the pendlebury          325 1451
+          evaluation (pe64) at higher energies.                    325 1451
+   mt=103        (n,p) cross section                               325 1451
+       threshold to 9 mev, based on the data of ba65.extended to   325 1451
+          20 mev through the 14 mev data of fr54 and ba53.         325 1451
+   mt=105        (n,t) cross section                               325 1451
+       below 3 mev, values are taken from the r-matrix analysis,   325 1451
+          which includes (n,t) measurements from re78, la78, br77, 325 1451
+          ov74, and ba75.  between 3 and 5 mev, the values are     325 1451
+          based on ba75, and at higher energies are taken from the 325 1451
+          evaluation of pe64, extended to 20 mev considering the   325 1451
+          data of ke58.                                            325 1451
+                                                                   325 1451
+                                                                   325 1451
+ mf = 4-------------------angular distributions------------------- 325 1451
+                                                                   325 1451
+   mt=2          elastic cross section                             325 1451
+       legendre coefficients determined as follows:                325 1451
+          below 4 mev, coefficients up to l=6 were taken from      325 1451
+          the r-matrix analysis , which included the measurements  325 1451
+          la61 and sm 82.  above 4 mev, the coefficients represent 325 1451
+          fits to the measurements of ho68, ho79, kn79, sm82,      325 1451
+          de73, ba63, ab70, and hy68.  most emphasis was placed    325 1451
+          on the data of ho79, kn79, sm82.  extrapolation of the   325 1451
+          coefficients to 20 mev was aided by optical model        325 1451
+          calculations.                                            325 1451
+   mt=24        (n,2n) cross section                               325 1451
+       lab distributions obtained by integrating over energy the   325 1451
+          4-body phase-space spectra that result from transforming 325 1451
+          isotropic center-of-mass distributions to the laboratory 325 1451
+          system.                                                  325 1451
+   mt=51-81     (n,n')d cross sections                             325 1451
+       excitation energy binned data is assumed isotropic in the   325 1451
+          center of mass reference system.  mt = 53 and 57         325 1451
+          are real levels.  mt = 57 is assumed to be isotropic     325 1451
+          in the two-body reference system.  mt = 53 is given as   325 1451
+          anisotropic, based on fits of legendre expansions to     325 1451
+          the experimental data of ab70, ba63, ho68, ho79, me65,   325 1451
+          hy68, wo62, sa82.                                        325 1451
+   mt=105       (n,t).cross section        (to be added)           325 1451
+       legendre coefficients obtained from the r-matrix analysis   325 1451
+          are supplied at energies below 4 mev.  the analysis      325 1451
+          takes into account (n,t) angular distribution            325 1451
+          measurements from kn83, co82, dr82, br77, ba75, and      325 1451
+          ov74.                                                    325 1451
+                                                                   325 1451
+                                                                   325 1451
+ mf = 5---------secondary energy distributions-------------------- 325 1451
+                                                                   325 1451
+   mt=24        (n,2n)                                             325 1451
+       lab distributions obtained by integrating over angle the 4- 325 1451
+          body phase-space spectra that result from transforming   325 1451
+          isotropic center-of-mass distributions to the laboratory 325 1451
+          system.                                                  325 1451
+                                                                   325 1451
+                                                                   325 1451
+ mf = 12--------gamma-ray multiplicities-------------------------- 325 1451
+                                                                   325 1451
+   mt=57        (n,n2) gamma                                       325 1451
+       energy taken from aj74.  multiplicity assumed to be one.    325 1451
+   mt=102       (n,gamma)                                          325 1451
+       energies and transition arrays for radiative capture taken  325 1451
+          from ju73, as reported in aj74.  the lp flag was used to 325 1451
+          describe the mt=102 photons.                             325 1451
+                                                                   325 1451
+                                                                   325 1451
+ mf = 14--------gamma-ray angular distributions------------------- 325 1451
+                                                                   325 1451
+   mt=57        (n,n2)gamma                                        325 1451
+       the gamma is assumed isotropic.                             325 1451
+   mt=102       (n,gamma)                                          325 1451
+      .the two high-energy gammas are assumed isotropic. data on   325 1451
+          the 477 kev gamma indicate isotropy.                     325 1451
+                                                                   325 1451
+                                                                   325 1451
+ mf=33----------cross section covariances------------------------- 325 1451
+                   (to be added later)                             325 1451
+                                                                   325 1451
+  the relative covariances for mt=1,2, and 105 below 4 mev are     325 1451
+  given in file 33. they are based on calculations using the co-   325 1451
+  variances of the r-matrix parameters in first-order error        325 1451
+  propogation.                                                     325 1451
+   mt=1         total                                              325 1451
+       relative covariances entered as nc-type sub-subsection,     325 1451
+          implying that they are to be constructed from those for  325 1451
+          mt=2 and 105.  they are not intended for use at energies 325 1451
+          above 4 mev.                                             325 1451
+   mt=2,105     elastic and (n,t)                                  325 1451
+       relative covariances among these two cross sections are     325 1451
+          entered explicitly as ni-type sub-subsections in the     325 1451
+          lb=5 (direct) representation at energies below 4 mev.    325 1451
+          although values for the 3.95-4.05 mev bin are repeated   325 1451
+          in a 4-20 mev bin, the covariances are not intended for  325 1451
+          use at energies above 4 mev.                             325 1451
+                                                                   325 1451
+                                                                   325 1451
+--------------------- references --------------------------------  325 1451
+                                                                   325 1451
+ab70  U.Abbondanno, Nuo.Cim. A166,139(1970).                       325 1451
+aj74  f.ajzenberg-selove and t.lauritsen, nucl. phys. a227,55      325 1451
+      (1974).                                                      325 1451
+ar64  a.h.armstrong, j.gammel, l.rosen, and g.m.frye, nucl. phys.  325 1451
+      52,505 (1964).                                               325 1451
+as63  v.j.ashby et al, phys. rev. 129,1771 (1963).                 325 1451
+ba53  m.e.battat and f.l.ribe, phys.rev. 89,80 (1953).             325 1451
+ba63  r.batchelor and j.h.towle, nucl. phys. 47,385 (1963).        325 1451
+ba65  r.bass, c.bindhardt, and k.kruger, eandc(e)-57u (1965).      325 1451
+ba75  c.m.bartle, proc. conf. on nuclear cross sections and        325 1451
+      technology, vol.2,688 (1975),  and private communication     325 1451
+      (1976).  see also nucl. phys. a330, 1 (1979).                325 1451
+be75  besotosnyj et al., yk-19, 77 (1975).                         325 1451
+br77  r.e.brown,g.g.ohlsen,r.f.haglund, and n.jarmie, phys. rev.   325 1451
+      16c, 513 (1977).                                             325 1451
+ca85  a.d.carlson,w.p.poenitz,g.m.hale, and r.w.peele, nuclear     325 1451
+      data for basic and applied science (santa fe, n.m.), 1429    325 1451
+      (1985).                                                      325 1451
+co67  j.a.cookson and d.dandy, nucl. phys. a91,273 (1967).         325 1451
+co82  h.conde,t.andersson,l.nilsson, and c.nordborg, nuclear data  325 1451
+      for science and technology (antwerp, belgium), 447 (1982).   325 1451
+de73  F.Demanins et al., infn/be-73 (1973).                        325 1451
+dr82  m.drosg,d.m.drake,r.a.hardekopf, and g.m.hale, la-9129-ms    325 1451
+      (1982).                                                      325 1451
+dr85  m.drosg et al., santa fe conf.1, 145(1985).                  325 1451
+fo71  d.g.foster and d.w.glasgow, phys. rev. c3,576 (1971).        325 1451
+fr54  g.m.frye, phys. rev. 93,1086 (1954).                         325 1451
+go72  c.a.goulding and p.stoler, eandc(us)-176u,161 (1972).        325 1451
+ha75  j.a.harvey and n.w.hill, nuclear cross sections and          325 1451
+      technology (washington, d.c.), 244 (1975).                   325 1451
+ha84  g.m.hale, nuclear standard reference data (geel,belgium)     325 1451
+      iaea tecdoc-335, 103 (1984). describes preliminary analysis. 325 1451
+ho68  j.c.hopkins,d.m.drake, and h.conde, nucl. phys. a107,139     325 1451
+      (1968), and j.c.hopkins, d.m.drake, and h.conde, la-3765     325 1451
+      (1967).                                                      325 1451
+ho79  h.h.hogue et al., n.s. amp;e. 69, 22 (1979).                 325 1451
+ju73  e.t.jurney, lasl, private communication (1973).              325 1451
+ke58  r.d.kern and w.e.kreger, phys. rev. 112, 926 (1958).         325 1451
+ke79  j.d.kellie,g.p.lamaze, and r.b.schwartz, nuclear cross       325 1451
+      sections for technology (knoxville, tn.), 48 (1979).         325 1451
+kn77  h.h.knitter,c.budtz-jorgensen,m.mailly, and r.vogt, eur-     325 1451
+      5726e (1977).                                                325 1451
+kn79  h.d.knox,r.m.white, and r.o.lane, n.s.  e. 69, 223 (1979).   325 1451
+kn83  h.h.knitter,c.budtz-jorgensen,d.l.smith, and d.marletta,     325 1451
+      n.s.e. 83, 229(1983).                                        325 1451
+la61  r.o.lane,a.s.langsdorf,j.e.monahan, and a.j.elwyn, ann.      325 1451
+      phys.12, 135 (1961).                                         325 1451
+la78  g.p.lamaze,o.a.wasson,r.a.schrack, and a.d.carlson, n.s.e.   325 1451
+      68, (1978).                                                  325 1451
+li80  p.w.lisowski et al., la-8342 (1980).                         325 1451
+ma69  d.s.mather and l.f.paine, awre-o-47/69 (1969).               325 1451
+me65  f.merchez,n.v.sen,v.regis, and r.bouchez, compt. rend. 260,  325 1451
+      3922 (1965).                                                 325 1451
+ov74  j.c.overley,r.m.sealock, and d.h.ehlers, nucl. phys. a221,   325 1451
+      573 (1974).                                                  325 1451
+pe64  e.d.pendlebury, awre-o-60/64 (1964).                         325 1451
+pr69  g.presser et al., nuc.phys. a131, 679(1969).                 325 1451
+re78  c.renner,j.a.harvey,n.w.hill,g.l.morgan, and k.pusk, bull.   325 1451
+      am. phys. soc. 23, 526 (1978).                               325 1451
+sa82  e.t.sadowski,h.knox,d.a.resler, and r.o.lane, bap 27,624(c5) 325 1451
+      (1982).                                                      325 1451
+sm77  a.b.smith,p.guenther,d.havel, and j.f.whalen, anl/ndm-29     325 1451
+      (1977).                                                      325 1451
+sm82  a.b.smith,p.t.guenther, and j.f.whalen, nucl. phys. a373,    325 1451
+      305 (1982).                                                  325 1451
+wo62  c.wong,j.d.anderson, and j.w.mcclure, nucl. phys. 33,680     325 1451
+      (1962).                                                      325 1451
+                                                                   325 1451
+****************************************************************** 325 1451
+                                                                   325 1451
+                                1        451        492          0 325 1451
+                                3         41         24          0 325 1451
+                                3         52         30          0 325 1451
+                                3        103         40          0 325 1451
+                                6         41         13          0 325 1451
+                                6         52        165          0 325 1451
+                                6        103        225          0 325 1451
+ 0.000000+0 0.000000+0          0          0          0          0 325 1  0
+                                                                   325 0  0
+                                                                   325 0  0
+ 3.006000+3 5.963450+0          0          0          0          0 325 3 41
+-3.698000+6-3.698000+6          0          0          1         62 325 3 41
+         62          2                                             325 3 41
+ 4.318000+6 0.000000+0 4.350000+6 2.000000-4 4.400000+6 8.000000-4 325 3 41
+ 4.450000+6 1.400000-3 4.500000+6 2.000000-3 4.550000+6 2.500000-3 325 3 41
+ 4.600000+6 3.100000-3 4.650000+6 3.650000-3 4.700000+6 4.100000-3 325 3 41
+ 4.750000+6 4.600000-3 4.800000+6 5.200000-3 4.850000+6 5.700000-3 325 3 41
+ 4.900000+6 6.300000-3 5.000000+6 7.300000-3 5.050000+6 7.900000-3 325 3 41
+ 5.100000+6 8.400000-3 5.200000+6 9.400000-3 5.300000+6 1.050000-2 325 3 41
+ 5.400000+6 1.160000-2 5.500000+6 1.260000-2 5.600000+6 1.360000-2 325 3 41
+ 5.800000+6 1.570000-2 6.000000+6 1.790000-2 6.200000+6 2.000000-2 325 3 41
+ 6.400000+6 2.210000-2 6.600000+6 2.420000-2 6.800000+6 2.630000-2 325 3 41
+ 7.000000+6 2.830000-2 7.200000+6 3.040000-2 7.400000+6 3.240000-2 325 3 41
+ 7.600000+6 3.440000-2 8.000000+6 3.830000-2 8.200000+6 4.060000-2 325 3 41
+ 8.400000+6 4.220000-2 8.500000+6 4.310000-2 8.600000+6 4.400000-2 325 3 41
+ 8.800000+6 4.580000-2 9.000000+6 4.760000-2 9.500000+6 5.190000-2 325 3 41
+ 1.000000+7 5.610000-2 1.040000+7 5.930000-2 1.050000+7 6.010000-2 325 3 41
+ 1.080000+7 6.250000-2 1.100000+7 6.400000-2 1.150000+7 6.760000-2 325 3 41
+ 1.200000+7 7.100000-2 1.250000+7 7.370000-2 1.300000+7 7.600000-2 325 3 41
+ 1.350000+7 7.750000-2 1.400000+7 7.820000-2 1.450000+7 7.870000-2 325 3 41
+ 1.500000+7 7.870000-2 1.550000+7 7.860000-2 1.600000+7 7.840000-2 325 3 41
+ 1.650000+7 7.790000-2 1.700000+7 7.740000-2 1.750000+7 7.680000-2 325 3 41
+ 1.800000+7 7.630000-2 1.850000+7 7.570000-2 1.900000+7 7.510000-2 325 3 41
+ 1.950000+7 7.440000-2 2.000000+7 7.360000-2                       325 3 41
+                                                                   325 3  0
+ 3.006000+3 5.963450+0          0          0          0          0 325 3 52
+ 0.000000+0-3.563000+6          0          0          1         81 325 3 52
+         81          2                                             325 3 52
+ 4.161606+6 0.000000+0 4.200000+6 5.153300-4 4.250000+6 1.357740-3 325 3 52
+ 4.300000+6 2.286620-3 4.350000+6 3.233240-3 4.400000+6 4.177340-3 325 3 52
+ 4.450000+6 5.129490-3 4.500000+6 6.123300-3 4.550000+6 7.194550-3 325 3 52
+ 4.600000+6 8.291570-3 4.650000+6 9.083710-3 4.670000+6 9.197600-3 325 3 52
+ 4.680000+6 9.202371-3 4.690000+6 9.174510-3 4.700000+6 9.117829-3 325 3 52
+ 4.750000+6 8.589761-3 4.800000+6 8.055460-3 4.850000+6 7.714310-3 325 3 52
+ 4.900000+6 7.530170-3 4.950000+6 7.437730-3 5.000000+6 7.392810-3 325 3 52
+ 5.100000+6 7.357040-3 5.200000+6 7.333090-3 5.300000+6 7.297680-3 325 3 52
+ 5.400000+6 7.246890-3 5.500000+6 7.182050-3 5.600000+6 7.105400-3 325 3 52
+ 5.700000+6 7.018810-3 5.800000+6 6.923570-3 5.900000+6 6.820430-3 325 3 52
+ 6.000000+6 6.709760-3 6.100000+6 6.591730-3 6.200000+6 6.466450-3 325 3 52
+ 6.300000+6 6.334050-3 6.400000+6 6.194790-3 6.500000+6 6.049050-3 325 3 52
+ 6.600000+6 5.897350-3 6.700000+6 5.740400-3 6.800000+6 5.578970-3 325 3 52
+ 6.900000+6 5.413970-3 7.000000+6 5.282598-3 7.100000+6 5.143894-3 325 3 52
+ 7.200000+6 5.010714-3 7.300000+6 4.880740-3 7.400000+6 4.752598-3 325 3 52
+ 7.500000+6 4.629451-3 7.600000+6 4.509730-3 7.700000+6 4.393442-3 325 3 52
+ 7.800000+6 4.282861-3 7.900000+6 4.175951-3 8.000000+6 4.072675-3 325 3 52
+ 8.200000+6 3.882510-3 8.400000+6 3.710210-3 8.600000+6 3.555695-3 325 3 52
+ 8.800000+6 3.412906-3 9.000000+6 3.280431-3 9.200000+6 3.156219-3 325 3 52
+ 9.400000+6 3.038264-3 9.600000+6 2.926290-3 9.800000+6 2.818349-3 325 3 52
+ 1.000000+7 2.714652-3 1.050000+7 2.474416-3 1.100000+7 2.262482-3 325 3 52
+ 1.150000+7 2.076367-3 1.200000+7 1.914284-3 1.250000+7 1.775637-3 325 3 52
+ 1.300000+7 1.658407-3 1.350000+7 1.556682-3 1.400000+7 1.467335-3 325 3 52
+ 1.450000+7 1.389676-3 1.500000+7 1.321786-3 1.550000+7 1.259730-3 325 3 52
+ 1.600000+7 1.201131-3 1.650000+7 1.145058-3 1.700000+7 1.092403-3 325 3 52
+ 1.750000+7 1.045463-3 1.800000+7 1.007290-3 1.850000+7 9.802181-4 325 3 52
+ 1.900000+7 9.610762-4 1.950000+7 9.484497-4 2.000000+7 9.400000-4 325 3 52
+                                                                   325 3  0
+                                                                   325 3  0
+ 3.006000+3 5.963450+0          0          0          0          0 325 3103
+-2.725944+6-2.725944+6          0          0          1        111 325 3103
+        111          2                                             325 3103
+ 3.183716+6 0.000000+0 3.200000+6 4.371500-8 3.220000+6 7.460700-6 325 3103
+ 3.240000+6 5.849000-5 3.260000+6 1.911400-4 3.280000+6 4.226900-4 325 3103
+ 3.300000+6 7.551300-4 3.320000+6 1.183270-3 3.340000+6 1.699570-3 325 3103
+ 3.360000+6 2.296290-3 3.380000+6 2.966390-3 3.400000+6 3.703700-3 325 3103
+ 3.420000+6 4.502770-3 3.440000+6 5.358740-3 3.460000+6 6.267140-3 325 3103
+ 3.480000+6 7.223730-3 3.500000+6 8.224370-3 3.550000+6 1.089128-2 325 3103
+ 3.600000+6 1.374029-2 3.650000+6 1.669972-2 3.700000+6 1.969395-2 325 3103
+ 3.750000+6 2.264611-2 3.800000+6 2.548182-2 3.850000+6 2.813310-2 325 3103
+ 3.900000+6 3.054177-2 3.950000+6 3.266189-2 4.000000+6 3.446089-2 325 3103
+ 4.050000+6 3.591910-2 4.100000+6 3.702754-2 4.150000+6 3.778144-2 325 3103
+ 4.200000+6 3.808256-2 4.250000+6 3.801349-2 4.300000+6 3.764053-2 325 3103
+ 4.350000+6 3.699169-2 4.400000+6 3.607025-2 4.450000+6 3.485087-2 325 3103
+ 4.500000+6 3.328173-2 4.550000+6 3.133346-2 4.600000+6 2.921815-2 325 3103
+ 4.650000+6 2.780402-2 4.660000+6 2.771587-2 4.670000+6 2.770584-2 325 3103
+ 4.680000+6 2.777161-2 4.690000+6 2.790640-2 4.700000+6 2.809960-2 325 3103
+ 4.750000+6 2.947121-2 4.800000+6 3.059991-2 4.850000+6 3.111504-2 325 3103
+ 4.900000+6 3.117411-2 4.950000+6 3.096702-2 5.000000+6 3.061606-2 325 3103
+ 5.100000+6 2.972993-2 5.200000+6 2.877952-2 5.300000+6 2.784913-2 325 3103
+ 5.400000+6 2.696502-2 5.500000+6 2.613279-2 5.600000+6 2.535034-2 325 3103
+ 5.700000+6 2.461287-2 5.800000+6 2.391502-2 5.900000+6 2.325178-2 325 3103
+ 6.000000+6 2.261893-2 6.100000+6 2.201318-2 6.200000+6 2.143214-2 325 3103
+ 6.300000+6 2.087427-2 6.400000+6 2.033870-2 6.500000+6 1.982515-2 325 3103
+ 6.600000+6 1.933372-2 6.700000+6 1.886476-2 6.800000+6 1.841877-2 325 3103
+ 6.900000+6 1.799622-2 7.000000+6 1.759754-2 7.100000+6 1.723386-2 325 3103
+ 7.200000+6 1.689698-2 7.300000+6 1.658334-2 7.400000+6 1.628940-2 325 3103
+ 7.500000+6 1.601437-2 7.600000+6 1.574884-2 7.700000+6 1.549087-2 325 3103
+ 7.800000+6 1.523955-2 7.900000+6 1.499524-2 8.000000+6 1.475622-2 325 3103
+ 8.200000+6 1.428864-2 8.400000+6 1.382667-2 8.500000+6 1.360297-2 325 3103
+ 8.600000+6 1.338326-2 8.800000+6 1.295620-2 9.000000+6 1.254252-2 325 3103
+ 9.500000+6 1.150000-2 1.000000+7 1.070000-2 1.040000+7 1.000000-2 325 3103
+ 1.050000+7 9.800000-3 1.080000+7 9.400000-3 1.100000+7 9.100000-3 325 3103
+ 1.150000+7 8.400000-3 1.200000+7 7.800000-3 1.250000+7 7.300000-3 325 3103
+ 1.300000+7 6.800000-3 1.350000+7 6.400000-3 1.400000+7 6.100000-3 325 3103
+ 1.450000+7 5.800000-3 1.500000+7 5.650000-3 1.550000+7 5.500000-3 325 3103
+ 1.600000+7 5.300000-3 1.650000+7 5.200000-3 1.700000+7 5.100000-3 325 3103
+ 1.750000+7 5.000000-3 1.800000+7 5.000000-3 1.850000+7 5.000000-3 325 3103
+ 1.900000+7 4.900000-3 1.950000+7 4.900000-3 2.000000+7 4.900000-3 325 3103
+                                                                   325 3  0
+                                                                   325 3  0
+                                                                   325 0  0
+                                                                   325 0  0
+ 3.006000+3 5.963450+0          0          2          3          0 325 6 41
+ 1.000000+0 1.000000+0          0          6          1          2 325 6 41
+          2          2                                             325 6 41
+ 4.318000+6 2.000000+0 2.000000+7 2.000000+0                       325 6 41
+ 6.967386+0 0.000000+0          0          0          0          4 325 6 41
+ 1.001000+3 9.986234-1          0          6          1          2 325 6 41
+          2          2                                             325 6 41
+ 4.318000+6 1.000000+0 2.000000+7 1.000000+0                       325 6 41
+ 6.967386+0 0.000000+0          0          0          0          4 325 6 41
+ 2.004000+3 3.967131+0          0          6          1          2 325 6 41
+          2          2                                             325 6 41
+ 4.318000+6 1.000000+0 2.000000+7 1.000000+0                       325 6 41
+ 6.967386+0 0.000000+0          0          0          0          4 325 6 41
+                                                                   325 6  0
+ 3.006000+3 5.963450+0          0          2          2          0 325 6 52
+ 1.000000+0 1.000000+0          0          2          1          2 325 6 52
+          2          2                                             325 6 52
+ 4.161606+6 1.000000+0 2.000000+7 1.000000+0                       325 6 52
+ 0.000000+0 0.000000+0          0          0          1         78 325 6 52
+         78          2                                             325 6 52
+ 0.000000+0 4.161606+6          0          0          2          2 325 6 52
+ 0.000000+0 0.000000+0                                             325 6 52
+ 0.000000+0 4.200000+6          0          0          2          2 325 6 52
+ 2.110092-1 7.848345-2                                             325 6 52
+ 0.000000+0 4.250000+6          0          0          2          2 325 6 52
+ 1.948015-1 9.344287-2                                             325 6 52
+ 0.000000+0 4.300000+6          0          0          2          2 325 6 52
+ 1.811224-1 9.692402-2                                             325 6 52
+ 0.000000+0 4.350000+6          0          0          2          2 325 6 52
+ 1.699463-1 9.653667-2                                             325 6 52
+ 0.000000+0 4.400000+6          0          0          2          2 325 6 52
+ 1.596535-1 9.359703-2                                             325 6 52
+ 0.000000+0 4.450000+6          0          0          2          2 325 6 52
+ 1.492026-1 8.817557-2                                             325 6 52
+ 0.000000+0 4.500000+6          0          0          2          2 325 6 52
+ 1.380682-1 7.997181-2                                             325 6 52
+ 0.000000+0 4.550000+6          0          0          2          2 325 6 52
+ 1.266815-1 6.899507-2                                             325 6 52
+ 0.000000+0 4.600000+6          0          0          2          2 325 6 52
+ 1.176480-1 5.705105-2                                             325 6 52
+ 0.000000+0 4.650000+6          0          0          2          2 325 6 52
+ 1.165687-1 4.974643-2                                             325 6 52
+ 0.000000+0 4.670000+6          0          0          2          2 325 6 52
+ 1.195948-1 4.986928-2                                             325 6 52
+ 0.000000+0 4.680000+6          0          0          2          2 325 6 52
+ 1.218758-1 5.074990-2                                             325 6 52
+ 0.000000+0 4.690000+6          0          0          2          2 325 6 52
+ 1.246183-1 5.217797-2                                             325 6 52
+ 0.000000+0 4.700000+6          0          0          2          2 325 6 52
+ 1.277604-1 5.412661-2                                             325 6 52
+ 0.000000+0 4.750000+6          0          0          2          2 325 6 52
+ 1.465950-1 6.955368-2                                             325 6 52
+ 0.000000+0 4.800000+6          0          0          2          2 325 6 52
+ 1.639288-1 8.771571-2                                             325 6 52
+ 0.000000+0 4.850000+6          0          0          2          2 325 6 52
+ 1.757173-1 1.027102-1                                             325 6 52
+ 0.000000+0 4.900000+6          0          0          2          2 325 6 52
+ 1.825887-1 1.134750-1                                             325 6 52
+ 0.000000+0 4.950000+6          0          0          2          2 325 6 52
+ 1.862269-1 1.209079-1                                             325 6 52
+ 0.000000+0 5.000000+6          0          0          2          2 325 6 52
+ 1.879352-1 1.260725-1                                             325 6 52
+ 0.000000+0 5.100000+6          0          0          2          2 325 6 52
+ 1.884287-1 1.324557-1                                             325 6 52
+ 0.000000+0 5.200000+6          0          0          2          2 325 6 52
+ 1.871855-1 1.361166-1                                             325 6 52
+ 0.000000+0 5.300000+6          0          0          2          2 325 6 52
+ 1.852165-1 1.384801-1                                             325 6 52
+ 0.000000+0 5.400000+6          0          0          2          2 325 6 52
+ 1.828572-1 1.401547-1                                             325 6 52
+ 0.000000+0 5.500000+6          0          0          2          2 325 6 52
+ 1.802203-1 1.414203-1                                             325 6 52
+ 0.000000+0 5.600000+6          0          0          2          2 325 6 52
+ 1.773448-1 1.424144-1                                             325 6 52
+ 0.000000+0 5.700000+6          0          0          2          2 325 6 52
+ 1.742465-1 1.432081-1                                             325 6 52
+ 0.000000+0 5.800000+6          0          0          2          2 325 6 52
+ 1.709373-1 1.438389-1                                             325 6 52
+ 0.000000+0 5.900000+6          0          0          2          2 325 6 52
+ 1.674310-1 1.443273-1                                             325 6 52
+ 0.000000+0 6.000000+6          0          0          2          2 325 6 52
+ 1.637455-1 1.446847-1                                             325 6 52
+ 0.000000+0 6.100000+6          0          0          2          2 325 6 52
+ 1.599021-1 1.449177-1                                             325 6 52
+ 0.000000+0 6.200000+6          0          0          2          2 325 6 52
+ 1.559244-1 1.450300-1                                             325 6 52
+ 0.000000+0 6.300000+6          0          0          2          2 325 6 52
+ 1.518379-1 1.450245-1                                             325 6 52
+ 0.000000+0 6.400000+6          0          0          2          2 325 6 52
+ 1.476679-1 1.449036-1                                             325 6 52
+ 0.000000+0 6.500000+6          0          0          2          2 325 6 52
+ 1.434396-1 1.446694-1                                             325 6 52
+ 0.000000+0 6.600000+6          0          0          2          2 325 6 52
+ 1.391768-1 1.443243-1                                             325 6 52
+ 0.000000+0 6.700000+6          0          0          2          2 325 6 52
+ 1.349015-1 1.438708-1                                             325 6 52
+ 0.000000+0 6.800000+6          0          0          2          2 325 6 52
+ 1.306341-1 1.433118-1                                             325 6 52
+ 0.000000+0 6.900000+6          0          0          2          2 325 6 52
+ 1.263924-1 1.426501-1                                             325 6 52
+ 0.000000+0 7.000000+6          0          0          2          2 325 6 52
+ 1.221927-1 1.418887-1                                             325 6 52
+ 0.000000+0 7.100000+6          0          0          2          2 325 6 52
+ 1.180487-1 1.410307-1                                             325 6 52
+ 0.000000+0 7.200000+6          0          0          2          2 325 6 52
+ 1.139726-1 1.400792-1                                             325 6 52
+ 0.000000+0 7.300000+6          0          0          2          2 325 6 52
+ 1.099744-1 1.390374-1                                             325 6 52
+ 0.000000+0 7.400000+6          0          0          2          2 325 6 52
+ 1.060630-1 1.379082-1                                             325 6 52
+ 0.000000+0 7.500000+6          0          0          2          2 325 6 52
+ 1.022454-1 1.366947-1                                             325 6 52
+ 0.000000+0 7.600000+6          0          0          2          2 325 6 52
+ 9.852756-2 1.353999-1                                             325 6 52
+ 0.000000+0 7.700000+6          0          0          2          2 325 6 52
+ 9.491443-2 1.340263-1                                             325 6 52
+ 0.000000+0 7.800000+6          0          0          2          2 325 6 52
+ 9.140989-2 1.325768-1                                             325 6 52
+ 0.000000+0 7.900000+6          0          0          2          2 325 6 52
+ 8.801706-2 1.310540-1                                             325 6 52
+ 0.000000+0 8.000000+6          0          0          2          2 325 6 52
+ 8.473837-2 1.294603-1                                             325 6 52
+ 0.000000+0 8.200000+6          0          0          2          2 325 6 52
+ 7.853053-2 1.260695-1                                             325 6 52
+ 0.000000+0 8.400000+6          0          0          2          2 325 6 52
+ 7.279619-2 1.224224-1                                             325 6 52
+ 0.000000+0 8.600000+6          0          0          2          2 325 6 52
+ 6.753994-2 1.185356-1                                             325 6 52
+ 0.000000+0 8.800000+6          0          0          2          2 325 6 52
+ 6.276284-2 1.144247-1                                             325 6 52
+ 0.000000+0 9.000000+6          0          0          2          2 325 6 52
+ 5.846359-2 1.101046-1                                             325 6 52
+ 0.000000+0 9.500000+6          0          0          2          2 325 6 52
+ 4.978503-2 9.848360-2                                             325 6 52
+ 0.000000+0 1.000000+7          0          0          2          2 325 6 52
+ 4.400468-2 8.586957-2                                             325 6 52
+ 0.000000+0 1.050000+7          0          0          2          2 325 6 52
+ 4.102885-2 7.249532-2                                             325 6 52
+ 0.000000+0 1.100000+7          0          0          2          2 325 6 52
+ 4.073649-2 5.861139-2                                             325 6 52
+ 0.000000+0 1.150000+7          0          0          2          2 325 6 52
+ 4.297036-2 4.448812-2                                             325 6 52
+ 0.000000+0 1.200000+7          0          0          2          2 325 6 52
+ 4.752853-2 3.041156-2                                             325 6 52
+ 0.000000+0 1.250000+7          0          0          2          2 325 6 52
+ 5.416008-2 1.667417-2                                             325 6 52
+ 0.000000+0 1.300000+7          0          0          2          2 325 6 52
+ 6.256672-2 3.562080-3                                             325 6 52
+ 0.000000+0 1.350000+7          0          0          2          2 325 6 52
+ 7.241055-2-8.659481-3                                             325 6 52
+ 0.000000+0 1.400000+7          0          0          2          2 325 6 52
+ 8.332732-2-1.976029-2                                             325 6 52
+ 0.000000+0 1.450000+7          0          0          2          2 325 6 52
+ 9.494319-2-2.955691-2                                             325 6 52
+ 0.000000+0 1.500000+7          0          0          2          2 325 6 52
+ 1.068928-1-3.792059-2                                             325 6 52
+ 0.000000+0 1.550000+7          0          0          2          2 325 6 52
+ 1.188366-1-4.478036-2                                             325 6 52
+ 0.000000+0 1.600000+7          0          0          2          2 325 6 52
+ 1.304742-1-5.012135-2                                             325 6 52
+ 0.000000+0 1.650000+7          0          0          2          2 325 6 52
+ 1.415550-1-5.397912-2                                             325 6 52
+ 0.000000+0 1.700000+7          0          0          2          2 325 6 52
+ 1.518820-1-5.643094-2                                             325 6 52
+ 0.000000+0 1.750000+7          0          0          2          2 325 6 52
+ 1.613131-1-5.758568-2                                             325 6 52
+ 0.000000+0 1.800000+7          0          0          2          2 325 6 52
+ 1.697572-1-5.757332-2                                             325 6 52
+ 0.000000+0 1.850000+7          0          0          2          2 325 6 52
+ 1.771684-1-5.653532-2                                             325 6 52
+ 0.000000+0 1.900000+7          0          0          2          2 325 6 52
+ 1.835387-1-5.461630-2                                             325 6 52
+ 0.000000+0 1.950000+7          0          0          2          2 325 6 52
+ 1.888902-1-5.195760-2                                             325 6 52
+ 0.000000+0 2.000000+7          0          0          2          2 325 6 52
+ 1.932674-1-4.869253-2                                             325 6 52
+ 3.006000+3 5.963450+0          0          4          1          2 325 6 52
+          2          2                                             325 6 52
+ 4.161606+6 1.000000+0 2.000000+7 1.000000+0                       325 6 52
+                                                                   325 6  0
+ 3.006000+3 5.963450+0          0          2          2          0 325 6103
+ 1.001000+3 9.986234-1          0          2          1          2 325 6103
+          2          2                                             325 6103
+ 3.183716+6 1.000000+0 2.000000+7 1.000000+0                       325 6103
+ 0.000000+0 0.000000+0          0          0          1        108 325 6103
+        108          2                                             325 6103
+ 0.000000+0 3.183716+6          0          0          2          2 325 6103
+ 0.000000+0 0.000000+0                                             325 6103
+ 0.000000+0 3.200000+6          0          0          2          2 325 6103
+ 2.124937-1 1.315047-2                                             325 6103
+ 0.000000+0 3.220000+6          0          0          2          2 325 6103
+ 1.926807-1 1.544546-2                                             325 6103
+ 0.000000+0 3.240000+6          0          0          2          2 325 6103
+ 1.777234-1 1.777360-2                                             325 6103
+ 0.000000+0 3.260000+6          0          0          2          2 325 6103
+ 1.655703-1 2.013773-2                                             325 6103
+ 0.000000+0 3.280000+6          0          0          2          2 325 6103
+ 1.555289-1 2.252646-2                                             325 6103
+ 0.000000+0 3.300000+6          0          0          2          2 325 6103
+ 1.472459-1 2.492168-2                                             325 6103
+ 0.000000+0 3.320000+6          0          0          2          2 325 6103
+ 1.404840-1 2.730393-2                                             325 6103
+ 0.000000+0 3.340000+6          0          0          2          2 325 6103
+ 1.350545-1 2.965531-2                                             325 6103
+ 0.000000+0 3.360000+6          0          0          2          2 325 6103
+ 1.307945-1 3.196067-2                                             325 6103
+ 0.000000+0 3.380000+6          0          0          2          2 325 6103
+ 1.275581-1 3.420809-2                                             325 6103
+ 0.000000+0 3.400000+6          0          0          2          2 325 6103
+ 1.252138-1 3.638870-2                                             325 6103
+ 0.000000+0 3.420000+6          0          0          2          2 325 6103
+ 1.236429-1 3.849642-2                                             325 6103
+ 0.000000+0 3.440000+6          0          0          2          2 325 6103
+ 1.227391-1 4.052749-2                                             325 6103
+ 0.000000+0 3.460000+6          0          0          2          2 325 6103
+ 1.224077-1 4.248011-2                                             325 6103
+ 0.000000+0 3.480000+6          0          0          2          2 325 6103
+ 1.225653-1 4.435396-2                                             325 6103
+ 0.000000+0 3.500000+6          0          0          2          2 325 6103
+ 1.231385-1 4.614994-2                                             325 6103
+ 0.000000+0 3.550000+6          0          0          2          2 325 6103
+ 1.259903-1 5.031228-2                                             325 6103
+ 0.000000+0 3.600000+6          0          0          2          2 325 6103
+ 1.302741-1 5.404179-2                                             325 6103
+ 0.000000+0 3.650000+6          0          0          2          2 325 6103
+ 1.354469-1 5.738914-2                                             325 6103
+ 0.000000+0 3.700000+6          0          0          2          2 325 6103
+ 1.411418-1 6.040562-2                                             325 6103
+ 0.000000+0 3.750000+6          0          0          2          2 325 6103
+ 1.471147-1 6.313898-2                                             325 6103
+ 0.000000+0 3.800000+6          0          0          2          2 325 6103
+ 1.532068-1 6.563196-2                                             325 6103
+ 0.000000+0 3.850000+6          0          0          2          2 325 6103
+ 1.593185-1 6.792225-2                                             325 6103
+ 0.000000+0 3.900000+6          0          0          2          2 325 6103
+ 1.653918-1 7.004321-2                                             325 6103
+ 0.000000+0 3.950000+6          0          0          2          2 325 6103
+ 1.713996-1 7.202500-2                                             325 6103
+ 0.000000+0 4.000000+6          0          0          2          2 325 6103
+ 1.773391-1 7.389605-2                                             325 6103
+ 0.000000+0 4.050000+6          0          0          2          2 325 6103
+ 1.832287-1 7.568494-2                                             325 6103
+ 0.000000+0 4.100000+6          0          0          2          2 325 6103
+ 1.891069-1 7.742280-2                                             325 6103
+ 0.000000+0 4.150000+6          0          0          2          2 325 6103
+ 1.950032-1 7.914760-2                                             325 6103
+ 0.000000+0 4.200000+6          0          0          2          2 325 6103
+ 2.011590-1 8.090648-2                                             325 6103
+ 0.000000+0 4.250000+6          0          0          2          2 325 6103
+ 2.079530-1 8.268116-2                                             325 6103
+ 0.000000+0 4.300000+6          0          0          2          2 325 6103
+ 2.152202-1 8.465631-2                                             325 6103
+ 0.000000+0 4.350000+6          0          0          2          2 325 6103
+ 2.233221-1 8.701395-2                                             325 6103
+ 0.000000+0 4.400000+6          0          0          2          2 325 6103
+ 2.328465-1 9.001798-2                                             325 6103
+ 0.000000+0 4.450000+6          0          0          2          2 325 6103
+ 2.447065-1 9.406914-2                                             325 6103
+ 0.000000+0 4.500000+6          0          0          2          2 325 6103
+ 2.601858-1 9.972974-2                                             325 6103
+ 0.000000+0 4.550000+6          0          0          2          2 325 6103
+ 2.803198-1 1.074575-1                                             325 6103
+ 0.000000+0 4.600000+6          0          0          2          2 325 6103
+ 3.022082-1 1.159998-1                                             325 6103
+ 0.000000+0 4.650000+6          0          0          2          2 325 6103
+ 3.106093-1 1.187123-1                                             325 6103
+ 0.000000+0 4.660000+6          0          0          2          2 325 6103
+ 3.087243-1 1.177030-1                                             325 6103
+ 0.000000+0 4.670000+6          0          0          2          2 325 6103
+ 3.055087-1 1.161130-1                                             325 6103
+ 0.000000+0 4.680000+6          0          0          2          2 325 6103
+ 3.010862-1 1.139956-1                                             325 6103
+ 0.000000+0 4.690000+6          0          0          2          2 325 6103
+ 2.956683-1 1.114428-1                                             325 6103
+ 0.000000+0 4.700000+6          0          0          2          2 325 6103
+ 2.895247-1 1.085718-1                                             325 6103
+ 0.000000+0 4.750000+6          0          0          2          2 325 6103
+ 2.572008-1 9.349554-2                                             325 6103
+ 0.000000+0 4.800000+6          0          0          2          2 325 6103
+ 2.347729-1 8.272653-2                                             325 6103
+ 0.000000+0 4.850000+6          0          0          2          2 325 6103
+ 2.229998-1 7.662320-2                                             325 6103
+ 0.000000+0 4.900000+6          0          0          2          2 325 6103
+ 2.174553-1 7.326438-2                                             325 6103
+ 0.000000+0 4.950000+6          0          0          2          2 325 6103
+ 2.151331-1 7.134104-2                                             325 6103
+ 0.000000+0 5.000000+6          0          0          2          2 325 6103
+ 2.144740-1 7.017397-2                                             325 6103
+ 0.000000+0 5.100000+6          0          0          2          2 325 6103
+ 2.154101-1 6.891898-2                                             325 6103
+ 0.000000+0 5.200000+6          0          0          2          2 325 6103
+ 2.175432-1 6.832077-2                                             325 6103
+ 0.000000+0 5.300000+6          0          0          2          2 325 6103
+ 2.200771-1 6.803973-2                                             325 6103
+ 0.000000+0 5.400000+6          0          0          2          2 325 6103
+ 2.227387-1 6.796214-2                                             325 6103
+ 0.000000+0 5.500000+6          0          0          2          2 325 6103
+ 2.254157-1 6.804165-2                                             325 6103
+ 0.000000+0 5.600000+6          0          0          2          2 325 6103
+ 2.280503-1 6.825318-2                                             325 6103
+ 0.000000+0 5.700000+6          0          0          2          2 325 6103
+ 2.306054-1 6.857872-2                                             325 6103
+ 0.000000+0 5.800000+6          0          0          2          2 325 6103
+ 2.330528-1 6.900304-2                                             325 6103
+ 0.000000+0 5.900000+6          0          0          2          2 325 6103
+ 2.353699-1 6.951273-2                                             325 6103
+ 0.000000+0 6.000000+6          0          0          2          2 325 6103
+ 2.375378-1 7.009613-2                                             325 6103
+ 0.000000+0 6.100000+6          0          0          2          2 325 6103
+ 2.395415-1 7.074351-2                                             325 6103
+ 0.000000+0 6.200000+6          0          0          2          2 325 6103
+ 2.413693-1 7.144709-2                                             325 6103
+ 0.000000+0 6.300000+6          0          0          2          2 325 6103
+ 2.430129-1 7.220097-2                                             325 6103
+ 0.000000+0 6.400000+6          0          0          2          2 325 6103
+ 2.444668-1 7.300092-2                                             325 6103
+ 0.000000+0 6.500000+6          0          0          2          2 325 6103
+ 2.457284-1 7.384408-2                                             325 6103
+ 0.000000+0 6.600000+6          0          0          2          2 325 6103
+ 2.467975-1 7.472859-2                                             325 6103
+ 0.000000+0 6.700000+6          0          0          2          2 325 6103
+ 2.476763-1 7.565321-2                                             325 6103
+ 0.000000+0 6.800000+6          0          0          2          2 325 6103
+ 2.483689-1 7.661700-2                                             325 6103
+ 0.000000+0 6.900000+6          0          0          2          2 325 6103
+ 2.488809-1 7.761897-2                                             325 6103
+ 0.000000+0 7.000000+6          0          0          2          2 325 6103
+ 2.492198-1 7.865787-2                                             325 6103
+ 0.000000+0 7.100000+6          0          0          2          2 325 6103
+ 2.493940-1 7.973198-2                                             325 6103
+ 0.000000+0 7.200000+6          0          0          2          2 325 6103
+ 2.494131-1 8.083899-2                                             325 6103
+ 0.000000+0 7.300000+6          0          0          2          2 325 6103
+ 2.492874-1 8.197598-2                                             325 6103
+ 0.000000+0 7.400000+6          0          0          2          2 325 6103
+ 2.490279-1 8.313942-2                                             325 6103
+ 0.000000+0 7.500000+6          0          0          2          2 325 6103
+ 2.486457-1 8.432521-2                                             325 6103
+ 0.000000+0 7.600000+6          0          0          2          2 325 6103
+ 2.481524-1 8.552881-2                                             325 6103
+ 0.000000+0 7.700000+6          0          0          2          2 325 6103
+ 2.475593-1 8.674534-2                                             325 6103
+ 0.000000+0 7.800000+6          0          0          2          2 325 6103
+ 2.468777-1 8.796973-2                                             325 6103
+ 0.000000+0 7.900000+6          0          0          2          2 325 6103
+ 2.461183-1 8.919683-2                                             325 6103
+ 0.000000+0 8.000000+6          0          0          2          2 325 6103
+ 2.452916-1 9.042159-2                                             325 6103
+ 0.000000+0 8.200000+6          0          0          2          2 325 6103
+ 2.434748-1 9.284478-2                                             325 6103
+ 0.000000+0 8.400000+6          0          0          2          2 325 6103
+ 2.414978-1 9.520404-2                                             325 6103
+ 0.000000+0 8.600000+6          0          0          2          2 325 6103
+ 2.394202-1 9.747059-2                                             325 6103
+ 0.000000+0 8.800000+6          0          0          2          2 325 6103
+ 2.372899-1 9.962302-2                                             325 6103
+ 0.000000+0 9.000000+6          0          0          2          2 325 6103
+ 2.351445-1 1.016472-1                                             325 6103
+ 0.000000+0 9.500000+6          0          0          2          2 325 6103
+ 2.298823-1 1.061091-1                                             325 6103
+ 0.000000+0 1.000000+7          0          0          2          2 325 6103
+ 2.249438-1 1.097395-1                                             325 6103
+ 0.000000+0 1.050000+7          0          0          2          2 325 6103
+ 2.204180-1 1.126458-1                                             325 6103
+ 0.000000+0 1.100000+7          0          0          2          2 325 6103
+ 2.163097-1 1.149650-1                                             325 6103
+ 0.000000+0 1.150000+7          0          0          2          2 325 6103
+ 2.125888-1 1.168269-1                                             325 6103
+ 0.000000+0 1.200000+7          0          0          2          2 325 6103
+ 2.092148-1 1.183400-1                                             325 6103
+ 0.000000+0 1.250000+7          0          0          2          2 325 6103
+ 2.061466-1 1.195899-1                                             325 6103
+ 0.000000+0 1.300000+7          0          0          2          2 325 6103
+ 2.033468-1 1.206423-1                                             325 6103
+ 0.000000+0 1.350000+7          0          0          2          2 325 6103
+ 2.007828-1 1.215465-1                                             325 6103
+ 0.000000+0 1.400000+7          0          0          2          2 325 6103
+ 1.984264-1 1.223392-1                                             325 6103
+ 0.000000+0 1.450000+7          0          0          2          2 325 6103
+ 1.962535-1 1.230477-1                                             325 6103
+ 0.000000+0 1.500000+7          0          0          2          2 325 6103
+ 1.942435-1 1.236925-1                                             325 6103
+ 0.000000+0 1.550000+7          0          0          2          2 325 6103
+ 1.923789-1 1.242885-1                                             325 6103
+ 0.000000+0 1.600000+7          0          0          2          2 325 6103
+ 1.906444-1 1.248469-1                                             325 6103
+ 0.000000+0 1.650000+7          0          0          2          2 325 6103
+ 1.890269-1 1.253762-1                                             325 6103
+ 0.000000+0 1.700000+7          0          0          2          2 325 6103
+ 1.875150-1 1.258824-1                                             325 6103
+ 0.000000+0 1.750000+7          0          0          2          2 325 6103
+ 1.860987-1 1.263702-1                                             325 6103
+ 0.000000+0 1.800000+7          0          0          2          2 325 6103
+ 1.847692-1 1.268431-1                                             325 6103
+ 0.000000+0 1.850000+7          0          0          2          2 325 6103
+ 1.835188-1 1.273036-1                                             325 6103
+ 0.000000+0 1.900000+7          0          0          2          2 325 6103
+ 1.823406-1 1.277536-1                                             325 6103
+ 0.000000+0 1.950000+7          0          0          2          2 325 6103
+ 1.812286-1 1.281946-1                                             325 6103
+ 0.000000+0 2.000000+7          0          0          2          2 325 6103
+ 1.801773-1 1.286277-1                                             325 6103
+ 2.006000+3 5.966093+0          0          4          1          2 325 6103
+          2          2                                             325 6103
+ 3.183716+6 1.000000+0 2.000000+7 1.000000+0                       325 6103
+                                                                   325 6  0
+                                                                   325 6  0
+                                                                   325 0  0
+                                                                   325 0  0
+                                                                   325 0  0
+                                                                   325 0  0
+                                                                     0 0  0
+                                                                    -1 0  0

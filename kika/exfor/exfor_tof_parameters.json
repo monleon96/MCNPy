@@ -1,0 +1,221 @@
+{
+  "10037024": {
+    "energy_resolution_input": {
+      "distance": {
+        "value": 2.75,
+        "uncertainty": 0.45,
+        "unit": "m",
+        "ref": "source_to_scatter + scatter_to_detector(mid)"
+      },
+      "time_resolution": {
+        "value": 1.5,
+        "unit": "ns",
+        "ref": "neutron_pulse_width_FWHM"
+      }
+    },
+    "flight_path": {
+      "source_to_scatter": {
+        "value": 0.1,
+        "uncertainty": null,
+        "unit": "m"
+      },
+      "scatter_to_detector": {
+        "value": 2.65,
+        "uncertainty": 0.45,
+        "unit": "m"
+      }
+    },
+    "notes": "Paper states neutron pulses of ~1.5 ns duration (FWHM). Samples were placed 10 cm from the neutron source; main detector distance varied from 220 to 310 cm, so scatter->detector stored as midpoint 2.65\u00b10.45 m and total TOF path (source->scatter + scatter->detector) as 2.75\u00b10.45 m. Data reduction used a Monte Carlo correction that included time-of-flight resolution; detector/electronics timing contributions beyond pulse width are not explicitly quoted, so \u0394t=1.5 ns should be treated as a lower-bound input."
+  },
+  "10571002": {
+    "energy_resolution_input": {
+      "distance": {
+        "value": 40.0,
+        "unit": "m",
+        "ref": "incident_TOF_flight_path"
+      },
+      "time_resolution": {
+        "value": 8.0,
+        "unit": "ns",
+        "ref": "incident_spectrum_resolution_0.2ns_per_m"
+      }
+    },
+    "notes": "ORELA TOF reported as a 40 m flight path with incident spectrum resolution 0.2 ns/m (treated as an effective timing term already including source/moderator/instrument contributions). Thus \u0394t_eff = (0.2 ns/m)*40 m = 8 ns. EXFOR text also describes scattering geometry with 5 m source->scatterer and 5 m scatterer->detector legs; those lengths describe the scattering setup, but the incident neutron energy resolution used here is tied to the 40 m TOF station. Data were averaged over 100 keV incident-energy bins, so practical incident-energy resolution is not better than the bin width even if TOF allows finer resolution."
+  },
+  "10886002": {
+    "flight_path": {
+      "total": {
+        "min": {
+          "value": 5.0,
+          "unit": "m"
+        },
+        "max": {
+          "value": 5.5,
+          "unit": "m"
+        }
+      }
+    }
+  },
+  "11276009": {
+    "energy_resolution_inputs": {
+      "flight_path": {
+        "source_to_scatter": {
+          "value": null,
+          "uncertainty": null,
+          "unit": "m"
+        },
+        "scatter_to_detector": {
+          "value": null,
+          "uncertainty": null,
+          "unit": "m"
+        }
+      },
+      "tof_resolution": {
+        "value": null,
+        "unit": "ns"
+      }
+    },
+    "notes": [
+      "EXFOR 11276 (COO-1573-33, 1967) specifies TOF method but does not provide flight-path distances or timing resolution in the BIB information available here.",
+      "A closely related Case Western Reserve (1USACSE) TOF scattering setup is documented in EXFOR 10037 (Boschung/Lindow/Shrader, Nucl. Phys. A161 (1971)), using a 3-MeV terminal pulsed Van de Graaff with Mobley magnet beam buncher, D(d,n) source, and liquid scintillator with pulse-shape discrimination. This may indicate similar instrumentation family, but distances/timing must still be taken from the 1967 report or derived from peak widths/energy spread.",
+      "If the 1967 report (COO-1573-33) can be accessed, extract the actual source\u2192scatterer and scatterer\u2192detector distances and the effective timing resolution (beam pulse width/bunch width + detector timing + electronics) and fill the null values above."
+    ],
+    "provenance": {
+      "exfor_entry": "11276",
+      "primary_reference": "COO-1573-33 (1967)",
+      "supporting_related_entry": "10037 (Boschung/Lindow/Shrader, 1971)"
+    }
+  },
+  "14462002": {
+    "energy_resolution_input": {
+      "distance": {
+        "value": 4.0,
+        "unit": "m",
+        "ref": "max_flight_path"
+      },
+      "time_resolution": {
+        "value": 1.0,
+        "unit": "ns",
+        "ref": "beam_bunch_width"
+      }
+    },
+    "notes": "TOF used with a pulsed/bunched beam; bunch width about 1 ns (used here as timing input). Detector mounted on a goniometer; paper states it can accommodate a flight path up to 4 m but does not give the exact flight path used for the reported datasets, so distance=4 m is an upper bound assumption. Actual flight path may be <4 m, which would worsen TOF energy resolution. Timing contributions from detector/electronics (beyond beam bunch width) are not explicitly given, so the true effective \u0394t is likely >1 ns."
+  },
+  "20743002": {
+    "flight_path": {
+      "source_to_detector": {
+        "value": 57.0,
+        "unit": "m"
+      }
+    },
+    "energy_resolution_input": {
+      "distance": {
+        "value": 57.0,
+        "unit": "m"
+      },
+      "time_resolution": {
+        "value": 5.47,
+        "unit": "ns"
+      }
+    },
+    "notes": "Assumed that Karlsruhe ISO-CYCLO TOF spectrometer used an evacuated flight path of ~57 m for neutron timing measurements (there is a longer flight path of 195m, information is not clear which one was used). EXFOR indicates a neutron pulse width of 2 ns and an instrument timing term of 0.09 ns/m; interpreted as separate timing contributions. Using L = 57 m gives spectrometer timing = 0.09 ns/m * 57 = 5.13 ns. Combined in quadrature with the 2 ns pulse width yields \u0394t_eff \u2248 5.47 ns for conservative time resolution."
+  },
+  "23365004": {
+    "energy_resolution_inputs": {
+      "distance": {
+        "value": 27.037,
+        "uncertainty": 0.005,
+        "unit": "m",
+        "ref": "source_to_scatter"
+      },
+      "time_resolution": {
+        "value": 5.0,
+        "unit": "ns"
+      }
+    },
+    "flight_path": {
+      "source_to_scatter": {
+        "value": 27.037,
+        "uncertainty": 0.005,
+        "unit": "m"
+      },
+      "source_to_monitor": {
+        "value": 25.667,
+        "uncertainty": 0.005,
+        "unit": "m"
+      }
+    },
+    "energy_resolution_at_1MeV": {
+      "value": 5.0,
+      "unit": "keV"
+    }
+  },
+  "23365005": {
+    "energy_resolution_inputs": {
+      "distance": {
+        "value": 8.3,
+        "uncertainty": 0.005,
+        "unit": "m",
+        "ref": "source_to_scatter"
+      },
+      "time_resolution": {
+        "value": 1.0,
+        "unit": "ns"
+      }
+    },
+    "flight_path": {
+      "source_to_scatter": {
+        "value": 8.3,
+        "uncertainty": 0.005,
+        "unit": "m"
+      },
+      "source_to_monitor": {
+        "value": 6.044,
+        "uncertainty": 0.005,
+        "unit": "m"
+      }
+    },
+    "energy_resolution_at_1MeV": {
+      "value": 3.0,
+      "unit": "keV"
+    }
+  },
+  "27673002": {
+    "energy_resolution_inputs": {
+      "distance": {
+        "value": 27.037,
+        "uncertainty": 0.005,
+        "unit": "m",
+        "ref": "source_to_scatter"
+      },
+      "time_resolution": {
+        "value": 10.0,
+        "unit": "ns"
+      }
+    },
+    "flight_path": {
+      "source_to_scatter": {
+        "value": 27.037,
+        "uncertainty": 0.005,
+        "unit": "m"
+      },
+      "source_to_monitor": {
+        "value": 25.667,
+        "uncertainty": 0.005,
+        "unit": "m"
+      }
+    },
+    "energy_resolution_at_1MeV": {
+      "value": 10.0,
+      "unit": "keV"
+    }
+  },
+  "30463020": {
+    "flight_path": {},
+    "tof_resolution": {
+      "value": 3.0,
+      "unit": "ns",
+      "origin": "reported_by_authors"
+    }
+  }
+}

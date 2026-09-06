@@ -82,6 +82,28 @@ def parse_perturbation_label(raw: str, index: int) -> Perturbation:
             mt=4,
             short_label=_mt_label(4),
         )
+    # nubar total | nubar prompt | nubar delayed → ENDF MT 452/456/455
+    m = re.fullmatch(r"nubar\s+(total|prompt|delayed)", s)
+    if m:
+        nubar_mt = {"total": 452, "prompt": 456, "delayed": 455}[m.group(1)]
+        return Perturbation(
+            index=index,
+            raw_label=raw,
+            category=PertCategory.NUBAR,
+            mt=nubar_mt,
+            short_label=_mt_label(nubar_mt),
+        )
+    # chi total | chi prompt | chi delayed → MT 1018 (ENDF) / 1019 / 1020 (Serpent extension)
+    m = re.fullmatch(r"chi\s+(total|prompt|delayed)", s)
+    if m:
+        chi_mt = {"total": 1018, "prompt": 1019, "delayed": 1020}[m.group(1)]
+        return Perturbation(
+            index=index,
+            raw_label=raw,
+            category=PertCategory.CHI,
+            mt=chi_mt,
+            short_label=_mt_label(chi_mt),
+        )
     # <channel> leg mom N (current format for Legendre moments)
     m = re.fullmatch(r"(\w+)\s+leg\s+mom\s+(\d+)", s)
     if m:

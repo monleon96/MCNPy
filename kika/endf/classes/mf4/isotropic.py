@@ -19,6 +19,8 @@ class MF4MTIsotropic(MF4MT):
         energy: Union[float, np.ndarray],
         max_legendre_order: int = 10,
         *,
+        trim: bool = False,
+        trim_tol: float = 1e-6,
         out_of_range: str = "zero"
     ) -> Dict[int, Union[float, np.ndarray]]:
         """
@@ -32,6 +34,10 @@ class MF4MTIsotropic(MF4MT):
             Energy point(s) at which to evaluate coefficients
         max_legendre_order : int, optional
             Maximum Legendre order to compute (default: 10)
+        trim, trim_tol : bool, float, optional
+            Accepted for API consistency with the other MF4 classes, and
+            inert here: an isotropic section's a_l>0 are exactly zero, so
+            trimming them would drop orders a caller asked for by name.
         out_of_range : str, optional
             Ignored for isotropic distributions since they don't depend on energy data tables.
             Included for API consistency with other MF4 implementations. (default: "zero")

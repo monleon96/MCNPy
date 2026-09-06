@@ -39,6 +39,7 @@ import matplotlib as mpl
 from typing import List, Optional, Union, Tuple, Dict, Any
 from ....plotting._backend_utils import _is_notebook, _detect_interactive_backend, _configure_figure_interactivity
 from ....plotting.styles import _apply_style_to_rcparams, _get_color_palette, format_energy_axis_ticks
+from ....plotting.covariance import plot_legendre_uncertainty_bands
 
 
 def _setup_legacy_plot(style='light', figsize=(8, 5), **kwargs):
@@ -139,120 +140,15 @@ def _generate_unique_labels(endf_list, labels):
     return endf_labels
 
 
-def _plot_uncertainty_bands(ax, coeff_energies, coeff_values, mf34_covmat, isotope_id, mt, order, 
-                           uncertainty_sigma, color, alpha=0.2):
-    """
-    Helper function to plot uncertainty bands using actual energy bin boundaries from MF34 covariance data.
-    
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Axes to plot on
-    coeff_energies : array-like
-        Energy values for coefficient data
-    coeff_values : array-like  
-        Coefficient values
-    mf34_covmat : LegendreCovariance
-        Covariance matrix object
-    isotope_id : int
-        Isotope ID
-    mt : int
-        MT reaction number
-    order : int
-        Legendre coefficient order
-    uncertainty_sigma : float
-        Number of sigma levels for uncertainty bands
-    color : str or tuple
-        Color for the uncertainty bands
-    alpha : float
-        Transparency level for uncertainty bands
-        
-    Returns
-    -------
-    bool
-        True if uncertainty bands were plotted successfully, False otherwise
-    """
-    try:
-        # Get uncertainty data for this order
-        unc_data = mf34_covmat.get_uncertainties_for_legendre_coefficient(isotope_id, mt, order)
-        if unc_data is None:
-            return False
-            
-        unc_energies = unc_data['energies']
-        unc_values = unc_data['uncertainties']
-        
-        # Get the actual energy bin boundaries from the covariance matrix
-        bin_boundaries = None
-        for i, (iso_r, mt_r, l_r, iso_c, mt_c, l_c) in enumerate(zip(
-            mf34_covmat.isotope_rows, mf34_covmat.reaction_rows, mf34_covmat.l_rows,
-            mf34_covmat.isotope_cols, mf34_covmat.reaction_cols, mf34_covmat.l_cols
-        )):
-            # Look for diagonal variance matrix (L = L) for the specified parameters
-            if (iso_r == isotope_id and iso_c == isotope_id and 
-                mt_r == mt and mt_c == mt and 
-                l_r == order and l_c == order):
-                
-                bin_boundaries = np.array(mf34_covmat.energy_grids[i])
-                break
-        
-        if bin_boundaries is None or len(bin_boundaries) != len(unc_energies) + 1:
-            # Fallback: can't find proper bin boundaries, skip uncertainty plotting
-            print(f"Warning: Could not find proper energy bin boundaries for uncertainty plotting of order {order}")
-            return False
-        
-        # Find the intersection of energy ranges between coefficients and uncertainties
-        min_energy = max(min(coeff_energies), min(bin_boundaries))
-        max_energy = min(max(coeff_energies), max(bin_boundaries))
-        
-        if min_energy >= max_energy:
-            print(f"Warning: No overlapping energy range between coefficients and uncertainties for order {order}")
-            return False
-        
-        # For each energy bin, find coefficient points within that bin and apply the bin's uncertainty
-        band_energies = []
-        band_coeffs = []
-        band_uncertainties = []
-        
-        for i in range(len(bin_boundaries) - 1):
-            bin_min = bin_boundaries[i]
-            bin_max = bin_boundaries[i + 1]
-            
-            # Find coefficient points in this bin
-            bin_coeff_indices = [j for j, e in enumerate(coeff_energies) 
-                               if bin_min <= e < bin_max or (i == len(bin_boundaries) - 2 and bin_min <= e <= bin_max)]
-            
-            if bin_coeff_indices and i < len(unc_values):
-                for idx in bin_coeff_indices:
-                    band_energies.append(coeff_energies[idx])
-                    band_coeffs.append(coeff_values[idx])
-                    band_uncertainties.append(unc_values[i])  # Same uncertainty for the whole bin
-        
-        if not band_energies:
-            print(f"Warning: No coefficient points found within uncertainty energy bins for order {order}")
-            return False
-        
-        # Convert to numpy arrays
-        band_energies = np.array(band_energies)
-        band_coeffs = np.array(band_coeffs)
-        band_uncertainties = np.array(band_uncertainties)
-        
-        # Convert relative uncertainties to absolute uncertainties
-        # MF34 covariance data is typically stored as relative covariances
-        absolute_unc = band_uncertainties * np.abs(band_coeffs) * uncertainty_sigma
-        
-        # Create uncertainty bounds
-        upper_bound = band_coeffs + absolute_unc
-        lower_bound = band_coeffs - absolute_unc
-        
-        # Plot uncertainty bands as shaded area
-        ax.fill_between(band_energies, lower_bound, upper_bound, 
-                       color=color, alpha=alpha, linewidth=0)
-        
-        return True
-        
-    except Exception as e:
-        print(f"Warning: Error plotting uncertainty bands for order {order}: {e}")
-        return False
+#: The MF34 uncertainty band, kept under its old private name.
+#:
+#: The implementation moved to :mod:`kika.plotting.covariance` in phase 4's P4.
+#: It draws a ``LegendreCovariance`` and touches no ENDF type, so it was
+#: calculation-layer code living in the format package — and
+#: ``kika/cov/multigroup/legacy_mg_plotting.py`` reached it here *through its
+#: leading underscore*, which is the import the layering ratchet was counting.
+#: The alias stays so this module's two call sites read unchanged.
+_plot_uncertainty_bands = plot_legendre_uncertainty_bands
 
 
 def plot_legendre_coefficients_from_endf(

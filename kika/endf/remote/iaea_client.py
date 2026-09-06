@@ -3,6 +3,7 @@
 import io
 import re
 import zipfile
+from typing import TYPE_CHECKING
 
 import httpx
 
@@ -10,15 +11,20 @@ from kika._constants import (
     ATOMIC_NUMBER_TO_SYMBOL,
     SYMBOL_TO_ATOMIC_NUMBER,
     ZAID_TO_ENDF_MAT,
+    ZAID_TO_ENDF_MAT_ISOMER,
 )
 
 from .cache import ENDFCache, get_cache
 from .constants import (
     IAEA_BASE_URL,
+    get_library_filename_style,
     get_library_path,
     list_available_libraries,
     normalize_library_name,
 )
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .catalog import CatalogEntry
 from .exceptions import (
     IsotopeNotFoundError,
     LibraryNotFoundError,
@@ -26,15 +32,67 @@ from .exceptions import (
 )
 
 
-def parse_isotope(isotope: str | int) -> tuple[int, int, str]:
+def parse_isotope_state(isotope: str | int) -> tuple[int, int, str, int]:
     """
-    Parse an isotope specification into Z, A, and element symbol.
+    Parse an isotope specification into Z, A, element symbol and isomeric state.
 
     Supports formats:
     - "Fe56", "Fe-56", "fe56" (element symbol + mass)
     - "U235", "U-235", "u235"
+    - "Am242m", "Am-242m", "Ag110M" (isomer, trailing m/M)
     - 26056 (ZAID integer)
     - "26056" (ZAID string)
+    - 95642 (ZAID with the +400 isomer offset)
+
+    Parameters
+    ----------
+    isotope : str or int
+        Isotope specification
+
+    Returns
+    -------
+    tuple[int, int, str, int]
+        (Z, A, symbol, isomer) e.g., (26, 56, "Fe", 0) or (95, 242, "Am", 1)
+    """
+    if isinstance(isotope, int) or (isinstance(isotope, str) and isotope.isdigit()):
+        # ZAID format: ZZZAAA, with A offset by 400 for isomers (MCNP convention)
+        zaid = int(isotope)
+        z = zaid // 1000
+        a = zaid % 1000
+        isomer = 0
+        if a > 400:
+            a -= 400
+            isomer = 1
+        symbol = ATOMIC_NUMBER_TO_SYMBOL.get(z)
+        if symbol is None:
+            raise ValueError(f"Unknown atomic number: {z}")
+        return z, a, symbol, isomer
+
+    # String format: Element + mass (e.g., "Fe56", "Fe-56", "U235", "Am242m")
+    isotope = isotope.strip()
+
+    # Try to match element-mass pattern, with an optional isomer suffix
+    match = re.fullmatch(r"([A-Za-z]+)-?(\d+)-?([mM]\d?)?", isotope)
+    if match:
+        symbol = match.group(1).capitalize()
+        a = int(match.group(2))
+        z = SYMBOL_TO_ATOMIC_NUMBER.get(symbol)
+        if z is None:
+            raise ValueError(f"Unknown element symbol: {symbol}")
+        isomer = 0
+        if match.group(3):
+            isomer = int(match.group(3)[1:] or 1)
+        return z, a, symbol, isomer
+
+    raise ValueError(f"Cannot parse isotope: {isotope}")
+
+
+def parse_isotope(isotope: str | int) -> tuple[int, int, str]:
+    """
+    Parse an isotope specification into Z, A, and element symbol.
+
+    Isomers parse to the same triplet as their ground state; use
+    :func:`parse_isotope_state` when the isomeric state matters.
 
     Parameters
     ----------
@@ -46,38 +104,75 @@ def parse_isotope(isotope: str | int) -> tuple[int, int, str]:
     tuple[int, int, str]
         (Z, A, symbol) e.g., (26, 56, "Fe")
     """
-    if isinstance(isotope, int) or (isinstance(isotope, str) and isotope.isdigit()):
-        # ZAID format: ZZZAAA
-        zaid = int(isotope)
-        z = zaid // 1000
-        a = zaid % 1000
-        symbol = ATOMIC_NUMBER_TO_SYMBOL.get(z)
-        if symbol is None:
-            raise ValueError(f"Unknown atomic number: {z}")
-        return z, a, symbol
-
-    # String format: Element + mass (e.g., "Fe56", "Fe-56", "U235")
-    isotope = isotope.strip()
-
-    # Try to match element-mass pattern
-    match = re.match(r"([A-Za-z]+)-?(\d+)", isotope)
-    if match:
-        symbol = match.group(1).capitalize()
-        a = int(match.group(2))
-        z = SYMBOL_TO_ATOMIC_NUMBER.get(symbol)
-        if z is None:
-            raise ValueError(f"Unknown element symbol: {symbol}")
-        return z, a, symbol
-
-    raise ValueError(f"Cannot parse isotope: {isotope}")
+    z, a, symbol, _ = parse_isotope_state(isotope)
+    return z, a, symbol
 
 
-def build_iaea_url(z: int, a: int, symbol: str, library: str, particle: str = "n") -> str:
+def isotope_key(isotope: str | int) -> int:
+    """
+    Build the cache key for an isotope: its ZAID, with A offset by 400 for isomers.
+
+    Parameters
+    ----------
+    isotope : str or int
+        Isotope specification
+
+    Returns
+    -------
+    int
+        e.g., 26056 for Fe-56, 95642 for Am-242m
+    """
+    z, a, _, isomer = parse_isotope_state(isotope)
+    return z * 1000 + a + (400 if isomer else 0)
+
+
+def get_endf_mat(z: int, a: int, isomer: int = 0) -> int:
+    """
+    Get the ENDF MAT number of a nuclide.
+
+    Parameters
+    ----------
+    z : int
+        Atomic number
+    a : int
+        Mass number
+    isomer : int
+        Isomeric state (0 = ground state)
+
+    Returns
+    -------
+    int
+        ENDF MAT number
+
+    Raises
+    ------
+    ValueError
+        If no MAT number is known for the nuclide
+    """
+    zaid = z * 1000 + a
+    mat = ZAID_TO_ENDF_MAT_ISOMER.get(zaid) if isomer else ZAID_TO_ENDF_MAT.get(zaid)
+    if mat is None:
+        state = f" (isomeric state {isomer})" if isomer else ""
+        raise ValueError(f"No MAT number found for ZAID {zaid}{state}")
+    return mat
+
+
+def build_iaea_url(
+    z: int,
+    a: int,
+    symbol: str,
+    library: str,
+    particle: str = "n",
+    isomer: int = 0,
+) -> str:
     """
     Build the IAEA download URL for an ENDF file.
 
-    URL pattern:
-    https://www-nds.iaea.org/public/download-endf/{LIBRARY}/{particle}/n_{ZZZ}-{Element}-{Mass}_{MAT}.zip
+    URL pattern, for the two naming conventions IAEA uses (see
+    :data:`~kika.endf.remote.constants.LIBRARY_FILENAME_STYLES`):
+
+    https://nds.iaea.org/public/download-endf/{LIBRARY}/{particle}/n_{ZZZ}-{El}-{A}_{MAT}.zip
+    https://nds.iaea.org/public/download-endf/{LIBRARY}/{particle}/n_{MAT}_{Z}-{El}-{A}.zip
 
     Parameters
     ----------
@@ -91,6 +186,8 @@ def build_iaea_url(z: int, a: int, symbol: str, library: str, particle: str = "n
         Library name
     particle : str
         Particle type (default: "n")
+    isomer : int
+        Isomeric state (0 = ground state)
 
     Returns
     -------
@@ -98,15 +195,15 @@ def build_iaea_url(z: int, a: int, symbol: str, library: str, particle: str = "n
         Full download URL
     """
     library_path = get_library_path(library)
-    zaid = z * 1000 + a
+    mat = get_endf_mat(z, a, isomer)
+    state = "M" if isomer else ""
 
-    # Get MAT number from ZAID
-    mat = ZAID_TO_ENDF_MAT.get(zaid)
-    if mat is None:
-        raise ValueError(f"No MAT number found for ZAID {zaid}")
-
-    # Format: n_ZZZ-Element-Mass_MMMM.zip (MAT padded to 4 digits)
-    filename = f"{particle}_{z:03d}-{symbol}-{a}_{mat:04d}.zip"
+    if get_library_filename_style(library) == "mat_za":
+        # e.g. n_9228_92-U-235.zip
+        filename = f"{particle}_{mat:04d}_{z}-{symbol}-{a}{state}.zip"
+    else:
+        # e.g. n_092-U-235_9228.zip
+        filename = f"{particle}_{z:03d}-{symbol}-{a}{state}_{mat:04d}.zip"
     return f"{IAEA_BASE_URL}/{library_path}/{particle}/{filename}"
 
 
@@ -177,11 +274,13 @@ class IAEAClient:
 
         # Parse isotope
         try:
-            z, a, symbol = parse_isotope(isotope)
+            z, a, symbol, isomer = parse_isotope_state(isotope)
         except ValueError as e:
             raise IsotopeNotFoundError(str(isotope), library) from e
 
-        zaid = z * 1000 + a
+        # Isomers share the ZAID of their ground state, so the cache key offsets
+        # A by 400 to keep the two files apart
+        zaid = z * 1000 + a + (400 if isomer else 0)
 
         # Check cache first
         if use_cache and not force_download:
@@ -189,12 +288,49 @@ class IAEAClient:
             if cached_path:
                 return cached_path.read_bytes()
 
-        # Build URL and download
-        try:
-            url = build_iaea_url(z, a, symbol, canonical_lib, particle)
-        except ValueError as e:
-            raise IsotopeNotFoundError(str(isotope), library) from e
+        # The catalogue knows the file's real name; the constructed URL is the
+        # fallback for a library the snapshot has not seen.
+        entry = _catalog_entry(canonical_lib, isotope, particle)
+        if entry is not None:
+            url = entry.url
+            is_archive = entry.is_archive
+        else:
+            try:
+                url = build_iaea_url(z, a, symbol, canonical_lib, particle, isomer)
+            except ValueError as e:
+                raise IsotopeNotFoundError(str(isotope), library) from e
+            is_archive = True
 
+        content = self._fetch(url, is_archive, isotope=str(isotope), library=library)
+
+        # Cache the result
+        if use_cache:
+            self.cache.put(zaid, canonical_lib, content, particle)
+
+        return content
+
+    def download_entry(
+        self,
+        entry: "CatalogEntry",
+        use_cache: bool = True,
+        force_download: bool = False,
+    ) -> bytes:
+        """Download one catalogue entry, whatever it names (a nuclide, a TSL
+        material), through the same cache as :meth:`download`."""
+        if use_cache and not force_download:
+            cached_path = self.cache.get(entry.cache_key, entry.library, entry.sublib)
+            if cached_path:
+                return cached_path.read_bytes()
+        content = self._fetch(entry.url, entry.is_archive, isotope=entry.label, library=entry.library)
+        if use_cache:
+            self.cache.put(entry.cache_key, entry.library, content, entry.sublib)
+        return content
+
+    def cached_path(self, entry: "CatalogEntry"):
+        """Where :meth:`download_entry` keeps *entry*, if it has been fetched."""
+        return self.cache.get(entry.cache_key, entry.library, entry.sublib)
+
+    def _fetch(self, url: str, is_archive: bool, *, isotope: str, library: str) -> bytes:
         try:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; rv:91.0) Gecko/20100101 Firefox/91.0",
@@ -207,22 +343,17 @@ class IAEAClient:
             raise NetworkError(f"Request timed out after {self.timeout}s", url)
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
-                raise IsotopeNotFoundError(str(isotope), library) from e
+                raise IsotopeNotFoundError(isotope, library) from e
             raise NetworkError(f"HTTP error {e.response.status_code}: {e}", url) from e
         except httpx.RequestError as e:
             raise NetworkError(f"Request failed: {e}", url) from e
 
-        # Extract ENDF file from ZIP
+        if not is_archive:
+            return response.content
         try:
-            content = self._extract_endf_from_zip(response.content)
+            return self._extract_endf_from_zip(response.content)
         except Exception as e:
             raise NetworkError(f"Failed to extract ENDF from ZIP: {e}", url) from e
-
-        # Cache the result
-        if use_cache:
-            self.cache.put(zaid, canonical_lib, content, particle)
-
-        return content
 
     def _extract_endf_from_zip(self, zip_content: bytes) -> bytes:
         """Extract the ENDF file from a ZIP archive."""
@@ -236,6 +367,17 @@ class IAEAClient:
                 if not name.endswith((".zip", ".gz", ".tar")):
                     return zf.read(name)
             raise ValueError("No ENDF file found in ZIP archive")
+
+
+def _catalog_entry(library: str, isotope, sublib: str):
+    """The catalogue's row for this file, or None when the catalogue cannot be
+    read or does not list it."""
+    try:
+        from .catalog import get_catalog
+
+        return get_catalog().find(library, isotope, sublib)
+    except (FileNotFoundError, ValueError, OSError):
+        return None
 
 
 # Module-level client instance

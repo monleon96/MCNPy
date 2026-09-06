@@ -1,0 +1,18 @@
+{
+  "machine": {
+    "platform": "Linux-5.10.102.1-microsoft-standard-WSL2-x86_64-with-glibc2.28",
+    "processor": "unknown",
+    "python": "3.12.3"
+  },
+  "seconds": {
+    "cross_section_from_endf_all_mts": 0.0031766249994689133,
+    "endf_reconstruct_adapter": 5.3282236520008155,
+    "read_pendf_mf3_sections": 0.2600495030001184
+  },
+  "spread": {
+    "cross_section_from_endf_all_mts": 1.0574354863574,
+    "endf_reconstruct_adapter": 1.104251108489097,
+    "read_pendf_mf3_sections": 1.0551278961732073
+  },
+  "tolerance": 0.2
+}

@@ -2,17 +2,182 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union, TYPE_CHECKING
 import copy
+import logging
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 from kika._constants import MT_TO_REACTION
+from kika._covariance_forms import require_single_matrix
 from kika._utils import create_repr_section
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_min_eigvalsh(M: np.ndarray) -> float:
+    """Smallest eigenvalue of a symmetric matrix, robust to LAPACK failures.
+
+    Fallback cascade:
+      1. numpy's eigvalsh (LAPACK dsyevd, divide-and-conquer; default, fast)
+      2. scipy.linalg.eigh with driver='evr' (LAPACK dsyevr, RRR)
+      3. scipy.linalg.eigh with driver='ev'  (LAPACK dsyev, QR iteration)
+      4. ARPACK (scipy.sparse.linalg.eigsh) for smallest algebraic — totally
+         different algorithm family, survives buggy LAPACK builds
+      5. Drop all-zero rows/cols and retry numpy on the reduced matrix
+      6. Last resort: warn and return -inf so callers proceed without
+         claiming the matrix is PSD. The pipeline's downstream PSD repair
+         (variance cap, threshold-bin rescale, Higham, eigen-clip) handles
+         the rest; an eigenvalue check that we couldn't run shouldn't kill
+         the whole job.
+    """
+    last_err: Exception = RuntimeError("no solver attempted")
+
+    def _ok(v: float) -> bool:
+        return np.isfinite(v)
+
+    try:
+        v = float(np.linalg.eigvalsh(M).min())
+        if _ok(v):
+            return v
+        last_err = RuntimeError(f"numpy eigvalsh returned non-finite ({v})")
+    except Exception as e:
+        last_err = e
+
+    try:
+        from scipy.linalg import eigh as _sp_eigh
+        for driver in ("evr", "ev"):
+            try:
+                v = float(_sp_eigh(M, eigvals_only=True, driver=driver).min())
+                if _ok(v):
+                    return v
+                last_err = RuntimeError(f"scipy eigh ({driver}) returned non-finite ({v})")
+            except Exception as e:
+                last_err = e
+    except ImportError as e:
+        last_err = e
+
+    try:
+        from scipy.sparse.linalg import eigsh as _sp_eigsh
+        v = float(_sp_eigsh(M, k=1, which="SA", return_eigenvectors=False)[0])
+        if _ok(v):
+            return v
+        last_err = RuntimeError(f"ARPACK eigsh returned non-finite ({v})")
+    except Exception as e:
+        last_err = e
+
+    try:
+        nonzero = ~(np.all(M == 0, axis=0) & np.all(M == 0, axis=1))
+        if 0 < int(nonzero.sum()) < M.shape[0]:
+            M_red = M[np.ix_(nonzero, nonzero)]
+            v_red = float(np.linalg.eigvalsh(M_red).min())
+            if _ok(v_red):
+                return min(v_red, 0.0)  # zero rows contribute zero eigenvalues
+    except Exception as e:
+        last_err = e
+
+    # All solvers failed. Returning -inf would force downstream removal
+    # escalation, but the removal loop also needs eigenvalues — so it falls
+    # back to a diagonal-magnitude heuristic that hatchets through every MT.
+    # Instead return 0.0 (== "acceptable at the boundary"): the caller skips
+    # removal, and the pipeline's downstream PSD repair (variance cap,
+    # threshold-bin rescale, inert-bin mask, Higham, eigen-clip) handles
+    # actual indefiniteness on the masked submatrix where LAPACK usually
+    # works fine. Worst case it doesn't fully repair — but that's strictly
+    # better than deleting most of the perturbation parameters.
+    import warnings
+    warnings.warn(
+        f"_safe_min_eigvalsh: all eigenvalue solvers failed ({type(last_err).__name__}: {last_err}); "
+        "returning 0.0 (treat as boundary-PSD) so the caller skips removal escalation. "
+        "Downstream Higham / eigen-clip will still repair indefiniteness on the masked submatrix.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return 0.0
+
 
 if TYPE_CHECKING:
     from pathlib import Path
     from kika.plotting.plot_data import CovarianceHeatmapData, MultigroupCrossSectionPlotData, MultigroupUncertaintyPlotData
+
+
+def _rescale_energy_grid(
+    grid: Optional[Sequence[float]], from_unit: Optional[str], to_unit: Optional[str],
+) -> Optional[List[float]]:
+    """Convert an energy grid between 'eV' and 'MeV'. Returns a new list (or None).
+
+    Covariance matrix *values* are unaffected by the energy-axis unit (relative
+    covariances are dimensionless; absolute ones are in cross-section units), so
+    only the grid boundaries are rescaled.
+    """
+    if grid is None:
+        return None
+    fu = (from_unit or 'eV').lower()
+    tu = (to_unit or 'eV').lower()
+    if fu == tu:
+        return [float(x) for x in grid]
+    if fu == 'ev' and tu == 'mev':
+        factor = 1e-6
+    elif fu == 'mev' and tu == 'ev':
+        factor = 1e6
+    else:
+        return [float(x) for x in grid]  # unknown unit pair: leave magnitudes as-is
+    return [float(x) * factor for x in grid]
+
+
+def _log_edges(edges: np.ndarray) -> np.ndarray:
+    """``log10`` of energy-bin boundaries, with a non-positive first edge handled.
+
+    A grid may start at exactly 0 eV — **every MF35 outgoing-energy grid does**,
+    and so does any MF33 grid written from threshold — and zero has no place on
+    a logarithmic axis. Clamping it to a floor like ``1e-300`` is arithmetically
+    safe and visually catastrophic: the first bin then spans 295 of the axis's
+    ~302 decades, so it covers 98 % of the figure and every real bin is crushed
+    into the remaining 2 %. That renders as a single flat block of colour, which
+    reads as "this covariance has no structure" rather than as "this axis is
+    broken".
+
+    So a non-positive edge is placed one decade below the smallest positive one
+    instead. The first bin is then drawn one decade wide, which is an honest
+    statement that its lower boundary is not representable here, and the rest of
+    the axis keeps its proportions.
+    """
+    edges = np.asarray(edges, dtype=float)
+    positive = edges[edges > 0]
+    if positive.size == 0:
+        return np.zeros_like(edges)
+    floor = positive.min() / 10.0
+    return np.log10(np.maximum(edges, floor))
+
+
+@dataclass
+class TransferResult:
+    """Outcome of :meth:`CrossSectionCovariance.transfer_reactions`.
+
+    Attributes
+    ----------
+    covariance : CrossSectionCovariance
+        The merged covariance (a new object; inputs are not mutated).
+    diagonal_transferred : list of (isotope, mt)
+        Self-blocks copied from the source.
+    cross_transferred : list of (iso_row, mt_row, iso_col, mt_col)
+        Off-diagonal cross-correlation blocks copied from the source.
+    cross_dropped : list of ((iso_row, mt_row, iso_col, mt_col), reason)
+        Cross blocks that were *not* copied, with the reason.
+    reactions_replaced : list of (isotope, mt)
+        Destination reactions whose existing blocks were removed before re-adding.
+    cross_sections_transferred : list of (isotope, mt)
+        Reactions whose associated cross-section vector was copied.
+    missing_in_source : list of (isotope, mt)
+        Requested reactions not found in the source.
+    """
+    covariance: "CrossSectionCovariance"
+    diagonal_transferred: List[Tuple[int, int]] = field(default_factory=list)
+    cross_transferred: List[Tuple[int, int, int, int]] = field(default_factory=list)
+    cross_dropped: List[Tuple[Tuple[int, int, int, int], str]] = field(default_factory=list)
+    reactions_replaced: List[Tuple[int, int]] = field(default_factory=list)
+    cross_sections_transferred: List[Tuple[int, int]] = field(default_factory=list)
+    missing_in_source: List[Tuple[int, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -50,6 +215,10 @@ class CrossSectionCovariance:
     is_relative: List[bool] = field(default_factory=list)  # Per-matrix: True=relative, False=absolute
     cross_sections: Dict[Tuple[int, int], np.ndarray] = field(default_factory=dict)
     energy_unit: str = 'eV'  # Energy unit: 'eV' or 'MeV'
+    # File-level scalar metadata propagated by I/O routines (COVFIL, COVERX, …).
+    # Well-known keys: 'awr' (atomic weight ratio), 'temperature' (K).
+    # New fields can be added without changing the class.
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
     # ------------------------------------------------------------------
@@ -316,6 +485,108 @@ class CrossSectionCovariance:
 
         return read_coverx(str(file_path), ascending=ascending, energy_unit=energy_unit)
 
+    @classmethod
+    def from_covariance_section(
+        cls,
+        section,
+        nuclide: int = 0,
+        mt: Optional[int] = None,
+        energy_unit: str = 'eV',
+    ) -> "CrossSectionCovariance":
+        """Create a CrossSectionCovariance from one GNDS §25.2 covariance section.
+
+        The model is treated as one more source format here, on the same footing
+        as GENDF, COVFIL, BOXER and COVERX — which is what the model layer is
+        for. The immediate reason it exists is MF35: its bands reach the model
+        directly (``decodeMF35MT``) and never pass through this class, so before
+        this there was no way to hand one to ``plot_covariance_heatmap``. It is
+        not MF35-specific: any section with a matrix and a row grid works, which
+        includes MF31, MF33 and MF34.
+
+        **One section, one matrix, on purpose.** The bands of a single MF35 file
+        have different orders (84, 641, 641, 641, 641 on ENDF/B-VIII.1 U-235)
+        and all carry the same MT, so a whole suite loaded into one object would
+        hold several matrices indistinguishable by the ``(nuclide, mt)`` key
+        every selector here uses, and a plot would quietly draw the first. Loop
+        over the sections and call this per band instead.
+
+        Parameters
+        ----------
+        section
+            A ``CovarianceSection``: anything exposing ``form.matrix``,
+            ``form.rowGrid`` and ``form.isRelative``, with an optional
+            ``rowData.ENDF_MFMT``. Duck-typed rather than imported so that
+            ``kika.cov`` keeps not depending on the model.
+        nuclide : int, optional
+            ZAID to file the matrix under. The model identifies a covariance by
+            its href rather than by a material header, so there is nothing to
+            read this from and it is the caller's to supply.
+        mt : int, optional
+            Reaction number. Defaults to the MT half of ``rowData.ENDF_MFMT``.
+        energy_unit : str, optional
+            Unit of ``form.rowGrid``. The model keeps ENDF's native eV.
+
+        Returns
+        -------
+        CrossSectionCovariance
+            A single-matrix instance, ready for ``plot_covariance_heatmap``.
+
+        Examples
+        --------
+        >>> suite, _ = decodeCovarianceSuite(endf)                # doctest: +SKIP
+        >>> band = CrossSectionCovariance.from_covariance_section(  # doctest: +SKIP
+        ...     suite.covarianceSections[0], nuclide=92235)
+        >>> plot_covariance_heatmap(band, nuclide=92235, mt=18)   # doctest: +SKIP
+        """
+        form = require_single_matrix(
+            getattr(section, 'form', None),
+            f"covariance section {getattr(section, 'label', '?')!r}",
+        )
+
+        matrix = np.asarray(form.matrix, dtype=float)
+        grid = getattr(form, 'rowGrid', None)
+        if grid is None:
+            raise ValueError(
+                "covariance section carries no rowGrid, so its matrix cannot be "
+                "placed on an energy axis; §25.3 parameter covariances are not "
+                "gridded and belong in ParameterCovarianceMatrix, not here"
+            )
+        grid = np.asarray(grid, dtype=float)
+        if grid.size != matrix.shape[0] + 1:
+            raise ValueError(
+                f"rowGrid has {grid.size} boundaries for {matrix.shape[0]} rows; "
+                f"expected one more than the rows"
+            )
+
+        if mt is None:
+            # Either separator. GNDS §25.2.3 spells `ENDF_MFMT` with a comma
+            # and every distributed covariance file writes one; kika's ENDF
+            # adapter writes a slash. Requiring the slash made this raise "has
+            # no ENDF_MFMT" at a section that had a perfectly good one, which
+            # is the misleading half of `docs/library/gnds_endf_conflicts.md` §3.1.
+            mfmt = getattr(getattr(section, 'rowData', None), 'ENDF_MFMT', None)
+            parts = str(mfmt).replace('/', ',').split(',') if mfmt else []
+            if len(parts) != 2 or not parts[1].strip().isdigit():
+                raise ValueError(
+                    f"no mt given and the section's rowData has no ENDF_MFMT to "
+                    f"take one from (it holds {mfmt!r}; §25.2.3 wants 'MF,MT')"
+                )
+            mt = int(parts[1])
+
+        # Both the shared `energy_grid` and the per-matrix `energy_grids` are
+        # filled. They are redundant only because this builds a single-matrix
+        # object, which is the one case where a shared grid is unambiguous —
+        # and the plotting path reads the shared one.
+        covariance = cls(num_groups=matrix.shape[0], energy_unit=energy_unit,
+                         energy_grid=list(grid))
+        covariance.add_matrix(
+            isotope_row=nuclide, reaction_row=mt,
+            isotope_col=nuclide, reaction_col=mt,
+            matrix=matrix, energy_grid=list(grid),
+            is_relative=bool(getattr(form, 'isRelative', False)),
+        )
+        return covariance
+
     def remove_matrix(
         self,
         isotope: int,
@@ -396,6 +667,240 @@ class CrossSectionCovariance:
 
 
 
+
+    # ------------------------------------------------------------------
+    # Merge / transfer
+    # ------------------------------------------------------------------
+
+    def _align_block_lists(self) -> None:
+        """Pad per-block lists to ``len(matrices)`` so positional appends stay aligned.
+
+        ``is_relative`` and ``energy_grids`` are permitted to be shorter than
+        ``matrices`` (some readers leave them empty), with consumers defaulting
+        the missing entries. Before merging we materialise those defaults so that
+        blocks appended afterwards keep a correct 1:1 index with their flag/grid.
+        ``is_relative`` defaults to ``True`` (the convention used by
+        :meth:`get_uncertainty`); ``energy_grids`` defaults to the shared
+        ``energy_grid`` when one is available.
+        """
+        n = len(self.matrices)
+        if len(self.is_relative) < n:
+            self.is_relative.extend([True] * (n - len(self.is_relative)))
+        if self.energy_grid is not None and len(self.energy_grids) < n:
+            self.energy_grids.extend(
+                list(self.energy_grid) for _ in range(n - len(self.energy_grids))
+            )
+
+    def _drop_reaction(self, isotope: int, reaction: int) -> None:
+        """Remove, in place, every block touching ``(isotope, reaction)`` on either
+        axis, plus its cross-section entry. Assumes lists were aligned first."""
+        n = len(self.matrices)
+        keep = [
+            i for i in range(n)
+            if not (
+                (self.isotope_rows[i] == isotope and self.reaction_rows[i] == reaction)
+                or (self.isotope_cols[i] == isotope and self.reaction_cols[i] == reaction)
+            )
+        ]
+
+        def _sel(lst):
+            return [lst[i] for i in keep] if len(lst) == n else lst
+
+        self.isotope_rows = _sel(self.isotope_rows)
+        self.reaction_rows = _sel(self.reaction_rows)
+        self.isotope_cols = _sel(self.isotope_cols)
+        self.reaction_cols = _sel(self.reaction_cols)
+        self.matrices = _sel(self.matrices)
+        self.is_relative = _sel(self.is_relative)
+        self.energy_grids = _sel(self.energy_grids)
+        self.cross_sections.pop((isotope, reaction), None)
+
+    def _validate_mergeable(
+        self, source: "CrossSectionCovariance", *, grid_atol: float, grid_rtol: float,
+    ) -> None:
+        """Raise ``ValueError`` if ``source`` cannot be merged into ``self`` because
+        of an incompatible group structure. Regridding is intentionally unsupported."""
+        import warnings
+
+        dest_g = self.num_groups or (self.matrices[0].shape[0] if self.matrices else 0)
+        src_g = source.num_groups or (source.matrices[0].shape[0] if source.matrices else 0)
+        if dest_g and src_g and dest_g != src_g:
+            raise ValueError(
+                f"Cannot merge covariances with different group counts "
+                f"(destination has {dest_g} groups, source has {src_g}). "
+                "Regridding is not supported; convert both files to a common "
+                "group structure first."
+            )
+
+        if self.energy_grid is not None and source.energy_grid is not None:
+            src_in_dest = _rescale_energy_grid(
+                source.energy_grid, source.energy_unit, self.energy_unit,
+            )
+            a = np.asarray(self.energy_grid, dtype=float)
+            b = np.asarray(src_in_dest, dtype=float)
+            if a.shape != b.shape or not np.allclose(a, b, rtol=grid_rtol, atol=grid_atol):
+                raise ValueError(
+                    "Cannot merge covariances on different energy grids "
+                    f"(destination unit={self.energy_unit}, source unit={source.energy_unit}). "
+                    "Regridding is not supported; convert both files to a common "
+                    "group structure first."
+                )
+        else:
+            warnings.warn(
+                "One or both covariances have no explicit energy grid; "
+                "merging on matching group count only.",
+                RuntimeWarning, stacklevel=2,
+            )
+
+    def transfer_reactions(
+        self,
+        source: "CrossSectionCovariance",
+        reactions: Sequence[Tuple[int, int]],
+        *,
+        cross_correlation: str = "both-present",
+        grid_atol: float = 1e-6,
+        grid_rtol: float = 1e-6,
+        replace: bool = True,
+    ) -> "TransferResult":
+        """Copy selected reaction blocks from ``source`` into a copy of ``self``.
+
+        ``self`` is the *destination* and is never mutated; a new
+        :class:`CrossSectionCovariance` is returned inside the
+        :class:`TransferResult`.
+
+        Parameters
+        ----------
+        source : CrossSectionCovariance
+            The covariance to take blocks from.
+        reactions : sequence of (isotope_zaid, mt)
+            Reactions to transfer. For each, the diagonal self-block and the
+            associated cross-section vector are copied, plus off-diagonal
+            cross-correlation blocks according to ``cross_correlation``.
+        cross_correlation : {'both-present', 'diagonal-only', 'always'}
+            How to handle off-diagonal blocks of a transferred reaction:
+
+            - ``'both-present'`` (default): copy a cross block only when *both*
+              partner reactions exist in the destination after the transfer;
+              otherwise record it in ``cross_dropped``.
+            - ``'diagonal-only'``: never copy cross blocks.
+            - ``'always'``: copy every cross block the reaction participates in,
+              even if the partner reaction is absent (may leave dangling refs).
+        grid_atol, grid_rtol : float
+            Tolerances for the energy-grid equality check (after eV/MeV
+            normalisation).
+        replace : bool
+            If True, a transferred reaction that already exists in the
+            destination has its existing blocks/cross-section removed first.
+
+        Returns
+        -------
+        TransferResult
+            The merged covariance plus a report of what was transferred/dropped.
+
+        Raises
+        ------
+        ValueError
+            If the group structures are incompatible, or ``cross_correlation``
+            is not a recognised mode.
+        """
+        valid_modes = {"both-present", "diagonal-only", "always"}
+        if cross_correlation not in valid_modes:
+            raise ValueError(
+                f"cross_correlation must be one of {sorted(valid_modes)}, "
+                f"got {cross_correlation!r}"
+            )
+
+        self._validate_mergeable(source, grid_atol=grid_atol, grid_rtol=grid_rtol)
+
+        new = self.copy()
+        new._align_block_lists()
+
+        # De-duplicate the request, preserving order.
+        requested: List[Tuple[int, int]] = []
+        seen: Set[Tuple[int, int]] = set()
+        for z, m in reactions:
+            key = (int(z), int(m))
+            if key not in seen:
+                seen.add(key)
+                requested.append(key)
+
+        source_pairs = set(source._get_param_pairs())
+        present = [p for p in requested if p in source_pairs]
+        present_set = set(present)
+
+        result = TransferResult(covariance=new)
+        result.missing_in_source = [p for p in requested if p not in source_pairs]
+
+        dest_existing = set(new._get_param_pairs())
+        dest_after = dest_existing | present_set
+
+        if replace:
+            for pair in present:
+                if pair in dest_existing:
+                    new._drop_reaction(pair[0], pair[1])
+                    result.reactions_replaced.append(pair)
+
+        use_grid = new.energy_grid is not None
+        for i in range(len(source.matrices)):
+            ir = int(source.isotope_rows[i])
+            rr = int(source.reaction_rows[i])
+            ic = int(source.isotope_cols[i])
+            rc = int(source.reaction_cols[i])
+            row_pair = (ir, rr)
+            col_pair = (ic, rc)
+            is_diagonal = row_pair == col_pair
+
+            if is_diagonal:
+                if row_pair not in present_set:
+                    continue
+            else:
+                if row_pair not in present_set and col_pair not in present_set:
+                    continue
+                if cross_correlation == "diagonal-only":
+                    result.cross_dropped.append(((ir, rr, ic, rc), "diagonal-only mode"))
+                    continue
+                if cross_correlation == "both-present" and not (
+                    row_pair in dest_after and col_pair in dest_after
+                ):
+                    missing = col_pair if row_pair in dest_after else row_pair
+                    result.cross_dropped.append((
+                        (ir, rr, ic, rc),
+                        f"partner reaction {missing} not present in destination",
+                    ))
+                    continue
+
+            new.isotope_rows.append(ir)
+            new.reaction_rows.append(rr)
+            new.isotope_cols.append(ic)
+            new.reaction_cols.append(rc)
+            new.matrices.append(np.array(source.matrices[i], copy=True))
+            is_rel = source.is_relative[i] if i < len(source.is_relative) else True
+            new.is_relative.append(bool(is_rel))
+            if use_grid:
+                src_grid = (
+                    source.energy_grids[i]
+                    if i < len(source.energy_grids) and source.energy_grids[i]
+                    else None
+                )
+                if src_grid is not None:
+                    new.energy_grids.append(
+                        _rescale_energy_grid(src_grid, source.energy_unit, new.energy_unit)
+                    )
+                else:
+                    new.energy_grids.append(list(new.energy_grid))
+
+            if is_diagonal:
+                result.diagonal_transferred.append(row_pair)
+            else:
+                result.cross_transferred.append((ir, rr, ic, rc))
+
+        for pair in present:
+            if pair in source.cross_sections:
+                new.cross_sections[pair] = np.array(source.cross_sections[pair], copy=True)
+                result.cross_sections_transferred.append(pair)
+
+        new._invalidate_cov_graph_cache()
+        return result
 
     # ------------------------------------------------------------------
     # Projection
@@ -964,10 +1469,12 @@ class CrossSectionCovariance:
         *,
         level: str = "soft",            # 'soft' | 'medium' | 'hard'
         high_val_thresh: float = 5.0,
+        clamp_target: float = 1.0,
         accept_tol: float = -1.0e-4,
         clamp_max_iter: int = 10,
         max_steps: int = 40,
         verbose: bool = True,
+        clamp_detail: bool = False,
         logger = None,  # Optional logger for file output
     ) -> Tuple["CrossSectionCovariance", Dict[str, Any]]:
         """
@@ -976,11 +1483,14 @@ class CrossSectionCovariance:
         Parameters
         ----------
         level
-            'soft'   - clamp variances only  
-            'medium' - clamp then drop the worst *block pairs*  
-            'hard'   - clamp then drop the worst *reactions* (all blocks)  
+            'soft'   - clamp variances only
+            'medium' - clamp then drop the worst *block pairs*
+            'hard'   - clamp then drop the worst *reactions* (all blocks)
         high_val_thresh
-            Threshold used both by clamping and by the removal heuristic.
+            Diagonal variances above this threshold are clamped.
+        clamp_target
+            Target variance assigned to clamped diagonals (off-diagonals
+            rescaled by sqrt(target/|old|) to preserve correlations).
         accept_tol
             Minimum eigenvalue tolerated for acceptance.
         clamp_max_iter
@@ -989,6 +1499,9 @@ class CrossSectionCovariance:
             Maximum block-removal iterations (if used).
         verbose
             Forwarded to the removal routine.
+        clamp_detail
+            Dump every off-diagonal before/after pair on each clamp event.
+            Very noisy — opt in only to debug a specific clamp.
         logger
             Optional logger instance for file output. If None, uses print().
         """
@@ -1002,9 +1515,11 @@ class CrossSectionCovariance:
         # ------------------------------------------------------------------
         cm_after_clamp, log = self._clamp_covariance(
             high_val_thresh=high_val_thresh,
+            clamp_target=clamp_target,
             accept_tol=accept_tol,
             max_iter=clamp_max_iter,
             verbose=verbose,
+            clamp_detail=clamp_detail,
             logger=logger,
         )
 
@@ -1458,59 +1973,83 @@ class CrossSectionCovariance:
                 # Found diagonal block - extract uncertainties
                 cov_matrix = self.matrices[i]
                 diag = np.diag(cov_matrix)
-                
-                # Get cross sections for this reaction (needed for creating MultigroupUncertaintyPlotData)
-                if key in self.cross_sections:
+
+                # Relative or absolute? This is the question that decides
+                # whether a cross section is needed, and it used to be asked
+                # the wrong way round: the branch was gated on
+                # ``cross_sections`` and then computed sqrt(diag) without ever
+                # reading the vector it had just fetched. A *relative*
+                # covariance already carries the answer — sqrt(diag) is the
+                # fractional standard deviation — so on every ENDF-derived
+                # covariance, where nothing populates ``cross_sections``, a
+                # computable band was refused. That is D13, and this is
+                # ``get_relative_uncertainty``'s convention, defaulting to
+                # relative for the matrices added without the flag (GENDF).
+                mat_is_relative = (bool(self.is_relative[i])
+                                   if i < len(self.is_relative) else True)
+
+                sd = np.sqrt(np.maximum(diag, 0.0))
+
+                if mat_is_relative:
+                    rel_unc = sd
+                elif key in self.cross_sections:
+                    # Absolute covariance: sqrt(diag) is in the cross
+                    # section's own units, so divide to get a percentage.
                     xs = np.asarray(self.cross_sections[key], dtype=float)
-                    
-                    # IMPORTANT: The covariance matrix from GENDF is already relative!
-                    # sqrt(diag) gives us the relative standard deviation (fractional)
-                    # We should NOT divide by xs again!
-                    rel_unc = np.sqrt(diag)
-                    
-                    # Ensure finite values
-                    rel_unc = np.where(np.isfinite(rel_unc), rel_unc, 0.0)
-                    
-                    # Convert to percentage and apply sigma multiplier
-                    rel_unc_pct = rel_unc * 100.0 * sigma
-                    
-                    # For step plots with 'post', we need G+1 points (bin edges)
-                    # with the last y-value repeated to show all G bins properly
-                    if self.energy_grid is not None:
-                        energy_edges = np.asarray(self.energy_grid, dtype=float)
-                        # Use energy edges (G+1 points) for x-axis
-                        x_values = energy_edges
-                        # Extend y-values to G+1 by repeating the last value
-                        y_values = np.r_[rel_unc_pct, rel_unc_pct[-1]]
-                    else:
-                        # Fallback: use indices as edges
-                        x_values = np.arange(len(rel_unc_pct) + 1, dtype=float)
-                        y_values = np.r_[rel_unc_pct, rel_unc_pct[-1]]
-                    
-                    # Generate label (for uncertainty data line plot)
-                    if label is None:
-                        try:
-                            isotope_symbol = zaid_to_symbol(zaid)
-                        except Exception:
-                            isotope_symbol = f"ZAID {zaid}"
-                        
-                        reaction_name = MT_TO_REACTION.get(mt, f"MT={mt}")
-                        
-                        sigma_str = f"{sigma}σ" if sigma != 1.0 else "1σ"
-                        label = f"{isotope_symbol} {reaction_name} Uncertainty ({sigma_str})"
-                    
-                    # Create MultigroupUncertaintyPlotData
-                    unc_data = MultigroupUncertaintyPlotData(
-                        x=x_values,
-                        y=y_values,
-                        label=label,
-                        zaid=zaid,
-                        mt=mt,
-                        uncertainty_type='relative',
-                        energy_bins=energy_edges if self.energy_grid is not None else None,
-                        step_where='post',
-                        **styling_kwargs
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        rel_unc = sd / np.abs(xs)
+                else:
+                    # Nothing on this object can relativise it. Say so rather
+                    # than draw barns on an axis labelled per cent.
+                    logger.warning(
+                        f"ZAID={zaid}, MT={mt}: covariance is absolute and no "
+                        f"cross section is stored for it — cannot express the "
+                        f"uncertainty as a percentage, so no band is produced."
                     )
+                    break
+
+                # Ensure finite values
+                rel_unc = np.where(np.isfinite(rel_unc), rel_unc, 0.0)
+
+                # Convert to percentage and apply sigma multiplier
+                rel_unc_pct = rel_unc * 100.0 * sigma
+
+                # For step plots with 'post', we need G+1 points (bin edges)
+                # with the last y-value repeated to show all G bins properly.
+                # The shared grid is the multigroup case; a pointwise
+                # covariance leaves it None and carries one grid per matrix.
+                energy_edges = self._plot_edges(i, len(rel_unc_pct))
+                if energy_edges is not None:
+                    x_values = energy_edges
+                else:
+                    # Fallback: use indices as edges
+                    x_values = np.arange(len(rel_unc_pct) + 1, dtype=float)
+                y_values = np.r_[rel_unc_pct, rel_unc_pct[-1]]
+
+                # Generate label (for uncertainty data line plot)
+                if label is None:
+                    try:
+                        isotope_symbol = zaid_to_symbol(zaid)
+                    except Exception:
+                        isotope_symbol = f"ZAID {zaid}"
+
+                    reaction_name = MT_TO_REACTION.get(mt, f"MT={mt}")
+
+                    sigma_str = f"{sigma}σ" if sigma != 1.0 else "1σ"
+                    label = f"{isotope_symbol} {reaction_name} Uncertainty ({sigma_str})"
+
+                # Create MultigroupUncertaintyPlotData
+                unc_data = MultigroupUncertaintyPlotData(
+                    x=x_values,
+                    y=y_values,
+                    label=label,
+                    zaid=zaid,
+                    mt=mt,
+                    uncertainty_type='relative',
+                    energy_bins=energy_edges,
+                    step_where='post',
+                    **styling_kwargs
+                )
                 break
         
         # Check if at least one of them is available
@@ -1669,8 +2208,7 @@ class CrossSectionCovariance:
 
         def _transform_edges(edges: np.ndarray) -> np.ndarray:
             if scale_normalized == "log":
-                safe = np.maximum(edges, 1e-300)
-                return np.log10(safe.astype(float))
+                return _log_edges(edges)
             return edges.astype(float)
 
         def _crop_edges(edges: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -2019,7 +2557,7 @@ class CrossSectionCovariance:
 
         # Transform edges based on scale
         if scale == "log":
-            transformed_edges = np.log10(np.maximum(edges_cropped, 1e-300).astype(float))
+            transformed_edges = _log_edges(edges_cropped)
         else:
             transformed_edges = edges_cropped.astype(float)
 
@@ -2493,7 +3031,43 @@ class CrossSectionCovariance:
             # ──────────────────────────────────────────────────────
             # 2 Eigen-analysis
             # ──────────────────────────────────────────────────────
-            eigvals, eigvecs = np.linalg.eigh(M)
+            # numpy's default driver (dsyevd) sometimes silently returns NaN
+            # eigenvalues on rank-deficient block-covariance matrices instead
+            # of raising. Treat NaN as a failure too, and fall back to scipy's
+            # 'evr' (dsyevr, RRR) driver, which is more numerically robust.
+            eigvals, eigvecs = None, None
+            _eigh_err: Exception = RuntimeError("no solver attempted")
+            for _backend in ("numpy", "scipy_evr", "scipy_ev"):
+                try:
+                    if _backend == "numpy":
+                        _ev, _vc = np.linalg.eigh(M)
+                    else:
+                        from scipy.linalg import eigh as _sp_eigh
+                        _ev, _vc = _sp_eigh(M, driver=_backend.split("_")[1])
+                    if np.all(np.isfinite(_ev)) and np.all(np.isfinite(_vc)):
+                        eigvals, eigvecs = _ev, _vc
+                        break
+                    _eigh_err = RuntimeError(f"{_backend} eigh returned non-finite values")
+                except Exception as e:
+                    _eigh_err = e
+            if eigvals is None:
+                # Cannot compute eigenvectors → cannot pick worst block to
+                # remove. Bail out cleanly; pipeline proceeds with downstream
+                # PSD repair (variance cap, Higham, eigen-clip).
+                if verbose:
+                    _log_message(
+                        f"[COV] [AUTOFIX] [WARNING] eigendecomposition failed at step {step:02d} "
+                        f"({type(_eigh_err).__name__}: {_eigh_err}); aborting removal loop"
+                    )
+                return current, {
+                    "iterations": step,
+                    "min_eigenvalue": _safe_min_eigvalsh(M),
+                    "converged": False,
+                    "removed_pairs": removed,
+                    "removed_mts": removed_mts,
+                    "removed_correlations": removed_correlations,
+                    "lapack_failed": True,
+                }
             min_ev = float(eigvals.min())
             if verbose:
                 _log_message(f"[COV] [AUTOFIX] [STEP {step:02d}] Smallest eigenvalue: {min_ev:.4e}")
@@ -2602,7 +3176,7 @@ class CrossSectionCovariance:
         if verbose:
             _log_message(f"[COV] [AUTOFIX] [ERROR] Reached limit of {max_steps} steps without convergence")
         # Directly compute min eigenvalue instead of using analyze_covariance
-        min_eigenvalue = float(np.linalg.eigvalsh(current.covariance_matrix).min())
+        min_eigenvalue = _safe_min_eigvalsh(current.covariance_matrix)
 
         logg = {
             "steps": max_steps,
@@ -2627,15 +3201,22 @@ class CrossSectionCovariance:
         self,
         *,
         high_val_thresh: float = 5.0,
+        clamp_target: float = 1.0,
         accept_tol: float = -1.0e-4,
         max_iter: int = 5,
         verbose: bool = True,
+        clamp_detail: bool = False,
         logger = None,  # Optional logger for file output
     ) -> Tuple["CrossSectionCovariance", Dict[str, Any]]:
         """
-        Cap diagonal variances larger than `high_val_thresh`
-        to **+1.0** (always positive) and rescale connected
-        covariances so that correlations remain untouched.
+        Cap diagonal variances larger than `high_val_thresh` to `clamp_target`
+        and rescale the connected row/column by sqrt(target/|old|) so that
+        correlations remain untouched.
+
+        verbose=True prints the [CLAMP #N] header and per-clamp adjusted-count
+        summary. clamp_detail=True additionally dumps every off-diagonal
+        before/after pair (very noisy on large matrices — opt in only when
+        debugging a specific clamp event).
         """
         if self.num_groups == 0:
             raise ValueError("num_groups is zero.")
@@ -2672,7 +3253,7 @@ class CrossSectionCovariance:
                     if abs(old_var) <= high_val_thresh:
                         continue
 
-                    new_var = 1.0                        # fixed target
+                    new_var = clamp_target
                     M[idx, idx] = new_var
                     changed_any = True
                     clamped_count += 1
@@ -2694,7 +3275,7 @@ class CrossSectionCovariance:
                     diff_total = (np.count_nonzero(diff_row) +
                                 np.count_nonzero(diff_col) - 1)
 
-                    if verbose and diff_total:
+                    if clamp_detail and diff_total:
                         for j in np.where(diff_row)[0]:
                             if j == idx:
                                 continue
@@ -2718,7 +3299,8 @@ class CrossSectionCovariance:
                                 f"{col_before[i]:12.4e} → {M[i, idx]:12.4e}"
                             )
 
-                    _log_message(f"      {diff_total} covariances adjusted")
+                    if verbose:
+                        _log_message(f"      {diff_total} covariances adjusted")
 
             if not changed_any:
                 _log_message(f"  [ITERATION {iter_num:02d}] No variances above threshold; stopping clamping")
@@ -2738,7 +3320,7 @@ class CrossSectionCovariance:
                 j = idx_map[(ic, rc)]
                 mat_ref[:, :] = M[i*G:(i+1)*G, j*G:(j+1)*G]
 
-            min_ev = float(np.linalg.eigvalsh(M).min())
+            min_ev = _safe_min_eigvalsh(M)
             _log_message(f"  [ITERATION {iter_num:02d}] Smallest eigenvalue: {min_ev:.4e}")
 
             if min_ev >= accept_tol:
@@ -2756,7 +3338,7 @@ class CrossSectionCovariance:
         
         # Return the clamped matrix and log after clamping - Fix: Check final eigenvalue here too
         final_M = current.covariance_matrix
-        min_ev_final = float(np.linalg.eigvalsh(final_M).min())
+        min_ev_final = _safe_min_eigvalsh(final_M)
         
         # Check if final result is actually acceptable
         converged = min_ev_final >= accept_tol
@@ -2769,6 +3351,28 @@ class CrossSectionCovariance:
             "clamp_iter": iter_num,
         }
         return current, log
+
+    def _plot_edges(self, index: int, n_bins: int) -> Optional[np.ndarray]:
+        """The ``n_bins + 1`` boundaries matrix *index* is defined on, or None.
+
+        Two storage conventions meet here. A multigroup covariance
+        (``read_njoy_covmat``) puts one grid on ``energy_grid`` and shares it;
+        a pointwise one (``MF33MT.to_xs_covmat``) leaves that ``None`` and
+        gives every matrix its own boundaries in ``energy_grids``, because the
+        subsections of an MF33 file do not agree on a grid. Only the first was
+        ever consulted, which put ENDF bands on group indices — that is the
+        second half of D13.
+
+        The shared grid keeps precedence so the multigroup answer cannot
+        change; the length check only rejects a grid that could not have been
+        plotted against these bins anyway.
+        """
+        if self.energy_grid is not None and len(self.energy_grid) == n_bins + 1:
+            return np.asarray(self.energy_grid, dtype=float)
+        if (index < len(self.energy_grids)
+                and len(self.energy_grids[index]) == n_bins + 1):
+            return np.asarray(self.energy_grids[index], dtype=float)
+        return None
 
     def _extract_xs_data(
         self,

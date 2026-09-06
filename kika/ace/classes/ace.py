@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import List, Optional, Union, Dict, Any
+import logging
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
@@ -402,14 +403,17 @@ class Ace:
         computed_totals = {}
         for total_mt, feeders in partial_mt_map.items():
             energy_sums = defaultdict(float)
+            has_feeder = False
 
             for mt in feeders:
                 if mt in cs:
+                    has_feeder = True
                     rx = cs[mt]
                     for E, x in zip(rx.energies, rx.xs_values):
                         energy_sums[E] += x
 
-                elif mt in computed_totals:
+                elif mt in computed_totals and computed_totals[mt]:
+                    has_feeder = True
                     for E, x in computed_totals[mt].items():
                         energy_sums[E] += x
 
@@ -417,30 +421,49 @@ class Ace:
 
             computed_totals[total_mt] = energy_sums
 
-            # if there is an original reaction for total_mt, we overwrite it
+            # Rebuild the redundant total only when at least one partial is
+            # present to sum. With no feeders, the total is stored directly
+            # (e.g. MT=18 fission without MT 19/20/21/38) and was already
+            # perturbed in place — overwriting it here would zero it out.
             if total_mt in cs:
-                total_rx = cs[total_mt]
-                for E, entry in zip(total_rx.energies, total_rx._xs_entries):
-                    entry.value = energy_sums.get(E, 0.0)
+                if has_feeder:
+                    total_rx = cs[total_mt]
+                    for E, entry in zip(total_rx.energies, total_rx._xs_entries):
+                        entry.value = energy_sums.get(E, 0.0)
+                else:
+                    logging.debug(
+                        "update_cross_sections: MT=%d stored directly (no "
+                        "partials present); leaving its values unchanged.",
+                        total_mt,
+                    )
 
         # ----------------------------------------------------------------------------
         # 4) Rebuild MT=1 = ΣMT: 2 + 3 + 101
         # ----------------------------------------------------------------------------
         energy_mt1 = defaultdict(float)
+        mt1_has_feeder = False
         for mt in (2, 3, 101):
             if mt in cs:
+                mt1_has_feeder = True
                 rx = cs[mt]
                 for E, x in zip(rx.energies, rx.xs_values):
                     energy_mt1[E] += x
-            else:
-                for E, x in computed_totals.get(mt, {}).items():
+            elif computed_totals.get(mt):
+                mt1_has_feeder = True
+                for E, x in computed_totals[mt].items():
                     energy_mt1[E] += x
 
         rx1 = cs.get(1)
         if not rx1:
             raise RuntimeError("MT=1 not found in cross section data")
-        for E, entry in zip(rx1.energies, rx1._xs_entries):
-            entry.value = energy_mt1.get(E, 0.0)
+        if mt1_has_feeder:
+            for E, entry in zip(rx1.energies, rx1._xs_entries):
+                entry.value = energy_mt1.get(E, 0.0)
+        else:
+            logging.debug(
+                "update_cross_sections: MT=1 stored directly (no components "
+                "present); leaving its values unchanged."
+            )
     
     def to_plot_data(self, data_type: str, mt: int, **kwargs):
         """

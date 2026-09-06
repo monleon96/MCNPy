@@ -529,10 +529,13 @@ def plot_mg_vs_endf_comparison(
             mf34_covmat = endf.mf[34].mt[mt].to_ang_covmat()
         except Exception:
             mf34_covmat = None  # Silent fail
-    # Import existing ENDF uncertainty plotting helper (works on native ENDF energies)
+    # The band plotter, which works on native ENDF energies. It lives in
+    # kika/plotting since phase 4's P4: it draws a LegendreCovariance and names
+    # no ENDF type, so reaching it in the format package meant reaching through
+    # a leading underscore across a package boundary.
     if uncertainty and mf34_covmat is not None:
         try:
-            from kika.endf.classes.mf4.plotting import _plot_uncertainty_bands as _plot_endf_uncertainty_bands
+            from kika.plotting.covariance import plot_legendre_uncertainty_bands as _plot_endf_uncertainty_bands
         except Exception:
             _plot_endf_uncertainty_bands = None
 

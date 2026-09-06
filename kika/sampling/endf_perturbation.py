@@ -15,7 +15,11 @@ import pandas as pd
 import shutil
 import tempfile
 
-from kika.sampling.generators import generate_endf_samples
+from kika.sampling.core import draw_samples
+from kika.sampling.model_blocks import (
+    legendre_covariance_blocks,
+    legendre_covariance_index,
+)
 from kika.cov.legendre_covariance import LegendreCovariance
 from kika.endf.parsers.parse_endf import parse_endf_file
 from kika.endf.writers.endf_writer import ENDFWriter
@@ -34,8 +38,11 @@ from kika.sampling.utils import (
     DualLogger,
     _get_logger,
     _set_logger,
+    make_ace_sample_paths,
     normalize_mt_list,
+    resolve_signed_request,
 )
+from kika._constants import MT_GROUPS
 
 # Import NJOY runner for ACE generation
 from kika.njoy.run_njoy import run_njoy
@@ -55,9 +62,12 @@ def _process_sample(
     generate_ace: bool = False,
     njoy_exe: Optional[str] = None,
     temperatures: Optional[List[float]] = None,
+    extensions: Optional[List[str]] = None,
     library_name: Optional[str] = None,
     njoy_version: str = "NJOY 2016.78",
     xsdir_file: Optional[str] = None,
+    enforce_positivity: bool = False,
+    positivity_check_points: int = 101,
 ):
     """
     Process a single perturbation sample for ENDF files.
@@ -90,13 +100,15 @@ def _process_sample(
         NJOY version string
     """
     if dry_run:
-        # Parse the ENDF file to get ZAID for proper directory structure
+        # Dry-run is a fast preview: write the factor summary, do not
+        # apply factors and do not run the positivity check. For a
+        # positivity audit, do a real run with a small num_samples.
         endf = parse_endf_file(endf_file)
         base = os.path.splitext(os.path.basename(endf_file))[0]
         sample_str = f"{sample_index+1:04d}"
         sample_dir = os.path.join(output_dir, "endf", str(endf.zaid or "unknown"), sample_str)
         os.makedirs(sample_dir, exist_ok=True)
-        
+
         _write_sample_summary(
             sample=sample,
             sample_index=sample_index,
@@ -105,42 +117,62 @@ def _process_sample(
             sample_dir=sample_dir,
             base=base,
         )
-        return
+        return {
+            "success": True,
+            "temperatures_processed": [],
+            "errors": [],
+            "warnings": [],
+            "positivity_events": [],
+            "dry_run": True,
+        }
     
-    # Parse the ENDF file
-    endf = parse_endf_file(endf_file)
-    
-    # Apply perturbations to MF4 data
-    perturbed_params = apply_perturbation_factors_to_endf(
-        endf, sample, sample_index, energy_grids, param_mapping, verbose=False
-    )
-    
-    # Write perturbed ENDF file
+    # Compute the expected output path before doing any heavy work. If the
+    # perturbed ENDF already exists, reuse it and skip parse + perturbation +
+    # write — this lets re-runs cheaply add ACE files at a new temperature.
+    # A targeted MF1 parse is enough to recover the ZAID; the full parse only
+    # happens on the write path below. That was the intent all along, but
+    # read_endf only set `mat` on the full-parse path, so `zaid` came back None
+    # and every sample landed in endf/unknown/ while stage B looked for it
+    # under endf/<zaid>/ and paired nothing.
     base, ext = os.path.splitext(os.path.basename(endf_file))
     sample_str = f"{sample_index+1:04d}"
-    sample_dir = os.path.join(output_dir, "endf", str(endf.zaid or "unknown"), sample_str)
-    os.makedirs(sample_dir, exist_ok=True)
+    try:
+        zaid_dir = str(read_endf(endf_file, mf_numbers=[1]).zaid or "unknown")
+    except Exception:
+        zaid_dir = "unknown"
+    sample_dir = os.path.join(output_dir, "endf", zaid_dir, sample_str)
     out_endf = os.path.join(sample_dir, f"{base}_{sample_str}{ext}")
-    
-    # Use ENDF writer to save the modified file
-    writer = ENDFWriter(endf_file)
-    if 4 in endf.files:
-        success = writer.replace_mf_section(endf.files[4], out_endf)
-        if not success:
-            if _get_logger():
-                _get_logger().error(f"  [ERROR] [ENDF] Failed to write perturbed ENDF file: {out_endf}")
-            return
-    
-    # Write sample summary
-    _write_sample_summary(
-        sample=sample,
-        sample_index=sample_index,
-        energy_grids=energy_grids,
-        param_mapping=param_mapping,
-        sample_dir=sample_dir,
-        base=base,
-    )
-    
+
+    if os.path.exists(out_endf):
+        reused = True
+        positivity_events: List[Tuple[int, float, float, float]] = []
+    else:
+        reused = False
+        endf = parse_endf_file(endf_file)
+        perturbed_params, positivity_events = apply_perturbation_factors_to_endf(
+            endf, sample, sample_index, energy_grids, param_mapping, verbose=False,
+            enforce_positivity=enforce_positivity,
+            positivity_check_points=positivity_check_points,
+        )
+        os.makedirs(sample_dir, exist_ok=True)
+        writer = ENDFWriter(endf_file)
+        if 4 in endf.files:
+            success = writer.replace_mf_section(endf.files[4], out_endf)
+            if not success:
+                if _get_logger():
+                    _get_logger().error(f"  [ERROR] [ENDF] Failed to write perturbed ENDF file: {out_endf}")
+                return {"success": False, "positivity_events": positivity_events,
+                        "temperatures_processed": [], "errors": [], "warnings": [],
+                        "reused": False}
+        _write_sample_summary(
+            sample=sample,
+            sample_index=sample_index,
+            energy_grids=energy_grids,
+            param_mapping=param_mapping,
+            sample_dir=sample_dir,
+            base=base,
+        )
+
     # Generate ACE files using NJOY if requested
     if generate_ace and not dry_run:
         njoy_result = _process_njoy_for_sample(
@@ -148,14 +180,19 @@ def _process_sample(
             sample_index=sample_index,
             njoy_exe=njoy_exe,
             temperatures=temperatures,
+            extensions=extensions,
             library_name=library_name,
             njoy_version=njoy_version,
             output_dir=output_dir,
             xsdir_file=xsdir_file,
         )
+        njoy_result["positivity_events"] = positivity_events
+        njoy_result["reused"] = reused
         return njoy_result
-    
-    return {"success": True, "temperatures_processed": [], "errors": [], "warnings": []}
+
+    return {"success": True, "temperatures_processed": [], "errors": [],
+            "warnings": [], "positivity_events": positivity_events,
+            "reused": reused}
 
 
 def _process_njoy_for_sample(
@@ -167,6 +204,7 @@ def _process_njoy_for_sample(
     njoy_version: str,
     output_dir: str,
     xsdir_file: Optional[str] = None,
+    extensions: Optional[List[str]] = None,
 ):
     """
     Process a perturbed ENDF file through NJOY to generate ACE files.
@@ -207,89 +245,106 @@ def _process_njoy_for_sample(
         return {"success": False, "error": f"Failed to parse ENDF for ZAID: {e}"}
     
     results = {"success": True, "temperatures_processed": [], "errors": [], "warnings": []}
-    
-    for temp in temperatures:
+
+    # New layout: per-sample directory, all temperatures + isotopes co-located,
+    # ZAID.<ext> filenames disambiguate them. xsdir snippets land in a
+    # `xsdir/` subdirectory of the sample directory.
+    ace_sample_dir, xsdir_sample_dir, _ = make_ace_sample_paths(output_dir, sample_index)
+    njoy_sample_dir = os.path.join(output_dir, "njoy_files", sample_str)
+    os.makedirs(ace_sample_dir, exist_ok=True)
+    os.makedirs(xsdir_sample_dir, exist_ok=True)
+    os.makedirs(njoy_sample_dir, exist_ok=True)
+
+    if extensions is not None and len(extensions) != len(temperatures):
+        msg = (
+            f"extensions length ({len(extensions)}) must match temperatures length "
+            f"({len(temperatures)}); ignoring extensions."
+        )
+        if logger:
+            logger.warning(f"  [WARN] [NJOY] Sample {sample_str}: {msg}")
+        extensions = None
+
+    for t_idx, temp in enumerate(temperatures):
         try:
-            # Create custom directory structure: ace/temp/zaid/sample_num/ using exact temperature input
-            temp_str = str(temp).rstrip('0').rstrip('.') if '.' in str(temp) else str(temp)
-            ace_sample_dir = os.path.join(output_dir, "ace", temp_str, str(zaid), sample_str)
-            njoy_sample_dir = os.path.join(output_dir, "njoy_files", temp_str, str(zaid), sample_str)
-            # Create directories
-            os.makedirs(ace_sample_dir, exist_ok=True)
-            os.makedirs(njoy_sample_dir, exist_ok=True)
-            
-            # Run NJOY with a temporary directory inside output_dir (to avoid library subdirectories)
+            ext_str = extensions[t_idx] if extensions is not None else None
+
+            # Run NJOY directly into the per-sample dirs. The runner places
+            # ACE at ace_sample_dir/<zaid>.<ext> and xsdir at
+            # xsdir_sample_dir/<zaid>.<ext>.xsdir when `extension` is given.
             with tempfile.TemporaryDirectory(prefix="njoy_temp_", dir=output_dir) as temp_dir:
                 result = run_njoy(
                     njoy_exe=njoy_exe,
                     endf_path=out_endf,
                     temperature=temp,
                     library_name=library_name,
-                    output_dir=temp_dir,  # Use temporary directory
+                    output_dir=temp_dir,
                     njoy_version=njoy_version,
-                    additional_suffix=sample_str,
+                    additional_suffix=sample_str if ext_str is None else None,
+                    extension=ext_str,
+                    ace_dir=ace_sample_dir if ext_str is not None else None,
+                    xsdir_dir=xsdir_sample_dir if ext_str is not None else None,
+                    njoy_files_dir=njoy_sample_dir if ext_str is not None else None,
                 )
-                
+
                 # Always move NJOY auxiliary files (input/output logs) for debugging
-                aux_files = ["njoy_input", "njoy_output", "xsdir_file", "viewr_output"]
+                aux_files = ["njoy_input", "njoy_output", "viewr_output"]
                 for aux_file in aux_files:
-                    if result.get(aux_file) and os.path.exists(result[aux_file]):
-                        aux_filename = os.path.basename(result[aux_file])
-                        dest_aux = os.path.join(njoy_sample_dir, aux_filename)
-                        try:
-                            shutil.move(result[aux_file], dest_aux)
-                            if aux_file == "njoy_output":
-                                results["njoy_output_path"] = dest_aux
-                        except Exception as move_err:
-                            warning_msg = f"Could not move {aux_file} at {temp}K: {move_err}"
-                            results["warnings"].append(warning_msg)
-                            if logger:
-                                logger.warning(f"  [WARN] [NJOY] Sample {sample_str}: {warning_msg}")
+                    src = result.get(aux_file)
+                    if src and os.path.exists(src):
+                        if os.path.dirname(src) != njoy_sample_dir:
+                            dest_aux = os.path.join(njoy_sample_dir, os.path.basename(src))
+                            try:
+                                shutil.move(src, dest_aux)
+                                if aux_file == "njoy_output":
+                                    results["njoy_output_path"] = dest_aux
+                            except Exception as move_err:
+                                warning_msg = f"Could not move {aux_file} at {temp}K: {move_err}"
+                                results["warnings"].append(warning_msg)
+                                if logger:
+                                    logger.warning(f"  [WARN] [NJOY] Sample {sample_str}: {warning_msg}")
+                        elif aux_file == "njoy_output":
+                            results["njoy_output_path"] = src
 
                 if result["returncode"] == 0:
                     results["temperatures_processed"].append(temp)
 
-                    # Move ACE file to our custom structure
-                    if result.get("ace_file") and os.path.exists(result["ace_file"]):
+                    # When the legacy layout is in use (no extension), the
+                    # runner put the ACE/xsdir under a library/<temp>K dir
+                    # inside temp_dir — relocate to the sample dir manually.
+                    if ext_str is None and result.get("ace_file") and os.path.exists(result["ace_file"]):
                         ace_filename = os.path.basename(result["ace_file"])
                         dest_ace = os.path.join(ace_sample_dir, ace_filename)
                         shutil.move(result["ace_file"], dest_ace)
+                        result["ace_file"] = dest_ace
+                    if ext_str is None and result.get("xsdir_file") and os.path.exists(result["xsdir_file"]):
+                        xsd_dest = os.path.join(xsdir_sample_dir, os.path.basename(result["xsdir_file"]))
+                        shutil.move(result["xsdir_file"], xsd_dest)
+                        result["xsdir_file"] = xsd_dest
 
-                        # Create xsdir files for the generated ACE file
-                        if xsdir_file is not None:
-                            try:
-                                # Parse ACE file to get header information for xsdir creation
-                                from kika.ace.parsers import read_ace
-                                ace_data = read_ace(dest_ace)
-                                hdr = ace_data.header
-                                has_ptable = bool(getattr(ace_data.unresolved_resonance, 'has_data', False))
-
-                                # Determine the proper cross-section library extension
-                                # For NJOY-generated files, calculate extension based on temperature
-                                base_ace, ace_file_ext = os.path.splitext(os.path.basename(dest_ace))
-
-                                # Convert temperature from MeV to Kelvin and get proper suffix
-                                from kika._utils import MeV_to_kelvin
-                                temp_K = MeV_to_kelvin(hdr.temperature)
-                                xs_ext = temperature_to_suffix(temp_K) + "c"  # Add 'c' for continuous energy
-
-                                create_xsdir_files_for_ace(
-                                    ace_file_path=dest_ace,
-                                    zaid=hdr.zaid,
-                                    awr=hdr.atomic_weight_ratio,
-                                    xss_len=hdr.nxs_array[1],
-                                    temperature_mev=hdr.temperature,
-                                    sample_index=sample_index,
-                                    output_dir=output_dir,
-                                    master_xsdir_file=xsdir_file,
-                                    has_ptable=has_ptable,
-                                )
-
-                            except Exception as xsdir_err:
-                                warning_msg = f"Failed to create XSDIR files at {temp}K: {xsdir_err}"
-                                results["warnings"].append(warning_msg)
-                                if logger:
-                                    logger.warning(f"[NJOY] Sample {sample_str} at {temp}K: {warning_msg}")
+                    # Master-xsdir merge when requested.
+                    if xsdir_file is not None and result.get("ace_file") and os.path.exists(result["ace_file"]):
+                        try:
+                            from kika.ace.parsers import read_ace
+                            ace_data = read_ace(result["ace_file"])
+                            hdr = ace_data.header
+                            has_ptable = bool(getattr(ace_data.unresolved_resonance, 'has_data', False))
+                            create_xsdir_files_for_ace(
+                                ace_file_path=result["ace_file"],
+                                zaid=hdr.zaid,
+                                awr=hdr.atomic_weight_ratio,
+                                xss_len=hdr.nxs_array[1],
+                                temperature_mev=hdr.temperature,
+                                sample_index=sample_index,
+                                output_dir=output_dir,
+                                master_xsdir_file=xsdir_file,
+                                has_ptable=has_ptable,
+                                per_sample_xsdir_path=result.get("xsdir_file"),
+                            )
+                        except Exception as xsdir_err:
+                            warning_msg = f"Failed to update master XSDIR at {temp}K: {xsdir_err}"
+                            results["warnings"].append(warning_msg)
+                            if logger:
+                                logger.warning(f"[NJOY] Sample {sample_str} at {temp}K: {warning_msg}")
                 else:
                     error_msg = f"NJOY failed at {temp}K with return code {result['returncode']}"
                     results["errors"].append(error_msg)
@@ -307,8 +362,77 @@ def _process_njoy_for_sample(
             results["success"] = False
             if logger:
                 logger.error(f"  [ERROR] [NJOY] Sample {sample_str}: {error_msg}")
-    
+
     return results
+
+
+def _log_positivity_events(
+    events_by_sample: List[Tuple[int, List[Tuple[int, float, float, float]]]],
+    file_key: str,
+    num_samples: int,
+    verbose: bool,
+    logger,
+):
+    """
+    Log MF4 positivity projection activity.
+
+    Verbose mode: one line per projected (sample, MT, energy) tuple.
+    Both modes: per-MT summary plus a cross-MT total.
+
+    Parameters
+    ----------
+    events_by_sample : list of (sample_index, list of (mt, energy, sigma_min, max_delta))
+        Per-sample projection records emitted by _apply_factors_to_mf4_legendre.
+    file_key : str
+        Short identifier of the current ENDF file for log context.
+    num_samples : int
+        Total samples processed for this file (denominator in the summary).
+    verbose : bool
+        If True, emit per-event lines; the summary is always emitted.
+    logger : DualLogger
+    """
+    if logger is None:
+        return
+    per_mt_count: Dict[int, int] = {}
+    per_mt_max_delta: Dict[int, float] = {}
+    per_mt_max_sigma_below_zero: Dict[int, float] = {}
+    n_events_total = 0
+
+    for sample_index, events in events_by_sample:
+        sample_str = f"{sample_index + 1:04d}"
+        for mt, energy, sigma_min, max_delta in events:
+            n_events_total += 1
+            per_mt_count[mt] = per_mt_count.get(mt, 0) + 1
+            per_mt_max_delta[mt] = max(per_mt_max_delta.get(mt, 0.0), max_delta)
+            # sigma_min is negative here; track the most-negative value
+            per_mt_max_sigma_below_zero[mt] = min(
+                per_mt_max_sigma_below_zero.get(mt, 0.0), sigma_min
+            )
+            if verbose:
+                logger.info(
+                    f"  [INFO] [POSITIVITY] {file_key} sample={sample_str} "
+                    f"MT={mt} E={energy:.6e} eV: f(μ)<0 (min={sigma_min:.3e}), "
+                    f"projected (max |Δa_l|={max_delta:.3e})"
+                )
+
+    if n_events_total == 0:
+        logger.info(
+            f"  [INFO] [POSITIVITY] {file_key}: all {num_samples} samples already physical "
+            f"(no projection needed)"
+        )
+        return
+
+    for mt in sorted(per_mt_count):
+        logger.info(
+            f"  [INFO] [POSITIVITY] {file_key} MT={mt}: projected {per_mt_count[mt]} "
+            f"(sample, energy) entries / {num_samples} samples; "
+            f"max |Δa_l|={per_mt_max_delta[mt]:.3e}; "
+            f"worst pre-projection σ(μ)={per_mt_max_sigma_below_zero[mt]:.3e}"
+        )
+    logger.info(
+        f"  [INFO] [POSITIVITY] {file_key}: total {n_events_total} (sample, MT, energy) "
+        f"entries projected across {num_samples} samples"
+    )
 
 
 def _log_njoy_batch_results(njoy_results, file_key, file_index, temperatures, summary_data):
@@ -509,6 +633,92 @@ def load_mf34_covariance(path: str) -> Optional[LegendreCovariance]:
         return None
 
 
+def load_mf34_suite(path: str):
+    """Load *path*'s covariance as the format-agnostic ``CovarianceSuite``.
+
+    The replacement for :func:`load_mf34_covariance` on the sampling path, and
+    the reason this module now reaches the GNDS adapter at all. Same contract:
+    ``None`` on failure, with the reason logged, so the caller's per-file
+    bookkeeping is unchanged.
+
+    **The import is function-scope on purpose.** ``kika.endf.model_adapter``
+    pulls in the whole GNDS model, and ``kika.sampling`` is imported on every
+    cluster run; at module scope this would wake the model for callers that
+    never sample MF34. ``test_only_the_facades_and_the_front_door_import_the_adapter``
+    is the ratchet that holds this, and this module is on its allowlist.
+    """
+    from kika.endf.model_adapter import decodeCovarianceSuite
+
+    logger = _get_logger()
+    try:
+        if logger:
+            logger.info(f"  [INFO] [ENDF] Loading MF34 covariance from file: {path}")
+
+        endf = read_endf(path)
+        if endf.get_file(34) is None:
+            if logger:
+                logger.error(f"  [ERROR] [ENDF] No MF34 section found in file: {path}")
+            return None
+
+        suite, report = decodeCovarianceSuite(endf)
+        if logger:
+            for line in getattr(report, "unsupported", ()) or ():
+                logger.info(f"  [INFO] [ENDF] {line}")
+        return suite
+
+    except Exception as e:
+        if logger:
+            logger.error(f"  [ERROR] [ENDF] Failed to load MF34 covariance: {e}")
+        return None
+
+
+def _mf34_available(suite) -> Tuple[List[int], List[int]]:
+    """The MTs and Legendre orders *suite*'s MF34 sections mention.
+
+    What ``resolve_signed_request`` needs, and the suite-side replacement for
+    ``LegendreCovariance.reactions`` / ``.legendre_indices``. Read off the index
+    rather than by walking sections, so it agrees with what would actually be
+    assembled — including a component a file mentions only on the *column* of a
+    cross block.
+    """
+    index = legendre_covariance_index(suite)
+    if not index:
+        return [], []
+    triplets = next(iter(index.values()))["triplets"]
+    return (sorted({mt for _za, mt, _l in triplets}),
+            sorted({l for _za, _mt, l in triplets}))
+
+
+def _parameter_mapping_from_index(entry) -> Tuple[
+    List[Tuple[int, int, int, int]], Dict[Tuple[int, int, int], List[float]]
+]:
+    """A :func:`legendre_covariance_index` entry → what the appliers read.
+
+    The successor of ``_create_parameter_mapping``, and deliberately a pure
+    reshaping of what the index already says: ``triplets`` in row order, each
+    occupying ``stride`` rows, and the per-triplet union grids. Both facts are
+    the index's, so the flat layout can no longer disagree with the matrix the
+    draw came from — which it could when one was derived from a
+    ``LegendreCovariance`` and the other from the suite.
+
+    Note the uniform stride is preserved, padding included: a triplet whose own
+    grid is shorter than ``stride`` still gets ``stride`` entries. Those columns
+    are inert (their rows in the joint are all zero), and the appliers already
+    skip an ``energy_bin`` past the end of its grid.
+    """
+    stride = entry["stride"]
+    param_mapping = [
+        (za, mt, l_coeff, energy_bin)
+        for (za, mt, l_coeff) in entry["triplets"]
+        for energy_bin in range(stride)
+    ]
+    energy_grids = {
+        triplet: np.asarray(entry["grids"][triplet], dtype=float).tolist()
+        for triplet in entry["triplets"]
+    }
+    return param_mapping, energy_grids
+
+
 def perturb_ENDF_files(
     endf_files: Union[str, List[str]],
     mt_list: Union[List[int], List[List[int]]],
@@ -517,7 +727,10 @@ def perturb_ENDF_files(
     mf34_cov_files: Optional[Union[str, List[str]]] = None,
     space: str = "linear",
     decomposition_method: str = "svd",
-    psd_method: str = "auto",
+    psd_method: str = "none",
+    higham_projection: bool = False,
+    enforce_positivity: bool = True,
+    positivity_check_points: int = 101,
     sampling_method: str = "sobol",
     output_dir: str = '.',
     seed: Optional[int] = None,
@@ -527,11 +740,13 @@ def perturb_ENDF_files(
     generate_ace: bool = False,
     njoy_exe: Optional[str] = None,
     temperatures: Optional[Union[float, List[float]]] = None,
+    extensions: Optional[List[str]] = None,
     library_name: Optional[str] = None,
     njoy_version: str = "NJOY 2016.78",
     xsdir_file: Optional[str] = None,
     energy_ranges: Optional[List[Tuple[float, float]]] = None,
     only_xsdir: bool = False,
+    log_file: Optional[str] = None,
 ):
     """
     Perturb ENDF nuclear data files using MF34 angular covariance matrices.
@@ -560,8 +775,34 @@ def perturb_ENDF_files(
         Sampling space: "linear"/"lin" (factors = 1 + X) or "log" (factors = exp(Y))
     decomposition_method : str, default "svd"
         Matrix decomposition method: "svd", "cholesky", "eigen", or "pca"
+    psd_method : str, default "none"
+        How to handle a non-PSD covariance during decomposition:
+            "none"   — do not modify the matrix (default); SVD silently folds
+                       negative eigenvalues to their absolute value. A WARN
+                       line is logged when |λ_min|/λ_max exceeds 1e-8.
+            "auto"   — clip mild negatives, Higham for severe ones.
+            "clip"   — zero out negative eigenvalues.
+            "higham" — nearest-PSD Higham projection.
+        Use `higham_projection=True` as a shortcut for "higham".
+    higham_projection : bool, default False
+        Convenience flag — when True, force `psd_method="higham"`. Raises if
+        the user also passes a non-default `psd_method`.
+    enforce_positivity : bool, default True
+        After each MF4 sample is assembled (factor × baseline), check that
+        f(μ) = (1/2) Σ (2l+1) a_l P_l(μ) ≥ 0 on a fine μ-grid. If not,
+        project to the L²-nearest non-negative coefficient set via SLSQP.
+        Applies during the perturbed-ENDF write path. **Skipped in
+        dry_run** — dry_run only writes the factor parquet, it does not
+        apply factors or check positivity. To audit positivity, just do
+        a real run with a small `num_samples`.
+    positivity_check_points : int, default 101
+        Number of μ points used for the positivity check / projection.
     sampling_method : str, default "sobol"
         Sampling method: "sobol", "lhs", or "random"
+    extensions : Optional[List[str]], default None
+        ACE extensions to assign per temperature, e.g. ['06c'] for 600 K.
+        Must have the same length as `temperatures`. When None, NJOY's
+        internal K_TO_SUFFIX lookup is used (legacy behavior).
     output_dir : str, default "."
         Output directory for perturbed files
     seed : Optional[int], default None
@@ -595,8 +836,14 @@ def perturb_ENDF_files(
 
     Notes
     -----
-    This function does not apply any autofix to the covariance matrices,
-    using them exactly as provided in the MF34 data.
+    Default behavior samples directly from the MF34 covariance with no
+    repair (`psd_method="none"`). Mild negative eigenvalues from numerical
+    noise are silently folded to their magnitude by SVD; a WARN line is
+    logged when the negative spectrum is non-trivial
+    (|λ_min|/λ_max > 1e-8). To repair the matrix, set
+    `higham_projection=True` (Higham projection) or pass an explicit
+    `psd_method` ("auto", "clip", or "higham"). The two are mutually
+    exclusive.
     
     When generate_ace=True, the output directory structure will include:
     - output_dir/endf/zaid/sample_num/ : perturbed ENDF files
@@ -606,18 +853,63 @@ def perturb_ENDF_files(
     - output_dir/*.log and *.parquet : log and master perturbation files
     """
     global _logger
-    
+
     # Normalize space parameter: support both 'lin' and 'linear'
     if space.lower() == 'lin':
         space = 'linear'
+
+    # The two settings `generate_endf_samples` accepted and `draw_samples` does
+    # not mean the same thing by. Refused by name rather than quietly drawing
+    # something else, which is what carrying them over would have done.
+    #
+    # `space="log"`: the old path drew from `LegendreCovariance`'s *separately
+    # computed* log covariance. `draw_samples` decomposes the matrix it is
+    # handed and moment-matches against that same matrix, so asking it for a log
+    # draw of a linear covariance gives a distribution neither function
+    # describes. The suite has no log form to hand it, and MF34 stores Legendre
+    # coefficients that are routinely negative -- a log-space multiplicative
+    # factor is not obviously meaningful for them -- so this is not plugged with
+    # a transform until someone argues for what it should mean.
+    if space.lower() != "linear":
+        raise NotImplementedError(
+            f"space={space!r} is not available on the MF34 path. It drew from "
+            f"LegendreCovariance.log_covariance_matrix, which the covariance "
+            f"suite has no equivalent of; draw_samples would moment-match "
+            f"against the linear matrix instead and silently draw a third "
+            f"thing. Use space='linear'."
+        )
+    # `pca` truncates at 99.9 % of the variance and `cholesky` is refused
+    # outright by draw_samples: these covariances are rank deficient by
+    # construction, so a Cholesky factor is either a failure or a fiction.
+    if decomposition_method.lower() not in ("svd", "eigen"):
+        raise NotImplementedError(
+            f"decomposition_method={decomposition_method!r} is not available on "
+            f"the MF34 path; draw_samples offers 'svd' (the shipped setting) "
+            f"and 'eigen'."
+        )
+
+    # Resolve higham_projection shorthand into psd_method. The two are
+    # mutually exclusive — flagging both is a user error worth surfacing
+    # loudly rather than silently picking one.
+    if higham_projection:
+        if psd_method != "none":
+            raise ValueError(
+                "higham_projection=True conflicts with an explicit "
+                f"psd_method={psd_method!r}. Pass one or the other."
+            )
+        psd_method = "higham"
     
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
     
-    # Setup logging
+    # Setup logging — when ``log_file`` is provided (e.g. by the combined
+    # orchestrator), append this stage's banner+log to that shared file.
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = os.path.join(output_dir, f'endf_perturbation_{timestamp}.log')
-    _logger = DualLogger(log_file)
+    if log_file is None:
+        log_file = os.path.join(output_dir, f'endf_perturbation_{timestamp}.log')
+        _logger = DualLogger(log_file, mode='w')
+    else:
+        _logger = DualLogger(log_file, mode='a')
     _set_logger(_logger)
     
     # Console: Basic start message
@@ -782,50 +1074,108 @@ def perturb_ENDF_files(
             cov_file = mf34_cov_files[0] if len(mf34_cov_files) == 1 else mf34_cov_files[i]
             
             # Load covariance matrix
-            mf34_cov = load_mf34_covariance(cov_file)
-            if mf34_cov is None:
+            suite = load_mf34_suite(cov_file)
+            if suite is None:
                 _logger.error(f"  [ERROR] [ENDF] File {step_num}: Failed to load covariance matrix from {cov_file}")
                 failed_files_details[file_key] = "Failed to load MF34 covariance matrix"
                 failed_files += 1
                 step_elapsed = time.time() - step_t0
                 _logger.info(f"#-- END STEP {step_num} (elapsed: {step_elapsed:.1f}s) -------------------------------------")
                 continue
-            
-            # Filter covariance data by requested MTs and Legendre coefficients
-            filtered_cov = _filter_mf34_covariance(mf34_cov, mt_list, legendre_coeffs)
-            
-            if filtered_cov.num_matrices == 0:
+
+            # Resolve positive/negative MT and L semantics against what's
+            # actually in the MF34 file (typically only MT2 has data).
+            available_mts_in_cov, available_ls_in_cov = _mf34_available(suite)
+            mt_resolved, mt_log = resolve_signed_request(
+                list(mt_list or []), available_mts_in_cov, group_map=MT_GROUPS,
+            )
+            for line in mt_log:
+                _logger.info(
+                    f"  [INFO] [ENDF] File {step_num}: "
+                    f"{line.replace('Excluding entries:', 'Excluding MTs:').replace('group expansion', 'composite expansion')}"
+                )
+            requested_mts_missing = (
+                sorted(set(mt_resolved) - set(available_mts_in_cov)) if mt_resolved else []
+            )
+            if requested_mts_missing:
+                _logger.warning(
+                    f"  [WARN] [ENDF] File {step_num}: MTs {requested_mts_missing} "
+                    f"not in MF34 (MF34 has {available_mts_in_cov}); silently dropped."
+                )
+            l_resolved, l_log = resolve_signed_request(
+                list(legendre_coeffs or []), available_ls_in_cov, group_map=None,
+            )
+            for line in l_log:
+                _logger.info(
+                    f"  [INFO] [ENDF] File {step_num}: "
+                    f"{line.replace('Excluding entries:', 'Excluding L:')}"
+                )
+
+            # Assemble the one covariance the file's MF34 sections partition,
+            # filtered to the resolved MTs and Legendre orders. The order filter
+            # is what keeps L=0 out, and on an `_a0cross` tape a0 is the section
+            # carrying the MF33 cross term on the magnitude grid -- so this is
+            # also what keeps two incompatible energy grids from meeting.
+            # `relative=True` reproduces `load_mf34_covariance`, which has always
+            # dropped absolute MF34 sections: the appliers multiply by what comes
+            # back, and an absolute covariance does not describe a factor.
+            blocks = legendre_covariance_blocks(
+                suite, mt=mt_resolved, orders=l_resolved, relative=True,
+            )
+            index = legendre_covariance_index(
+                suite, mt=mt_resolved, orders=l_resolved, relative=True,
+            )
+
+            if not blocks:
                 _logger.warning(f"  [WARN] [ENDF] File {step_num}: No covariance data found for requested MTs {mt_list} and L coefficients {legendre_coeffs}")
                 failed_files_details[file_key] = f"No covariance data for requested MTs {mt_list} and L coefficients {legendre_coeffs}"
                 failed_files += 1
                 step_elapsed = time.time() - step_t0
                 _logger.info(f"#-- END STEP {step_num} (elapsed: {step_elapsed:.1f}s) -------------------------------------")
                 continue
-            
+
+            (block_key, joint), = blocks
+            triplets = index[block_key]["triplets"]
+
             # Store which MTs and L coefficients will be perturbed
-            summary_data[file_key]['perturbed_mts'] = list(filtered_cov.reactions)
-            summary_data[file_key]['perturbed_l_coeffs'] = list(filtered_cov.legendre_indices)
-            
+            summary_data[file_key]['perturbed_mts'] = sorted({mt for _za, mt, _l in triplets})
+            summary_data[file_key]['perturbed_l_coeffs'] = sorted({l for _za, _mt, l in triplets})
+
             # Create parameter mapping and energy grids
-            param_mapping, energy_grids = _create_parameter_mapping(filtered_cov)
-            
+            param_mapping, energy_grids = _parameter_mapping_from_index(index[block_key])
+
             # Generate perturbation factors
             if verbose:
                 _logger.info(f"  [INFO] [ENDF] File {step_num}: Generating {num_samples} perturbation samples...")
-            
+                _logger.info(
+                    f"  [INFO] [ENDF] File {step_num}: joint covariance "
+                    f"{joint.shape[0]}x{joint.shape[0]} over {len(triplets)} "
+                    f"triplet(s), stride {index[block_key]['stride']}"
+                )
+
             try:
-                factors, _, diagnostic_results = generate_endf_samples(
-                    filtered_cov,
+                samples, diagnostic_results = draw_samples(
+                    blocks,
                     num_samples,
                     space=space,
+                    returns="factors",
                     decomposition_method=decomposition_method,
                     sampling_method=sampling_method,
                     seed=seed,
-                    mt_numbers=mt_list,
                     psd_method=psd_method,
+                    # Retain the null directions. Truncating to the retained rank
+                    # is `draw_samples`' default and is the better draw, but it
+                    # changes the QMC dimension and so moves every drawn column
+                    # -- 4218 -> 3603 on the shipped Fe-56 multigroup joint. It
+                    # is turned on in its own commit, against a measurement,
+                    # rather than as a side effect of changing which object the
+                    # covariance arrives in.
+                    null_tol=None,
+                    dtype=np.float32,
                     verbose=verbose,
                 )
-                
+                factors = samples[block_key]
+
                 _logger.info(f"  [INFO] [ENDF] File {step_num}: Successfully generated perturbation factors: shape {factors.shape}")
                 _logger.info(f">> factors_shape = {factors.shape}")
 
@@ -864,40 +1214,56 @@ def perturb_ENDF_files(
             
             # Process samples with optional parallelization
             njoy_results = []  # Track NJOY results for batch logging
-            
+            # (sample_index, [(mt, energy, sigma_min, max_delta_a_l), ...])
+            positivity_events_by_sample: List[Tuple[int, List[Tuple[int, float, float, float]]]] = []
+            # Mutable container so nested _absorb_result can mutate it without nonlocal.
+            reused_count = [0]
+
+            def _absorb_result(sample_idx, result):
+                if not isinstance(result, dict):
+                    return
+                events = result.get("positivity_events") or []
+                if events:
+                    positivity_events_by_sample.append((sample_idx, events))
+                if result.get("reused"):
+                    reused_count[0] += 1
+                if generate_ace and not dry_run:
+                    njoy_results.append((sample_idx, result))
+
             if nprocs > 1 and num_samples > 1:
                 if verbose:
                     _logger.info(f"  [INFO] [ENDF] File {step_num}: Using {nprocs} processes for parallel processing")
-                
+
                 try:
                     with Pool(processes=nprocs) as pool:
                         futures = []
                         for sample_idx in range(num_samples):
                             args = (
-                                endf_file, factors[sample_idx], sample_idx, energy_grids, 
-                                param_mapping, output_dir, dry_run, generate_ace, njoy_exe, 
-                                temperatures, library_name, njoy_version, xsdir_file
+                                endf_file, factors[sample_idx], sample_idx, energy_grids,
+                                param_mapping, output_dir, dry_run, generate_ace, njoy_exe,
+                                temperatures, extensions, library_name, njoy_version, xsdir_file,
+                                enforce_positivity, positivity_check_points,
                             )
                             future = pool.apply_async(_process_sample, args=args)
                             futures.append(future)
-                        
+
                         # Wait for all processes to complete
                         pool.close()
                         pool.join()
-                        
+
                         # Collect results and check for any exceptions
                         for j, future in enumerate(futures):
                             try:
                                 result = future.get()  # This will raise any exception that occurred
-                                if result and generate_ace and not dry_run:
-                                    njoy_results.append((j, result))
+                                _absorb_result(j, result)
                             except Exception as e:
                                 _logger.error(f"  [ERROR] [ENDF] File {step_num}: Sample {j+1:04d} processing failed: {e}")
-                                
+
                 except Exception as e:
                     _logger.error(f"  [ERROR] [ENDF] File {step_num}: Parallel processing failed, falling back to serial: {e}")
                     # Fall back to serial processing
                     njoy_results = []
+                    positivity_events_by_sample = []
                     for sample_idx in range(num_samples):
                         try:
                             result = _process_sample(
@@ -911,12 +1277,14 @@ def perturb_ENDF_files(
                                 generate_ace=generate_ace,
                                 njoy_exe=njoy_exe,
                                 temperatures=temperatures,
+                                extensions=extensions,
                                 library_name=library_name,
                                 njoy_version=njoy_version,
                                 xsdir_file=xsdir_file,
+                                enforce_positivity=enforce_positivity,
+                                positivity_check_points=positivity_check_points,
                             )
-                            if result and generate_ace and not dry_run:
-                                njoy_results.append((sample_idx, result))
+                            _absorb_result(sample_idx, result)
                         except Exception as sample_e:
                             _logger.error(f"  [ERROR] [ENDF] File {step_num}: Sample {sample_idx+1:04d} processing failed: {sample_e}")
                             continue
@@ -935,16 +1303,32 @@ def perturb_ENDF_files(
                             generate_ace=generate_ace,
                             njoy_exe=njoy_exe,
                             temperatures=temperatures,
+                            extensions=extensions,
                             library_name=library_name,
                             njoy_version=njoy_version,
                             xsdir_file=xsdir_file,
+                            enforce_positivity=enforce_positivity,
+                            positivity_check_points=positivity_check_points,
                         )
-                        if result and generate_ace and not dry_run:
-                            njoy_results.append((sample_idx, result))
+                        _absorb_result(sample_idx, result)
                     except Exception as e:
                         _logger.error(f"  [ERROR] [ENDF] File {step_num}: Sample {sample_idx+1:04d} processing failed: {e}")
                         continue
-            
+
+            # Report reuse of existing perturbed ENDFs (re-runs at new temperature).
+            if reused_count[0] > 0:
+                _logger.info(
+                    f"  [INFO] [ENDF] File {step_num}: Reused {reused_count[0]}/{num_samples} "
+                    f"existing perturbed ENDFs on disk; skipped perturbation+write for those samples."
+                )
+
+            # Positivity reporting: per-event in verbose, summary always.
+            if enforce_positivity:
+                _log_positivity_events(
+                    positivity_events_by_sample, file_key, num_samples,
+                    verbose=verbose, logger=_logger,
+                )
+
             # Batch logging for NJOY results
             if generate_ace and not dry_run and njoy_results:
                 _log_njoy_batch_results(njoy_results, file_key, i+1, temperatures, summary_data)
@@ -1001,18 +1385,30 @@ def perturb_ENDF_files(
 
                 _logger.info(f"    Number of samples generated: {data['num_samples']}")
 
-                # Sampling quality assessment
-                diagnostics = data.get('sampling_diagnostics')
-                if diagnostics and 'overall_status' in diagnostics:
-                    status = diagnostics['overall_status']
-                    tag_map = {
-                        "EXCELLENT": "[PASS]", "GOOD": "[PASS]",
-                        "ACCEPTABLE": "[WARN]", "POOR": "[WARN]", "CRITICAL": "[FAIL]",
-                    }
-                    tag = tag_map.get(status, "[INFO]")
-                    _logger.info(f"    Sampling Quality: {tag} {status}")
-                    if status in ("CRITICAL", "POOR", "ACCEPTABLE"):
-                        _logger.info(f"      -> See 'SAMPLING QUALITY ASSESSMENT' section above for details")
+                # Sampling quality assessment. `draw_samples` reports per block,
+                # and MF34 is one joint block -- so this reads the block out
+                # rather than looking for the old `overall_status` verdict, which
+                # no longer exists. What replaces it is not a grade but the
+                # numbers a grade was standing in for: how much of the matrix was
+                # actually spanned, and how well the draw reproduced it.
+                diagnostics = data.get('sampling_diagnostics') or {}
+                block = next(iter(diagnostics.values()), None)
+                if isinstance(block, dict) and 'rank' in block:
+                    _logger.info(
+                        f"    Sampling: rank {block['rank']} of {block['n']} "
+                        f"({block['n_null']} null direction(s)), seed {block['seed']}"
+                    )
+                    error = block.get('realised_covariance_error')
+                    if error is not None and np.isfinite(error):
+                        _logger.info(
+                            f"      realised covariance error on the retained "
+                            f"subspace: {error:.3e}"
+                        )
+                    if block['n_null']:
+                        _logger.info(
+                            f"      -> null directions were drawn in, not truncated "
+                            f"(null_tol=None)"
+                        )
                 else:
                     _logger.info("    Sampling Quality: [INFO] Not available (diagnostics disabled)")
 
@@ -1090,12 +1486,14 @@ def perturb_ENDF_files(
 
 
 def apply_perturbation_factors_to_endf(
-    endf, 
-    sample: np.ndarray, 
-    sample_index: int, 
-    energy_grids: Dict[Tuple[int, int, int], List[float]], 
-    param_mapping: List[Tuple[int, int, int, int]], 
-    verbose: bool = True
+    endf,
+    sample: np.ndarray,
+    sample_index: int,
+    energy_grids: Dict[Tuple[int, int, int], List[float]],
+    param_mapping: List[Tuple[int, int, int, int]],
+    verbose: bool = True,
+    enforce_positivity: bool = False,
+    positivity_check_points: int = 101,
 ):
     """
     Apply perturbation factors to ENDF MF4 angular distribution data.
@@ -1124,28 +1522,32 @@ def apply_perturbation_factors_to_endf(
         _get_logger().info(f"  [INFO] [ENDF] Applying perturbations to sample {sample_index + 1}")
     
     perturbed_params = []
-    
+    positivity_events: List[Tuple[int, float, float, float]] = []
+
     # Get MF4 data
     mf4 = endf.get_file(4)
     if mf4 is None:
         if _get_logger():
             _get_logger().warning("  [WARN] [ENDF] No MF4 data found in ENDF file")
-        return perturbed_params
-    
+        return perturbed_params, positivity_events
+
     # Apply perturbations to each MT section
     for mt_number, mt_data in mf4.sections.items():
         # Check for both MF4MTLegendre and MF4MTMixed (both have Legendre coefficients)
         if isinstance(mt_data, (MF4MTLegendre, MF4MTMixed)):
             # Apply perturbations to Legendre coefficients
-            _apply_factors_to_mf4_legendre(
-                mt_data, sample, param_mapping, energy_grids, verbose
+            events = _apply_factors_to_mf4_legendre(
+                mt_data, sample, param_mapping, energy_grids, verbose,
+                enforce_positivity=enforce_positivity,
+                positivity_check_points=positivity_check_points,
             )
+            positivity_events.extend(events)
             # Add all perturbed parameters for this MT
             for isotope, mt, l_coeff, energy_bin in param_mapping:
                 if mt == mt_number:
                     perturbed_params.append((isotope, mt, l_coeff, energy_bin))
-    
-    return perturbed_params
+
+    return perturbed_params, positivity_events
 
 
 def _apply_factors_to_mf4_legendre(
@@ -1153,8 +1555,11 @@ def _apply_factors_to_mf4_legendre(
     factors: np.ndarray,
     param_mapping: List[Tuple[int, int, int, int]],
     energy_grids: Dict[Tuple[int, int, int], List[float]],
-    verbose: bool = True
-):
+    verbose: bool = True,
+    enforce_positivity: bool = False,
+    positivity_check_points: int = 101,
+    mf3_magnitude_sink: Optional[Dict[Tuple[int, int, int], float]] = None,
+) -> List[Tuple[int, float, float, float]]:
     """
     Apply perturbation factors to MF4 Legendre coefficient data with proper discontinuity handling.
     
@@ -1178,12 +1583,23 @@ def _apply_factors_to_mf4_legendre(
         Union energy grids for each parameter combination
     verbose : bool
         Whether to log details
-        
+    mf3_magnitude_sink : dict, optional
+        Dormant hook for a future joint MF3+MF4 (TMC) path.  In MF4 the
+        isotropic term a_0 is identically 1 — the cross-section *magnitude*
+        lives in MF3 sigma(E), not here — so an L=0 (magnitude) perturbation
+        factor cannot be applied to the Legendre coefficients.  When this dict
+        is provided, any L=0 entry in ``param_mapping`` is recorded as
+        ``{(isotope, mt, energy_bin): factor}`` for the caller to apply to the
+        MF3 cross section; when ``None`` (all current callers) L=0 entries are
+        skipped.  L>=1 (shape) factors are applied to MF4 exactly as before, so
+        this changes nothing for existing MF34-only callers (whose
+        ``param_mapping`` never contains L=0).
+
     Notes
     -----
     Key improvements implemented:
     - Uses union energy grids for consistent parameter mapping
-    - Tolerant boundary detection with np.isclose (atol=1e-10) 
+    - Tolerant boundary detection with np.isclose (atol=1e-10)
     - Prevents double-scaling at nearly-identical energies
     - Ensures discontinuities are inserted exactly once per boundary
     """
@@ -1257,13 +1673,27 @@ def _apply_factors_to_mf4_legendre(
             
         energy_low = energy_grid[energy_bin]
         energy_high = energy_grid[energy_bin + 1]
-        
+
+        # L=0 is the cross-section magnitude (a_0 ≡ 1 in MF4; the magnitude
+        # lives in MF3 sigma(E)).  It must never scale the Legendre shape
+        # coefficients.  Route it once per bin to the optional MF3 sink for a
+        # future joint MF3+MF4 (TMC) path; skip otherwise (current behavior).
+        if l_coeff == 0:
+            if mf3_magnitude_sink is not None:
+                mf3_magnitude_sink[(isotope, mt, energy_bin)] = float(factor)
+                if verbose and _get_logger():
+                    _get_logger().debug(
+                        f"  [INFO] [ENDF] MAGNITUDE MT{mt} L0 bin {energy_bin}: "
+                        f"factor {factor:.6f} routed to MF3 sink"
+                    )
+            continue
+
         # Apply factor to coefficients strictly inside this bin (not at boundaries)
         for energy_idx, energy in enumerate(mt_data._energies):
             if energy_low <= energy < energy_high and not _on_boundary(energy):
                 # Check if this L coefficient exists at this energy
                 coeff_index = l_coeff - 1  # Convert L=1,2,3... to 0-indexed
-                if (coeff_index >= 0 and energy_idx < len(mt_data._legendre_coeffs) and 
+                if (coeff_index >= 0 and energy_idx < len(mt_data._legendre_coeffs) and
                     coeff_index < len(mt_data._legendre_coeffs[energy_idx])):
                     
                     old_value = mt_data._legendre_coeffs[energy_idx][coeff_index]
@@ -1298,13 +1728,21 @@ def _apply_factors_to_mf4_legendre(
         for factor_idx, (isotope, mt, l_coeff, energy_bin) in enumerate(param_mapping):
             if mt != mt_data.number:
                 continue
-                
+
+            # L=0 is magnitude (MF3), not an MF4 shape order — it creates no
+            # angular-distribution discontinuity, so it must not enter the
+            # boundary factor sets (else an L=0-only boundary would insert a
+            # redundant energy point). It is routed to the MF3 sink in the
+            # interior pass above.
+            if l_coeff == 0:
+                continue
+
             triplet = (isotope, mt, l_coeff)
             energy_grid = energy_grids.get(triplet, [])
-            
+
             if len(energy_grid) < 2 or energy_bin >= len(energy_grid) - 1:
                 continue
-            
+
             factor = factors[factor_idx]
             energy_low = energy_grid[energy_bin]
             energy_high = energy_grid[energy_bin + 1]
@@ -1323,11 +1761,14 @@ def _apply_factors_to_mf4_legendre(
         coeffs_minus = baseline_coeffs[:]
         coeffs_plus = baseline_coeffs[:]
         
+        # L=0 (coeff_index == -1) is intentionally excluded by the guards below:
+        # magnitude creates no MF4 shape discontinuity and is handled in the
+        # interior pass via mf3_magnitude_sink.
         for l_coeff, factor in lower_factors.items():
             coeff_index = l_coeff - 1
             if 0 <= coeff_index < len(coeffs_minus):
                 coeffs_minus[coeff_index] *= factor
-        
+
         for l_coeff, factor in upper_factors.items():
             coeff_index = l_coeff - 1
             if 0 <= coeff_index < len(coeffs_plus):
@@ -1344,17 +1785,71 @@ def _apply_factors_to_mf4_legendre(
     if mt_data._ne > 0:
         mt_data._interpolation = [(mt_data._ne, 2)]  # One region, linear-linear
         mt_data._nr = 1
-    
+
     # For MF4MTMixed, also update Legendre-specific attributes
     if isinstance(mt_data, MF4MTMixed):
         mt_data._ne1 = mt_data._ne  # Number of Legendre energy points
         # Note: _ne2 and _nr_tab are for the tabulated part and should remain unchanged
-    
+
+    # Step 6: Positivity enforcement.
+    # f(mu) = (1/2) sum_l (2l+1) a_l P_l(mu), with a_0 = 1 implicit.
+    # Pin the high-l tail (outside the perturbed band) to baseline so the
+    # projection only redistributes within the perturbed orders.
+    positivity_events: List[Tuple[int, float, float, float]] = []
+    if enforce_positivity and mt_data._ne > 0:
+        from kika.sampling.mf4_positivity import (
+            check_mf4_positivity,
+            project_mf4_to_positive,
+        )
+
+        perturbed_l = {
+            l_coeff for (_iso, mt, l_coeff, _bin) in param_mapping
+            if mt == mt_data.number
+        }
+        if perturbed_l:
+            max_perturbed_l = max(perturbed_l)
+        else:
+            max_perturbed_l = 0
+
+        for energy_idx, energy in enumerate(mt_data._energies):
+            a_endf_tail = np.asarray(
+                mt_data._legendre_coeffs[energy_idx], dtype=float
+            )
+            if a_endf_tail.size == 0:
+                continue
+            a_full = np.concatenate(([1.0], a_endf_tail))
+            is_pos, sigma_min = check_mf4_positivity(
+                a_full, n_points=positivity_check_points
+            )
+            if is_pos:
+                continue
+
+            # Pin a_l beyond the perturbed band to their current (baseline) values.
+            frozen = {
+                idx: float(a_full[idx])
+                for idx in range(max_perturbed_l + 1, len(a_full))
+            }
+            a_projected = project_mf4_to_positive(
+                a_full,
+                n_points=positivity_check_points,
+                frozen_indices=frozen,
+            )
+            delta = np.abs(a_projected - a_full)
+            max_delta = float(delta.max()) if delta.size else 0.0
+            positivity_events.append(
+                (mt_data.number, float(energy), float(sigma_min), max_delta)
+            )
+
+            # Write the projected a_l back (drop a_0).
+            mt_data._legendre_coeffs[energy_idx] = list(a_projected[1:])
+
     if verbose and _get_logger():
         _get_logger().info(
             f"  [INFO] [ENDF] MT{mt_data.number}: Applied {applied_count} interior factors and "
             f"{insertions_made} boundary discontinuities. Final: {mt_data._ne} energy points"
         )
+
+    return positivity_events
 
 
 def _interpolate_legendre_coefficients(

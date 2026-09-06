@@ -4,7 +4,7 @@ import numpy as np
 
 from .base import MF4MT
 from ....endf.utils import (
-    get_interpolation_scheme_name, interpolate_1d_endf,
+    auto_trim_legendre_tail, get_interpolation_scheme_name, interpolate_1d_endf,
 )
 
 
@@ -242,6 +242,8 @@ class MF4MTLegendre(MF4MT):
         energy: Union[float, np.ndarray],
         max_legendre_order: int = 10,
         *,
+        trim: bool = False,
+        trim_tol: float = 1e-6,
         out_of_range: str = "zero"
     ) -> Dict[int, Union[float, np.ndarray]]:
         """
@@ -308,6 +310,9 @@ class MF4MTLegendre(MF4MT):
         # Fill remaining orders beyond available
         for l in range(Lmax + 1, max_legendre_order + 1):
             result[l] = float(0.0) if np.isscalar(energy) else np.zeros_like(x_eval, dtype=float)
+
+        if trim:
+            result = auto_trim_legendre_tail(result, tol=trim_tol, min_order=0)
 
         return result
 

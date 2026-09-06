@@ -48,7 +48,6 @@ from scripts.tof_parameters import get_tof_parameters, compute_sigma_E
 
 # Import resample_AD functions (relative import for same directory)
 from .resample_AD import (
-    load_exfor_for_fitting,
     endf_normalize_legendre_coeffs,
     sample_legendre_coefficients,
     compute_energy_resolution_tof,
@@ -113,6 +112,21 @@ def _set_logger(logger: Optional[DualLogger]) -> None:
     """Set the global logger instance."""
     global _logger
     _logger = logger
+
+
+# Manifest-application diagnostics for build_exfor_cache_from_objects.
+# Reset at the start of each call; exposed via get_last_manifest_stats() so
+# the caller can include the counts in the run audit log.
+_last_manifest_stats: Dict[str, Any] = {
+    'attempted': 0,
+    'failed': 0,
+    'failures': [],  # list of (entry, subentry, exception_repr)
+}
+
+
+def get_last_manifest_stats() -> Dict[str, Any]:
+    """Return diagnostics from the most recent build_exfor_cache_from_objects call."""
+    return dict(_last_manifest_stats)
 
 
 def _format_condensed_experiments(experiments_info: List[Dict]) -> List[str]:
@@ -500,6 +514,7 @@ def compute_energy_bins_with_tof_resolution(
     delta_t_ns: float = 5.0,
     flight_path_m: float = 27.037,
     reference_grid_ev: Optional[np.ndarray] = None,
+    delta_t_is_fwhm: bool = True,
 ) -> List[EnergyBinInfo]:
     """
     Compute energy bins with TOF-based energy resolution.
@@ -555,6 +570,7 @@ def compute_energy_bins_with_tof_resolution(
             E_mev=e_mev,
             delta_t_ns=delta_t_ns,
             flight_path_m=flight_path_m,
+            delta_t_is_fwhm=delta_t_is_fwhm,
         )
 
         # Compute bin boundaries (midpoints to neighbors)
@@ -768,31 +784,58 @@ def build_exfor_cache_from_objects(
     # Parse exclusion patterns
     exclusion_patterns = _parse_exclusion_list(exclude_experiments)
 
+    # Reset manifest-application diagnostics for this call.
+    global _last_manifest_stats
+    _last_manifest_stats = {'attempted': 0, 'failed': 0, 'failures': []}
+
     # Apply the uncertainty manifest at the pipeline boundary. The kika
     # library returns raw ExforAngularDistribution objects; here we layer the
     # manifest-derived per-point σ_stat (with optional decomposition from a
     # total) and the per-experiment σ_sys (split into indep and dep parts).
+    # The manifest is mandatory: silently disabling it would let bad imports
+    # revert the run to raw EXFOR uncertainties, which directly affect GLS
+    # weights, AICc, τ, MC perturbations, and covariance.
+    _import_errors: List[ImportError] = []
     try:
         from scripts.uncertainty_manifest import apply_manifest_to_exfor
-    except ImportError:
+    except ImportError as e:
+        _import_errors.append(e)
         try:
             from uncertainty_manifest import apply_manifest_to_exfor  # in-tree fallback
-        except ImportError:
-            apply_manifest_to_exfor = None  # manifest is best-effort
+        except ImportError as e2:
+            _import_errors.append(e2)
+            raise ImportError(
+                "Could not import apply_manifest_to_exfor from "
+                "scripts.uncertainty_manifest or uncertainty_manifest. "
+                "The uncertainty manifest is mandatory for build_exfor_cache_from_objects. "
+                f"Underlying errors: {[str(e) for e in _import_errors]}"
+            )
 
+    logger = _get_logger()
     for exfor in exfor_objects:
         # Check if experiment is excluded
         if _is_experiment_excluded(exfor.entry, exfor.subentry, exclusion_patterns):
             continue
 
-        if apply_manifest_to_exfor is not None:
-            try:
-                apply_manifest_to_exfor(
-                    exfor,
-                    uncertainty_components=getattr(exfor, '_raw_uncertainty_components', None),
-                )
-            except Exception:
-                pass
+        _last_manifest_stats['attempted'] += 1
+        try:
+            apply_manifest_to_exfor(
+                exfor,
+                uncertainty_components=getattr(exfor, '_raw_uncertainty_components', None),
+            )
+        except Exception as e:
+            _last_manifest_stats['failed'] += 1
+            _last_manifest_stats['failures'].append(
+                (exfor.entry, exfor.subentry, repr(e))
+            )
+            msg = (
+                f"Manifest application failed for {exfor.entry}/{exfor.subentry}: "
+                f"{type(e).__name__}: {e}"
+            )
+            if logger is not None:
+                logger.warning(msg)
+            else:
+                warnings.warn(msg, RuntimeWarning)
 
         # Get all available energies in MeV
         energies_mev = exfor.energies(unit='MeV')
@@ -992,6 +1035,9 @@ def filter_exfor_with_energy_bin(
     sigma_norm: float = 0.05,                     # Normalization uncertainty for GLS-ESS weighting
     band_aware_ess: bool = False,                 # Split Kish budget by F/M/B bands
     max_experiment_weight_fraction: float = 1.0,  # 1.0 = disabled
+    # Membership window (see "Membership vs weighting" in the notes)
+    membership_k_sigma: float = 0.0,              # 0.0 = hard bin edges (default)
+    sigma_E_mev: Optional[float] = None,          # required when membership_k_sigma > 0
     logger=None,
 ) -> Tuple[pd.DataFrame, List[Dict], np.ndarray, KernelDiagnostics, Dict]:
     """
@@ -1039,6 +1085,25 @@ def filter_exfor_with_energy_bin(
         Maximum allowed weight fraction per experiment (default: 1.0 = disabled).
         If < 1.0, experiments exceeding this fraction are scaled down.
         Applied AFTER normalize_by_n_points if both are enabled.
+    membership_k_sigma : float, optional
+        Widens the window that decides WHICH datasets may constrain this bin,
+        to ``target_energy_mev +- membership_k_sigma * sigma_E_mev`` (unioned
+        with the bin edges, so data is never lost). Default 0.0 keeps the hard
+        bin edges.
+
+        This is deliberately a membership knob and not a weighting knob. The
+        analysis grid here is ~5x finer than any experiment's TOF resolution,
+        so a bin-width window renews almost the entire point set from one bin
+        to the next; widening it to the resolution scale makes the composition
+        vary slowly. The selected point per experiment is still the one nearest
+        the target and still carries weight 1.0 — no Gaussian overlap weighting
+        is applied. That distinction matters: every EXFOR datum is ALREADY
+        folded by its own resolution, so weighting the fit by an overlap kernel
+        of the same width would convolve a second time and hand back an
+        effective resolution of sqrt(2)*sigma_E. Widening membership does not.
+    sigma_E_mev : float, optional
+        The bin's TOF energy resolution. Required when membership_k_sigma > 0;
+        ignored otherwise.
 
     Returns
     -------
@@ -1068,9 +1133,20 @@ def filter_exfor_with_energy_bin(
     # experiment_candidates: {(entry, subentry): [(energy, df, meta), ...]}
     experiment_candidates: Dict[Tuple[str, str], List[Tuple[float, pd.DataFrame, Dict]]] = defaultdict(list)
 
+    # Membership window. Defaults to the bin edges; when membership_k_sigma > 0
+    # it is unioned with +-k*sigma_E about the target so an experiment whose
+    # resolution spans many bins can constrain all of them. Only membership is
+    # affected — dedupe still picks the point nearest target_energy_mev and the
+    # weight stays 1.0.
+    member_lower_mev, member_upper_mev = bin_lower_mev, bin_upper_mev
+    if membership_k_sigma > 0 and sigma_E_mev and sigma_E_mev > 0:
+        half_width = membership_k_sigma * sigma_E_mev
+        member_lower_mev = min(bin_lower_mev, target_energy_mev - half_width)
+        member_upper_mev = max(bin_upper_mev, target_energy_mev + half_width)
+
     for available_energy in sorted_energies:
         # Exact bin matching - include if within [lower, upper]
-        if available_energy < bin_lower_mev or available_energy > bin_upper_mev:
+        if available_energy < member_lower_mev or available_energy > member_upper_mev:
             continue
 
         entries = exfor_cache.get(available_energy, [])
@@ -1675,70 +1751,6 @@ def apply_per_experiment_weight_cap(
     return capped_weights, exp_weight_fracs, capping_applied
 
 
-def load_exfor_with_asymmetric_tolerance(
-    exfor_directory: str,
-    energy_mev: float,
-    tolerance_lower_mev: float,
-    tolerance_upper_mev: float,
-    m_proj_u: float,
-    m_targ_u: float,
-) -> Tuple[pd.DataFrame, int]:
-    """
-    Load EXFOR data with asymmetric tolerance bounds.
-
-    Parameters
-    ----------
-    exfor_directory : str
-        Path to EXFOR data directory
-    energy_mev : float
-        Target energy in MeV
-    tolerance_lower_mev : float
-        Lower tolerance in MeV
-    tolerance_upper_mev : float
-        Upper tolerance in MeV
-    m_proj_u : float
-        Projectile mass in atomic mass units
-    m_targ_u : float
-        Target mass in atomic mass units
-
-    Returns
-    -------
-    Tuple[pd.DataFrame, int]
-        DataFrame with EXFOR data and count of unique energies found
-    """
-    # Use the maximum tolerance for initial search
-    max_tolerance = max(tolerance_lower_mev, tolerance_upper_mev)
-
-    # Suppress print statements from load_exfor_for_fitting
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        import io
-        old_stdout = sys.stdout
-        sys.stdout = io.StringIO()
-        try:
-            exfor_df = load_exfor_for_fitting(
-                exfor_directory=exfor_directory,
-                energy_mev=energy_mev,
-                tolerance=max_tolerance,
-                m_proj_u=m_proj_u,
-                m_targ_u=m_targ_u,
-            )
-        finally:
-            sys.stdout = old_stdout
-
-    if exfor_df.empty:
-        return exfor_df, 0
-
-    # Count unique experiments (entry, subentry pairs)
-    if 'entry' in exfor_df.columns and 'subentry' in exfor_df.columns:
-        unique_experiments = exfor_df.groupby(['entry', 'subentry']).size()
-        n_experiments = len(unique_experiments)
-    else:
-        n_experiments = 1
-
-    return exfor_df, n_experiments
-
-
 # =============================================================================
 # KERNEL-WEIGHT MC FOR CROSS-ENERGY CORRELATIONS
 # =============================================================================
@@ -1750,6 +1762,8 @@ def precompute_overlap_weights(
     tof_params_cache: Optional[Dict] = None,
     default_flight_path_m: float = 27.037,
     default_time_resolution_ns: float = 5.0,
+    default_delta_t_is_fwhm: bool = True,
+    logger=None,
 ) -> Dict[int, List[Tuple[Dict, float]]]:
     """Compute overlap weights from ALL datasets across all bins.
 
@@ -1785,6 +1799,8 @@ def precompute_overlap_weights(
     # Collect all unique datasets across all bins
     all_datasets = []
     seen = set()
+    # Which subentries resolved to which TOF convention, for the audit below.
+    _conv_seen: Dict[str, Any] = {}
     for nr in nominal_results:
         if not nr.has_data or nr.interpolated:
             continue
@@ -1826,9 +1842,11 @@ def precompute_overlap_weights(
                 tof_params = get_tof_parameters(
                     subentry_id, tof_params_cache,
                     default_flight_path_m, default_time_resolution_ns,
+                    default_delta_t_is_fwhm=default_delta_t_is_fwhm,
                 )
                 ds_sigma_E = compute_sigma_E(exfor_energy, tof_params)
                 ds_tof_source = tof_params.source
+                _conv_seen.setdefault(subentry_id, tof_params)
             else:
                 ds_sigma_E = None  # will use bin sigma_E as fallback
                 ds_tof_source = "bin_default"
@@ -1866,6 +1884,32 @@ def precompute_overlap_weights(
 
         overlap_weights[bin_info.index] = bin_datasets
 
+    # Audit the TOF convention actually applied per subentry. sigma_E scales by
+    # ~2.355 between the FWHM and sigma readings, and it decides how far each
+    # experimental point spreads across bins — so a silent fallback to the
+    # pipeline default is worth naming rather than assuming.
+    if logger is not None and _conv_seen:
+        from_file = sorted(
+            s for s, p in _conv_seen.items() if p.source == "file"
+        )
+        defaulted = sorted(
+            s for s, p in _conv_seen.items() if p.source != "file"
+        )
+        conv = "FWHM" if default_delta_t_is_fwhm else "sigma"
+        logger.info(
+            f"  TOF convention: delta_t read as {conv} by default; "
+            f"{len(from_file)} subentry(ies) had file parameters, "
+            f"{len(defaulted)} fell back to L={default_flight_path_m} m, "
+            f"dt={default_time_resolution_ns} ns"
+        )
+        if defaulted:
+            logger.warning(
+                f"  [TOF] No per-experiment parameters for: "
+                f"{', '.join(defaulted[:12])}"
+                f"{' ...' if len(defaulted) > 12 else ''} — these inherit the "
+                f"global delta_t and its {conv} reading."
+            )
+
     return overlap_weights
 
 
@@ -1902,7 +1946,7 @@ def _run_one_kw_sample(args_tuple):
         overlap_weights = sh['overlap_weights']
         energy_bins_data = sh['energy_bins_data']
         sigma_norm = sh['sigma_norm']
-        sigma_norm_elastic = sh.get('sigma_norm_elastic', 0.0)
+        sigma_norm_common_mode = sh.get('sigma_norm_common_mode', 0.0)
         norm_dist = sh['norm_dist']
         max_degree = sh['max_degree']
         ridge_lambda = sh['ridge_lambda']
@@ -1923,6 +1967,7 @@ def _run_one_kw_sample(args_tuple):
         tau_info_by_bin = sh['tau_info_by_bin']
         mc_order_cap_by_bin = sh['mc_order_cap_by_bin']
         band_aware_ess = sh.get('band_aware_ess', False)
+        record_c0_channel = sh.get('record_c0_channel', False)
     else:
         # Legacy path: full args tuple (sequential mode or old callers)
         (
@@ -1948,85 +1993,56 @@ def _run_one_kw_sample(args_tuple):
             tau_info_by_bin,
             mc_order_cap_by_bin,
         ) = args_tuple
-        sigma_norm_elastic = 0.0
+        sigma_norm_common_mode = 0.0
         band_aware_ess = False
         fix_c0_at_nominal = False
         sys_aware_mc_fit = False
+        record_c0_channel = False
 
     rng = np.random.default_rng(base_seed + s_idx)
 
-    # Step 0: Draw one global elastic-XS factor per MC sample.
-    # Models uncertainty in the shared elastic reference / monitor that all
+    # Step 0: Draw one global common-mode normalization factor per MC sample.
+    # Models uncertainty in the shared reference / monitor that all
     # experiments rely on. Applied to every data point regardless of which
     # experiment produced it; introduces a common-mode correlation across
     # all bins and all entries for this sample.
-    if sigma_norm_elastic > 0:
+    if sigma_norm_common_mode > 0:
         if norm_dist == "lognormal":
-            elastic_factor = float(rng.lognormal(
-                mean=-0.5 * sigma_norm_elastic ** 2, sigma=sigma_norm_elastic
+            common_mode_factor = float(rng.lognormal(
+                mean=-0.5 * sigma_norm_common_mode ** 2, sigma=sigma_norm_common_mode
             ))
         else:
-            elastic_factor = float(rng.normal(1.0, sigma_norm_elastic))
+            common_mode_factor = float(rng.normal(1.0, sigma_norm_common_mode))
     else:
-        elastic_factor = 1.0
+        common_mode_factor = 1.0
 
-    # Step 1: Draw two normalization factors per data point:
+    # Step 1: Draw ONE shared standard-normal `z` per experiment per sample.
+    # The same z is applied to every point of every dataset that experiment
+    # contributes to (across all energies, all subentries, all bins) — so the
+    # direction of the systematic shift is correlated across the experiment's
+    # full energy range, with the per-point AMPLITUDE coming from the manifest.
     #
-    #   (a) entry_indep_norms[entry_id]
-    #       — one factor per EXFOR entry (correlated across ALL its data,
-    #         including all energies and subentries). Magnitude is the
-    #         manifest's energy-INDEPENDENT sys component (e.g. Kinney's
-    #         monitor 7% + geometry 4% → 8.06%; Tomita's 5%; Cox's 10%).
+    # Per-point factor (lognormal): exp(z*sigma_i - 0.5*sigma_i^2)
+    # Per-point factor (normal):    1 + z*sigma_i
     #
-    #   (b) entry_energy_dep_norms[(entry_id, exfor_energy)]
-    #       — one factor per (entry, exfor_energy). Independent across
-    #         energies of the same experiment. Magnitude is the
-    #         energy-DEPENDENT sys at that energy (e.g. Kinney's gain_shift
-    #         at the cell's E; Cierjacks's piecewise total at the cell's E;
-    #         Tsukada's piecewise ERR-1). Zero for experiments without
-    #         energy-dependent components.
+    # Marginally each point sees a Lognormal/Normal multiplier with parameter
+    # sigma_i (so per-point variance reproduces the manifest); the shared z
+    # makes any two points of the same experiment perfectly correlated, which
+    # is what produces long-range covariance between bins fed by the same
+    # experiment. Cross-experiment shifts are independent (different z).
     #
-    # The composite per-point factor = entry_indep × entry_energy_dep.
-    # When manifest doesn't specify either component, fall back to global
-    # `sigma_norm` for the indep factor (per-experiment) only.
-    entry_indep_norms: Dict[str, float] = {}
-    entry_energy_dep_norms: Dict[Tuple[str, float], float] = {}
-
-    def _draw_factor(sigma_eff: float) -> float:
-        if sigma_eff <= 0:
-            return 1.0
-        if norm_dist == "lognormal":
-            return float(rng.lognormal(mean=-0.5 * sigma_eff**2, sigma=sigma_eff))
-        return float(rng.normal(1.0, sigma_eff))
-
+    # The per-point sigma comes from `df['sigma_sys_relative']` (manifest-
+    # derived total sys, computed as |error_sys|/|value| at DataFrame build
+    # time). For Cierjacks band B this is 0.07 at every point; for Kinney it
+    # is 0.0806 everywhere; for uncurated experiments it's the manifest
+    # default 5%. Falls back to the global `sigma_norm` for legacy callers
+    # whose DataFrame lacks the column.
+    entry_z_norms: Dict[str, float] = {}
     for bin_idx, datasets_and_weights in overlap_weights.items():
         for ds, w in datasets_and_weights:
             entry_id = ds['experiment_id'].split('.')[0]
-            ds_energy = ds['exfor_energy_mev']
-            df_ds = ds.get('exfor_df')
-
-            if entry_id not in entry_indep_norms:
-                # Per-experiment energy-INDEPENDENT factor
-                indep = 0.0
-                if df_ds is not None and 'sigma_sys_indep_relative' in df_ds.columns and len(df_ds) > 0:
-                    indep = float(df_ds['sigma_sys_indep_relative'].iloc[0])
-                # Fallback: when manifest didn't supply an indep component
-                # (uncurated entries) use the global sigma_norm so that some
-                # per-experiment correlated noise is still applied.
-                if indep <= 0:
-                    indep = sigma_norm
-                entry_indep_norms[entry_id] = _draw_factor(indep)
-
-            key = (entry_id, ds_energy)
-            if key not in entry_energy_dep_norms:
-                # Per-(experiment, energy) energy-DEPENDENT factor
-                dep = 0.0
-                if df_ds is not None and 'sigma_sys_dep_relative' in df_ds.columns and len(df_ds) > 0:
-                    dep = float(df_ds['sigma_sys_dep_relative'].iloc[0])
-                entry_energy_dep_norms[key] = _draw_factor(dep) if dep > 0 else 1.0
-    # Aliases for any code path still reading the older names
-    entry_energy_norms = entry_energy_dep_norms
-    entry_norms = entry_indep_norms
+            if entry_id not in entry_z_norms:
+                entry_z_norms[entry_id] = float(rng.standard_normal())
 
     # Step 2: Perturb all datasets (shared across bins)
     # Build per-dataset tau from the bin with highest overlap weight so that
@@ -2055,14 +2071,23 @@ def _run_one_kw_sample(args_tuple):
             if df.empty:
                 continue
             entry_id = exp_id.split('.')[0]
-            ds_energy = ds['exfor_energy_mev']
-            norm_indep_factor = entry_indep_norms.get(entry_id, 1.0)
-            norm_dep_factor   = entry_energy_dep_norms.get((entry_id, ds_energy), 1.0)
-            # Compose elastic (global), per-experiment systematic, and
-            # per-(experiment, energy) systematic factors. The latter two are
-            # independent draws so the total per-point shift has variance
-            # (sigma_indep² + sigma_dep_at_E²) at first order.
-            values = df['value'].to_numpy() * (elastic_factor * norm_indep_factor * norm_dep_factor)
+            z = entry_z_norms.get(entry_id, 0.0)
+            # Per-point sys magnitude (relative). Already aggregated across
+            # all manifest components (e.g. Kinney's monitor⊕geometry → 8.06%;
+            # Cierjacks's piecewise → 7% in band B; etc). When the column is
+            # missing (legacy DataFrames), fall back to the global `sigma_norm`.
+            if 'sigma_sys_relative' in df.columns:
+                sigma_per_pt = df['sigma_sys_relative'].to_numpy(dtype=float)
+            else:
+                sigma_per_pt = np.full(len(df), sigma_norm, dtype=float)
+            # Apply per-point shared-z factor: same direction, per-point amplitude.
+            if norm_dist == "lognormal":
+                norm_per_pt = np.exp(z * sigma_per_pt - 0.5 * sigma_per_pt ** 2)
+            else:
+                norm_per_pt = 1.0 + z * sigma_per_pt
+            # Compose elastic (global, all experiments) with per-experiment
+            # shared-direction per-point factor.
+            values = df['value'].to_numpy() * (common_mode_factor * norm_per_pt)
             # Optional MF33 multiplicative factor (v3 hook). When the caller
             # passes mf33_dsigma_per_sample + mf33_c0_per_bin + a home-bin map,
             # apply (1 + δσ/c0_home) to this dataset on top of the per-experiment
@@ -2070,6 +2095,14 @@ def _run_one_kw_sample(args_tuple):
             # within a sample (drawn once from MF33's full covariance), so
             # bins inherit MF33-driven cross-bin correlation through the
             # per-dataset home-bin lookup. Default-off → exact v2 behavior.
+            #
+            # WARNING (MF33/MF34 roadmap, Phase 1): do NOT repurpose this hook to
+            # derive an MF33↔MF34 cross-covariance. It injects an *assumed* MF33
+            # draw into the DCS while c0 is pinned (fix_c0_at_nominal), so the
+            # resulting a_l = c_l/c0 correlation is manufactured from fit
+            # residuals, not measured. A genuine sigma↔a_l cross block must be
+            # estimated from a joint fit (roadmap Phase 3), never from this
+            # convenience factor. See kika-workspace/docs/chi2-mf4/mf3_mf33_roadmap.md.
             mf33_dsigma_per_sample = sh.get('mf33_dsigma_per_sample') if isinstance(args_tuple, int) else None
             if mf33_dsigma_per_sample is not None:
                 home_map = sh['mf33_home_bin_by_e_key']
@@ -2105,6 +2138,9 @@ def _run_one_kw_sample(args_tuple):
 
     # Step 3-4: For each bin, collect perturbed data, fit
     sample_coeffs = {}
+    # Phase-2 magnitude channel: fixed-shape c0 per bin for this sample. Stays
+    # empty (and is dropped from the return) unless recording is on.
+    sample_c0 = {} if record_c0_channel else None
     # Phase D audit follow-up: count bins where the per-bin coeffs needed a
     # positivity projection (only when projection is enabled). Surfaced via the
     # worker's return tuple so the orchestrator can aggregate across samples.
@@ -2333,7 +2369,7 @@ def _run_one_kw_sample(args_tuple):
             c0_fix_arg = float(nom_for_freeze_high[0])
 
         try:
-            coef_df, _ = sample_legendre_coefficients(
+            coef_df, fit_info = sample_legendre_coefficients(
                 fit_df,
                 value_col="value",
                 unc_col="unc",
@@ -2350,7 +2386,13 @@ def _run_one_kw_sample(args_tuple):
                 max_band_scale=max_band_scale,
                 freeze_c0=freeze_c0,
                 fixed_c0_value=c0_fix_arg,
+                record_c0_scale=record_c0_channel,
+                c0_scale_ref_coeffs=nom_for_freeze_high if record_c0_channel else None,
             )
+            # Fixed-shape c0 scale of this sample's (shared-draw) perturbed data
+            # against the frozen nominal shape — read-only, doesn't touch coeffs.
+            if record_c0_channel and fit_info.get("c0_samples") is not None:
+                sample_c0[bin_idx] = float(np.asarray(fit_info["c0_samples"]).ravel()[0])
             coeffs = coef_df.iloc[0].to_numpy()
             if len(coeffs) < max_degree + 1:
                 coeffs = np.pad(coeffs, (0, max_degree + 1 - len(coeffs)))
@@ -2387,7 +2429,13 @@ def _run_one_kw_sample(args_tuple):
             nom = nominal_coeffs_by_bin.get(bin_idx)
             if nom is not None:
                 sample_coeffs[bin_idx] = endf_normalize_legendre_coeffs(nom, include_a0=False)
+                if record_c0_channel and len(nom) > 0:
+                    # Fall back to the unperturbed magnitude so the c0 sample
+                    # matrix stays aligned with the coeff samples.
+                    sample_c0[bin_idx] = float(nom[0])
 
+    if record_c0_channel:
+        return s_idx, sample_coeffs, n_pos_violations, sample_c0
     return s_idx, sample_coeffs, n_pos_violations
 
 
@@ -2398,7 +2446,7 @@ def run_mc_with_kernel_weights(
     n_samples: int,
     n_workers: int,
     sigma_norm: float,
-    sigma_norm_elastic: float,
+    sigma_norm_common_mode: float,
     norm_dist: str,
     max_degree: int,
     ridge_lambda: float,
@@ -2420,6 +2468,7 @@ def run_mc_with_kernel_weights(
     mf33_home_bin_by_e_key: Optional[Dict[str, int]] = None,
     sampled_degrees_per_bin_sample: Optional[Dict[int, np.ndarray]] = None,
     nominal_coeffs_by_bin_by_degree: Optional[Dict[int, Dict[int, np.ndarray]]] = None,
+    record_c0_channel: bool = False,
     logger=None,
 ) -> Dict[int, Dict[int, np.ndarray]]:
     """Orchestrate kernel-weighted multi-bin MC sampling.
@@ -2440,10 +2489,10 @@ def run_mc_with_kernel_weights(
         Per-experiment systematic normalization uncertainty. Drives the MC
         perturbation amplitude per experiment AND the Kish ρ for ESS collapse
         (same physical parameter in both roles).
-    sigma_norm_elastic : float
+    sigma_norm_common_mode : float
         Global normalization uncertainty applied as a single multiplicative
         factor per MC sample to ALL data points across ALL experiments
-        (e.g. uncertainty in a shared elastic XS reference / monitor).
+        (e.g. uncertainty in a shared reference / monitor).
         Set to 0.0 to disable.
     norm_dist : str
         "lognormal" or "normal".
@@ -2493,7 +2542,7 @@ def run_mc_with_kernel_weights(
         'overlap_weights': overlap_weights,
         'energy_bins_data': energy_bins_data,
         'sigma_norm': sigma_norm,
-        'sigma_norm_elastic': sigma_norm_elastic,
+        'sigma_norm_common_mode': sigma_norm_common_mode,
         'norm_dist': norm_dist,
         'max_degree': max_degree,
         'ridge_lambda': ridge_lambda,
@@ -2535,6 +2584,10 @@ def run_mc_with_kernel_weights(
         # Default-off → exact v2 behavior.
         'sampled_degrees_per_bin_sample': sampled_degrees_per_bin_sample,
         'nominal_coeffs_by_bin_by_degree': nominal_coeffs_by_bin_by_degree,
+        # Phase-2 magnitude channel: when True the worker also records the
+        # fixed-shape c0 of each sample's perturbed data (read-only; the shape
+        # coeffs are untouched). Default False → v2/v3 return shape unchanged.
+        'record_c0_channel': record_c0_channel,
     }
 
     if n_workers > 1:
@@ -2551,8 +2604,15 @@ def run_mc_with_kernel_weights(
 
     # Assemble into expected format
     all_samples: Dict[int, Dict[int, np.ndarray]] = {s_idx: {} for s_idx in range(n_samples)}
+    c0_samples_kw: Dict[int, Dict[int, float]] = {} if record_c0_channel else None
     total_pos_violations = 0
-    for s_idx, sample_coeffs, n_pos_violations in results:
+    for res in results:
+        # Worker returns a 4-tuple (…, sample_c0) only when recording is on.
+        if record_c0_channel:
+            s_idx, sample_coeffs, n_pos_violations, sample_c0 = res
+            c0_samples_kw[s_idx] = sample_c0
+        else:
+            s_idx, sample_coeffs, n_pos_violations = res
         all_samples[s_idx] = sample_coeffs
         total_pos_violations += n_pos_violations
 
@@ -2567,6 +2627,8 @@ def run_mc_with_kernel_weights(
                 f"distributions projected ({pct:.2f}%)"
             )
 
+    if record_c0_channel:
+        return all_samples, c0_samples_kw
     return all_samples
 
 
@@ -2633,6 +2695,153 @@ def stack_samples_to_matrix(
             n = min(arr.shape[0], max_degree)
             row[k * max_degree:k * max_degree + n] = arr[:n]
     return out
+
+
+def stack_c0_samples(
+    c0_samples_by_idx: Dict[int, Dict[int, float]],
+    energy_indices: List[int],
+    n_samples: int,
+) -> np.ndarray:
+    """Flatten the fixed-shape c0 side channel ``{sample_idx -> {energy_idx ->
+    c0}}`` into an ``(n_samples, len(energy_indices))`` ndarray.
+
+    Missing (sample, bin) entries become NaN so the two-pass combine can treat
+    them as absent (pairwise-complete correlations, per-column variances) rather
+    than as a spurious zero magnitude.
+    """
+    n_bins = len(energy_indices)
+    out = np.full((n_samples, n_bins), np.nan, dtype=float)
+    for s in range(n_samples):
+        sd = c0_samples_by_idx.get(s)
+        if not sd:
+            continue
+        for k, e_idx in enumerate(energy_indices):
+            val = sd.get(int(e_idx))
+            if val is not None:
+                out[s, k] = float(val)
+    return out
+
+
+def build_mf33_channel(
+    c0_samples_pass1: Dict[int, Dict[int, float]],
+    c0_samples_pass2: Dict[int, Dict[int, float]],
+    energy_indices: List[int],
+    c0_nominal: np.ndarray,
+    n_samples: int,
+) -> Tuple[np.ndarray, np.ndarray, "pd.DataFrame"]:
+    """Assemble the fixed-shape c0 (MF33) channel from the two-pass samples.
+
+    Pure (no I/O): stacks the two per-sample c0 dicts into matrices, runs the
+    two-pass congruence combine, and builds a long-format sample frame for the
+    sidecar.  The pipeline wraps this with the ``np.save`` / ``to_parquet``
+    calls; keeping it separate makes the numeric path unit-testable without a
+    full run.
+
+    Returns
+    -------
+    (rel_cov, cov_abs, samples_df, diag)
+        ``rel_cov`` / ``cov_abs`` are ``(n_bins, n_bins)`` relative / absolute
+        c0 covariances aligned to ``energy_indices``; ``samples_df`` has columns
+        ``sample_idx, energy_index, pass, c0`` for both passes.  ``diag`` holds
+        completeness/PSD inspection numbers (warn-only material):
+        ``p1_finite_per_bin`` / ``p2_finite_per_bin`` (finite-sample counts per
+        bin) and ``corr_pass1_min_eig`` (min eigenvalue of the Pass-1
+        pairwise-complete correlation matrix, which is not guaranteed PSD).
+    """
+    from .resample_AD import combine_c0_covariance
+
+    c0_nominal = np.asarray(c0_nominal, dtype=float)
+    p1 = stack_c0_samples(c0_samples_pass1, energy_indices, n_samples)
+    p2 = stack_c0_samples(c0_samples_pass2, energy_indices, n_samples)
+    rel_cov, cov_abs = combine_c0_covariance(p1, p2, c0_nominal)
+
+    # Completeness + Pass-1 correlation PSD inspection (pairwise-complete
+    # np.ma.corrcoef can go indefinite when different sample pairs are missing
+    # in different bins).
+    p1_counts = np.sum(np.isfinite(p1), axis=0).astype(int)
+    p2_counts = np.sum(np.isfinite(p2), axis=0).astype(int)
+    corr_p1 = np.ma.corrcoef(np.ma.masked_invalid(p1), rowvar=False)
+    corr_p1 = np.asarray(np.ma.filled(corr_p1, 0.0), dtype=float)
+    np.fill_diagonal(corr_p1, 1.0)
+    corr_p1 = 0.5 * (corr_p1 + corr_p1.T)
+    diag = {
+        "p1_finite_per_bin": p1_counts,
+        "p2_finite_per_bin": p2_counts,
+        "corr_pass1_min_eig": float(np.min(np.linalg.eigvalsh(corr_p1))),
+    }
+
+    n_bins = len(energy_indices)
+    s_col = np.repeat(np.arange(n_samples), n_bins)
+    e_col = np.tile(np.asarray(energy_indices), n_samples)
+    samples_df = pd.concat([
+        pd.DataFrame({"sample_idx": s_col, "energy_index": e_col,
+                      "pass": "pass1", "c0": p1.ravel()}),
+        pd.DataFrame({"sample_idx": s_col, "energy_index": e_col,
+                      "pass": "pass2", "c0": p2.ravel()}),
+    ], ignore_index=True)
+    return rel_cov, cov_abs, samples_df, diag
+
+
+def recentre_relative_covariance(
+    cov_abs: np.ndarray, ref_means: np.ndarray
+) -> np.ndarray:
+    """Convert an absolute covariance to relative against reference means.
+
+    ``rel[i, j] = cov_abs[i, j] / (ref_means[i] * ref_means[j])`` — used to
+    recentre the DCS-derived absolute c0 covariance on the HOST MF3 bin means
+    (the shipped File-3 central), so the relative MF33 preserves the absolute
+    uncertainty claim when users multiply it by the host cross section.  Rows
+    and columns with a non-positive reference are zeroed.
+    """
+    cov_abs = np.asarray(cov_abs, dtype=float)
+    ref = np.asarray(ref_means, dtype=float)
+    rel = np.zeros_like(cov_abs)
+    pos = ref > 0
+    outer = np.outer(ref, ref)
+    rel[np.ix_(pos, pos)] = cov_abs[np.ix_(pos, pos)] / outer[np.ix_(pos, pos)]
+    return rel
+
+
+def contiguous_grid_from_bins(valid_bins, rtol: float = 1e-9) -> np.ndarray:
+    """Build the fine energy grid (eV) from has-data bins, asserting adjacency.
+
+    The MF33/MF34 fine writes represent the bins as one contiguous grid
+    (lower edges + last upper edge).  That is only correct when the bins are
+    adjacent — a quality gate leaving an internal gap would silently produce a
+    semantically wrong ENDF grid.  A gap is a structural bug, so this raises
+    (hard error, not the warn-only policy reserved for PSD-type judgement
+    calls).
+
+    Parameters
+    ----------
+    valid_bins : sequence
+        Bin objects exposing ``bin_lower_mev`` / ``bin_upper_mev``, in
+        ascending energy order.
+    rtol : float, default 1e-9
+        Relative tolerance on ``upper[i] == lower[i+1]``.
+
+    Returns
+    -------
+    np.ndarray
+        Energy boundaries in eV, ``len(valid_bins) + 1`` values.
+    """
+    if not valid_bins:
+        raise ValueError("contiguous_grid_from_bins: no bins given")
+    for i in range(len(valid_bins) - 1):
+        upper = float(valid_bins[i].bin_upper_mev)
+        lower_next = float(valid_bins[i + 1].bin_lower_mev)
+        if not np.isclose(upper, lower_next, rtol=rtol, atol=0.0):
+            raise ValueError(
+                f"contiguous_grid_from_bins: gap between bin {i} "
+                f"(upper {upper:.9g} MeV) and bin {i + 1} "
+                f"(lower {lower_next:.9g} MeV) — the fine-grid write assumes "
+                f"adjacent bins; refusing to build a wrong contiguous grid."
+            )
+    grid_ev = np.empty(len(valid_bins) + 1, dtype=float)
+    for k, b in enumerate(valid_bins):
+        grid_ev[k] = float(b.bin_lower_mev) * 1e6
+    grid_ev[-1] = float(valid_bins[-1].bin_upper_mev) * 1e6
+    return grid_ev
 
 
 # =============================================================================
@@ -2745,6 +2954,9 @@ def compute_covariance_from_samples(
     snr_threshold: float = 0.0,
     n_neighbors: int = 3,
     logger=None,
+    mixture_blocks: Optional[Dict[int, Dict[str, np.ndarray]]] = None,
+    frozen_mask: Optional[np.ndarray] = None,
+    mixture_abs_std: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]], np.ndarray, np.ndarray]:
     """
     Compute relative (fractional) covariance and correlation matrices from MC samples.
@@ -2760,6 +2972,24 @@ def compute_covariance_from_samples(
         List of energy indices (sorted)
     max_order : int
         Maximum Legendre order to include
+    mixture_blocks : Dict[int, Dict[str, np.ndarray]], optional
+        Phase-3 per-bin mixture moments, ``{energy_index: {'mean': (max_order,),
+        'cov': (max_order, max_order)}}``, in the same ENDF a-space and the same
+        absolute units as the samples.
+
+        When given, each listed bin's diagonal block of the ABSOLUTE covariance
+        and its slice of the mean vector are replaced before anything else
+        happens. Everything downstream — the ``valid_mask`` zeroing, the
+        relative conversion, the near-zero regularisation and the correlation
+        extraction — then runs on the mixture exactly as it would on a sample
+        covariance. That is deliberate: the near-zero guard is the only active
+        protection against relative-sigma blow-up, and routing the mixture
+        through this function is what keeps it applied rather than requiring a
+        second copy of it at the call site.
+
+        Bins not listed keep their sample estimates, so interpolated bins and
+        bins whose MC failed fall through untouched. **Cross-bin blocks are
+        never replaced** — they stay as estimated from the pooled samples.
 
     Returns
     -------
@@ -2778,8 +3008,9 @@ def compute_covariance_from_samples(
         Cov_rel(i, j) = Cov_abs(i, j) / (mean_i * mean_j)
 
     The conversion is performed here so that the returned matrix can be
-    written directly to MF34 with LB=5 format. Where |mean_i * mean_j| < 1e-30
-    (effectively zero coefficients), the relative covariance is set to zero.
+    written directly to MF34 with LB=5 format. Rows/columns of parameters
+    with |mean| < 1e-6 (effectively zero coefficients at ENDF precision)
+    are set to zero in the relative covariance.
     """
     n_samples = len(all_samples)
     n_energies = len(energy_indices)
@@ -2798,6 +3029,35 @@ def compute_covariance_from_samples(
 
     # Compute absolute covariance
     cov_abs = np.cov(sample_matrix, rowvar=False)
+    mean_params = np.mean(sample_matrix, axis=0)
+
+    # Phase 3: substitute the analytic per-bin mixture moments for the sample
+    # estimates. Done here, before the mask and the relative conversion, so the
+    # mixture is subject to every guard the sampled path is subject to.
+    if mixture_blocks:
+        n_sub = 0
+        for k, e_idx in enumerate(energy_indices):
+            blk = mixture_blocks.get(e_idx)
+            if not blk:
+                continue
+            m = np.asarray(blk['mean'], dtype=float)
+            c = np.asarray(blk['cov'], dtype=float)
+            if m.shape != (max_order,) or c.shape != (max_order, max_order):
+                raise ValueError(
+                    f"mixture block for energy_index {e_idx} has mean{m.shape} "
+                    f"cov{c.shape}, expected ({max_order},) and "
+                    f"({max_order}, {max_order})"
+                )
+            s = k * max_order
+            e = s + max_order
+            cov_abs[s:e, s:e] = 0.5 * (c + c.T)
+            mean_params[s:e] = m
+            n_sub += 1
+        if logger:
+            logger.info(
+                f"  [MIX] per-bin mixture blocks substituted for {n_sub}/"
+                f"{n_energies} bins (cross-bin blocks left as sampled)"
+            )
 
     # Zero out rows/columns for parameters that were not actually fitted
     if valid_mask is not None:
@@ -2807,9 +3067,13 @@ def compute_covariance_from_samples(
 
     # Convert absolute covariance to relative (fractional) covariance
     # Cov_rel(i,j) = Cov_abs(i,j) / (mean_i * mean_j)
-    mean_params = np.mean(sample_matrix, axis=0)
+    # Per-parameter safe test (|mean| > 1e-6, ~ENDF 6-sig-digit precision),
+    # mirroring absolute_to_nominal_relative: the pairwise-product test
+    # (|mean_i*mean_j| > threshold²) could zero a diagonal variance while
+    # keeping its cross-terms, breaking PSD.
+    param_safe = np.abs(mean_params) > 1e-6
+    safe_mask = np.outer(param_safe, param_safe)
     denom = np.outer(mean_params, mean_params)
-    safe_mask = np.abs(denom) > 1e-12  # ENDF 6-digit precision squared
     cov_matrix = np.zeros_like(cov_abs)
     cov_matrix[safe_mask] = cov_abs[safe_mask] / denom[safe_mask]
 
@@ -2825,6 +3089,8 @@ def compute_covariance_from_samples(
             max_order=max_order,
             snr_threshold=snr_threshold,
             n_neighbors=n_neighbors,
+            frozen_mask=frozen_mask,
+            mixture_abs_std=mixture_abs_std,
             logger=logger,
         )
 
@@ -2882,6 +3148,8 @@ def regularize_near_zero_relative_covariance(
     max_order: int,
     snr_threshold: float = 1.0,
     n_neighbors: int = 3,
+    frozen_mask: Optional[np.ndarray] = None,
+    mixture_abs_std: Optional[np.ndarray] = None,
     logger=None,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
@@ -2892,6 +3160,44 @@ def regularize_near_zero_relative_covariance(
     replaces those explosive relative stds with interpolated values from
     neighboring bins of the same Legendre order, applied via congruence
     transform to preserve correlations and PSD.
+
+    ⛔ THAT PREMISE STOPPED BEING TRUE WHEN THE MIXTURE LANDED. This function
+    predates the model averaging by ~5 months (`3d3e6a6` vs `dbcd7d9`). It was
+    written when the mean was the MC *sample* mean and a near-zero mean was an
+    accident. Under the mixture the mean is ``p·m``: it shrinks ON PURPOSE when
+    the order probably is not there, and the large relative sigma is then the
+    model-selection uncertainty — information, not an artefact.
+    ``model_averaging`` says so in as many words: "a large relative uncertainty
+    at a near-zero mean is a diagnostic state, not a covariance failure".
+
+    Measured on run 101a, the unguarded version is BACKWARDS:
+
+      * of the flagged parameters, **99.3 % (a_5) and 98.8 % (a_6) are bins the
+        MC actually sampled** — flagged precisely because they carry a real
+        spread against a shrunk mean;
+      * of the donors, **79.8 % (a_5) and 98.0 % (a_6) are FROZEN bins**, whose
+        sigma is c₀ jitter (see ``analytic_between_block``).
+
+    So it took the fake sigma of the bins that were never sampled and
+    transplanted it onto the ones that were: a_5 went 174.7 % → 17.1 %.
+
+    Two arguments fix it, and both are optional so the old behaviour is exactly
+    recoverable by passing neither:
+
+    ``frozen_mask``
+        True where the parameter was frozen to the nominal in the MC. Those are
+        excluded from the DONOR pool — never from the flagging, since their SNR
+        is high by construction and they are never flagged anyway.
+    ``mixture_abs_std``
+        The ABSOLUTE sigma the averaging itself implies, per parameter — passed
+        absolute on purpose, so the same array is correct at every call site
+        whatever ``mean_params`` is relative to. When finite it REPLACES the
+        neighbour median as the target, which removes the donor pool from the
+        answer entirely. The target is then ``min(rel_std, that/|mean|)``: this
+        function may only ever shrink.
+        Growing where the mixture asks for more is a separate, separately
+        measured change (the analytic between-model block) — keeping the two
+        apart is what makes either of them attributable.
 
     Returns regularized cov_rel and diagnostics dict.
     """
@@ -2918,6 +3224,20 @@ def regularize_near_zero_relative_covariance(
 
     # Build scale vector
     scale = np.ones(n_params)
+    n_from_mixture = 0
+    n_donors_excluded = 0
+
+    if frozen_mask is not None:
+        frozen = np.asarray(frozen_mask, dtype=bool)
+        if frozen.shape != (n_params,):
+            raise ValueError(
+                f"frozen_mask has shape {frozen.shape}, expected ({n_params},)")
+        n_donors_excluded = int((frozen & ~flagged & (rel_std > 0)).sum())
+    else:
+        frozen = np.zeros(n_params, dtype=bool)
+
+    def _is_donor(j):
+        return (not flagged[j]) and rel_std[j] > 0 and not frozen[j]
 
     for i in range(n_params):
         if not flagged[i]:
@@ -2929,32 +3249,43 @@ def regularize_near_zero_relative_covariance(
         k = i // max_order
         l = i % max_order
 
-        # Collect rel_std from neighboring bins of the same order l
-        neighbor_stds = []
-        # Walk left
-        count = 0
-        for kk in range(k - 1, -1, -1):
-            j = kk * max_order + l
-            if not flagged[j] and rel_std[j] > 0:
-                neighbor_stds.append(rel_std[j])
-                count += 1
-                if count >= n_neighbors:
-                    break
-        # Walk right
-        count = 0
-        for kk in range(k + 1, n_energies):
-            j = kk * max_order + l
-            if not flagged[j] and rel_std[j] > 0:
-                neighbor_stds.append(rel_std[j])
-                count += 1
-                if count >= n_neighbors:
-                    break
+        # La sigma que el propio promediado implica manda sobre cualquier
+        # vecino: es de ESTE parametro, no de otro bin.
+        target_rel_std = None
+        if mixture_abs_std is not None:
+            _s = float(mixture_abs_std[i])
+            _mu = abs(float(mean_params[i]))
+            if np.isfinite(_s) and _s > 0 and _mu > 1e-30:
+                target_rel_std = min(rel_std[i], _s / _mu)
+                n_from_mixture += 1
 
-        if neighbor_stds:
-            target_rel_std = float(np.median(neighbor_stds))
-        else:
-            # Fallback: 100% relative uncertainty
-            target_rel_std = 1.0
+        if target_rel_std is None:
+            # Collect rel_std from neighboring bins of the same order l
+            neighbor_stds = []
+            # Walk left
+            count = 0
+            for kk in range(k - 1, -1, -1):
+                j = kk * max_order + l
+                if _is_donor(j):
+                    neighbor_stds.append(rel_std[j])
+                    count += 1
+                    if count >= n_neighbors:
+                        break
+            # Walk right
+            count = 0
+            for kk in range(k + 1, n_energies):
+                j = kk * max_order + l
+                if _is_donor(j):
+                    neighbor_stds.append(rel_std[j])
+                    count += 1
+                    if count >= n_neighbors:
+                        break
+
+            if neighbor_stds:
+                target_rel_std = float(np.median(neighbor_stds))
+            else:
+                # Fallback: 100% relative uncertainty
+                target_rel_std = 1.0
 
         scale[i] = target_rel_std / rel_std[i]
 
@@ -2965,11 +3296,17 @@ def regularize_near_zero_relative_covariance(
         "n_regularized": n_flagged,
         "n_total": n_params,
         "max_scale_down": float(np.min(scale[flagged])) if n_flagged > 0 else 1.0,
+        "n_from_mixture": n_from_mixture,
+        "n_donors_excluded": n_donors_excluded,
     }
 
     if logger:
         logger.info(f"  Near-zero regularization: {n_flagged}/{n_params} parameters "
                     f"(SNR < {snr_threshold})")
+        if n_from_mixture or n_donors_excluded:
+            logger.info(
+                f"    objetivo desde la mezcla en {n_from_mixture}/{n_flagged}; "
+                f"{n_donors_excluded} donantes congelados excluidos del vecindario")
         # Report before/after stats
         old_max = float(np.max(rel_std[flagged])) if n_flagged > 0 else 0.0
         new_rel_std = np.sqrt(np.maximum(np.diag(cov_reg), 0.0))
@@ -3233,6 +3570,599 @@ def apply_between_experiment_floor(
                 f"  [Between-exp floor WARNING] Floor is DISABLED but would inflate "
                 f"{n_floored} entries ({frac:.0f}% of eligible, median {median_infl:.1f}x). "
                 f"Consider setting APPLY_BETWEEN_EXP_FLOOR=True."
+            )
+
+    if apply:
+        return cov_floored, diagnostics
+    return cov_rel, diagnostics
+
+
+HALFNORMAL_MEDIAN = 0.674489750196   # median(|Z|), Z ~ N(0,1)
+
+DCS_MU_GRID = np.linspace(-1.0, 1.0, 201)
+
+
+def _endf_shape_series(a_l: np.ndarray) -> np.ndarray:
+    """Legendre series of ``y(mu)/c_0`` from ENDF ``a_1..a_L``.
+
+    ``endf_normalize_legendre_coeffs`` returns ``a_l = (c_l/c_0)/(2l+1)``, so
+    the series that reconstructs the shape is ``[1, 3 a_1, 5 a_2, ...]`` and
+    ``int y/c_0 dmu = 2``.  ``c_0`` cancels, which is the whole point: the
+    reconstruction is EXACT from what ``between_exp_per_experiment`` already
+    stores, and needs no access to the EXFOR corpus.
+    """
+    a = np.asarray(a_l, dtype=float)
+    l = np.arange(1, len(a) + 1, dtype=float)
+    return np.concatenate([[1.0], (2.0*l + 1.0)*a])
+
+
+def dcs_shape_disagreement(a_e, a_o, mu: np.ndarray = DCS_MU_GRID) -> float:
+    """Median relative shape difference between two experiments, in DCS space.
+
+    ⚑ WHY DCS AND NOT ``a_l``.  The pooled estimator measures
+    ``|a_l(e) - a_l(others)| / |a_l(nominal)|``, and ``|a_l(nominal)|`` swings
+    orders of magnitude with energy.  Any energy trend measured there is
+    confounded with the denominator — the same defect that already bit MF34's
+    relative form, the near-zero regulariser and the sign-change cut.  In DCS
+    space there is no denominator to get wrong.
+
+    ⚑ AND IT IS SHAPE ONLY.  The research pipeline fits each experiment with
+    ``freeze_c0=False``, so a pure normalisation offset cancels in ``a_l`` and
+    therefore in the reconstructed ``y/c_0``.  Measured on run 99 (2026-08-22),
+    the energy trend survives that removal — Spearman rho(E) +0.391 (Cierjacks),
+    +0.181 (Kinney), +0.407 (Pirovano) — while the normalisation-only control is
+    ~0 or negative.  So the trend belongs to MF34 and not to MF33.
+    """
+    from numpy.polynomial.legendre import legval
+    ya = legval(mu, _endf_shape_series(a_e))
+    yb = legval(mu, _endf_shape_series(a_o))
+    ref = 0.5*(np.abs(ya) + np.abs(yb))
+    ok = ref > 0
+    if not ok.any():
+        return float("nan")
+    return float(np.median(np.abs(ya - yb)[ok]/ref[ok]))
+
+
+def _energy_shape_curve(E, v, window: int, clamp: bool):
+    """``(centres, factor)`` — the energy shape of the disagreement, median 1.
+
+    A rolling median with an ADAPTIVE window of ``window`` points, divided by
+    the median of the same sample.  Adaptive and not fixed-width in energy:
+    fixed-width windows leave stretches with 3 points where the median is noise,
+    and the floor would inherit that noise multiplied by ``sqrt(2k)``.
+
+    ⚑ ``clamp`` IS THE CONSERVATIVE HALF, AND IT IS MEASURED, NOT A TASTE.  A
+    median-preserving curve declares LESS than today's constant at low energy.
+    The out-of-sample gate says the constant already OVER-covers there (90.6 %
+    Cierjacks / 88.2 % Kinney) so lowering it is not a statistical error — but
+    the bar for this work is conservatism: under-declaring is inadmissible,
+    over-declaring only wastes.  Flooring the factor at 1 never declares less
+    than what ships today, and on the same gate it is as good or better:
+    dispersion across energy terciles 27.5 -> 7.8 pp (Cierjacks) and
+    20.8 -> 8.1 pp (Kinney), against 12.9 and 7.9 pp unclamped.
+    """
+    E = np.asarray(E, dtype=float)
+    v = np.asarray(v, dtype=float)
+    m = np.isfinite(E) & np.isfinite(v)
+    E, v = E[m], v[m]
+    if len(v) < 3*window:
+        return None
+    i = np.argsort(E)
+    E, v = E[i], v[i]
+    ref = float(np.median(v))
+    if not (ref > 0):
+        return None
+    k = window//2
+    idx = np.arange(k, len(v) - k)
+    med = np.array([np.median(v[j - k:j + k + 1]) for j in idx])
+    fac = med/ref
+    if clamp:
+        fac = np.maximum(fac, 1.0)
+    return E[idx], fac
+
+
+def energy_shape_factor(energy_shape, entry, energy_mev) -> float:
+    """The multiplier on ``sigma_e`` at this bin.  1.0 when nothing applies.
+
+    Flat extrapolation outside the calibrated range — the rolling median has no
+    support there and a linear extrapolation of a noisy tail is the one thing
+    that could make the factor unbounded.  ``None`` is the key of the pooled
+    curve, used when the bin's lone experiment was not calibrated on its own.
+    """
+    if not energy_shape or energy_mev is None:
+        return 1.0
+    E = float(energy_mev)
+    if not np.isfinite(E):
+        return 1.0
+    cur = energy_shape.get(entry)
+    if cur is None:
+        cur = energy_shape.get(None)
+    if cur is None:
+        return 1.0
+    cen, fac = cur
+    return float(np.interp(E, cen, fac))
+
+
+def pool_between_experiment_sigma(
+    nominal_results: List,
+    max_order: int,
+    min_bins: int = 30,
+    energy_dependent: bool = False,
+    energy_window: int = 40,
+    energy_clamp: bool = True,
+    logger=None,
+) -> Tuple[Dict, np.ndarray, Optional[Dict]]:
+    """``sigma_e(entry, l)`` — what ONE experiment alone knows ``a_l`` to.
+
+    Measured where the experiment HAS a companion, so it can be applied where it
+    does not.  Returned in nominal-relative ``a_l`` units, which is the unit the
+    covariance carries at the point the floor is applied
+    (``cov_rel = cov_abs / outer(nominal_params, nominal_params)``).
+
+    THE ESTIMATOR.  In every bin where >= 2 experiments qualify, each qualifying
+    experiment is compared against the weighted mean of the others:
+
+        d = |a_l(e) - mean_{others} a_l| / |a_l(nominal)|
+
+    ``d`` is not ``sigma_e``: with N experiments in the bin the complement mean
+    already averages N-1 of them, so ``Var(d) = sigma_e^2 (1 + 1/(N-1))``.
+    Dividing by ``sqrt(1 + 1/(N-1))`` puts bins with different N on the same
+    scale — for N=2 that factor is ``sqrt(2)``, the familiar one.  Then the
+    per-bin values are pooled by median and converted to a sigma with
+    ``median(|Z|) = 0.6745`` for ``Z ~ N(0,1)``.
+
+    ⚠ THE MEDIAN IS NOT A SIGMA.  Using ``median(|d|)`` directly under-states
+    sigma by a factor 1/0.6745 = 1.48.  The first version of this did exactly
+    that and the out-of-sample gate caught it.
+
+    ⚑ POOLED PER EXPERIMENT, NOT GLOBALLY, and that is a measured choice rather
+    than a stylistic one: calibrating with one experiment and measuring the
+    coverage of another lands anywhere between 29 % and 91 % against a 52 %
+    nominal.  The disagreement is a property of the experiment.
+
+    ⚑ ``energy_dependent`` ADDS THE ENERGY SHAPE, AND ONLY THE SHAPE.  The
+    level per order stays exactly as above; what the extra pass measures is a
+    dimensionless factor of median 1, obtained in DCS space (see
+    ``dcs_shape_disagreement``) and applied identically to every order.  That
+    split is deliberate: the measurement says the disagreement GROWS with
+    energy, it does not say how that growth divides among orders, and the
+    per-order split is still open (design doc §6.2).  Inventing one here would
+    be putting a number where there is no measurement.
+
+    ⚑ WHY IT HAD TO BE MEASURED FIRST.  With a constant, the out-of-sample
+    coverage falls monotonically with energy in both calibrated experiments —
+    90.6 / 79.3 / 63.1 % by energy tercile (Cierjacks) and 88.2 / 78.2 / 67.4 %
+    (Kinney) — i.e. the floor under-declares exactly where the disagreement is
+    largest.  The clamped shape takes the spread across terciles from 27.5 to
+    7.8 pp and from 20.8 to 8.1 pp, and is insensitive to ``energy_window``
+    (7.6-9.9 pp for 20-120 points), which is the signature of structure rather
+    than of fitting noise.
+
+    ⚠ THE GATE IS THE SPREAD ACROSS TERCILES, NOT ITS LEVEL.  The ~80 % here is
+    not §4-bis's 52 %: there the raw ``|A-B|`` is compared against ``sigma_e``,
+    while ``d`` already carries the shrink division and so estimates
+    ``sigma_e`` directly.  The level is a property of the shape of the
+    distribution and does not depend on energy; the slope does.
+
+    ⚠ RESIDUAL, and it is real: after the correction the middle tercile still
+    sits at 75-83 % in BOTH experiments.  The residual is non-monotone and
+    shared, so a rolling median cannot chase it.  That is this estimator's
+    honest limit.
+
+    Returns
+    -------
+    (sigma_pool, sigma_global, energy_shape)
+        ``sigma_pool`` maps ``(entry, l)`` -> sigma for experiments seen in at
+        least ``min_bins`` bins; ``sigma_global`` is the ``(max_order,)``
+        fallback for everyone else.  ``energy_shape`` is ``None`` unless
+        ``energy_dependent``, otherwise maps ``entry -> (centres, factor)`` with
+        ``None`` as the key of the pooled curve; read it with
+        ``energy_shape_factor``.
+    """
+    from scripts.resample_AD import endf_normalize_legendre_coeffs
+
+    per_entry: Dict = {}
+    per_all: Dict = {l: [] for l in range(max_order)}
+    dcs_entry: Dict = {}          # entry -> [(E, d_DCS), ...]
+    dcs_all: List = []
+    for nr in nominal_results:
+        pe = getattr(nr, "between_exp_per_experiment", None)
+        if not pe or len(pe) < 2:
+            continue
+        a_nom = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
+        entries = list(pe.keys())
+        N = len(entries)
+        shrink = np.sqrt(1.0 + 1.0/(N - 1))
+        w = np.array([pe[e][2] for e in entries], float)
+        for i, e in enumerate(entries):
+            a_e = np.asarray(pe[e][0], float)
+            m = np.ones(N, bool); m[i] = False
+            if w[m].sum() <= 0:
+                continue
+            a_o = np.average(np.stack([np.asarray(pe[x][0], float)
+                                       for x in np.asarray(entries)[m]]),
+                             axis=0, weights=w[m])
+            for l in range(min(max_order, len(a_e), len(a_o), len(a_nom))):
+                if abs(a_nom[l]) < 1e-9:
+                    continue
+                d = abs(a_e[l] - a_o[l])/abs(a_nom[l])/shrink
+                per_entry.setdefault((e, l), []).append(d)
+                per_all[l].append(d)
+            if energy_dependent:
+                # el MISMO par (e, complemento), medido donde no hay denominador
+                E_b = getattr(nr, "energy_mev", None)
+                d_dcs = dcs_shape_disagreement(a_e, a_o)
+                if E_b is not None and np.isfinite(d_dcs):
+                    rec = (float(E_b), d_dcs/shrink)
+                    dcs_entry.setdefault(e, []).append(rec)
+                    dcs_all.append(rec)
+
+    sigma_global = np.array(
+        [np.median(per_all[l])/HALFNORMAL_MEDIAN if len(per_all[l]) >= 8 else np.nan
+         for l in range(max_order)])
+    counts: Dict = {}
+    for (e, l), v in per_entry.items():
+        counts[e] = max(counts.get(e, 0), len(v))
+    sigma_pool = {(e, l): float(np.median(v)/HALFNORMAL_MEDIAN)
+                  for (e, l), v in per_entry.items()
+                  if counts.get(e, 0) >= min_bins and len(v) >= 8}
+    energy_shape: Optional[Dict] = None
+    if energy_dependent:
+        energy_shape = {}
+        calibrated = {e for (e, _l) in sigma_pool}
+        for e, rec in dcs_entry.items():
+            if e not in calibrated:
+                continue
+            cur = _energy_shape_curve([r[0] for r in rec], [r[1] for r in rec],
+                                      energy_window, energy_clamp)
+            if cur is not None:
+                energy_shape[e] = cur
+        cur = _energy_shape_curve([r[0] for r in dcs_all], [r[1] for r in dcs_all],
+                                  energy_window, energy_clamp)
+        if cur is not None:
+            energy_shape[None] = cur          # el respaldo agrupado
+        if not energy_shape:
+            energy_shape = None
+
+    if logger:
+        seen = sorted({e for (e, _l) in sigma_pool})
+        logger.info(f"  [Between-exp pool] {len(seen)} experiments calibrated "
+                    f"(>= {min_bins} bins each), global fallback "
+                    + " ".join(f"a_{l+1} {sigma_global[l]:.3f}"
+                               for l in range(max_order)
+                               if np.isfinite(sigma_global[l])))
+        if energy_dependent:
+            if energy_shape is None:
+                logger.info("  [Between-exp pool] energy shape NOT built "
+                            f"(needs >= {3*energy_window} comparisons per "
+                            "experiment); falling back to the constant")
+            else:
+                for e, (cen, fac) in sorted(energy_shape.items(),
+                                            key=lambda kv: str(kv[0])):
+                    logger.info(
+                        f"    energy shape {e if e is not None else 'POOLED':<12} "
+                        f"{len(cen)} centres  {cen[0]:.3f}-{cen[-1]:.3f} MeV  "
+                        f"factor {fac.min():.2f}-{fac.max():.2f} "
+                        f"(median {np.median(fac):.2f}"
+                        + (", clamped at 1" if energy_clamp else "") + ")")
+    return sigma_pool, sigma_global, energy_shape
+
+
+def apply_between_experiment_floor_pooled(
+    cov_rel: np.ndarray,
+    nominal_results: List,
+    energy_indices: List[int],
+    max_order: int,
+    sigma_pool: Dict,
+    sigma_global: np.ndarray,
+    apply: bool = True,
+    only_blind: bool = True,
+    max_floor_order: int = 4,
+    energy_shape: Optional[Dict] = None,
+    logger=None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Floor the declared sigma where the fit could not see any disagreement.
+
+    THE TARGET, derived rather than chosen.  If one experiment alone knows
+    ``a_l`` to ``sigma_e``, then k independent qualifying experiments know it to
+    ``sigma_e / sqrt(k)``.  So the band a bin should declare is
+
+        target(b, l) = sigma_e(entry, l) * f_E(entry, E_b) / sqrt(k_qual(b))
+        scale(b, l)  = max(1, target(b, l) / rel_std(b, l))
+
+    and the covariance is scaled by the congruence ``C' = S C S``, which leaves
+    every correlation and the PSD untouched and — because it is multiplicative —
+    does not depend on what the relative form is relative to.
+
+    ⚑ IT SWITCHES ITSELF OFF as ``1/sqrt(k)``: the moment the fit can see the
+    disagreement on its own, the term vanishes.  No threshold, no
+    discontinuity, and no double counting.  That is the whole difference from
+    ``apply_between_experiment_floor``, which needed >= 2 qualifying experiments
+    to produce anything at all and therefore only ever acted on the bins that
+    already saw the disagreement — 62 % of them — while doing nothing in the
+    38 % that were blind.  It was backwards.
+
+    ``only_blind`` keeps it to ``k_qual <= 1``.  The k >= 2 bins would also be
+    floored in places (their declared band sits below ``sigma_e/sqrt(k)`` in
+    about half of them), but that is a wider claim than "repair the bins that
+    cannot see", so it is off by default and reported instead.
+
+    ⛔ ``max_floor_order`` STOPS AT a_4, AND THAT IS THE POINT.  ``sigma_e`` is
+    calibrated as ``|a_l(A) - a_l(B)| / |a_l_nom|``, so the order that gets
+    inflated most is the one whose ``a_l`` is nearest zero, not the one that is
+    worst known.  a_5 and a_6 are exactly the ones that cross zero, which is why
+    the calibration hands them 0.896 and 0.780 against 0.19-0.29 for a_1-a_3 and
+    why the applied inflation there runs to a median 34x and 40x.
+
+    Measured on run 101a's emitted covariance, propagated to the DCS band
+    (fine grid / multigroup):
+
+      * flooring a_1..a_4 alone gives x1.59 / x1.74 on the band -- the whole
+        effect the design asked for, which was x1.73 measured in DCS space;
+      * adding a_5, a_6 moves that to x1.67 / x1.81, i.e. they are worth ~10 %
+        of the effect;
+      * but they take the l>=5 share of the band variance from 2.0 % to 27 %
+        (p90), and the L>=5 content of Var(mu) from 39.3 % -- BELOW today's
+        48.8 % -- to 47.5 %.
+
+    So a_5 and a_6 buy a tenth of the inflation and pay for it with the whole
+    of the high-order oscillation, which is the JEFF pathology this evaluation
+    exists to avoid.  Set to 6 to restore the old behaviour.
+
+    ⚑ And they are not what the floor is for.  At a_5/a_6 the declared variance
+    is 100 % between-MODEL (``[MIX] between-model share ... a_5 1.000, a_6
+    1.000``): it measures how much the competing Legendre degrees disagree, not
+    how optimistic one experiment's error bars are.  There is no
+    single-experiment sigma there to repair.
+
+    ⚑ ``energy_shape`` IS THE ENERGY DEPENDENCE, AND IT IS A PURE MULTIPLIER.
+    ``f_E`` is 1.0 when the argument is ``None``, so leaving it out reproduces
+    the previous behaviour exactly — the inertness gate is array equality, not
+    a tolerance.  It multiplies the TARGET, not the covariance, so everything
+    the design already guarantees survives untouched: the result is still the
+    congruence ``S C S``, no correlation moves, PSD is preserved, and the
+    ``1/sqrt(k)`` switch-off is unchanged.  Built by
+    ``pool_between_experiment_sigma(energy_dependent=True)``; clamped at 1 by
+    default, so the floor can only ever declare MORE than the constant version,
+    never less.
+
+    ⚠ IT IS THE SAME FACTOR FOR EVERY ORDER.  The measurement is in DCS space
+    and mixes orders by construction; the per-order split is open (§6.2).
+    Spreading one measured number across six orders with an invented rule would
+    be the same mistake the ``a_l`` denominator already caused three times.
+    """
+    n_params = cov_rel.shape[0]
+    rel_std = np.sqrt(np.maximum(np.diag(cov_rel), 0.0))
+    scale = np.ones(n_params)
+    nr_lookup = {nr.energy_index: nr for nr in nominal_results
+                 if nr.has_data and not nr.interpolated}
+
+    n_floored = 0
+    n_blind = 0
+    n_withheld = 0
+    energy_factors: List[float] = []
+    per_order = {l: [] for l in range(max_order)}
+    withheld_order = {l: [] for l in range(max_order)}
+    for k, e_idx in enumerate(energy_indices):
+        nr = nr_lookup.get(e_idx)
+        if nr is None:
+            continue
+        kq = int(getattr(nr, "between_exp_n_qual", 0) or 0)
+        if kq < 1:
+            continue
+        if only_blind and kq > 1:
+            continue
+        if kq <= 1:
+            n_blind += 1
+        entry = getattr(nr, "between_exp_lone_entry", None)
+        f_E = energy_shape_factor(energy_shape, entry,
+                                  getattr(nr, "energy_mev", None))
+        if f_E > 1.0:
+            energy_factors.append(f_E)
+        for l in range(max_order):
+            idx = k*max_order + l
+            if idx >= n_params:
+                break
+            s_e = sigma_pool.get((entry, l), np.nan)
+            if not np.isfinite(s_e):
+                s_e = sigma_global[l] if l < len(sigma_global) else np.nan
+            if not np.isfinite(s_e):
+                continue
+            target = s_e*f_E/np.sqrt(kq)
+            cur = rel_std[idx]
+            if cur > 1e-15 and target > cur:
+                if l >= max_floor_order:
+                    # Se mide y se reporta, pero NO se aplica. Ver el docstring:
+                    # el denominador |a_l| decide el orden, no la fisica.
+                    n_withheld += 1
+                    withheld_order[l].append(target/cur)
+                    continue
+                scale[idx] = target/cur
+                n_floored += 1
+                per_order[l].append(scale[idx])
+
+    cov_floored = cov_rel*np.outer(scale, scale)
+    diagnostics = {
+        'n_blind_bins': n_blind,
+        'n_floored': n_floored,
+        'max_floor_order': int(max_floor_order),
+        'n_withheld': n_withheld,
+        'withheld_per_order': {l: (len(v), float(np.median(v)) if v else 1.0)
+                               for l, v in withheld_order.items()},
+        'median_inflation': float(np.median(scale[scale > 1])) if (scale > 1).any() else 1.0,
+        'max_inflation': float(scale.max()),
+        'per_order': {l: (len(v), float(np.median(v)) if v else 1.0)
+                      for l, v in per_order.items()},
+        'energy_shape': energy_shape is not None,
+        'energy_factor': ((len(energy_factors),
+                           float(np.median(energy_factors)),
+                           float(np.max(energy_factors)))
+                          if energy_factors else (0, 1.0, 1.0)),
+    }
+    if logger:
+        status = "APPLIED" if apply else "NOT APPLIED (diagnostic only)"
+        logger.info(
+            f"  [Between-exp floor POOLED] {status} — {n_blind} blind bins, "
+            f"{n_floored} (E,l) entries floored, median inflation "
+            f"{diagnostics['median_inflation']:.2f}x, max "
+            f"{diagnostics['max_inflation']:.2f}x "
+            f"[hasta l={max_floor_order}]")
+        cnt_E, med_E, max_E = diagnostics['energy_factor']
+        if energy_shape is not None:
+            logger.info(
+                f"  [Between-exp floor POOLED] dependencia en ENERGIA activa: "
+                f"{cnt_E} bins con factor > 1 (median {med_E:.2f}x, max "
+                f"{max_E:.2f}x). Multiplica el objetivo, no la covarianza: "
+                f"sigue siendo la congruencia S C S.")
+        for l in range(max_order):
+            cnt, med = diagnostics['per_order'][l]
+            if cnt:
+                logger.info(f"    l={l+1}: {cnt} floored (median {med:.2f}x)")
+        if n_withheld:
+            logger.info(
+                f"  [Between-exp floor POOLED] RETENIDO en l>{max_floor_order}: "
+                f"{n_withheld} entradas que el criterio habria inflado y NO se "
+                f"aplican (el denominador |a_l| elige el orden, no la fisica; "
+                f"y alli la varianza es 100 % entre-modelos)")
+            for l in range(max_floor_order, max_order):
+                cnt, med = diagnostics['withheld_per_order'][l]
+                if cnt:
+                    logger.info(f"    l={l+1}: {cnt} retenidas (median {med:.2f}x)")
+    return (cov_floored if apply else cov_rel), diagnostics
+
+
+def apply_between_experiment_floor_mg(
+    cov_rel: np.ndarray,
+    nominal_results: List,
+    valid_indices: List[int],
+    groups: List[List[int]],
+    max_order: int,
+    logger=None,
+    apply: bool = True,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Multigroup analogue of ``apply_between_experiment_floor``.
+
+    The fine-grid floor compares per-bin between-experiment scatter to the
+    fine-grid covariance diagonal.  At the multigroup level each group spans
+    several fine bins, so the floor for ``(group g, order l)`` is the *maximum*
+    scatter_rel across constituent fine bins (most conservative choice; a
+    weaker scatter floor in one bin should not undo a stronger one in
+    another).
+
+    Parameters
+    ----------
+    cov_rel : np.ndarray
+        Multigroup nominal-relative covariance matrix, shape
+        ``(n_groups * max_order, n_groups * max_order)``.
+    nominal_results : list of NominalFitResult
+        Per-fine-bin nominal fits (used for ``between_exp_scatter`` and
+        ``nominal_coeffs``).
+    valid_indices : list of int
+        Indices into ``nominal_results`` for the non-interpolated fine bins
+        that participate in the multigroup aggregation.  ``valid_indices[k]``
+        is the ``nominal_results`` index for the k-th fine bin used in the MG
+        layout.
+    groups : list of list of int
+        ``multigroup_result.groups``.  ``groups[g]`` is a list of positions
+        into ``valid_indices`` (i.e. into the non-interpolated fine subset).
+    max_order : int
+        Number of Legendre orders per bin.
+    logger : optional
+    apply : bool
+        Same semantics as the FG version: when False, diagnostics are still
+        computed and logged but the covariance is returned unchanged.
+
+    Returns
+    -------
+    cov_floored : np.ndarray
+    diagnostics : dict
+    """
+    from scripts.resample_AD import endf_normalize_legendre_coeffs
+
+    n_groups = len(groups)
+    if cov_rel.shape[0] != n_groups * max_order:
+        raise ValueError(
+            f"apply_between_experiment_floor_mg: cov_rel has {cov_rel.shape[0]} "
+            f"rows, expected n_groups*max_order = {n_groups * max_order}"
+        )
+
+    rel_std = np.sqrt(np.maximum(np.diag(cov_rel), 0.0))
+    scale = np.ones(cov_rel.shape[0])
+
+    n_floored = 0
+    n_groups_with_scatter = 0
+    per_order_stats = {l: {"n_floored": 0, "inflation_factors": []}
+                        for l in range(max_order)}
+
+    for g, fine_positions in enumerate(groups):
+        # Collect each constituent fine bin's scatter_rel per order
+        scatter_rel_per_order: List[List[float]] = [[] for _ in range(max_order)]
+        for fp in fine_positions:
+            nr_idx = valid_indices[fp]
+            nr = nominal_results[nr_idx]
+            if nr is None or nr.between_exp_scatter is None:
+                continue
+            scatter = nr.between_exp_scatter
+            L_common = nr.between_exp_L_common
+            endf_a_l = endf_normalize_legendre_coeffs(
+                nr.nominal_coeffs, include_a0=False
+            )
+            for l_idx in range(min(L_common, max_order)):
+                if l_idx < len(endf_a_l) and abs(endf_a_l[l_idx]) > 1e-15:
+                    scatter_rel_per_order[l_idx].append(
+                        float(scatter[l_idx]) / abs(float(endf_a_l[l_idx]))
+                    )
+
+        if any(scatter_rel_per_order):
+            n_groups_with_scatter += 1
+
+        for l_idx in range(max_order):
+            if not scatter_rel_per_order[l_idx]:
+                continue
+            scatter_rel_g = max(scatter_rel_per_order[l_idx])
+            param_idx = g * max_order + l_idx
+            current_rel_std = rel_std[param_idx]
+            if current_rel_std > 1e-15 and scatter_rel_g > current_rel_std:
+                s = scatter_rel_g / current_rel_std
+                scale[param_idx] = s
+                n_floored += 1
+                per_order_stats[l_idx]["n_floored"] += 1
+                per_order_stats[l_idx]["inflation_factors"].append(s)
+
+    cov_floored = cov_rel * np.outer(scale, scale)
+
+    diagnostics = {
+        "n_groups_with_scatter": int(n_groups_with_scatter),
+        "n_floored": int(n_floored),
+        "per_order": per_order_stats,
+    }
+
+    status = "APPLIED" if apply else "NOT APPLIED (diagnostic only)"
+    if logger:
+        logger.info(
+            f"  [Between-exp floor MG] {status} — "
+            f"{n_groups_with_scatter}/{n_groups} groups had scatter computed, "
+            f"{n_floored} (group,l) entries would be floored"
+        )
+        for l in range(max_order):
+            stats = per_order_stats[l]
+            if stats["n_floored"] > 0:
+                mean_infl = float(np.mean(stats["inflation_factors"]))
+                max_infl = float(np.max(stats["inflation_factors"]))
+                logger.info(
+                    f"    l={l + 1}: {stats['n_floored']} floored "
+                    f"(mean inflation {mean_infl:.1f}x, max {max_infl:.1f}x)"
+                )
+        if not apply and n_floored > 0:
+            frac = n_floored / max(1, n_groups_with_scatter * max_order) * 100
+            all_factors = []
+            for l in range(max_order):
+                all_factors.extend(per_order_stats[l]["inflation_factors"])
+            median_infl = float(np.median(all_factors)) if all_factors else 1.0
+            logger.warning(
+                f"  [Between-exp floor MG WARNING] Floor is DISABLED but would "
+                f"inflate {n_floored} entries ({frac:.0f}% of eligible, "
+                f"median {median_infl:.1f}x)."
             )
 
     if apply:
@@ -4838,12 +5768,114 @@ def build_pipeline_coeffs_for_splice(
     return energies, coeffs
 
 
+#: Half-width, in eV, of the band around the splice boundaries within which an
+#: original ENDF point counts as coincident with the requested range and is
+#: dropped in favour of the pipeline grid. Was an unnamed literal 1.0 in two
+#: places.
+SPLICE_KEEP_TOLERANCE_EV = 1.0
+
+
+def split_original_grid(
+    orig_energies,
+    orig_coeffs,
+    energy_min_ev: float,
+    energy_max_ev: float,
+) -> Tuple[List[float], List[List[float]], List[float], List[List[float]]]:
+    """The original points kept either side of the splice window.
+
+    Returns ``(left_e, left_c, right_e, right_c)``.
+    """
+    orig_e = np.asarray(orig_energies)
+    tol = SPLICE_KEEP_TOLERANCE_EV
+    keep = (orig_e < energy_min_ev - tol) | (orig_e > energy_max_ev + tol)
+
+    left_idx = np.where(keep & (orig_e < energy_min_ev))[0]
+    right_idx = np.where(keep & (orig_e > energy_max_ev))[0]
+
+    return (
+        [orig_e[i] for i in left_idx],
+        [list(orig_coeffs[i]) for i in left_idx],
+        [orig_e[i] for i in right_idx],
+        [list(orig_coeffs[i]) for i in right_idx],
+    )
+
+
+def merge_spliced_grid(
+    left_energies: List[float],
+    left_coeffs: List[List[float]],
+    pipeline_energies: List[float],
+    pipeline_coeffs: List[List[float]],
+    right_energies: List[float],
+    right_coeffs: List[List[float]],
+    logger=None,
+) -> Tuple[List[float], List[List[float]]]:
+    """Concatenate left + pipeline + right, and police the result.
+
+    Evaluated files may legitimately repeat an abscissa. JEFF-4.0 Fe-56 does:
+    MF4/MT2 carries two consecutive LIST subsections at 3.905 MeV with
+    byte-identical coefficients. Points outside the splice window are kept
+    verbatim, so both copies survived here and the old strict ``>`` check
+    rejected a grid that had come straight out of the input file.
+
+    Policy, in order:
+
+    * **Exact duplicate** — same energy *and* same coefficients. A redundant
+      record, carrying no information: the second copy is dropped and the
+      event logged.
+    * **Same energy, different coefficients** — a genuine ENDF discontinuity.
+      Both are kept and a warning names the energy. Note that the single
+      lin-lin region assigned by the callers cannot represent a repeated
+      abscissa; that is a separate hazard and is deliberately not papered over
+      here.
+    * **Out of order** — still an error. This is the check that has to survive,
+      and relaxing it to "non-decreasing" is what makes it meaningful again.
+    """
+    energies = list(left_energies) + list(pipeline_energies) + list(right_energies)
+    coeffs = (
+        [list(c) for c in left_coeffs]
+        + [list(c) for c in pipeline_coeffs]
+        + [list(c) for c in right_coeffs]
+    )
+
+    merged_e: List[float] = []
+    merged_c: List[List[float]] = []
+    n_dropped = 0
+    for energy, coefficient in zip(energies, coeffs):
+        if merged_e and energy < merged_e[-1]:
+            raise AssertionError(
+                f"Spliced grid out of order at index {len(merged_e)}: "
+                f"{merged_e[-1]:.1f} > {energy:.1f}"
+            )
+        if merged_e and energy == merged_e[-1]:
+            if coefficient == merged_c[-1]:
+                n_dropped += 1
+                if logger:
+                    logger.info(
+                        f"  [SPLICE] dropped a duplicate MF4 record at "
+                        f"E = {energy:.1f} eV (identical coefficients)"
+                    )
+                continue
+            if logger:
+                logger.warning(
+                    f"  [SPLICE] E = {energy:.1f} eV appears twice with "
+                    f"different coefficients; keeping both as a discontinuity"
+                )
+        merged_e.append(energy)
+        merged_c.append(coefficient)
+
+    if n_dropped and logger:
+        logger.info(f"  [SPLICE] dropped {n_dropped} duplicate MF4 record(s) in total")
+
+    return merged_e, merged_c
+
+
 def splice_legendre_grid(
     mt_data,                        # MF4MTLegendre or MF4MTMixed
     pipeline_energies_ev: List[float],
     pipeline_coeffs: List[List[float]],
     energy_min_ev: float,
     energy_max_ev: float,
+    logger=None,
 ) -> None:
     """
     Remove original ENDF energy points in [E_min, E_max] and insert pipeline
@@ -4851,32 +5883,16 @@ def splice_legendre_grid(
 
     Modifies mt_data in-place (_energies, _legendre_coeffs, _interpolation, _nr).
     """
-    orig_e = np.array(mt_data._energies)
-    orig_c = mt_data._legendre_coeffs
+    left_e, left_c, right_e, right_c = split_original_grid(
+        mt_data._energies, mt_data._legendre_coeffs, energy_min_ev, energy_max_ev
+    )
 
-    # Keep mask: outside the splice range (1 eV tolerance)
-    keep = (orig_e < energy_min_ev - 1.0) | (orig_e > energy_max_ev + 1.0)
-
-    # Split into left / right portions
-    left_idx = np.where(keep & (orig_e < energy_min_ev))[0]
-    right_idx = np.where(keep & (orig_e > energy_max_ev))[0]
-
-    left_energies = [orig_e[i] for i in left_idx]
-    left_coeffs = [list(orig_c[i]) for i in left_idx]
-
-    right_energies = [orig_e[i] for i in right_idx]
-    right_coeffs = [list(orig_c[i]) for i in right_idx]
-
-    # Concatenate: left + pipeline + right
-    new_energies = left_energies + list(pipeline_energies_ev) + right_energies
-    new_coeffs = left_coeffs + [list(c) for c in pipeline_coeffs] + right_coeffs
-
-    # Sanity: must be sorted
-    for i in range(1, len(new_energies)):
-        assert new_energies[i] > new_energies[i - 1], (
-            f"Spliced grid not sorted at index {i}: "
-            f"{new_energies[i-1]:.1f} >= {new_energies[i]:.1f}"
-        )
+    new_energies, new_coeffs = merge_spliced_grid(
+        left_e, left_c,
+        list(pipeline_energies_ev), [list(c) for c in pipeline_coeffs],
+        right_e, right_c,
+        logger=logger,
+    )
 
     # Assign back
     mt_data._energies = new_energies
@@ -4946,7 +5962,8 @@ def write_nominal_endf(
         energies, coeffs = build_pipeline_coeffs_for_splice(energy_bins, coeffs_by_index)
         e_min_ev = energy_range_mev[0] * 1e6
         e_max_ev = energy_range_mev[1] * 1e6
-        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev)
+        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev,
+                             logger=_logger)
     else:
         # Legacy in-place mode
         for nr in nominal_results:
@@ -5071,7 +6088,8 @@ def write_average_endf(
         energies, coeffs = build_pipeline_coeffs_for_splice(energy_bins, mc_mean_coeffs)
         e_min_ev = energy_range_mev[0] * 1e6
         e_max_ev = energy_range_mev[1] * 1e6
-        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev)
+        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev,
+                             logger=_logger)
     else:
         # Legacy in-place mode
         idx_to_endf = {}
@@ -5162,7 +6180,8 @@ def write_endf_sample(
         energies, coeffs = build_pipeline_coeffs_for_splice(energy_bins, sampled_coeffs_by_energy)
         e_min_ev = energy_range_mev[0] * 1e6
         e_max_ev = energy_range_mev[1] * 1e6
-        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev)
+        splice_legendre_grid(mt_data, energies, coeffs, e_min_ev, e_max_ev,
+                             logger=_logger)
     else:
         # Legacy in-place mode
         for energy_idx, new_coeffs in sampled_coeffs_by_energy.items():
@@ -5288,32 +6307,14 @@ def write_endf_samples_batch(
         e_max_ev = energy_range_mev[1] * 1e6
 
         # Compute left/right portions once (same for every sample)
-        orig_e = np.array(mt_data_template._energies)
-        orig_c = mt_data_template._legendre_coeffs
-        keep = (orig_e < e_min_ev - 1.0) | (orig_e > e_max_ev + 1.0)
-        left_idx = np.where(keep & (orig_e < e_min_ev))[0]
-        right_idx = np.where(keep & (orig_e > e_max_ev))[0]
-
-        left_energies = [orig_e[i] for i in left_idx]
-        left_coeffs = [list(orig_c[i]) for i in left_idx]
-        right_energies = [orig_e[i] for i in right_idx]
-        right_coeffs = [list(orig_c[i]) for i in right_idx]
+        left_energies, left_coeffs, right_energies, right_coeffs = split_original_grid(
+            mt_data_template._energies, mt_data_template._legendre_coeffs,
+            e_min_ev, e_max_ev,
+        )
 
         # Build pipeline energies once (same for every sample)
         sorted_bins = sorted(energy_bins, key=lambda b: b.energy_ev)
         pipeline_energies = [b.energy_ev for b in sorted_bins]
-
-        # Build the spliced energy grid (constant across samples)
-        spliced_energies = left_energies + pipeline_energies + right_energies
-        new_ne = len(spliced_energies)
-
-        # Set the fixed grid structure
-        mt_data_template._energies = spliced_energies
-        mt_data_template._interpolation = [(new_ne, 2)]
-        mt_data_template._nr = 1
-
-        n_left = len(left_coeffs)
-        n_pipeline = len(sorted_bins)
 
         for sample_idx in sorted(all_samples.keys()):
             # Build pipeline coefficients for this sample
@@ -5325,12 +6326,23 @@ def write_endf_samples_batch(
                 else:
                     pipeline_coeffs.append(list(b.original_coeffs))
 
-            # Assemble full coefficients: left + pipeline + right
-            mt_data_template._legendre_coeffs = (
-                [list(c) for c in left_coeffs]
-                + pipeline_coeffs
-                + [list(c) for c in right_coeffs]
+            # Assemble through the shared merge. This branch used to
+            # concatenate left + pipeline + right by hand, with no sortedness
+            # check at all — so where the parallel branch raised on a bad grid,
+            # this one wrote it to disk in silence. The grid it produces is the
+            # same for every sample (duplicates come from the constant
+            # left/right portions), so re-merging per sample costs nothing and
+            # buys one implementation instead of two.
+            merged_e, merged_c = merge_spliced_grid(
+                left_energies, left_coeffs,
+                pipeline_energies, pipeline_coeffs,
+                right_energies, right_coeffs,
+                logger=_logger if sample_idx == min(all_samples) else None,
             )
+            mt_data_template._energies = merged_e
+            mt_data_template._legendre_coeffs = merged_c
+            mt_data_template._interpolation = [(len(merged_e), 2)]
+            mt_data_template._nr = 1
 
             # Write output file
             sample_str = f"{sample_idx + 1:04d}"

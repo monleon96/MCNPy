@@ -9,6 +9,7 @@ the new, cleaner implementation.
 """
 
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.colors import Normalize
 from typing import Union, Sequence, Tuple, List, Optional
 from kika.cov.cross_section_covariance import CrossSectionCovariance
@@ -421,6 +422,154 @@ def plot_mf34_covariance_heatmap(
     return fig
 
 
+def plot_mf34_uncertainties(
+    mf34_covmat: LegendreCovariance,
+    isotope: Union[int, str],
+    mt: int,
+    legendre_coeffs: Union[int, Sequence[int]],
+    *,
+    ax: Optional[plt.Axes] = None,
+    uncertainty_type: str = "relative",
+    style: str = "light",
+    figsize: Tuple[float, float] = (8, 5),
+    dpi: int = 100,
+    font_family: str = "serif",
+    legend_loc: str = "best",
+    energy_range: Optional[Tuple[float, float]] = None,
+    sigma: float = 1.0,
+    title: Optional[str] = "default",
+    show: bool = False,
+    **styling_kwargs,
+) -> plt.Figure:
+    """
+    Plot MF34 Legendre-coefficient uncertainties for one isotope/MT.
+
+    The MF34 counterpart of :func:`plot_uncertainties`, which serves
+    ``CrossSectionCovariance``. One curve per requested Legendre order, drawn
+    through ``LegendreCovariance.to_plot_data`` and ``PlotBuilder``.
+
+    Parameters
+    ----------
+    mf34_covmat : LegendreCovariance
+        The MF34 covariance object.
+    isotope : int or str
+        Isotope identifier — ZAID (``26056``) or symbol (``'Fe56'``).
+    mt : int
+        Reaction MT number.
+    legendre_coeffs : int or sequence of int
+        Legendre order(s) to plot. An empty sequence means every order
+        available for this isotope/MT.
+    ax : plt.Axes, optional
+        Axes to draw into. If None, a new figure is created.
+    uncertainty_type : {"relative", "absolute"}, default "relative"
+        Relative uncertainties are plotted as percentages.
+    style : str, default "light"
+        ``'light'`` or ``'dark'``. ``'default'`` is accepted as a synonym for
+        ``'light'`` because that is what the method wrapping this function has
+        always declared as its default; the older style names ('paper',
+        'publication', 'presentation') did not survive the move to
+        ``PlotBuilder`` and raise.
+    sigma : float, default 1.0
+        Sigma level applied to the uncertainties.
+    energy_range : tuple of float, optional
+        (min, max) for the x-axis, in the covariance's own energy unit.
+    title : str or None, default "default"
+        ``"default"`` auto-generates, ``None`` omits, a string is used as given.
+    **styling_kwargs
+        Forwarded to ``to_plot_data`` (color, linestyle, linewidth, ...).
+
+    Returns
+    -------
+    plt.Figure
+
+    Raises
+    ------
+    ValueError
+        If ``uncertainty_type`` is not recognised, if the isotope/MT pair holds
+        no Legendre orders, or if a requested order is not among them.
+
+    Examples
+    --------
+    >>> mf34 = endf.mf[34].mt[2].to_ang_covmat()
+    >>> fig = plot_mf34_uncertainties(mf34, isotope=26056, mt=2,
+    ...                               legendre_coeffs=[1, 2, 3])
+
+    See Also
+    --------
+    plot_uncertainties : the same plot for cross-section covariances
+    plot_mf34_covariance_heatmap : MF34 covariance/correlation heatmaps
+    """
+    from kika._utils import symbol_to_zaid, zaid_to_symbol
+
+    if uncertainty_type not in ("relative", "absolute"):
+        raise ValueError(
+            f"uncertainty_type must be 'relative' or 'absolute', got {uncertainty_type!r}"
+        )
+
+    zaid = symbol_to_zaid(isotope) if isinstance(isotope, str) else int(isotope)
+
+    available = sorted(
+        {t[2] for t in mf34_covmat._get_param_triplets() if t[0] == zaid and t[1] == mt}
+    )
+    if not available:
+        raise ValueError(f"No Legendre coefficients found for isotope={zaid}, MT={mt}")
+
+    if isinstance(legendre_coeffs, int):
+        requested = [legendre_coeffs]
+    else:
+        requested = list(legendre_coeffs) or list(available)
+
+    missing = [l for l in requested if l not in available]
+    if missing:
+        raise ValueError(
+            f"Legendre coefficient(s) {missing} not available for isotope={zaid}, "
+            f"MT={mt}. Available: {available}"
+        )
+
+    builder = PlotBuilder(
+        style="light" if style == "default" else style,
+        figsize=figsize,
+        dpi=dpi,
+        font_family=font_family,
+        ax=ax,
+    )
+    builder.set_scales(log_x=True, log_y=False)
+
+    for order in requested:
+        _, unc_data = mf34_covmat.to_plot_data(
+            nuclide=zaid,
+            mt=mt,
+            order=order,
+            sigma=sigma,
+            uncertainty_type=uncertainty_type,
+            **styling_kwargs,
+        )
+        builder.add_data(unc_data)
+
+    if energy_range is not None:
+        builder.set_limits(x_lim=(energy_range[0], energy_range[1]))
+
+    if title == "default":
+        orders = ",".join(str(l) for l in requested)
+        builder.set_labels(title=f"{zaid_to_symbol(zaid)} MT={mt} L={orders} uncertainties")
+    elif title is not None:
+        builder.set_labels(title=title)
+
+    fig = builder.build(show=show)
+
+    if fig.axes:
+        axis = fig.axes[0]
+        axis.legend(loc=legend_loc)
+        axis.set_xlabel(f"Energy ({mf34_covmat.energy_unit})")
+        axis.set_ylabel(
+            "Relative Uncertainty (%)"
+            if uncertainty_type == "relative"
+            else "Absolute Uncertainty"
+        )
+
+    return fig
+
+
 def plot_uncertainties(
     covmat: CrossSectionCovariance,
     nuclide: Union[int, str, Sequence[Union[int, str]]],
@@ -789,3 +938,132 @@ def plot_multigroup_xs(
         ax.set_ylabel("Cross Section (barns)")
 
     return fig
+
+
+def plot_legendre_uncertainty_bands(ax, coeff_energies, coeff_values, mf34_covmat,
+                                    isotope_id, mt, order,
+                                    uncertainty_sigma, color, alpha=0.2):
+    """Shade a_l(E) +/- k*sigma using MF34's own energy bin boundaries.
+
+    Moved here from ``kika.endf.classes.mf4.plotting`` in phase 4's P4. It was
+    reached from ``kika/cov`` through its leading underscore, across a package
+    boundary, which is what the layering ratchet was counting; and it never
+    needed ENDF at all. ``mf34_covmat`` is a
+    :class:`~kika.cov.legendre_covariance.LegendreCovariance`, the body is one
+    call to ``get_uncertainties_for_legendre_coefficient`` plus a scan over the
+    container's own row labels, and the output is an ``ax.fill_between``. That
+    is calculation-layer drawing, so it belongs beside the other covariance
+    plotters rather than inside the format package.
+
+    ``kika.endf.classes.mf4.plotting`` re-exports it under its old private name
+    so the two call sites there read unchanged.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axes to plot on
+    coeff_energies : array-like
+        Energy values for coefficient data
+    coeff_values : array-like
+        Coefficient values
+    mf34_covmat : LegendreCovariance
+        Covariance matrix object
+    isotope_id : int
+        Isotope ID
+    mt : int
+        MT reaction number
+    order : int
+        Legendre coefficient order
+    uncertainty_sigma : float
+        Number of sigma levels for uncertainty bands
+    color : str or tuple
+        Color for the uncertainty bands
+    alpha : float
+        Transparency level for uncertainty bands
+
+    Returns
+    -------
+    bool
+        True if uncertainty bands were plotted successfully, False otherwise
+    """
+    try:
+        # Get uncertainty data for this order
+        unc_data = mf34_covmat.get_uncertainties_for_legendre_coefficient(isotope_id, mt, order)
+        if unc_data is None:
+            return False
+
+        unc_energies = unc_data['energies']
+        unc_values = unc_data['uncertainties']
+
+        # Get the actual energy bin boundaries from the covariance matrix
+        bin_boundaries = None
+        for i, (iso_r, mt_r, l_r, iso_c, mt_c, l_c) in enumerate(zip(
+            mf34_covmat.isotope_rows, mf34_covmat.reaction_rows, mf34_covmat.l_rows,
+            mf34_covmat.isotope_cols, mf34_covmat.reaction_cols, mf34_covmat.l_cols
+        )):
+            # Look for diagonal variance matrix (L = L) for the specified parameters
+            if (iso_r == isotope_id and iso_c == isotope_id and
+                mt_r == mt and mt_c == mt and
+                l_r == order and l_c == order):
+
+                bin_boundaries = np.array(mf34_covmat.energy_grids[i])
+                break
+
+        if bin_boundaries is None or len(bin_boundaries) != len(unc_energies) + 1:
+            # Fallback: can't find proper bin boundaries, skip uncertainty plotting
+            print(f"Warning: Could not find proper energy bin boundaries for uncertainty plotting of order {order}")
+            return False
+
+        # Find the intersection of energy ranges between coefficients and uncertainties
+        min_energy = max(min(coeff_energies), min(bin_boundaries))
+        max_energy = min(max(coeff_energies), max(bin_boundaries))
+
+        if min_energy >= max_energy:
+            print(f"Warning: No overlapping energy range between coefficients and uncertainties for order {order}")
+            return False
+
+        # For each energy bin, find coefficient points within that bin and apply the bin's uncertainty
+        band_energies = []
+        band_coeffs = []
+        band_uncertainties = []
+
+        for i in range(len(bin_boundaries) - 1):
+            bin_min = bin_boundaries[i]
+            bin_max = bin_boundaries[i + 1]
+
+            # Find coefficient points in this bin
+            bin_coeff_indices = [j for j, e in enumerate(coeff_energies)
+                               if bin_min <= e < bin_max or (i == len(bin_boundaries) - 2 and bin_min <= e <= bin_max)]
+
+            if bin_coeff_indices and i < len(unc_values):
+                for idx in bin_coeff_indices:
+                    band_energies.append(coeff_energies[idx])
+                    band_coeffs.append(coeff_values[idx])
+                    band_uncertainties.append(unc_values[i])  # Same uncertainty for the whole bin
+
+        if not band_energies:
+            print(f"Warning: No coefficient points found within uncertainty energy bins for order {order}")
+            return False
+
+        # Convert to numpy arrays
+        band_energies = np.array(band_energies)
+        band_coeffs = np.array(band_coeffs)
+        band_uncertainties = np.array(band_uncertainties)
+
+        # Convert relative uncertainties to absolute uncertainties
+        # MF34 covariance data is typically stored as relative covariances
+        absolute_unc = band_uncertainties * np.abs(band_coeffs) * uncertainty_sigma
+
+        # Create uncertainty bounds
+        upper_bound = band_coeffs + absolute_unc
+        lower_bound = band_coeffs - absolute_unc
+
+        # Plot uncertainty bands as shaded area
+        ax.fill_between(band_energies, lower_bound, upper_bound,
+                       color=color, alpha=alpha, linewidth=0)
+
+        return True
+
+    except Exception as e:
+        print(f"Warning: Error plotting uncertainty bands for order {order}: {e}")
+        return False

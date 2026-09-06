@@ -20,6 +20,19 @@ The workflow:
 5. Create N output ENDF files with the sampled coefficients
 6. Handle missing data by interpolating from neighboring bins
 
+Per-point uncertainty decomposition
+-----------------------------------
+Per-point σ_stat (GLS fit weights, χ²) and per-experiment σ_sys (MC factor,
+Kish ρ) come from ``scripts/uncertainty_manifest.py`` applied to each EXFOR
+dataset at the cache-build boundary (``build_exfor_cache_from_objects``).
+For datasets whose manifest stat-spec carries ``derive_stat_only: true`` —
+i.e. the prose says the named column is a TOTAL that already includes the
+correlated systematic (e.g. Barnard 30076004 DATA-ERR including the 5%
+detector-efficiency systematic) — the resolver returns
+    σ_stat = sqrt(max(σ_total² − σ_sys², 0))    per point,
+so the per-experiment MC factor layered on top reproduces σ_total² without
+double-counting. See ``uncertainty_manifest.py:resolve_for_dataset``.
+
 Author: Generated for kika project
 """
 from __future__ import annotations
@@ -42,6 +55,9 @@ for _var in (
 ):
     os.environ.setdefault(_var, "1")
 
+import hashlib
+import json
+import subprocess
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -67,6 +83,11 @@ from kika.exfor import read_all_exfor
 
 # Import kika modules - MF34 from library (replaces local implementation)
 from kika.endf.writers import create_mf34_from_covariance, write_mf34_to_file, merge_mf34
+from kika.endf.writers import (
+    create_mf33_from_covariance,
+    merge_mf33_covariance_into_host,
+    write_mf33_to_file,
+)
 
 # Import local utility module (uses relative import from scripts package)
 from scripts.exfor_utils import (
@@ -106,6 +127,7 @@ from scripts.exfor_utils import (
     absolute_to_nominal_relative,
     regularize_near_zero_relative_covariance,
     apply_between_experiment_floor,
+    apply_between_experiment_floor_mg,
     smooth_absent_order_uncertainties,
     log_rel_std_profile,
     cap_order_relative_uncertainty,
@@ -116,6 +138,9 @@ from scripts.exfor_utils import (
     precompute_overlap_weights,
     run_mc_with_kernel_weights,
     stack_samples_to_matrix,
+    build_mf33_channel,
+    contiguous_grid_from_bins,
+    recentre_relative_covariance,
     # ENDF writing
     write_nominal_endf,
     write_average_endf,
@@ -137,6 +162,18 @@ from scripts.multigroup_collapse import (
 )
 
 # Import TOF parameters module (Improvement 1.4)
+from scripts.mf33_diagnostics import (
+    FOUR_PI as _MF33_FOUR_PI,
+    bin_average_xs,
+    fold_host_mf3_at_points,
+    folded_c0_comparison_stats,
+    log_folded_comparison,
+)
+from scripts.mf33_build import (
+    build_mf33_denominator,
+    build_mf33_matrices,
+    write_mf33_products,
+)
 from scripts.tof_parameters import (
     load_tof_parameters_file,
     get_tof_parameters,
@@ -169,7 +206,15 @@ ENDF_FILE = "/share_snc/snc/JuanMonleon/jeff40_with_MF4_from_jeff33/26-Fe-56g.tx
 MF34_SOURCE_FILE = None                          # Separate MF34 source (None = use ENDF_FILE)
 EXFOR_DIRECTORY = "/share_snc/snc/JuanMonleon/EXFOR/data_v1/"
 EXFOR_DB_PATH = '/share_snc/snc/JuanMonleon/EXFOR/x4_iron_angular.db'
-OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_54/"
+# Run 83 = run 82's method, re-evaluated with the declared EXFOR EN-RSL*
+# resolutions now read by scripts/tof_parameters.py. Nothing else changed:
+# sigma_E feeds compute_overlap_weight, so which datasets constrain which bin
+# moves and this is a re-evaluation, not a re-scoring. Overridable so a sweep
+# can redirect without editing this file.
+OUTPUT_DIR = os.environ.get(
+    "KIKA_OUTPUT_DIR",
+    "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/NEW_FIT_83/",
+)
 TOF_PARAMETERS_FILE = "/share_snc/snc/JuanMonleon/EXFOR/exfor_tof_parameters.json"
 
 # --- DATA SOURCE ----------------------------------------------------------- #
@@ -189,7 +234,12 @@ M_TARG_U = 55.93494                              # Target mass in u (Fe-56)
 
 # --- LEGENDRE FITTING ------------------------------------------------------ #
 MAX_LEGENDRE_DEGREE = 6                          # Maximum Legendre order (capped at 8)
-SELECT_DEGREE = "aicc"                           # "aicc", "bic", or None (use max)
+SELECT_DEGREE = "aic"                            # "aicc" | "aic" | "bic" | None (use max).
+                                                  # "aic" drops the small-sample correction
+                                                  # (penalty = 2k); use it when AICc over-
+                                                  # penalises higher orders in low-n bins
+                                                  # (e.g. single-experiment 8-pt bins where
+                                                  # AICc's 2k(k+1)/(n−k−1) term ≈ 30 at k=5).
 RIDGE_LAMBDA = 1e-4                              # Ridge regularization parameter
 RIDGE_POWER = 4                                  # Power for ridge penalty (l^ridge_power)
 DF_METHOD = "hat"                                # Degrees of freedom: "hat" or "naive"
@@ -197,11 +247,19 @@ DF_METHOD = "hat"                                # Degrees of freedom: "hat" or 
 # --- UNCERTAINTY & DISCREPANCY --------------------------------------------- #
 # Band-based discrepancy
 USE_BAND_DISCREPANCY = True                      # Use band-based uncertainty (vs global Birge)
-MIN_POINTS_PER_BAND = 5                          # Min points to estimate s_b per band
+MIN_POINTS_PER_BAND = 4                          # Min points to estimate s_b per band
+                                                  # (5 sits at the median per-bin support; 4 captures
+                                                  # the typical bin's left-edge without losing MAD's
+                                                  # statistical meaning. Threshold 6+ collapses M-band
+                                                  # derivation on this Fe-56 dataset.)
 MAX_BAND_SCALE_FACTOR = 5.0                      # Max multiplicative scale per band
 TAU_SMOOTHING_WINDOW = 1                         # Moving median window for s_b(E) (1 = disabled)
-TAU_PRIOR_FLOOR = False                          # Apply tau prior floor from well-supported bins
-TAU_PRIOR_NEFF_THRESHOLD = 5.0                   # Min N_eff to count as "well-supported"
+TAU_PRIOR_FLOOR = True                           # Apply tau prior floor from well-supported bins
+TAU_PRIOR_NEFF_THRESHOLD = 5.0                   # Min N_eff to count as "well-supported" for the
+                                                  # tau prior floor. Stays above the N_eff<3 zone
+                                                  # where single-experiment residual collapse biases
+                                                  # τ down, and gives a robust donor/recipient split
+                                                  # on this dataset.
 TAU_PRIOR_PERCENTILE = 50                        # Percentile of well-supported tau for baseline
 TAU_IRLS_MAX_ITERS = 20                           # Max (τ, refit) iterations for band discrepancy
 TAU_IRLS_TOL = 1e-2                              # Converge when max |Δτ_b| < tol
@@ -218,32 +276,39 @@ SIGMA_SYS_AWARE_FIT = True                       # Fit weights = 1/σ_total² wi
                                                   #  semantics unchanged). Set False for legacy
                                                   #  σ_stat-only behaviour.
 RESCALE_UNC_BY_CHI2 = True                       # Apply Birge scaling when band discrepancy disabled
-ALLOW_SHRINK_UNC = True                          # Allow uncertainties to shrink (chi2_red < 1)
+ALLOW_SHRINK_UNC = False                          # Allow uncertainties to shrink (chi2_red < 1)
 # Normalization model (two physically distinct sources of multiplicative noise):
-#   ELASTIC:     uncertainty in the elastic XS reference / monitor that ALL
-#                experiments rely on. One factor per MC sample, applied globally
-#                to every data point across every experiment.
+#   COMMON-MODE: uncertainty in a shared reference / monitor that ALL experiments
+#                rely on. One factor per MC sample, applied globally to every data
+#                point across every experiment (fully correlated → MF33 floor).
 #   SYSTEMATIC:  per-experiment calibration / setup uncertainty. One factor per
-#                experiment per MC sample. Also drives the Kish ρ for ESS
-#                collapse in the nominal fit (same physical parameter as the
-#                per-experiment MC perturbation, so one knob).
-NORM_ELASTIC_SIGMA = 0.0                         # Global elastic XS reference uncertainty (0 = disabled, matches test_50)
-NORM_SYSTEMATIC_SIGMA = 0.05                     # Per-experiment systematic uncertainty (5%)
+#                experiment per MC sample (superseded by the manifest sigma_sys).
+#                Also drives the Kish ρ for ESS collapse in the nominal fit.
+NORM_COMMON_MODE_SIGMA = 0.0                      # Common-mode normalization uncertainty (0 = off).
+                                                  # ONE global factor applied to ALL experiments together
+                                                  # (shared monitor/reference lineage) — the fully-correlated
+                                                  # floor of MF33 that between-experiment scatter can't see.
+                                                  # 0 = experiment normalizations treated as independent.
+NORM_SYSTEMATIC_SIGMA = 0.05                      # Per-experiment systematic (fallback only): the manifest's
+                                                  # per-dataset sigma_sys supersedes this whenever present.
 NORM_DIST = "lognormal"                          # "lognormal" (always positive) or "normal"
 # Experiment exclusion & uncertainty floor
-EXCLUDE_EXPERIMENTS = ["32246002"]                # Experiments to exclude (e.g. "32246002" = Tostkii)
-MIN_STAT_RELATIVE_UNCERTAINTY = 0.01             # Minimum *statistical* σ_stat relative
-                                                  # uncertainty floor. After the manifest split,
-                                                  # this is the per-point uncorrelated noise
-                                                  # baseline; applied where σ_stat would
-                                                  # otherwise be implausibly small or zero
-                                                  # (Cierjacks ERR-S ~0.05%, Cox by-design 0%,
-                                                  # Kinney/Barnard residual decomposition floor).
-                                                  # 1% is the empirical lower edge of σ_stat
-                                                  # across curated manifest entries and a
-                                                  # conservative minimum for per-point counting/
-                                                  # digitization noise in MeV-range differential
-                                                  # XS measurements. Set to 0 to disable.
+EXCLUDE_EXPERIMENTS = ["32246002", "400750022"]   # Tostkii 1957; Morozov 1972 pointer 2 (SPA-fitted sister of 400750021, double-counts raw data)
+MIN_STAT_RELATIVE_UNCERTAINTY = 1e-4             # Numerical guard against literal-zero σ_stat
+                                                  # (which would give infinite GLS weights). Set
+                                                  # well below the smallest credible reported
+                                                  # statistical uncertainty so that prose-stated
+                                                  # values pass through unchanged: Korzh 1972
+                                                  # ERR-S=0.7%, Cierjacks per-point ERR-S median
+                                                  # ~0.05%, Tomita DATA-ERR ~0.5%. The legitimate
+                                                  # "residual decomposition" floor is enforced at
+                                                  # the resolver level (SIGMA_STAT_MIN_REL=0.01 in
+                                                  # uncertainty_manifest.py) for Case B entries
+                                                  # only — that's where σ_stat = √(σ_total² −
+                                                  # σ_sys²) can saturate when the prose-named sys
+                                                  # exceeds the lab's reported total. Set to 0
+                                                  # to disable entirely (risks div-by-zero in GLS
+                                                  # if any loader produces σ_stat=0 silently).
 MIN_RELATIVE_UNCERTAINTY = MIN_STAT_RELATIVE_UNCERTAINTY  # backwards-compat alias
 UNCERTAINTY_FLOOR_STRATEGY = 'bin_median'        # 'fixed' | 'bin_median' | 'band_median'
                                                   #  'band_median' uses per-F/M/B median with
@@ -254,19 +319,49 @@ UNCERTAINTY_FLOOR_STRATEGY = 'bin_median'        # 'fixed' | 'bin_median' | 'ban
 USE_MODEL_AVERAGING = True                       # Enable model averaging over Legendre orders
 MIN_DEGREE_FOR_AVERAGING = 1                     # Min degree to consider (1 = include all)
 USE_DEGREE_SAMPLING_IN_MC = True                 # Sample degree from degree_weights in MC
+RERUN_AICC_POST_TAU = True                       # Recompute AICc weights against τ-inflated σ_eff
+                                                  # before sampling, so the degree distribution sent
+                                                  # to MC reflects the τ-converged noise model
+                                                  # (matches v3). False reverts to pre-τ stat-only
+                                                  # weights — biases degree sampling for any bin
+                                                  # where τ inflated σ noticeably.
+USE_GLS_KERNEL = True                            # GLS kernel (block-correlated, Σ = D + u uᵀ + v vᵀ) for the
+                                                  # IC model-selection scan, the initial nominal fit,
+                                                  # and the post-τ rescan. Applies regardless of
+                                                  # SELECT_DEGREE choice (aicc/aic/bic). τ-IRLS,
+                                                  # freeze_c0 refit, and MC sampler stay diagonal.
 
 # --- ENERGY BINNING & CORRELATION ------------------------------------------ #
 # Weighting and constraints
 NORMALIZE_BY_N_POINTS = True                     # Enable study-level GLS-ESS weighting
 BAND_AWARE_ESS = False                           # Kish ESS uses per-band counts (F/M/B)
 MAX_EXP_WEIGHT_FRAC_BIN = 0.8                    # Safety cap per experiment weight fraction
-FREEZE_C0 = True                                 # Fix c0 for shape-only refits
-MAX_SAMPLE_ORDER = 3                             # Publish covariance for l=1..MAX_SAMPLE_ORDER only
+FREEZE_C0 = True                                 # Freeze c0 in MC/KW shape refits (nominal AICc fit
+                                                  # must float c0 to determine it; MC then refits
+                                                  # a_l = c_l/c0 with c0 fixed at the nominal).
+MAX_SAMPLE_ORDER = 6                             # Publish covariance for l=1..MAX_SAMPLE_ORDER only
 # Angular quality gate
-ANGULAR_QUALITY_GATE = True
+ANGULAR_QUALITY_GATE = True                      # Matches run77. A no-op on this database (every bin
+                                                  # in the 0.847-4 MeV grid already passes the angular
+                                                  # coverage check, so no bin is expanded/interpolated)
 MIN_ANGULAR_POINTS = 4                           # Min total angular data points
 MIN_BANDS_COVERED = 3                            # Must have data in all 3 bands (F/M/B)
 MAX_BIN_EXPANSION = 3                            # Max expansion steps (1=+-1 bins, 2=+-2, etc.)
+MEMBERSHIP_K_SIGMA = 0.0                         # Widen WHICH datasets may constrain a bin to
+                                                  # target +- k*sigma_E (unioned with the bin edges).
+                                                  # 0.0 = hard bin edges, i.e. runs <= 82.
+                                                  #
+                                                  # Motivation: sigma_E is 1.7-8.6 keV here against a
+                                                  # 1 keV grid, so a bin-width window renews ~89% of
+                                                  # the point set from one bin to the next, and an
+                                                  # experiment with coarse resolution constrains a
+                                                  # single 1 keV bin instead of the region it actually
+                                                  # measured. This is a MEMBERSHIP knob only: the
+                                                  # selected point per experiment is still the nearest
+                                                  # to target and still carries weight 1.0. Applying
+                                                  # Gaussian overlap WEIGHTS instead would convolve a
+                                                  # second time (the data are already resolution-
+                                                  # folded) and cost sqrt(2)*sigma_E of resolution.
 # Energy grid source
 ENERGY_GRID_SOURCE = "union"                     # "endf" (MF4 grid) or "union" (from EXFOR subentries)
 UNION_GRID_SUBENTRIES = [                        # (subentry, min_MeV, max_MeV)
@@ -289,6 +384,20 @@ KW_MIN_POINTS_REF = None                         # Quality penalty threshold (se
 # TOF energy resolution
 DELTA_T_NS = 5.0                                 # Time resolution in nanoseconds
 FLIGHT_PATH_M = 27.037                           # Flight path in meters
+DELTA_T_IS_FWHM = True                           # Whether DELTA_T_NS (and the per-experiment
+                                                  # time_resolution values in TOF_PARAMETERS_FILE)
+                                                  # are FWHM rather than sigma. Timing spreads are
+                                                  # normally quoted as FWHM — exfor_tof_parameters
+                                                  # records e.g. "neutron_pulse_width_FWHM" — and
+                                                  # sigma_E = FWHM/2.3548 accordingly.
+                                                  #
+                                                  # THIS CHANGES RESULTS. sigma_E sets how far each
+                                                  # experimental point spreads across bins via the
+                                                  # overlap weights, so it moves n_eff, the tau
+                                                  # bands, degree selection and hence MF4/MF34/MF33.
+                                                  # Runs <= 81 were produced with False; set False
+                                                  # to reproduce them. Individual subentries may
+                                                  # override via "is_fwhm" in the TOF JSON.
 N_SIGMA_CUTOFF = 3.0                             # Gaussian kernel cutoff (+-n_sigma * sigma_E)
 
 # --- COVARIANCE PIPELINE --------------------------------------------------- #
@@ -326,7 +435,7 @@ MULTIGROUP_SIGMA_RATIO_MAX = 5.0                 # Max running max(σ_l1)/min(σ
 MULTIGROUP_USE_RAW_MC_CORR = True                # Feed multigroup collapse with raw KW correlations + Pass-2 std,
                                                   # bypassing the inject + Higham-smear path. No effect when
                                                   # KW_MC_TWO_PASS=False. See plan: ok-i-watn-you-floofy-hickey.md
-MULTIGROUP_CORRELATION_THRESHOLD = "auto"         # Hard-zero |rho| < threshold in the multigroup correlation matrix.
+MULTIGROUP_CORRELATION_THRESHOLD = 0        # Hard-zero |rho| < threshold in the multigroup correlation matrix.
                                                   # Set to 0.0 to disable, "auto" to use 1/sqrt(N_SAMPLES) (sampling-
                                                   # noise floor), or a positive float for an explicit threshold.
 MF34_COVARIANCE_TYPE = "both"              # "fine", "multigroup", or "both"
@@ -336,6 +445,66 @@ MULTIGROUP_VARIANCE_PCT_MIN = 67                 # Base percentile for homogeneo
 MULTIGROUP_VARIANCE_PCT_MAX = 85                 # Max percentile for heterogeneous groups
 MULTIGROUP_VARIANCE_RATIO_REF = 5.0              # Sigma ratio at which percentile saturates
 MULTIGROUP_REGROUP_AFTER_SMOOTH = False          # Second-pass regrouping after smoothing
+
+# --- MF33 ELASTIC MAGNITUDE CHANNEL ---------------------------------------- #
+# Record the fixed-shape c0 (sigma_el = 4*pi*c0) and write its MF33 covariance.
+# Read-only: MF4/MF34 are unchanged. MF3 itself is deliberately NOT written
+# (despite the knob name, which records the eventual intent) — the central stays
+# at the host value and the DCS magnitude 4*pi*c0 is saved as a sidecar. When on,
+# MF33 goes into BOTH products: the nominal file on the fine MF4 grid, and the
+# _mg file on its own adaptive grid (see MF33_MULTIGROUP_* below).
+GENERATE_MF3_MF33 = 1                            # 0 = off, 1 = on
+
+# The MF33 relative covariance is C_abs / sigma_host^2, so it needs a host
+# central per bin. Two things make that non-trivial and both are handled here:
+#
+#   1. RESOLUTION. The fitted c0 is what a detector with a finite TOF resolution
+#      measured (sigma_E = 4-41 keV here), not a box average over the 1 keV bin.
+#      The denominator is folded through the same kernel — see fold_xs_over_bins.
+#   2. RESONANCE RANGE. File 3 carries only the smooth background inside a
+#      resolved resonance range, so MF3 MT2 is identically ZERO below the RRR
+#      upper bound (850 keV for JEFF-4.0 Fe-56, while this grid starts at
+#      846.8 keV). The denominator therefore comes from the RECONR-reconstructed
+#      PENDF, not from File 3 — correct for any target whose RRR reaches into
+#      the analysis window, and it costs one cached NJOY run.
+#
+# RECONR output is 0 K; BROADR is unnecessary because Doppler widths (~eV) are
+# negligible against a 4-41 keV resolution kernel.
+MF33_PENDF_TOLERANCE = 0.001                     # RECONR linearization tolerance
+MF33_PENDF_CACHE_DIR = None                      # None -> kika default temp cache
+                                                  # (keyed on ENDF sha256 + tolerance,
+                                                  #  so repeat runs are free)
+
+# Adaptive multigroup grid for MF33. Independent of the MF34 grid: the magnitude
+# channel has its own correlation structure, and ENDF lets each MF/MT section
+# carry its own grid. Defaults match the MF34 knobs so the first run is directly
+# comparable.
+MF33_MULTIGROUP_RHO_MIN = 0.85                   # Min adjacent c0 correlation to merge
+MF33_MULTIGROUP_SIGMA_RATIO_MAX = 5.0            # Max intra-group max(sigma)/min(sigma)
+MF33_MG_REPRESENTATION = "fine"                  # What MF33 the _mg file carries:
+                                                  # "multigroup" -> the collapsed grid
+                                                  # (as MF34), "fine" -> the full MF4-grid
+                                                  # matrix while MF34 stays collapsed.
+                                                  # MF34 is what makes that file large and
+                                                  # genuinely needs grouping; the MF33
+                                                  # collapse is irreversible and damped the
+                                                  # peak elastic sigma 19.3% -> 12.2% on
+                                                  # run 82. Grouping can always be done
+                                                  # afterwards; un-grouping cannot.
+MF33_REBUILD_MT1 = True                          # Rebuild MF33 MT1 (total) over the analysis
+                                                  # window as the sandwich over the partials,
+                                                  # cross terms zeroed, so the file's total
+                                                  # stops contradicting its own elastic. The
+                                                  # host ships MT1 within 1.4% of the
+                                                  # uncorrelated partial sum, so this keeps
+                                                  # the evaluator's own convention.
+SAVE_MF33_MULTIGROUP_DIAGNOSTICS_CSV = True      # mf33_boundary_decisions.csv
+SAVE_MF33_C0_SAMPLES = False                     # mf33_c0_samples.parquet — the raw
+                                                  # two-pass c0 draws (~300 MB at 10k
+                                                  # samples). Only needed for a
+                                                  # non-Gaussian TMC of the magnitude
+                                                  # channel; the covariance sidecars
+                                                  # carry the Gaussian summary.
 
 # --- OUTPUT: Pipeline A (fitting) ------------------------------------------ #
 N_SAMPLES = 10000                                # Number of MC samples
@@ -362,6 +531,12 @@ SAVE_RAW_KW_PARQUET = False                      # legendre_samples_raw_kw.parqu
 SAVE_MULTIGROUP_DIAGNOSTICS_CSV = True           # multigroup_boundary_decisions.csv — small
                                                   # diagnostic with per-pair merge decisions;
                                                   # useful for tuning rho_min / sigma_ratio_max.
+STOP_AFTER_NOMINAL_FITS = False                  # Exit after Step 4 (~2 min) instead of running the
+                                                  # MC (~5 h). For pre-flighting a config change on
+                                                  # the fits — n_eff, tau bands, degree selection —
+                                                  # before committing to a production run.
+SAVE_NOMINAL_FITS = True                         # nominal_fits.parquet — per-bin c_0..c_L, chi2_red,
+                                                  # frozen_degree, tau bands, AICc weights.
 
 # --- OUTPUT: Pipeline B (MF34 sampling) ------------------------------------ #
 GENERATE_MF34_SAMPLES = False                    # Perturbed ENDF samples from MF34 -> endf/
@@ -391,6 +566,120 @@ VERBOSE_DIAGNOSTICS = True                       # Per-order percentile stats at
 
 # Global logger reference (set by _set_logger from exfor_utils)
 _logger = None
+
+
+# =============================================================================
+# RUN METADATA (audit trail)
+# =============================================================================
+
+
+def _sha256_of_file(path: str) -> Optional[str]:
+    """Return hex SHA256 of a file, or None if unreadable."""
+    try:
+        h = hashlib.sha256()
+        with open(path, 'rb') as f:
+            for chunk in iter(lambda: f.read(65536), b''):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
+def _git_info(repo_dir: str) -> Dict[str, Any]:
+    """Best-effort git commit + dirty status for the repo at repo_dir."""
+    info: Dict[str, Any] = {'commit': None, 'dirty': None, 'branch': None}
+    try:
+        commit = subprocess.run(
+            ['git', '-C', repo_dir, 'rev-parse', 'HEAD'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if commit.returncode == 0:
+            info['commit'] = commit.stdout.strip()
+        branch = subprocess.run(
+            ['git', '-C', repo_dir, 'rev-parse', '--abbrev-ref', 'HEAD'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if branch.returncode == 0:
+            info['branch'] = branch.stdout.strip()
+        status = subprocess.run(
+            ['git', '-C', repo_dir, 'status', '--porcelain'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if status.returncode == 0:
+            info['dirty'] = bool(status.stdout.strip())
+    except Exception:
+        pass
+    return info
+
+
+def _collect_config_constants() -> Dict[str, Any]:
+    """Snapshot every ALL_CAPS module-level constant for the run audit."""
+    g = globals()
+    snapshot: Dict[str, Any] = {}
+    for name, val in g.items():
+        if not name.isupper():
+            continue
+        if name.startswith('_'):
+            continue
+        if callable(val):
+            continue
+        # Keep only JSON-friendly leaf values (str/int/float/bool/None/list/dict).
+        try:
+            json.dumps(val)
+        except (TypeError, ValueError):
+            snapshot[name] = repr(val)
+            continue
+        snapshot[name] = val
+    return snapshot
+
+
+def _write_run_metadata(output_dir: str) -> Dict[str, Any]:
+    """
+    Write OUTPUT_DIR/run_metadata.json capturing config + git + script/manifest hashes.
+
+    Returns the metadata dict so the caller can log a short summary.
+    """
+    script_path = os.path.abspath(__file__)
+    repo_dir = str(Path(__file__).resolve().parent.parent)
+
+    # Resolve manifest path. Importing the module here avoids hard-coding the
+    # path; if the manifest module isn't importable, build_exfor_cache_from_objects
+    # will raise loudly anyway, so a None here is safe metadata.
+    # Call the resolver rather than reading a module constant, so the path
+    # logged here is the one load_manifest() will actually open.
+    manifest_path: Optional[str] = None
+    manifest_sha256: Optional[str] = None
+    manifest_path_reachable: Optional[bool] = None
+    try:
+        from scripts.uncertainty_manifest import manifest_path as _resolve_manifest_path
+        manifest_path = str(_resolve_manifest_path())
+    except Exception:
+        try:
+            from uncertainty_manifest import manifest_path as _resolve_manifest_path
+            manifest_path = str(_resolve_manifest_path())
+        except Exception:
+            manifest_path = None
+    if manifest_path is not None:
+        manifest_path_reachable = os.path.exists(manifest_path)
+        if manifest_path_reachable:
+            manifest_sha256 = _sha256_of_file(manifest_path)
+
+    metadata: Dict[str, Any] = {
+        'started_at': datetime.now().isoformat(),
+        'script_path': script_path,
+        'script_sha256': _sha256_of_file(script_path),
+        'manifest_path': manifest_path,
+        'manifest_path_reachable': manifest_path_reachable,
+        'manifest_sha256': manifest_sha256,
+        'git': _git_info(repo_dir),
+        'config': _collect_config_constants(),
+    }
+
+    out = Path(output_dir) / 'run_metadata.json'
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, 'w') as f:
+        json.dump(metadata, f, indent=2, default=str, sort_keys=True)
+    return metadata
 
 
 # =============================================================================
@@ -547,8 +836,10 @@ def _mc_one_bin(args):
     Returns
     -------
     tuple
-        (energy_idx, is_interpolated, results_by_sample, success)
-        where results_by_sample is Dict[s_idx, np.ndarray] of ENDF coefficients.
+        (energy_idx, is_interpolated, results_by_sample, success, error_msg)
+        where results_by_sample is Dict[s_idx, np.ndarray] of ENDF coefficients
+        and error_msg is None on success or the exception summary when the bin
+        fell back to nominal coefficients (zero MC variance).
     """
     (
         nr_energy_idx,
@@ -572,21 +863,28 @@ def _mc_one_bin(args):
         allow_shrink_unc,
         freeze_c0,
         normalization_sigma,
-        sigma_norm_elastic,
+        sigma_norm_common_mode,
         norm_dist,
         max_sample_order,
         _apply_positivity_projection,
         _positivity_check_points,
         frozen_tau_info,
         mc_order_cap,
-    ) = args
+    ) = args[:28]
+    # Phase-2 magnitude channel: optional 29th field. Absent (28-tuple) → off,
+    # so the Gaussian-method builder needs no change and behavior is identical.
+    record_c0 = bool(args[28]) if len(args) > 28 else False
+    # Per-sample fixed-shape c0 for this bin; empty unless recording.
+    c0_by_sample: dict = {}
 
     energy_idx = nr_energy_idx
 
     if nr_interpolated:
         endf_coeffs = endf_normalize_legendre_coeffs(nr_nominal_coeffs, include_a0=False)
         results = {s_idx: endf_coeffs for s_idx in range(n_samples)}
-        return (energy_idx, True, results, True)
+        if record_c0 and len(nr_nominal_coeffs) > 0:
+            c0_by_sample = {s_idx: float(nr_nominal_coeffs[0]) for s_idx in range(n_samples)}
+        return (energy_idx, True, results, True, None, c0_by_sample)
 
     bin_seed = base_seed + energy_idx
     rng = np.random.default_rng(bin_seed)
@@ -624,6 +922,13 @@ def _mc_one_bin(args):
     )
 
     results = {}
+    # Positivity-projection counter. Pure bookkeeping: it is incremented only
+    # where `check_angular_distribution_positivity` is ALREADY being called and
+    # has ALREADY returned False, so it adds no computation, no RNG draw and no
+    # branch. The sampled coefficients are bit-identical with and without it.
+    # Returned to the parent because `_mc_one_bin` runs in a `Pool` — a module
+    # global would be counted in the child and lost. Roadmap §6.5.
+    n_positivity_projected = 0
     try:
         if use_degree_sampling:
             degrees = list(nr_degree_weights.keys())
@@ -643,7 +948,7 @@ def _mc_one_bin(args):
 
             for deg, s_indices in degree_groups.items():
                 n_batch = len(s_indices)
-                coef_df_batch, _ = sample_legendre_coefficients(
+                coef_df_batch, info_batch = sample_legendre_coefficients(
                     nr_mc_df,
                     value_col="value",
                     unc_col="unc",
@@ -665,10 +970,16 @@ def _mc_one_bin(args):
                     max_band_scale=max_band_scale,
                     freeze_c0=freeze_c0,
                     sigma_norm=normalization_sigma,
-                    sigma_norm_elastic=sigma_norm_elastic,
+                    sigma_norm_common_mode=sigma_norm_common_mode,
                     norm_dist=norm_dist,
                     max_sample_order=effective_sample_order,
+                    record_c0_scale=record_c0,
+                    c0_scale_ref_coeffs=nr_nominal_coeffs if record_c0 else None,
                 )
+                if record_c0 and info_batch.get("c0_samples") is not None:
+                    _c0_batch = np.atleast_1d(info_batch["c0_samples"])
+                    for local_i, s_idx in enumerate(s_indices):
+                        c0_by_sample[s_idx] = float(_c0_batch[local_i])
                 for local_i, s_idx in enumerate(s_indices):
                     sample_coeffs = coef_df_batch.iloc[local_i].to_numpy()
                     if len(sample_coeffs) < max_degree + 1:
@@ -680,6 +991,7 @@ def _mc_one_bin(args):
                                 sample_coeffs[l] = nr_nominal_coeffs[l]
                     if _apply_positivity_projection:
                         if not check_angular_distribution_positivity(sample_coeffs, _positivity_check_points):
+                            n_positivity_projected += 1
                             frozen = {}
                             if freeze_c0:
                                 frozen[0] = sample_coeffs[0]
@@ -694,7 +1006,7 @@ def _mc_one_bin(args):
                 project_to_positive_distribution,
             )
 
-            coef_df, _ = sample_legendre_coefficients(
+            coef_df, info_nd = sample_legendre_coefficients(
                 nr_mc_df,
                 value_col="value",
                 unc_col="unc",
@@ -715,14 +1027,21 @@ def _mc_one_bin(args):
                 max_band_scale=max_band_scale,
                 freeze_c0=freeze_c0,
                 sigma_norm=normalization_sigma,
-                sigma_norm_elastic=sigma_norm_elastic,
+                sigma_norm_common_mode=sigma_norm_common_mode,
                 norm_dist=norm_dist,
                 max_sample_order=effective_sample_order,
+                record_c0_scale=record_c0,
+                c0_scale_ref_coeffs=nr_nominal_coeffs if record_c0 else None,
             )
+            if record_c0 and info_nd.get("c0_samples") is not None:
+                _c0_nd = np.atleast_1d(info_nd["c0_samples"])
+                for s_idx in range(n_samples):
+                    c0_by_sample[s_idx] = float(_c0_nd[s_idx])
             for s_idx in range(n_samples):
                 sample_coeffs = coef_df.iloc[s_idx].to_numpy()
                 if _apply_positivity_projection:
                     if not check_angular_distribution_positivity(sample_coeffs, _positivity_check_points):
+                        n_positivity_projected += 1
                         frozen = {}
                         if freeze_c0:
                             frozen[0] = sample_coeffs[0]
@@ -736,12 +1055,96 @@ def _mc_one_bin(args):
                     endf_coeffs = padded
                 results[s_idx] = endf_coeffs
 
-        return (energy_idx, False, results, True)
+        return (energy_idx, False, results, True, None, c0_by_sample,
+                n_positivity_projected)
 
-    except Exception:
+    except Exception as exc:
         endf_coeffs = endf_normalize_legendre_coeffs(nr_nominal_coeffs, include_a0=False)
         results = {s_idx: endf_coeffs for s_idx in range(n_samples)}
-        return (energy_idx, False, results, False)
+        c0_fallback = (
+            {s_idx: float(nr_nominal_coeffs[0]) for s_idx in range(n_samples)}
+            if record_c0 and len(nr_nominal_coeffs) > 0 else {}
+        )
+        return (energy_idx, False, results, False,
+                f"{type(exc).__name__}: {exc}", c0_fallback)
+
+
+def _log_positivity_projections(bin_results, nominal_results, n_samples, logger):
+    """Report how often the positivity projection fired, and in WHICH bins.
+
+    The projection (`project_to_positive_distribution`) silently modifies any MC
+    sample whose Legendre expansion goes negative somewhere in mu. It is the
+    right thing to do — a negative angular distribution is unphysical — but it
+    means the covariance we publish is that of a *projected* sample set, and
+    ENDF-6 MF34 has no syntax for a positivity constraint, so a consumer drawing
+    a Gaussian from it is not protected the same way.
+
+    How often that happens was never recorded, which left the size of the effect
+    unknown in both directions. This logs it: the overall rate, and the bins
+    where it concentrates so they can be located in energy. Roadmap §6.5.
+    """
+    energy_by_idx = {nr.energy_index: nr.energy_mev for nr in nominal_results}
+    per_bin = {}
+    total = 0
+    for rec in bin_results:
+        energy_idx = rec[0]
+        n_proj = rec[6] if len(rec) > 6 else 0
+        if n_proj:
+            per_bin[energy_idx] = n_proj
+            total += n_proj
+
+    n_bins = len(bin_results)
+    denom = max(n_bins * max(n_samples, 1), 1)
+    if total == 0:
+        logger.info(
+            f"  [POSITIVITY] projection never fired "
+            f"({n_bins} bins x {n_samples} samples)"
+        )
+        return per_bin
+
+    logger.info(
+        f"  [POSITIVITY] projection fired on {total}/{denom} samples "
+        f"({100.0 * total / denom:.3f} %) in {len(per_bin)}/{n_bins} bins"
+    )
+    ranked = sorted(per_bin.items(), key=lambda kv: kv[1], reverse=True)
+    logger.info("  [POSITIVITY] bins where it fires, worst first "
+                "(energy MeV: samples projected of %d):" % n_samples)
+    for energy_idx, n_proj in ranked[:40]:
+        e = energy_by_idx.get(energy_idx)
+        e_str = f"{e:.6f}" if e is not None else f"idx {energy_idx}"
+        logger.info(f"  [POSITIVITY]    {e_str} : {n_proj} "
+                    f"({100.0 * n_proj / max(n_samples, 1):.1f} %)")
+    if len(ranked) > 40:
+        logger.info(f"  [POSITIVITY]    ... and {len(ranked) - 40} further bins")
+    return per_bin
+
+
+def _log_mc_bin_failures(bin_results, nominal_results, warning_counts, logger):
+    """Log every per-bin MC failure (nominal fallback = zero MC variance).
+
+    A failed bin contributes identical (nominal) coefficients to all samples,
+    so its Pass-2 variance is ~0 and the published MF34 silently understates
+    the uncertainty there unless the failure is surfaced.
+    """
+    energy_by_idx = {nr.energy_index: nr.energy_mev for nr in nominal_results}
+    n_failed = 0
+    for rec in bin_results:
+        energy_idx, _interp, _results, success, error_msg = rec[:5]
+        if success:
+            continue
+        n_failed += 1
+        e_mev = energy_by_idx.get(energy_idx)
+        e_str = f"E={e_mev:.4f} MeV" if e_mev is not None else f"idx={energy_idx}"
+        if logger:
+            logger.error(
+                f"[ERROR] [MC] Bin {e_str}: per-bin MC failed, all samples "
+                f"fell back to nominal (zero MC variance) — {error_msg}",
+                console=True,
+            )
+    if n_failed:
+        warning_counts['mc_bin_failures'] = (
+            warning_counts.get('mc_bin_failures', 0) + n_failed
+        )
 
 
 # =============================================================================
@@ -1055,6 +1458,10 @@ def perform_nominal_fits(
     min_angular_points: int = 4,
     min_bands_covered: int = 3,
     max_bin_expansion: int = 2,
+    rerun_aicc_post_tau: bool = True,
+    use_gls_kernel: bool = True,
+    sigma_norm_systematic: float = NORM_SYSTEMATIC_SIGMA,
+    membership_k_sigma: float = 0.0,
     logger = None,
 ) -> List[NominalFitResult]:
     """Phase 1: Perform nominal fits using energy_bin method.
@@ -1090,9 +1497,11 @@ def perform_nominal_fits(
             min_relative_uncertainty=min_relative_uncertainty,
             unc_floor_strategy=UNCERTAINTY_FLOOR_STRATEGY,
             normalize_by_n_points=NORMALIZE_BY_N_POINTS,
-            sigma_norm=NORM_SYSTEMATIC_SIGMA,
+            sigma_norm=sigma_norm_systematic,
             band_aware_ess=BAND_AWARE_ESS,
             max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
+            membership_k_sigma=membership_k_sigma,
+            sigma_E_mev=bin_info.sigma_E_mev,
             logger=_logger,
         )
 
@@ -1149,9 +1558,11 @@ def perform_nominal_fits(
                         min_relative_uncertainty=min_relative_uncertainty,
                         unc_floor_strategy=UNCERTAINTY_FLOOR_STRATEGY,
                         normalize_by_n_points=NORMALIZE_BY_N_POINTS,
-                        sigma_norm=NORM_SYSTEMATIC_SIGMA,
+                        sigma_norm=sigma_norm_systematic,
                         band_aware_ess=BAND_AWARE_ESS,
                         max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
+                        membership_k_sigma=membership_k_sigma,
+                        sigma_E_mev=bin_info.sigma_E_mev,
                         logger=_logger,
                     )
 
@@ -1247,6 +1658,8 @@ def perform_nominal_fits(
             tau_irls_tol=TAU_IRLS_TOL,
             tau_irls_damping=TAU_IRLS_DAMPING,
             band_scale_method=BAND_SCALE_METHOD,
+            rerun_aicc_post_tau=rerun_aicc_post_tau,
+            use_gls_kernel=use_gls_kernel,
         )
 
         frozen_degree = fit_info['degree']
@@ -1832,10 +2245,14 @@ def run_exfor_to_endf_sampling_v2(
     tau_prior_neff_threshold: float = 5.0,
     tau_prior_percentile: float = 50.0,
     sigma_norm_systematic: float = 0.05,
-    sigma_norm_elastic: float = 0.05,
+    sigma_norm_common_mode: float = 0.0,
     use_model_averaging: bool = True,
     min_degree_for_averaging: int = 3,
     n_eff_warning_threshold: float = 5.0,
+    # Every parallel step reads this argument. Five of them used to read the
+    # N_PROCS module constant instead, so asking for one worker still forked
+    # forty. Production is unaffected: the __main__ block passes N_PROCS here
+    # explicitly, which is what the constant is for.
     n_procs: int = 1,
     base_seed: int = 42,
     generate_nominal_endf: bool = True,
@@ -1880,6 +2297,7 @@ def run_exfor_to_endf_sampling_v2(
     save_tmc_parquet: bool = True,
     save_raw_kw_parquet: bool = False,
     save_multigroup_diagnostics_csv: bool = True,
+    save_nominal_fits: bool = True,
     # ACE common options (shared NJOY config)
     ace_temperatures: Optional[List[float]] = None,
     ace_njoy_exe: Optional[str] = None,
@@ -1947,6 +2365,32 @@ def run_exfor_to_endf_sampling_v2(
     print(f"[INFO] Starting EXFOR-to-ENDF sampling (v2)")
     print(f"[INFO] Log file: {log_file}")
 
+    # ── Run metadata (audit trail) ───────────────────────────────────────────
+    try:
+        _md = _write_run_metadata(output_dir)
+        _logger.info("#== RUN METADATA ==========================================================")
+        _logger.info(f"  metadata_file   = {Path(output_dir) / 'run_metadata.json'}")
+        _logger.info(f"  script_sha256   = {_md.get('script_sha256')}")
+        _logger.info(f"  manifest_path   = {_md.get('manifest_path')}")
+        _logger.info(f"  manifest_sha256 = {_md.get('manifest_sha256')} "
+                     f"(reachable={_md.get('manifest_path_reachable')})")
+        _g = _md.get('git') or {}
+        _logger.info(f"  git_branch      = {_g.get('branch')}")
+        _logger.info(f"  git_commit      = {_g.get('commit')}")
+        _logger.info(f"  git_dirty       = {_g.get('dirty')}")
+        _logger.info("")
+    except Exception as _e:
+        _logger.warning(f"Failed to write run_metadata.json: {type(_e).__name__}: {_e}")
+
+    # ── Model-order policy (deliberate; log so it is reviewer-auditable) ─────
+    _logger.info("#== MODEL-ORDER POLICY ====================================================")
+    _logger.info("  Nominal MF4 order = AICc winner per bin.")
+    _logger.info("  MC samples may draw alternate AICc-supported orders (mixture).")
+    _logger.info("  MF34 covariance is published only for orders present in nominal MF4")
+    _logger.info("    (n_valid = min(frozen_degree, MAX_SAMPLE_ORDER)).")
+    _logger.info("  Higher sampled orders affect retained-order variance but are not published.")
+    _logger.info("")
+
     # Track warnings for dynamic summary at end
     _warning_counts = {}
 
@@ -2006,7 +2450,7 @@ def run_exfor_to_endf_sampling_v2(
     _logger.info(f"  BAND_SCALE_METHOD = {BAND_SCALE_METHOD}")
     _logger.info(f"  RESCALE_UNC_BY_CHI2 = {RESCALE_UNC_BY_CHI2}")
     _logger.info(f"  ALLOW_SHRINK_UNC = {ALLOW_SHRINK_UNC}")
-    _logger.info(f"  NORM_ELASTIC_SIGMA = {sigma_norm_elastic}  (global, all experiments)")
+    _logger.info(f"  NORM_COMMON_MODE_SIGMA = {sigma_norm_common_mode}  (global, all experiments)")
     _logger.info(f"  NORM_SYSTEMATIC_SIGMA = {sigma_norm_systematic}  (per-experiment, dist={NORM_DIST})")
     _logger.info(f"  EXCLUDE_EXPERIMENTS = {exclude_experiments if exclude_experiments else 'None'}")
     _logger.info(f"  MIN_RELATIVE_UNCERTAINTY = {min_relative_uncertainty} ({min_relative_uncertainty*100:.1f}%)")
@@ -2018,6 +2462,8 @@ def run_exfor_to_endf_sampling_v2(
     _logger.info(f"  USE_MODEL_AVERAGING = {use_model_averaging}")
     _logger.info(f"  MIN_DEGREE_FOR_AVERAGING = {min_degree_for_averaging}")
     _logger.info(f"  USE_DEGREE_SAMPLING_IN_MC = {USE_DEGREE_SAMPLING_IN_MC}")
+    _logger.info(f"  RERUN_AICC_POST_TAU = {RERUN_AICC_POST_TAU}")
+    _logger.info(f"  USE_GLS_KERNEL = {USE_GLS_KERNEL}")
     _logger.info("")
 
     # -- Energy Binning & Correlation --
@@ -2046,6 +2492,10 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info(f"  KW_MIN_POINTS_REF = {KW_MIN_POINTS_REF}")
     _logger.info(f"  DELTA_T_NS = {DELTA_T_NS}")
     _logger.info(f"  FLIGHT_PATH_M = {FLIGHT_PATH_M}")
+    _logger.info(
+        f"  DELTA_T_IS_FWHM = {DELTA_T_IS_FWHM}"
+        f"  (sigma_E{'  = FWHM/2.3548' if DELTA_T_IS_FWHM else ' taken directly; pre-82 behaviour'})"
+    )
     _logger.info(f"  N_SIGMA_CUTOFF = {N_SIGMA_CUTOFF}")
     _logger.info("")
 
@@ -2106,6 +2556,7 @@ def run_exfor_to_endf_sampling_v2(
     _logger.info(f"  SAVE_TMC_PARQUET = {save_tmc_parquet}")
     _logger.info(f"  SAVE_RAW_KW_PARQUET = {save_raw_kw_parquet}")
     _logger.info(f"  SAVE_MULTIGROUP_DIAGNOSTICS_CSV = {save_multigroup_diagnostics_csv}")
+    _logger.info(f"  SAVE_NOMINAL_FITS = {save_nominal_fits}")
     _logger.info("")
 
     # -- Output: Pipeline B (MF34 sampling) --
@@ -2169,7 +2620,18 @@ def run_exfor_to_endf_sampling_v2(
         _logger.error(f"[ERROR] [ENDF] File not found: {endf_file}", console=True)
         return
 
-    if not os.path.isdir(exfor_directory):
+    # The JSON directory is only read when the source asks for JSON, and only
+    # exfor_source='json' cannot do without it — read_all_exfor treats it as
+    # optional for 'auto' and 'both' (kika/exfor/io.py: `if directory is not
+    # None`). Checking it unconditionally meant exfor_source='database', which
+    # never touches it, died on os.path.isdir(None) inside genericpath instead
+    # of reaching any of the error handling here.
+    if exfor_source == "json" and not exfor_directory:
+        _logger.error(
+            "[ERROR] [EXFOR] exfor_source='json' reads JSON files, but no "
+            "exfor_directory was given", console=True)
+        return
+    if exfor_directory and not os.path.isdir(exfor_directory):
         _logger.error(f"[ERROR] [EXFOR] Directory not found: {exfor_directory}", console=True)
         return
 
@@ -2206,6 +2668,67 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info(f"  [INFO] [EXFOR] Energy range: [{min(sorted_exfor_energies):.4f}, {max(sorted_exfor_energies):.4f}] MeV")
         _logger.info(f">> exfor_experiments = {n_exfor_files}")
         _logger.info(f">> exfor_energies = {len(sorted_exfor_energies)}")
+
+        # Manifest-flag summary: how many datasets/points came from each
+        # manifest source bucket (curated/uncurated/default/excluded), plus
+        # any per-dataset manifest application failures from the cache build.
+        try:
+            from collections import Counter as _Counter
+            from scripts.exfor_utils import get_last_manifest_stats as _get_mstats
+            flag_datasets: Dict[str, set] = {}
+            flag_points: _Counter = _Counter()
+            for _e_mev, _entries in exfor_cache.items():
+                for _df, _meta in _entries:
+                    _flag = str(_meta.get('uncertainty_manifest_flag', 'default'))
+                    flag_datasets.setdefault(_flag, set()).add(
+                        f"{_meta.get('entry')}/{_meta.get('subentry')}"
+                    )
+                    flag_points[_flag] += int(len(_df))
+            _mstats = _get_mstats()
+            _logger.info("  [INFO] [EXFOR] Manifest flag summary:")
+            for _flag in sorted(set(list(flag_points.keys()) +
+                                    ['curated', 'uncurated', 'default', 'excluded'])):
+                _ndsets = len(flag_datasets.get(_flag, set()))
+                _npts = flag_points.get(_flag, 0)
+                _logger.info(f"    flag={_flag:<12s} datasets={_ndsets:>4d}  points={_npts:>6d}")
+            _logger.info(
+                f"    manifest_failed: attempted={_mstats.get('attempted', 0)}, "
+                f"failed={_mstats.get('failed', 0)}"
+            )
+            for _ent, _sub, _exc in (_mstats.get('failures', []) or [])[:10]:
+                _logger.warning(f"    manifest_failed: {_ent}/{_sub} — {_exc}")
+        except Exception as _e:
+            _logger.warning(f"Manifest flag summary failed: {type(_e).__name__}: {_e}")
+
+        # Manifest excluded-flag desync check: any dataset the manifest marks
+        # `flag: excluded` should also appear in EXCLUDE_EXPERIMENTS, otherwise
+        # the manifest and the run config are out of sync. Warn-only; do not
+        # raise (the run can still be valid if the desync is intentional).
+        try:
+            from scripts.uncertainty_manifest import load_manifest as _load_manifest
+            from scripts.exfor_utils import _parse_exclusion_list, _is_experiment_excluded
+            _m = _load_manifest()
+            _excl_patterns = _parse_exclusion_list(exclude_experiments)
+            _desync = []
+            for _dsid, _entry in (_m.get('datasets') or {}).items():
+                if _entry.get('flag') != 'excluded':
+                    continue
+                # _dsid is "ENTRYSUB" format (e.g. "32246002"); split into entry/subentry.
+                if len(_dsid) >= 8:
+                    _ent, _sub = _dsid[:5], _dsid[5:]
+                else:
+                    _ent, _sub = _dsid, ''
+                if not _is_experiment_excluded(_ent, _sub, _excl_patterns):
+                    _desync.append(_dsid)
+            if _desync:
+                _logger.warning(
+                    f"  [WARN] [EXFOR] {len(_desync)} dataset(s) flagged 'excluded' in manifest "
+                    f"but not in EXCLUDE_EXPERIMENTS: {_desync[:10]}"
+                    + (" ..." if len(_desync) > 10 else "")
+                )
+        except Exception as _e:
+            _logger.warning(f"Manifest excluded-flag desync check failed: {type(_e).__name__}: {_e}")
+
         _logger.info(f"#-- END STEP 1 (elapsed: {t_exfor_elapsed:.2f}s) -------------------------------------")
         _logger.info(f"  [INFO] [EXFOR] Loaded {n_exfor_files} experiments in {t_exfor_elapsed:.1f}s", console=True)
     except Exception as e:
@@ -2269,6 +2792,7 @@ def run_exfor_to_endf_sampling_v2(
         delta_t_ns=DELTA_T_NS,
         flight_path_m=FLIGHT_PATH_M,
         reference_grid_ev=energies_ev if energy_grid_source == "union" else None,
+        delta_t_is_fwhm=DELTA_T_IS_FWHM,
     )
 
     if not energy_bins:
@@ -2315,6 +2839,10 @@ def run_exfor_to_endf_sampling_v2(
         min_angular_points=MIN_ANGULAR_POINTS,
         min_bands_covered=MIN_BANDS_COVERED,
         max_bin_expansion=MAX_BIN_EXPANSION,
+        rerun_aicc_post_tau=RERUN_AICC_POST_TAU,
+        use_gls_kernel=USE_GLS_KERNEL,
+        sigma_norm_systematic=sigma_norm_systematic,
+        membership_k_sigma=MEMBERSHIP_K_SIGMA,
         logger=_logger,
     )
 
@@ -2345,8 +2873,83 @@ def run_exfor_to_endf_sampling_v2(
     # Log experiment summary
     log_experiments_summary(nominal_results, logger=_logger)
 
+    # IC solver path: GLS for multi-experiment bins, WLS fallback for
+    # single-experiment bins (see resample_AD.py:1745-1760 for rationale).
+    # Skipped bins (has_data=False) and interpolated bins are excluded.
+    if USE_GLS_KERNEL:
+        n_gls = sum(
+            1 for nr in nominal_results
+            if nr.has_data and not nr.interpolated and len(nr.experiments_info) >= 2
+        )
+        n_wls = sum(
+            1 for nr in nominal_results
+            if nr.has_data and not nr.interpolated and len(nr.experiments_info) == 1
+        )
+        _logger.info(
+            f"  [INFO] [FIT] IC solver: GLS={n_gls} bins, "
+            f"WLS-fallback (1-experiment)={n_wls} bins"
+        )
+    else:
+        n_fitted = sum(1 for nr in nominal_results if nr.has_data and not nr.interpolated)
+        _logger.info(f"  [INFO] [FIT] IC solver: WLS={n_fitted} bins (USE_GLS_KERNEL=False)")
+
+    if save_nominal_fits:
+        rows = []
+        # Bin metadata by index, so the per-bin TOF resolution and edges travel
+        # with the fits. rebuild_mf33.py needs them to reconstruct the folding
+        # kernel offline without re-deriving the grid from the EXFOR database.
+        _bin_by_idx_nom = {b.index: b for b in energy_bins}
+        for r in nominal_results:
+            coeffs = np.full(max_degree + 1, np.nan)
+            if r.nominal_coeffs is not None and len(r.nominal_coeffs) > 0:
+                n_c = min(len(r.nominal_coeffs), max_degree + 1)
+                coeffs[:n_c] = r.nominal_coeffs[:n_c]
+            tau = r.tau_info or {}
+            _eb = _bin_by_idx_nom.get(r.energy_index)
+            row = {
+                'energy_mev': r.energy_mev,
+                'sigma_E_mev': getattr(_eb, 'sigma_E_mev', np.nan),
+                'bin_lower_mev': getattr(_eb, 'bin_lower_mev', np.nan),
+                'bin_upper_mev': getattr(_eb, 'bin_upper_mev', np.nan),
+                'energy_index': r.energy_index,
+                'endf_index': r.endf_index,
+                'has_data': r.has_data,
+                'interpolated': r.interpolated,
+                'expanded_bins': r.expanded_bins,
+                'frozen_degree': r.frozen_degree,
+                'chi2_red': r.chi2_red,
+                'tau_F': tau.get('tau_F', 1.0),
+                'tau_M': tau.get('tau_M', 1.0),
+                'tau_B': tau.get('tau_B', 1.0),
+                'mc_order_cap': r.mc_order_cap,
+                'n_pts': len(r.exfor_df) if r.exfor_df is not None else 0,
+                'n_eff': (r.kernel_diagnostics.n_eff
+                          if r.kernel_diagnostics is not None else np.nan),
+                'aicc_weights_json': (
+                    json.dumps({int(k): float(v) for k, v in r.degree_weights.items()})
+                    if r.degree_weights else None
+                ),
+            }
+            row.update({f'c_{l}': float(coeffs[l]) for l in range(max_degree + 1)})
+            rows.append(row)
+        df_nom = pd.DataFrame(rows)
+        out_nom = output_path / 'nominal_fits.parquet'
+        df_nom.to_parquet(out_nom, index=False)
+        _logger.info(f"  Saved per-bin nominal fits ({len(df_nom)} rows) to {out_nom.name}")
+
     _logger.info(f"#-- END STEP 4 (elapsed: {time.time() - t_step:.2f}s) -------------------------------------")
     _logger.info(f"  [INFO] [FIT] Nominal fits: {n_with_data}/{len(nominal_results)} with data, {n_interpolated} interpolated", console=True)
+
+    if STOP_AFTER_NOMINAL_FITS:
+        # Steps 1-4 cost ~2 minutes against ~5 h for the MC, so this is the
+        # cheap way to see how a config change lands on the fits (n_eff, tau,
+        # degree selection) before committing to a production run.
+        _logger.info(
+            "  STOP_AFTER_NOMINAL_FITS=True — stopping before MC sampling. "
+            f"nominal_fits.parquet is in {output_dir}",
+            console=True,
+        )
+        return
 
     # Step 5: MC sampling
     t_step = time.time()
@@ -2357,13 +2960,23 @@ def run_exfor_to_endf_sampling_v2(
     _prebuilt_gaussian_cov = None
     _prebuilt_mc_mean = None
 
+    # Phase-2 magnitude channel: defined here so the MF33 write block downstream
+    # is safe under every CORRELATION_METHOD (only the KW path can turn it on).
+    record_c0_channel = False
+    mf33_rel_cov_fine = None
+    mf33_c0_nom = None
+    mf33_energy_grid_ev = None
+    mf33_sigma_host_bin = None
+    _mf33_products = None
+    _mf33_pendf_path = None
+
     if CORRELATION_METHOD == "gaussian":
         # Per-bin stochastic MC → Gaussian parametric correlations → Cholesky samples
         _logger.info("  " + "=" * 60)
         _logger.info("  Method: Gaussian decay correlation + Cholesky resampling")
         _logger.info("  " + "=" * 60)
-        if N_PROCS > 1:
-            _logger.info(f"  Using {N_PROCS} parallel processes over bins")
+        if n_procs > 1:
+            _logger.info(f"  Using {n_procs} parallel processes over bins")
 
         bin_args_list = []
         for nr in nominal_results:
@@ -2390,8 +3003,8 @@ def run_exfor_to_endf_sampling_v2(
                 RESCALE_UNC_BY_CHI2,
                 ALLOW_SHRINK_UNC,
                 FREEZE_C0,
-                NORM_SYSTEMATIC_SIGMA,
-                NORM_ELASTIC_SIGMA,
+                sigma_norm_systematic,
+                sigma_norm_common_mode,
                 NORM_DIST,
                 MAX_SAMPLE_ORDER,
                 apply_positivity_projection,
@@ -2400,14 +3013,17 @@ def run_exfor_to_endf_sampling_v2(
                 nr.mc_order_cap,
             ))
 
-        if N_PROCS > 1:
-            with Pool(N_PROCS) as pool:
+        if n_procs > 1:
+            with Pool(n_procs) as pool:
                 bin_results = pool.map(_mc_one_bin, bin_args_list)
         else:
             bin_results = [_mc_one_bin(a) for a in bin_args_list]
 
+        _log_mc_bin_failures(bin_results, nominal_results, _warning_counts, _logger)
+        _log_positivity_projections(bin_results, nominal_results, n_samples, _logger)
         all_samples_stochastic = {s_idx: {} for s_idx in range(n_samples)}
-        for energy_idx, is_interpolated, results_by_sample, success in bin_results:
+        for _rec in bin_results:
+            energy_idx, is_interpolated, results_by_sample, success, error_msg, _c0 = _rec[:6]
             for s_idx, endf_coeffs in results_by_sample.items():
                 all_samples_stochastic[s_idx][energy_idx] = endf_coeffs
 
@@ -2498,20 +3114,32 @@ def run_exfor_to_endf_sampling_v2(
             tof_params_cache=tof_params_cache if tof_params_cache else None,
             default_flight_path_m=FLIGHT_PATH_M,
             default_time_resolution_ns=DELTA_T_NS,
+            default_delta_t_is_fwhm=DELTA_T_IS_FWHM,
+            logger=_logger,
         )
 
         n_datasets_total = sum(len(dsets) for dsets in overlap_weights.values())
         _logger.info(f"  Overlap weights computed: {n_datasets_total} (dataset, bin) pairs")
 
         # Run kernel-weight MC (all bins coupled via shared perturbations)
-        kw_samples = run_mc_with_kernel_weights(
+        # Phase-2 magnitude channel needs both passes (Pass-1 correlations,
+        # Pass-2 variances). If the knob is on but two-pass is off, warn and
+        # skip rather than emit a half-built covariance.
+        record_c0_channel = (GENERATE_MF3_MF33 > 0) and KW_MC_TWO_PASS
+        if GENERATE_MF3_MF33 > 0 and not KW_MC_TWO_PASS:
+            _logger.warning(
+                "  [MF33] GENERATE_MF3_MF33 is on but KW_MC_TWO_PASS=False; "
+                "the fixed-shape c0 channel needs both passes — skipping.",
+                console=True,
+            )
+        _kw_out = run_mc_with_kernel_weights(
             nominal_results=nominal_results,
             energy_bins=energy_bins,
             overlap_weights=overlap_weights,
             n_samples=n_samples,
-            n_workers=N_PROCS,
-            sigma_norm=NORM_SYSTEMATIC_SIGMA,
-            sigma_norm_elastic=NORM_ELASTIC_SIGMA,
+            n_workers=n_procs,
+            sigma_norm=sigma_norm_systematic,
+            sigma_norm_common_mode=sigma_norm_common_mode,
             norm_dist=NORM_DIST,
             max_degree=max_degree,
             ridge_lambda=ridge_lambda,
@@ -2539,8 +3167,13 @@ def run_exfor_to_endf_sampling_v2(
             max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
             min_relative_uncertainty=MIN_RELATIVE_UNCERTAINTY,
             band_aware_ess=BAND_AWARE_ESS,
+            record_c0_channel=record_c0_channel,
             logger=_logger,
         )
+        if record_c0_channel:
+            kw_samples, c0_samples_kw = _kw_out
+        else:
+            kw_samples, c0_samples_kw = _kw_out, None
 
         if KW_MC_TWO_PASS:
             _logger.info("  Two-pass: running per-bin MC for variance")
@@ -2571,26 +3204,35 @@ def run_exfor_to_endf_sampling_v2(
                     RESCALE_UNC_BY_CHI2,
                     ALLOW_SHRINK_UNC,
                     FREEZE_C0,
-                    NORM_SYSTEMATIC_SIGMA,
-                    NORM_ELASTIC_SIGMA,
+                    sigma_norm_systematic,
+                    sigma_norm_common_mode,
                     NORM_DIST,
                     MAX_SAMPLE_ORDER,
                     apply_positivity_projection,
                     positivity_check_points,
                     nr.tau_info,
                     nr.mc_order_cap,
+                    # 29th field: Phase-2 magnitude-channel recording flag.
+                    record_c0_channel,
                 ))
 
-            if N_PROCS > 1:
-                with Pool(N_PROCS) as pool:
+            if n_procs > 1:
+                with Pool(n_procs) as pool:
                     bin_results = pool.map(_mc_one_bin, bin_args_list)
             else:
                 bin_results = [_mc_one_bin(a) for a in bin_args_list]
 
+            _log_mc_bin_failures(bin_results, nominal_results, _warning_counts, _logger)
+            _log_positivity_projections(bin_results, nominal_results, n_samples, _logger)
             all_samples_perbin = {s_idx: {} for s_idx in range(n_samples)}
-            for energy_idx, is_interpolated, results_by_sample, success in bin_results:
+            c0_samples_perbin = {s_idx: {} for s_idx in range(n_samples)} if record_c0_channel else None
+            for _rec in bin_results:
+                energy_idx, is_interpolated, results_by_sample, success, error_msg, c0_by_sample = _rec[:6]
                 for s_idx, endf_coeffs in results_by_sample.items():
                     all_samples_perbin[s_idx][energy_idx] = endf_coeffs
+                if record_c0_channel:
+                    for s_idx, c0_val in c0_by_sample.items():
+                        c0_samples_perbin[s_idx][energy_idx] = c0_val
 
             _logger.info(f"  Per-bin stochastic pass completed: {len(bin_args_list)} bins")
 
@@ -2616,6 +3258,203 @@ def run_exfor_to_endf_sampling_v2(
             # Combine: correlations from kw_samples, variance from per-bin
             energy_indices_kw = [nr.energy_index for nr in nominal_results if nr.has_data]
             nr_by_idx_kw = {nr.energy_index: nr for nr in nominal_results}
+
+            # --- Phase-2 elastic magnitude channel: fixed-shape c0 → MF33 ----
+            # Pass-1 shared draws give cross-bin correlations, Pass-2 per-bin
+            # draws give marginal variances — the same congruence combine as the
+            # Legendre-vector channel, on the scalar c0 per bin. Fine-grid
+            # relative covariance is stashed for the MF33 write + sidecars, and
+            # the channel gets its own adaptive multigroup grid (independent of
+            # the MF34 one) built alongside it.
+            mf33_rel_cov_fine = None
+            mf33_c0_nom = None
+            mf33_energy_grid_ev = None
+            mf33_sigma_host_bin = None
+            _mf33_products = None
+            _mf33_pendf_path = None
+            if record_c0_channel:
+                try:
+                    _bin_by_idx_mf33 = {b.index: b for b in energy_bins}
+                    mf33_c0_nom = np.array([
+                        float(nr_by_idx_kw[e].nominal_coeffs[0]) for e in energy_indices_kw
+                    ])
+                    _mf33_rel_dcs, _mf33_cov_abs, _df_c0, _mf33_diag = build_mf33_channel(
+                        c0_samples_kw, c0_samples_perbin,
+                        energy_indices_kw, mf33_c0_nom, n_samples,
+                    )
+                    # Fine energy grid (eV): lower edges of the has-data bins
+                    # plus the last upper edge — hard-asserts bin adjacency (a
+                    # gapped grid would be a semantically wrong ENDF grid).
+                    _vb = [_bin_by_idx_mf33[e] for e in energy_indices_kw]
+                    mf33_energy_grid_ev = contiguous_grid_from_bins(_vb)
+
+                    # Completeness + Pass-1 correlation inspection (warn-only).
+                    _p1c = _mf33_diag["p1_finite_per_bin"]
+                    _p2c = _mf33_diag["p2_finite_per_bin"]
+                    _logger.info(
+                        "  [MF33] Sample completeness per bin: "
+                        f"Pass-1 min/median {int(np.min(_p1c))}/{int(np.median(_p1c))}, "
+                        f"Pass-2 min/median {int(np.min(_p2c))}/{int(np.median(_p2c))} "
+                        f"(of {n_samples})"
+                    )
+                    _corr_eig = _mf33_diag["corr_pass1_min_eig"]
+                    if _corr_eig < -1e-8:
+                        _logger.warning(
+                            f"  [MF33] Pass-1 pairwise-complete correlation not PSD "
+                            f"(min eig {_corr_eig:.2e}) — warn only, not repaired.",
+                            console=True,
+                        )
+
+                    # Recentre the relative covariance on the HOST central: the
+                    # DCS analysis infers the absolute covariance C_abs; dividing
+                    # by the host means keeps the absolute uncertainty claim
+                    # intact for users who multiply the relative MF33 by MF3.
+                    #
+                    # The denominator is the RECONR-reconstructed cross section
+                    # folded through each bin's TOF kernel, NOT a box average of
+                    # File 3 — File 3 is zero inside the resolved resonance range
+                    # and a 1 keV box is not what the fit measured. See the
+                    # MF33_PENDF_* config block.
+                    _mf33_den = build_mf33_denominator(
+                        endf_file,
+                        _vb,
+                        mt=mt_number,
+                        njoy_exe=ACE_NJOY_EXE,
+                        pendf_tolerance=MF33_PENDF_TOLERANCE,
+                        pendf_cache_dir=MF33_PENDF_CACHE_DIR,
+                        grid_ev=mf33_energy_grid_ev,
+                        logger=_logger,
+                    )
+                    mf33_sigma_host_bin = _mf33_den.sigma_host_bin
+                    # Reused by the folded-comparison diagnostic below, so it
+                    # sees the same reconstructed cross section.
+                    _host_e_ev, _host_xs_b = _mf33_den.e_ev, _mf33_den.xs_b
+                    # The MT1 rebuild needs every partial's cross section, so it
+                    # reads the PENDF again rather than just MT2's fold.
+                    _mf33_pendf_path = _mf33_den.pendf_path
+                    _c0_host = mf33_sigma_host_bin / _MF33_FOUR_PI
+
+                    # Build the fine relative covariance and its own adaptive
+                    # multigroup collapse in one go — the same call the offline
+                    # rebuild uses, so both paths emit identical sections.
+                    _mf33_products = build_mf33_matrices(
+                        cov_abs_fine=_mf33_cov_abs,
+                        sigma_host_bin=mf33_sigma_host_bin,
+                        energy_bins=_vb,
+                        grid_fine_ev=mf33_energy_grid_ev,
+                        c0_dcs=mf33_c0_nom,
+                        regularize_near_zero=regularize_near_zero,
+                        snr_threshold=near_zero_snr_threshold,
+                        n_neighbors=near_zero_n_neighbors,
+                        rho_min=MF33_MULTIGROUP_RHO_MIN,
+                        sigma_ratio_max=MF33_MULTIGROUP_SIGMA_RATIO_MAX,
+                        diagnostics_file=(
+                            output_path / "mf33_boundary_decisions.csv"
+                            if SAVE_MF33_MULTIGROUP_DIAGNOSTICS_CSV else None
+                        ),
+                        logger=_logger,
+                    )
+                    mf33_rel_cov_fine = _mf33_products.rel_fine
+                    _logger.info(
+                        f"  [MF33] Fixed-shape c0 channel: {len(energy_indices_kw)} "
+                        f"fine bins -> {_mf33_products.multigroup.cov_rel_grouped.shape[0]} "
+                        f"MF33 groups (the MF34 grid is collapsed separately)"
+                    )
+                    _min_eig = float(np.min(np.linalg.eigvalsh(mf33_rel_cov_fine)))
+                    if _min_eig < -1e-8:
+                        _logger.warning(
+                            f"  [MF33] Fine-grid relative covariance not PSD "
+                            f"(min eig {_min_eig:.2e}) — warn only, not repaired.",
+                            console=True,
+                        )
+
+                    # Sidecar outputs. mf33_absolute_covariance.npy is the
+                    # primary object — the relative one is derived from it and
+                    # the folded host central, and is the lossy one (rows with a
+                    # non-positive central are zeroed). Together with the grid
+                    # and nominal_fits.parquet these are exactly what
+                    # scripts/rebuild_mf33.py needs to rebuild MF33 offline.
+                    _mf33_sidecars = [
+                        "mf33_relative_covariance.npy", "mf33_absolute_covariance.npy",
+                        "mf33_c0_nominal.npy", "mf33_c0_host.npy",
+                        "mf33_energy_grid_ev.npy", "mf33_multigroup_grid_ev.npy",
+                        "mf33_multigroup_relative_covariance.npy",
+                    ]
+                    np.save(output_path / "mf33_relative_covariance.npy", mf33_rel_cov_fine)
+                    np.save(output_path / "mf33_absolute_covariance.npy", _mf33_cov_abs)
+                    np.save(output_path / "mf33_c0_nominal.npy", mf33_c0_nom)
+                    np.save(output_path / "mf33_c0_host.npy", _c0_host)
+                    np.save(output_path / "mf33_energy_grid_ev.npy", mf33_energy_grid_ev)
+                    np.save(
+                        output_path / "mf33_multigroup_grid_ev.npy",
+                        _mf33_products.multigroup.group_boundaries_ev,
+                    )
+                    np.save(
+                        output_path / "mf33_multigroup_relative_covariance.npy",
+                        _mf33_products.multigroup.cov_rel_grouped,
+                    )
+                    if SAVE_MF33_C0_SAMPLES:
+                        _df_c0.to_parquet(
+                            output_path / "mf33_c0_samples.parquet",
+                            engine="pyarrow", index=False,
+                        )
+                        _mf33_sidecars.append("mf33_c0_samples.parquet")
+                    _logger.info(
+                        f"  [MF33] Sidecars written: {', '.join(_mf33_sidecars)}"
+                    )
+
+                    # Folded-host comparison (warn-only, never gates): fold the
+                    # host MF3 through each contributing experiment's TOF
+                    # kernel at the bin energy and compare against 4*pi*c0.
+                    try:
+                        _cmp_sub, _cmp_e, _cmp_dcs, _cmp_rel, _cmp_camp = [], [], [], [], []
+                        _rel_dcs_diag = np.sqrt(
+                            np.clip(np.diag(_mf33_rel_dcs), 0.0, None)
+                        )
+                        for _ib, _eidx in enumerate(energy_indices_kw):
+                            _nr_b = nr_by_idx_kw[_eidx]
+                            for _exp in (_nr_b.experiments_info or []):
+                                _cmp_sub.append(
+                                    f"{_exp.get('entry', '')}{_exp.get('subentry', '')}"
+                                )
+                                _cmp_e.append(float(_nr_b.energy_mev))
+                                _cmp_dcs.append(_MF33_FOUR_PI * mf33_c0_nom[_ib])
+                                _cmp_rel.append(float(_rel_dcs_diag[_ib]))
+                                _cmp_camp.append(str(_exp.get('entry', '')))
+                        if _cmp_sub:
+                            _folded_b = fold_host_mf3_at_points(
+                                _host_e_ev, _host_xs_b, _cmp_sub, _cmp_e,
+                                tof_params_cache,
+                                default_flight_path_m=FLIGHT_PATH_M,
+                                default_time_resolution_ns=DELTA_T_NS,
+                                default_delta_t_is_fwhm=DELTA_T_IS_FWHM,
+                            )
+                            _cmp_df = pd.DataFrame({
+                                "campaign": _cmp_camp,
+                                "energy_mev": _cmp_e,
+                                "sigma_folded_b": _folded_b,
+                                "sigma_el_dcs_b": _cmp_dcs,
+                                "rel_sigma_dcs": _cmp_rel,
+                            })
+                            _folded_stats = folded_c0_comparison_stats(_cmp_df)
+                            log_folded_comparison(
+                                _folded_stats, _logger,
+                                verbose=bool(VERBOSE_DIAGNOSTICS),
+                            )
+                    except Exception as _e_fold:
+                        _logger.warning(
+                            f"  [MF33] Folded-host comparison failed "
+                            f"(diagnostic only): {_e_fold}",
+                            console=True,
+                        )
+                except Exception as _e_mf33:
+                    _logger.error(
+                        f"[ERROR] [MF33] Fixed-shape c0 channel failed: {_e_mf33}",
+                        console=True,
+                    )
+                    mf33_rel_cov_fine = None
+                    mf33_sigma_host_bin = None
+
             _valid_mask_kw = np.zeros(len(energy_indices_kw) * max_degree, dtype=bool)
             for ie, e_idx in enumerate(energy_indices_kw):
                 nr = nr_by_idx_kw[e_idx]
@@ -3201,6 +4040,7 @@ def run_exfor_to_endf_sampling_v2(
         mc_mean_params = mc_mean_params[keep]
         cov_abs = cov_abs[np.ix_(keep, keep)]
         param_labels = [param_labels[i] for i in keep]
+        valid_mask_s7 = valid_mask_s7[keep]
         _logger.info(f"  Trimmed covariance from {max_degree} to {_eff} orders/bin "
                      f"(MAX_SAMPLE_ORDER={MAX_SAMPLE_ORDER}): {cov_matrix.shape[0]} params")
         max_degree = _eff
@@ -3347,7 +4187,7 @@ def run_exfor_to_endf_sampling_v2(
             mt_number=mt_number,
             all_samples=all_samples_endf,
             output_dir=str(output_path),
-            n_procs=N_PROCS,
+            n_procs=n_procs,
             energy_bins=energy_bins if use_splice else None,
             energy_range_mev=splice_range,
         )
@@ -3675,25 +4515,22 @@ def run_exfor_to_endf_sampling_v2(
                     pipe_emin = float(pipe_grid_ev[0])
                     pipe_emax = float(pipe_grid_ev[-1])
                     return merge_mf34(
-                        original_mf34=original_mf34_mt,
-                        pipeline_mf34=pipeline_mf34_obj,
-                        pipeline_energy_min_ev=pipe_emin,
-                        pipeline_energy_max_ev=pipe_emax,
+                        base_mf34=original_mf34_mt,
+                        overlay_mf34=pipeline_mf34_obj,
+                        overlay_energy_min_ev=pipe_emin,
+                        overlay_energy_max_ev=pipe_emax,
                     )
                 return pipeline_mf34_obj
 
             # Compute fine energy grid from midpoint bin boundaries.
             # Each energy point's fitting bin is [bin_lower, bin_upper] (midpoints
-            # to its neighbours).  These boundaries are contiguous
-            # (bin_upper[i] == bin_lower[i+1]), so they form a proper group
-            # structure that is consistent with the region where EXFOR data was
-            # actually fitted.
+            # to its neighbours).  These boundaries must be contiguous
+            # (bin_upper[i] == bin_lower[i+1]) to form a proper group structure —
+            # contiguous_grid_from_bins hard-asserts it (a gapped grid would be a
+            # semantically wrong ENDF grid).
             bin_by_idx = {b.index: b for b in energy_bins}
             valid_bins = [bin_by_idx[i] for i in energy_indices]
-            energy_grid_ev = np.empty(len(valid_bins) + 1)
-            for k, b in enumerate(valid_bins):
-                energy_grid_ev[k] = b.bin_lower_mev * 1e6
-            energy_grid_ev[-1] = valid_bins[-1].bin_upper_mev * 1e6
+            energy_grid_ev = contiguous_grid_from_bins(valid_bins)
 
             # Write fine-grid MF34 if requested
             if mf34_covariance_type in ("fine", "both"):
@@ -3735,6 +4572,27 @@ def run_exfor_to_endf_sampling_v2(
                     mf34_fine_nom = _maybe_merge(mf34_fine_nom, energy_grid_ev)
                     write_mf34_to_file(nominal_file, mf34_fine_nom, nominal_file)
                     _logger.info(f"  Fine MF34 added to nominal: {nominal_file}")
+
+                    # Fine MF33 goes in beside the fine MF34, on the same MF4
+                    # grid. Written here rather than with the multigroup MF33 so
+                    # it does not depend on the multigroup branch running.
+                    if record_c0_channel and _mf33_products is not None:
+                        try:
+                            write_mf33_products(
+                                _mf33_products,
+                                fine_endf=nominal_file,
+                                mg_endf=None,
+                                mt=mt_number,
+                                za=za, awr=awr, mat=mat,
+                                rebuild_mt1=MF33_REBUILD_MT1,
+                                pendf_path=_mf33_pendf_path,
+                                logger=_logger,
+                            )
+                        except Exception as _e_mf33f:
+                            _logger.error(
+                                f"[ERROR] [MF33] Fine MF33 write failed: {_e_mf33f}",
+                                console=True,
+                            )
 
             # Compute nominal-relative grouped covariance (needed for MG MF34 and/or Step 11)
             cov_grouped_nominal = None
@@ -3796,6 +4654,31 @@ def run_exfor_to_endf_sampling_v2(
                     )
                     if verbose_diagnostics:
                         log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-nz-nom", _logger, verbose=True)
+
+                # Between-experiment scatter floor at the multigroup level
+                # (mirror of the FG floor — without this the published MF34
+                # ignores APPLY_BETWEEN_EXP_FLOOR entirely).
+                cov_grouped_nominal, _bexp_mg_nom = apply_between_experiment_floor_mg(
+                    cov_rel=cov_grouped_nominal,
+                    nominal_results=nominal_results,
+                    valid_indices=valid_indices,
+                    groups=multigroup_result.groups,
+                    max_order=max_degree,
+                    logger=_logger,
+                    apply=apply_between_exp_floor,
+                )
+                if average_file:
+                    multigroup_result.cov_grouped, _bexp_mg_avg = apply_between_experiment_floor_mg(
+                        cov_rel=multigroup_result.cov_grouped,
+                        nominal_results=nominal_results,
+                        valid_indices=valid_indices,
+                        groups=multigroup_result.groups,
+                        max_order=max_degree,
+                        logger=_logger,
+                        apply=apply_between_exp_floor,
+                    )
+                if verbose_diagnostics:
+                    log_rel_std_profile(cov_grouped_nominal, max_degree, "MG post-between-exp", _logger, verbose=True)
 
                 if apply_cov_postprocessing:
                     # Step 2: Dip/spike smoothing & absent-order interpolation (MG)
@@ -3956,6 +4839,29 @@ def run_exfor_to_endf_sampling_v2(
                         )
                         if verbose_diagnostics:
                             log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-nz-nom", _logger, verbose=True)
+
+                    # Re-apply between-experiment floor on the regrouped MG cov.
+                    cov_grouped_nominal, _bexp_rg_nom = apply_between_experiment_floor_mg(
+                        cov_rel=cov_grouped_nominal,
+                        nominal_results=nominal_results,
+                        valid_indices=valid_indices,
+                        groups=multigroup_result.groups,
+                        max_order=max_degree,
+                        logger=_logger,
+                        apply=apply_between_exp_floor,
+                    )
+                    if average_file:
+                        multigroup_result.cov_grouped, _bexp_rg_avg = apply_between_experiment_floor_mg(
+                            cov_rel=multigroup_result.cov_grouped,
+                            nominal_results=nominal_results,
+                            valid_indices=valid_indices,
+                            groups=multigroup_result.groups,
+                            max_order=max_degree,
+                            logger=_logger,
+                            apply=apply_between_exp_floor,
+                        )
+                    if verbose_diagnostics:
+                        log_rel_std_profile(cov_grouped_nominal, max_degree, "RG post-between-exp", _logger, verbose=True)
 
                     if apply_cov_postprocessing:
                         # Step 2: Dip/spike smoothing & absent-order interpolation (RG)
@@ -4125,6 +5031,43 @@ def run_exfor_to_endf_sampling_v2(
                     shutil.copy(nominal_file, mg_nom_file)
                     write_mf34_to_file(mg_nom_file, mf34_mg_nom, mg_nom_file)
                     _logger.info(f"  Multigroup MF34 written to: {mg_nom_file}")
+
+                    # --- Phase-2: MF33 MT2 (elastic magnitude covariance) ----
+                    # The _mg product gets MF33 on the MF33 channel's OWN
+                    # adaptive grid — not the MF34 one. The shape and magnitude
+                    # channels have different correlation lengths, and ENDF lets
+                    # each MF/MT section carry its own boundaries. (The fine
+                    # MF33 was written beside the fine MF34 further up, and the
+                    # _mg file inherits it from the copy — this replaces it.)
+                    #
+                    # RANGE-MERGED into the host MF33 MT2: our matrix replaces
+                    # the host inside the working range, the host survives
+                    # outside, and in/out cross terms are zeroed (a documented
+                    # factorization assumption that Phase 3 measures, never a
+                    # format limit). Sibling MF33 MT sections (1, 4, 5, 16, 102,
+                    # 103) are preserved by the per-MT section writer.
+                    #
+                    # The MF3 central is intentionally left at the host value;
+                    # the DCS magnitude is 4*pi*c0, reconstructable from
+                    # mf33_c0_nominal.npy (no File-3 rewrite required).
+                    if record_c0_channel and _mf33_products is not None:
+                        try:
+                            write_mf33_products(
+                                _mf33_products,
+                                fine_endf=None,
+                                mg_endf=mg_nom_file,
+                                mt=mt_number,
+                                za=za, awr=awr, mat=mat,
+                                mg_representation=MF33_MG_REPRESENTATION,
+                                rebuild_mt1=MF33_REBUILD_MT1,
+                                pendf_path=_mf33_pendf_path,
+                                logger=_logger,
+                            )
+                        except Exception as _e_mf33w:
+                            _logger.error(
+                                f"[ERROR] [MF33] MF33 write failed: {_e_mf33w}",
+                                console=True,
+                            )
 
             elif mf34_covariance_type in ("multigroup", "both") and cov_grouped_nominal is None:
                 if multigroup_failure_reason:
@@ -4323,8 +5266,11 @@ if __name__ == "__main__":
         min_points_per_band=MIN_POINTS_PER_BAND,
         max_band_scale=MAX_BAND_SCALE_FACTOR,
         tau_smoothing_window=TAU_SMOOTHING_WINDOW,
+        tau_prior_floor=TAU_PRIOR_FLOOR,
+        tau_prior_neff_threshold=TAU_PRIOR_NEFF_THRESHOLD,
+        tau_prior_percentile=TAU_PRIOR_PERCENTILE,
         sigma_norm_systematic=NORM_SYSTEMATIC_SIGMA,
-        sigma_norm_elastic=NORM_ELASTIC_SIGMA,
+        sigma_norm_common_mode=NORM_COMMON_MODE_SIGMA,
         use_model_averaging=USE_MODEL_AVERAGING,
         min_degree_for_averaging=MIN_DEGREE_FOR_AVERAGING,
         n_eff_warning_threshold=N_EFF_WARNING_THRESHOLD,
@@ -4372,6 +5318,7 @@ if __name__ == "__main__":
         save_tmc_parquet=SAVE_TMC_PARQUET,
         save_raw_kw_parquet=SAVE_RAW_KW_PARQUET,
         save_multigroup_diagnostics_csv=SAVE_MULTIGROUP_DIAGNOSTICS_CSV,
+        save_nominal_fits=SAVE_NOMINAL_FITS,
         # ACE common options
         ace_temperatures=ACE_TEMPERATURES,
         ace_njoy_exe=ACE_NJOY_EXE,

@@ -1,2 +1,8 @@
-LIBRARY_VERSION = "0.2.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    LIBRARY_VERSION = version("kika-nd")
+except PackageNotFoundError:
+    LIBRARY_VERSION = "0.0.0+local"
+
 AUTHOR = "Juan Antonio Monleon de la Lluvia <juanmonleon96@gmail.com>"

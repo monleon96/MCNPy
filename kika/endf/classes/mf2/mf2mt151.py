@@ -8,6 +8,7 @@ import numpy as np
 
 from ..mt import MT
 from ...utils import (
+    format_endf_send_record,
     format_endf_data_line,
     format_data_values,
     format_tab1,
@@ -43,11 +44,21 @@ class Resonance:
 
 @dataclass
 class LValueBlock:
-    """Resonances for a single orbital angular momentum *l*."""
+    """Resonances for a single orbital angular momentum *l*.
+
+    ``apl_or_qx`` is field C2 of the block header, whose meaning depends on the
+    parent range's LRF — ``APL``, the l-dependent scattering radius, under LRF=3
+    (Reich-Moore), and ``QX``, the competitive-reaction Q value, under LRF=1/2.
+    It is kept under the raw name for the same reason ``Resonance.c3..c6`` are:
+    naming it for one formalism would be wrong under the other. Use
+    :meth:`EnergyRange.scattering_radius_for_l`, which knows the LRF.
+    """
     awri: float         # Isotope mass ratio
     l: int              # Orbital angular momentum quantum number
     num_resonances: int # NRS
     resonances: List[Resonance] = field(default_factory=list)
+    apl_or_qx: float = 0.0  # C2: APL (LRF=3) or QX (LRF=1/2)
+    lrx: int = 0            # C4: competitive-width flag
 
 
 @dataclass
@@ -65,6 +76,11 @@ class ResolvedResonanceRange:
     nls: int            # Number of l-values
     nlsc: int           # Number of l-values for convergence
     l_values: List[LValueBlock] = field(default_factory=list)
+    # LAD: 1 when MF4 angular distributions can be computed from these
+    # parameters, 0 otherwise. Meaningful for LRF=3 only. Defaulted rather than
+    # required because it was neither parsed nor written until 2026-08-07, so
+    # every existing caller constructs this class without it.
+    lad: int = 0
 
 
 @dataclass
@@ -338,6 +354,28 @@ class EnergyRange:
         None,
     ] = None
     ap_e: Optional[EnergyDependentScatteringRadius] = None
+
+    def scattering_radius_for_l(self, l: int) -> Optional[float]:
+        """AP for orbital angular momentum *l*, in fm, or *None* if not resolved.
+
+        ENDF-6 lets a Reich-Moore (LRF=3) range give each l-block its own
+        scattering radius in field C2, falling back to the range-level AP when
+        that field is zero. JEFF-4.0 Fe-56 uses this: AP = 0.5444 fm overall
+        but APL = 0.5002 fm for L=1, which shifts the p-wave hard-sphere phase
+        shift and so the l=1 cross sections.
+
+        Under LRF=1/2 the same field is QX, a Q value, and must never be read
+        as a radius.
+        """
+        if self.lru != 1 or not isinstance(self.parameters, ResolvedResonanceRange):
+            return None
+
+        if self.lrf == 3:
+            for block in self.parameters.l_values:
+                if block.l == l and block.apl_or_qx:
+                    return block.apl_or_qx
+
+        return self.parameters.ap
 
 
 @dataclass
@@ -670,18 +708,27 @@ class MF2MT151(MT):
 
                 elif isinstance(er.parameters, ResolvedResonanceRange):
                     p = er.parameters
+                    # CONT: SPI, AP, LAD, 0, NLS, NLSC. LAD was written as a
+                    # hardcoded 0 until 2026-08-07 and was not parsed either, so
+                    # a tape declaring "MF4 can be computed from these
+                    # parameters" came back saying the opposite. Th-232
+                    # JEFF-4.0 is LAD=1.
                     lines.append(_cont(
-                        [p.spi, p.ap, 0, 0, p.nls, p.nlsc],
+                        [p.spi, p.ap, p.lad, 0, p.nls, p.nlsc],
                         mat, mf, mt, ln,
                         [ENDF_FORMAT_FLOAT, ENDF_FORMAT_FLOAT,
-                         ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT_ZERO,
+                         ENDF_FORMAT_INT, ENDF_FORMAT_INT_ZERO,
                          ENDF_FORMAT_INT, ENDF_FORMAT_INT],
                     ))
                     ln += 1
 
                     for lv in p.l_values:
+                        # C2 (APL or QX) and C4 (LRX) were hardcoded to 0 here,
+                        # so a tape written back through kika lost its
+                        # l-dependent scattering radius.
                         lines.append(_cont(
-                            [lv.awri, 0, lv.l, 0, 6 * lv.num_resonances, lv.num_resonances],
+                            [lv.awri, lv.apl_or_qx, lv.l, lv.lrx,
+                             6 * lv.num_resonances, lv.num_resonances],
                             mat, mf, mt, ln,
                             [ENDF_FORMAT_FLOAT, ENDF_FORMAT_FLOAT,
                              ENDF_FORMAT_INT, ENDF_FORMAT_INT_ZERO,
@@ -708,11 +755,7 @@ class MF2MT151(MT):
                     ln = _serialize_rml(er.parameters, lines, mat, mf, mt, ln)
 
         # SEND record
-        lines.append(format_endf_data_line(
-            [0, 0, 0, 0, 0, 0],
-            mat, mf, 0, 99999,
-            formats=[ENDF_FORMAT_INT] * 6,
-        ))
+        lines.append(format_endf_send_record(mat, mf))
 
         return "\n".join(lines)
 
@@ -898,13 +941,20 @@ def _serialize_rml(p, lines, mat, mf, mt, ln):
     ))
     ln += 1
 
-    # Particle pairs LIST
+    # Particle pairs LIST: 0.0, 0.0, NPP, 0, 12*NPP, 2*NPP
+    #
+    # L1 is **NPP**, and it was written as a hardcoded 0 until 2026-08-07. The
+    # counts either side of it were right, so the section stayed structurally
+    # valid and self-consistent -- NPP is recoverable from 2*NPP, which is
+    # exactly why the parser never noticed it was reading a field the writer
+    # did not write. It cost one differing line out of 163 on Fe-57 JEFF-4.0,
+    # and it is the reason an MF2 encoder could not be gated on byte identity.
     npp = len(p.particle_pairs)
     lines.append(_cont(
-        [p.spi, p.ap, 0, 0, 12 * npp, 2 * npp],
+        [p.spi, p.ap, npp, 0, 12 * npp, 2 * npp],
         mat, mf, mt, ln,
         [ENDF_FORMAT_FLOAT, ENDF_FORMAT_FLOAT,
-         ENDF_FORMAT_INT_ZERO, ENDF_FORMAT_INT_ZERO,
+         ENDF_FORMAT_INT, ENDF_FORMAT_INT_ZERO,
          ENDF_FORMAT_INT, ENDF_FORMAT_INT],
     ))
     ln += 1

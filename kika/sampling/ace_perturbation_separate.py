@@ -44,7 +44,17 @@ from typing import List, Union, Optional, Dict, Tuple
 from multiprocessing import Pool
 from datetime import datetime
 
-from kika.sampling.generators import generate_samples
+from kika.sampling.carrier_blocks import (
+    cross_section_carrier_blocks,
+    cross_section_carrier_index,
+)
+from kika.sampling.multigroup_draw import (
+    SoftAutofixWarning,
+    apply_legacy_autofix,
+    draw_relative_factors,
+    mark_soft_autofix_survived,
+    soft_autofix_missed,
+)
 from kika.ace.parsers import read_ace
 from kika.ace.writers.write_ace import write_ace
 from kika._utils import temperature_to_suffix
@@ -604,28 +614,58 @@ def perturb_seprate_ACE_files(
         # Console: Show sample generation start
         _logger.info(f"  [INFO] [ACE] Generating {num_samples} samples for ZAID {zaid}", console=True)
         
+        # The repairs run ahead of the draw, as a plan. No ``mt_thresholds``
+        # on this path -- this pipeline never extracted them, and passing them
+        # now would be a change to what is sampled, not a migration.
         try:
-            factors, mt_perturb_final, fix_info = generate_samples(
-                cov                  = cov,
-                space                = space,
-                n_samples            = num_samples,
-                decomposition_method = decomposition_method,
-                sampling_method      = sampling_method,
-                seed                 = None if seed is None else seed + zaid,
-                mt_numbers           = mt_perturb,
-                energy_grid          = energy_grid,
-                autofix              = autofix,
-                high_val_thresh      = high_val_thresh,
-                accept_tol           = accept_tol,
-                psd_method           = psd_method,
-                max_relative_std     = max_relative_std,
-                verbose              = verbose,
-                label                = str(zaid),
+            cov, mt_perturb_final, fix_info = apply_legacy_autofix(
+                cov, autofix,
+                mt_numbers=mt_perturb,
+                high_val_thresh=high_val_thresh,
+                accept_tol=accept_tol,
+                verbose=verbose,
+                logger=_logger,
+            )
+            soft_missed = soft_autofix_missed(autofix, fix_info)
+            (block_key, joint), = cross_section_carrier_blocks(cov)
+            (_key, block_index), = cross_section_carrier_index(cov).items()
+            try:
+                factors, draw_info = draw_relative_factors(
+                    joint,
+                    num_samples,
+                    key                  = block_key,
+                    pairs                = block_index["pairs"],
+                    stride               = block_index["stride"],
+                    bins                 = energy_grid,
+                    space                = space,
+                    decomposition_method = decomposition_method,
+                    sampling_method      = sampling_method,
+                    seed                 = None if seed is None else seed + zaid,
+                    psd_method           = psd_method,
+                    max_relative_std     = max_relative_std,
+                    verbose              = verbose,
+                    logger               = _logger,
+                    label                = str(zaid),
+                )
+            except Exception as exc:
+                if soft_missed:
+                    min_eigenvalue = fix_info.get("min_eigenvalue", float("nan"))
+                    raise SoftAutofixWarning(
+                        f"Soft autofix failed to meet threshold "
+                        f"(λ_min={min_eigenvalue:.4e} < {accept_tol:.4e}) and "
+                        f"decomposition failed: {exc}"
+                    ) from exc
+                raise
+            if soft_missed:
+                mark_soft_autofix_survived(fix_info)
+            _logger.info(
+                f"  [INFO] [ACE] zaid={zaid}: conditioning plan = "
+                f"{[s.remedy for s in draw_info['plan'].steps] or ['none']}, "
+                f"{draw_info['n_inert_dropped']} inert bin(s) dropped"
             )
         except Exception as e:
-            # Import the exception classes to check for them
-            from kika.sampling.generators import CovarianceFixError, SoftAutofixWarning
-            
+            from kika.sampling.multigroup_draw import CovarianceFixError
+
             if isinstance(e, SoftAutofixWarning):
                 # Soft autofix failed threshold but decomposition also failed
                 _logger.error(f"  [ERROR] [ACE] Soft autofix warning for isotope {zaid}")

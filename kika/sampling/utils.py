@@ -15,6 +15,26 @@ from kika.cov.parse_covmat import read_coverx, read_covfil, read_boxer, read_sca
 from kika._utils import zaid_to_symbol
 
 
+def make_ace_sample_paths(output_dir: Union[str, os.PathLike], sample_index: int):
+    """
+    Build the per-sample ACE/xsdir output directories under the new layout
+    (shared by endf_perturbation, pendf_perturbation, and combined_perturbation).
+
+    Returns
+    -------
+    ace_dir : str   — output_dir/ace/<NNNN>
+    xsdir_dir : str — output_dir/ace/<NNNN>/xsdir
+    sample_str : str — zero-padded NNNN
+
+    All temperatures and isotopes for a given sample live in the same
+    directory; per-(ZAID, ext) filenames disambiguate them.
+    """
+    sample_str = f"{sample_index + 1:04d}"
+    ace_dir = os.path.join(str(output_dir), "ace", sample_str)
+    xsdir_dir = os.path.join(ace_dir, "xsdir")
+    return ace_dir, xsdir_dir, sample_str
+
+
 def _format_energy_group_name(energy_grid: List[float], group_index: int) -> str:
     """
     Format energy group name using actual energy boundary values in scientific notation.
@@ -56,18 +76,31 @@ class DualLogger:
     story in the log file without console spam.
     """
     
-    def __init__(self, log_file: str, console_level: str = 'CRITICAL'):
+    def __init__(self, log_file: str, console_level: str = 'CRITICAL', mode: str = 'w'):
+        """
+        Parameters
+        ----------
+        log_file
+            Destination log path.
+        console_level
+            (Reserved.) Console handler level threshold; defaults to a value
+            above CRITICAL so console output is opt-in via ``console=True``.
+        mode
+            File-handler mode: ``'w'`` (default) starts a new file, ``'a'``
+            appends. The orchestrator pipeline opens with ``'w'``; sub-
+            pipelines that want to share the same log file pass ``'a'``.
+        """
         self.log_file = log_file
-        
+
         # Create logger
         self.logger = logging.getLogger('sampling_perturbation')
         self.logger.setLevel(logging.DEBUG)
-        
+
         # Clear existing handlers
         self.logger.handlers.clear()
-        
+
         # File handler - gets everything at DEBUG level
-        file_handler = logging.FileHandler(log_file, mode='w')
+        file_handler = logging.FileHandler(log_file, mode=mode)
         file_handler.setLevel(logging.DEBUG)
         file_formatter = logging.Formatter('%(message)s')
         file_handler.setFormatter(file_formatter)
@@ -204,6 +237,8 @@ def _write_isotope_parquet(
     energy_grid: List[float],
     verbose: bool = True,
     logger=None,
+    extra_metadata: Optional[Dict] = None,
+    param_labels: Optional[List[str]] = None,
 ) -> Optional[Dict]:
     """
     Write per-isotope perturbation factors to a parquet file.
@@ -231,24 +266,53 @@ def _write_isotope_parquet(
         Logger to use; if None, falls back to ``_get_logger()``. Workers
         should pass their own ``BufferedLogger`` to avoid touching the
         shared module-level logger.
+    extra_metadata : dict, optional
+        Extra per-isotope facts to carry into ``metadata.json`` alongside the
+        ZAID. Used by the nu-bar pipeline to flag which sampled MTs were
+        actually applied — MF31 samples the redundant total, but
+        ``perturb_nubar_family`` derives it from the components and discards
+        its block, so those columns are present in the parquet without being
+        free parameters. Other pipelines leave it unset.
+    param_labels : list of str, optional
+        Column names for the parameter axis, overriding the
+        ``{symbol}_MT{mt}_{group}`` construction below. Must have one entry per
+        column of *factors*, in the same order.
+
+        Needed because that construction is the outer product of
+        ``mt_numbers`` and one shared ``energy_grid``, which cannot express a
+        parameter axis with any other shape. The PFNS pipeline's columns are
+        ``(incident-energy band, outgoing group)`` and its bands do not share a
+        grid — 84 groups in one and 641 in the next on ENDF/B-VIII.1 U-235 — so
+        it passes its own labels. Any future non-MT-indexed pipeline can do the
+        same; existing callers leave it unset and are unaffected.
 
     Returns
     -------
     fragment : dict or None
-        ``{"zaid": int}`` on success, or ``None`` if no columns were
-        produced (caller should not append to metadata in that case).
+        ``{"zaid": int, **extra_metadata}`` on success, or ``None`` if no
+        columns were produced (caller should not append to metadata in that
+        case).
     """
     symbol = zaid_to_symbol(zaid)
 
-    n_groups = len(energy_grid) - 1
     columns_data = {'Sample_ID': np.arange(1, factors.shape[0] + 1, dtype='int32')}
 
-    for mt_idx, mt in enumerate(mt_numbers):
-        for grp in range(n_groups):
-            energy_group_name = _format_energy_group_name(energy_grid, grp)
-            col_name = f"{symbol}_MT{mt}_{energy_group_name}"
-            start_idx = mt_idx * n_groups + grp
-            columns_data[col_name] = factors[:, start_idx]
+    if param_labels is not None:
+        if len(param_labels) != factors.shape[1]:
+            raise ValueError(
+                f"param_labels has {len(param_labels)} entries for "
+                f"{factors.shape[1]} parameter columns"
+            )
+        for index, label in enumerate(param_labels):
+            columns_data[label] = factors[:, index]
+    else:
+        n_groups = len(energy_grid) - 1
+        for mt_idx, mt in enumerate(mt_numbers):
+            for grp in range(n_groups):
+                energy_group_name = _format_energy_group_name(energy_grid, grp)
+                col_name = f"{symbol}_MT{mt}_{energy_group_name}"
+                start_idx = mt_idx * n_groups + grp
+                columns_data[col_name] = factors[:, start_idx]
 
     log = logger if logger is not None else _get_logger()
 
@@ -265,7 +329,7 @@ def _write_isotope_parquet(
         n_cols = len(columns_data) - 1
         log.info(f"[MATRIX] Saved {n_cols} columns for ZAID {zaid}")
 
-    return {"zaid": zaid}
+    return {"zaid": zaid, **(extra_metadata or {})}
 
 
 def _merge_isotope_metadata(matrix_dir: str, fragments: List[Dict]) -> None:
@@ -282,6 +346,9 @@ def _merge_isotope_metadata(matrix_dir: str, fragments: List[Dict]) -> None:
         Directory holding ``metadata.json``.
     fragments : list of dict
         Each fragment must have a ``"zaid"`` key; appended in input order.
+        Any other keys are recorded under ``isotope_details[<zaid>]`` — a
+        fragment that carries only ``"zaid"`` adds nothing there, so pipelines
+        that do not use it see an unchanged ``metadata.json``.
     """
     if not fragments:
         return
@@ -293,8 +360,13 @@ def _merge_isotope_metadata(matrix_dir: str, fragments: List[Dict]) -> None:
             metadata = json.load(f)
         for frag in fragments:
             zaid = frag.get("zaid")
-            if zaid is not None and zaid not in metadata["isotopes_processed"]:
+            if zaid is None:
+                continue
+            if zaid not in metadata["isotopes_processed"]:
                 metadata["isotopes_processed"].append(zaid)
+            details = {k: v for k, v in frag.items() if k != "zaid"}
+            if details:
+                metadata.setdefault("isotope_details", {})[str(zaid)] = details
         with open(metadata_file, 'w') as f:
             json.dump(metadata, f, indent=2)
     except Exception:
@@ -342,14 +414,22 @@ def _update_master_perturbation_matrix(
 def _finalize_master_perturbation_matrix(matrix_dir: str, verbose: bool = True) -> str:
     """
     Combine all isotope-specific parquet files into a single master matrix.
-    
+
+    The parts directory is removed at the end, so ``metadata.json`` is copied
+    out beside the master parquet first — it is the only run manifest written
+    to disk (the caller's summary dict lives in memory), and it is what says
+    which of the parquet's columns were actually applied. A nu-bar run samples
+    the redundant total but derives it from the sum rule, so three of Pu-241's
+    MTs appear as columns and only two are free parameters; without the copy
+    that distinction died with the temporary directory.
+
     Parameters
     ----------
     matrix_dir : str
         Directory containing isotope-specific parquet files
     verbose : bool
         Enable verbose output
-        
+
     Returns
     -------
     str
@@ -410,6 +490,22 @@ def _finalize_master_perturbation_matrix(matrix_dir: str, verbose: bool = True) 
         logger.info(f"[MATRIX] [FINALIZE] Master matrix created: {n_samples} samples × {n_factor_cols} parameters")
         logger.info(f"[MATRIX] [FINALIZE] File: {os.path.basename(master_file)}")
     
+    # Preserve the run manifest before the parts directory goes away.
+    try:
+        import shutil
+        meta_out = os.path.join(
+            parent_dir, f"perturbation_matrix_{timestamp}_metadata.json"
+        )
+        if os.path.exists(metadata_file):
+            shutil.copyfile(metadata_file, meta_out)
+            if verbose and logger:
+                logger.info(
+                    f"[MATRIX] [FINALIZE] Manifest: {os.path.basename(meta_out)}"
+                )
+    except Exception as e:
+        if verbose and logger:
+            logger.warning(f"[MATRIX] [FINALIZE] Could not save the manifest: {e}")
+
     # Clean up temporary files
     try:
         import shutil
@@ -421,6 +517,60 @@ def _finalize_master_perturbation_matrix(matrix_dir: str, verbose: bool = True) 
             logger.warning(f"[MATRIX] [FINALIZE] Could not clean up temporary directory: {e}")
     
     return master_file
+
+def resolve_signed_request(
+    request: List[int],
+    available: List[int],
+    group_map: Optional[List] = None,
+) -> tuple:
+    """Apply positive/negative signed-list semantics to an integer request.
+
+    Rules:
+      * empty request          → all entries in ``available``
+      * positives only         → those entries
+      * negatives only         → ``available`` minus expanded negatives
+      * mixed positive/negative → positives minus expanded negatives
+
+    A negative entry that matches a key in ``group_map`` (a list of
+    ``(key, iterable)`` pairs like :data:`kika._constants.MT_GROUPS`)
+    expands to drop the whole group too. Pass ``group_map=None`` for
+    plain "drop only the explicit negatives" semantics — appropriate for
+    indices with no grouping (e.g. Legendre coefficients).
+
+    Returns ``(resolved, log_lines)`` where ``log_lines`` is a list of
+    user-facing summary strings the caller writes via the active logger.
+    """
+    log_lines: List[str] = []
+    available_set = {int(x) for x in available}
+
+    if not request:
+        return sorted(available_set), log_lines
+
+    positives = sorted({int(x) for x in request if int(x) > 0})
+    negatives = sorted({abs(int(x)) for x in request if int(x) < 0})
+
+    expanded_negatives = set(negatives)
+    if group_map and negatives:
+        for excluded in negatives:
+            for key, rng in group_map:
+                if key == excluded:
+                    expanded_negatives.update(int(p) for p in rng)
+                    break
+
+    start = set(positives) if positives else available_set
+    resolved = sorted(start - expanded_negatives)
+
+    if negatives:
+        explicit = sorted(set(negatives))
+        also = sorted(expanded_negatives - set(negatives))
+        if also:
+            log_lines.append(
+                f"Excluding entries: {explicit} (group expansion also drops {also})"
+            )
+        else:
+            log_lines.append(f"Excluding entries: {explicit}")
+    return resolved, log_lines
+
 
 def normalize_mt_list(
     mt_list: Union[List[int], List[List[int]], None],

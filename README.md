@@ -1,5 +1,6 @@
 # KIKA
 
+[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](https://github.com/juanmonleon/kika)
 [![Documentation Status](https://readthedocs.org/projects/kika/badge/?version=latest)](https://kika.readthedocs.io/en/latest/?badge=latest)
 [![PyPI](https://img.shields.io/pypi/v/kika-nd)](https://pypi.org/project/kika-nd/)
 [![Python](https://img.shields.io/pypi/pyversions/kika-nd)](https://pypi.org/project/kika-nd/)
@@ -25,7 +26,35 @@ A comprehensive Python toolkit for nuclear data analysis, Monte Carlo simulation
 ### Nuclear Data
 - **ACE**: Parse ACE format nuclear data files
 - **ENDF**: Read Evaluated Nuclear Data Files
+- **GNDS**: Read and write GNDS 2.0/2.1 — see *What "GNDS support" means here*
 - **Covariance**: Handle covariance matrices from SCALE and NJOY
+
+#### What "GNDS support" means here
+
+kika reads and writes GNDS. It does **not** implement GNDS 2.1, and those are
+different claims: it covers the parts the ENDF/B-VIII.1 neutron evaluations
+use. Rather than leave you to find the edge, the library states it:
+
+```python
+>>> import kika.gnds
+>>> print(kika.gnds.capabilities().summary())
+300 of GNDS's nodes: 134 full, 7 partial, 159 unsupported (17 lost without a report line); and 12 nodes kika names that gnds.xsd does not declare
+```
+
+The left-hand column is every element `gnds.xsd` and `covariances.xsd`
+declare, so a node kika does not touch is listed as unsupported rather than
+being missing from the list. Every row says why, citing a section of the
+specification or a line of the source. In short: the covariance chapter (§25)
+is complete; the thermal scattering law and the double-differential cross
+sections are not read at all.
+
+```python
+>>> print(kika.gnds.capabilities(coverage="partial").text())
+>>> print(kika.gnds.capabilities(group="thermalScattering").text())
+```
+
+`capabilities()` says what the library can lose without opening a file; the
+`report` on a suite you read says what your file lost.
 
 ### Additional Tools
 - Energy group structure definitions
@@ -77,6 +106,48 @@ ace_data = kika.read_ace("path/to/ace_file")
 # Read covariance matrices
 cov = kika.read_coverx("path/to/covmat_file")  # text or binary, auto-detected
 ```
+
+### SDF uncertainty convention
+
+KIKA follows the SCALE SDF convention: reaction error arrays and e0 are
+absolute one-sigma standard deviations. Energy boundaries are represented
+internally in MeV and written to SDF files in eV.
+
+```python
+# Standard SCALE/KIKA SDF (absolute uncertainties)
+sdf = kika.read_sdf("profile.sdf")
+
+# Historical KIKA SDF written with relative uncertainties
+legacy = kika.read_sdf("old_profile.sdf", uncertainty_convention="relative")
+```
+
+### Sensitivity/covariance alignment and c-k
+
+UQ calculations use a format-neutral `SensitivityProfile`. Alignment is exact
+by default: energy grids and units must agree, and missing covariance raises an
+actionable error instead of silently reducing the calculation.
+
+```python
+from kika.UQ import align_sensitivity_covariance, similarity_ck
+import kika.benchmarks as benchmarks
+
+application = kika.read_sdf("application.sdf").to_sensitivity_profile()
+benchmark = benchmarks.get_sensitivity_profile(profile_id)
+
+aligned = align_sensitivity_covariance(
+    [application, benchmark], covariance,
+    alias_policy="tsurfer",       # explicit SCALE/TSURFER aliases
+    missing="drop",               # explicit opt-in; inspect aligned.report
+)
+ck = similarity_ck(application, benchmark, covariance)
+ranking = benchmarks.rank_benchmarks_by_ck(
+    application, covariance, benchmark_ids=candidate_ids
+)
+```
+
+Ranking and propagation never condense grids implicitly. Until explicit SDF
+condensation is implemented, candidates must use the same grid as the supplied
+covariance.
 
 ## Documentation
 

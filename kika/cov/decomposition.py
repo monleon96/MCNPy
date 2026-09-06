@@ -6,7 +6,7 @@ CrossSectionCovariance and LegendreCovariance classes without code duplication.
 """
 
 import numpy as np
-from typing import Dict, List, Optional, Sequence, Tuple, Protocol, runtime_checkable
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -180,7 +180,7 @@ _PSD_AUTO_THRESHOLD: float = 1e-2
 # the unconverged projection.
 _HIGHAM_FALLBACK_FROB_THRESHOLD: float = 1e-2
 
-_VALID_PSD_METHODS = frozenset({"auto", "higham", "clip", "none"})
+_VALID_PSD_METHODS = frozenset({"auto", "higham", "clip", "clip_rescale", "none"})
 
 
 def _validate_psd_method(psd_method: str) -> None:
@@ -238,6 +238,95 @@ def _resolve_psd_auto(
             logger, verbose,
         )
     return resolved, eigvals, eigvecs
+
+
+def clip_projection(
+    matrix: np.ndarray,
+    *,
+    floor: float = 0.0,
+    symmetrise: bool = True,
+    passthrough_when_clean: bool = False,
+    eigvals: Optional[np.ndarray] = None,
+    eigvecs: Optional[np.ndarray] = None,
+    verbose: bool = True,
+    logger=None,
+    label: str = "clip",
+) -> Tuple[np.ndarray, Dict]:
+    """``V·max(Λ, floor)·Vᵀ`` — the PSD projection, written down once.
+
+    Four copies of these three lines were in the tree: two inside
+    :func:`nearest_psd_higham`, one inside :func:`clip_and_rescale`, one inside
+    :func:`svd_decomposition`, and a fifth in
+    :func:`kika.cov.conditioning._clipped`. Consolidating them turned up
+    something worth stating rather than quietly averaging away: **they were not
+    the same projection.** They differ in three ways, each of which is
+    load-bearing at the last bits, so each is a parameter here and every call
+    site keeps exactly the arithmetic it had.
+
+    * *floor*. Higham and ``clip_rescale`` clip to ``eigval_floor`` (a small
+      positive number), the sampling paths clip to ``0.0``. A strictly positive
+      floor makes the result positive *definite* rather than semi-definite,
+      which is what a Cholesky downstream needs and what an SVD does not.
+    * *symmetrise*. ``(V·Λ·Vᵀ + ·ᵀ)/2`` is not a no-op: the product is
+      mathematically symmetric and numerically is not, and Higham's inner loop
+      deliberately skips the fold-up because Dykstra's correction is taken on
+      the raw projection.
+    * *passthrough_when_clean*. ``svd_decomposition`` leaves a matrix with no
+      negative eigenvalue **untouched** rather than rebuilding it from its own
+      eigendecomposition. That is what makes ``psd_method="clip"`` a true no-op
+      on an already-PSD matrix, and it is what
+      :func:`kika.cov.conditioning.apply_plan` has to reproduce for a
+      conditioned matrix drawn with ``psd_method="none"`` to be bit-identical
+      to the same matrix drawn with ``psd_method="clip"``.
+
+    ``A @ np.diag(w)`` and ``A * w[None, :]`` are bit-identical for finite *A*
+    — the gemm adds exact zeros — so the two spellings the copies used are not
+    a fourth difference, and the faster one is used here.
+
+    Parameters
+    ----------
+    eigvals, eigvecs
+        A decomposition of *matrix* already in hand, reused rather than
+        recomputed. Callers that need the eigendecomposition for their own
+        reasons — ``psd_method="auto"``, which resolves on the spectrum, and
+        Higham's loop, which counts SVD fallbacks — pass it in.
+
+    Returns
+    -------
+    (matrix, info)
+        ``info`` carries ``n_negative``, ``min_eigenvalue`` and ``clipped``
+        (False when *passthrough_when_clean* returned the input unchanged).
+    """
+    if eigvals is None or eigvecs is None:
+        eigvals, eigvecs = _robust_eigh(matrix, label=label, verbose=verbose, logger=logger)
+
+    n_negative = int(np.sum(eigvals < 0))
+    info = {
+        "n_negative": n_negative,
+        "min_eigenvalue": float(eigvals.min()) if eigvals.size else 0.0,
+        "clipped": True,
+    }
+
+    if passthrough_when_clean and n_negative == 0:
+        info["clipped"] = False
+        if verbose:
+            _log_message(
+                f"[COV] [{label.upper()}] No negative eigenvalues - matrix left as it stands",
+                logger, verbose,
+            )
+        return matrix, info
+
+    if verbose and n_negative:
+        _log_message(
+            f"[COV] [{label.upper()}] Clipped {n_negative} negative eigenvalues "
+            f"(min={info['min_eigenvalue']:.3e})",
+            logger, verbose,
+        )
+
+    projected = (eigvecs * np.maximum(eigvals, floor)[None, :]) @ eigvecs.T
+    if symmetrise:
+        projected = (projected + projected.T) / 2.0
+    return projected, info
 
 
 def cap_variance_congruence(
@@ -686,6 +775,137 @@ def rescale_threshold_bins_congruence(
     return cov_rescaled, info
 
 
+def flag_outlier_variance_bins(
+    cov_mat: np.ndarray,
+    param_pairs: Sequence[Tuple[int, int]],
+    num_groups: int,
+    bins: Sequence[float],
+    *,
+    outlier_factor: float = 1000.0,
+    min_groups_for_median: int = 4,
+    skip_indices: Optional[Sequence[int]] = None,
+    space: str = "log",
+    verbose: bool = True,
+    logger=None,
+    label: str = "",
+) -> Tuple[List[int], List[float], List[Dict]]:
+    """
+    Flag diagonal entries σ²_i > ``outlier_factor`` × per-MT median(σ²) as
+    statistical outliers. Target = per-MT median.
+
+    Catches evaluator-written placeholder/filler variances that aren't near
+    a reaction threshold (so ``flag_threshold_bins`` won't catch them) and
+    would otherwise saturate the global variance cap. Concrete failure mode:
+    JEFF-4.0 Mn-55 MT=856 (lumped n,α ladder) carries σ²_rel ~ 10⁹ in bins
+    above ~22 MeV where σ̄ collapses; the data is parsed as already-relative
+    so the σ̄-floor in the abs→rel conversion never sees it.
+
+    Same return signature as ``flag_threshold_bins`` so
+    ``rescale_threshold_bins_congruence`` consumes the output unchanged.
+
+    ``outlier_factor`` is intentionally large (default 1000) so only
+    physically-impossible outliers are caught — bins at 5–10× the median
+    represent legitimate heterogeneity in measurement quality and are left
+    alone.
+
+    Parameters
+    ----------
+    cov_mat : (n,n) np.ndarray
+    param_pairs : list of (zaid, mt) tuples
+    num_groups : int
+    bins : array-like, length ``num_groups + 1``
+    outlier_factor : float
+        Bins with σ² > ``outlier_factor`` × per-MT median are flagged.
+    min_groups_for_median : int
+        Minimum same-MT bins (excluding the flagged one) required to
+        compute the median target. If fewer, the bin is not flagged.
+    skip_indices : sequence of int, optional
+        Flat indices to exclude from outlier consideration entirely
+        (typically those already rescaled by ``flag_threshold_bins``).
+    space, verbose, logger, label : same as ``flag_threshold_bins``.
+    """
+    bins_arr = np.asarray(bins, dtype=float)
+    diag = np.diag(cov_mat)
+
+    skip_set: Set[int] = set(int(i) for i in (skip_indices or []))
+
+    flagged_indices: List[int] = []
+    targets: List[float] = []
+    detection_log: List[Dict] = []
+
+    for pair_idx, (zaid, mt) in enumerate(param_pairs):
+        block_start = pair_idx * num_groups
+        block_diag = diag[block_start: block_start + num_groups]
+        finite_pos = block_diag[np.isfinite(block_diag) & (block_diag > 0)]
+        if finite_pos.size < min_groups_for_median:
+            continue
+        median_var = float(np.median(finite_pos))
+        if median_var <= 0.0:
+            continue
+        threshold = outlier_factor * median_var
+
+        for g in range(num_groups):
+            flat = block_start + g
+            if flat in skip_set:
+                continue
+            cur = float(diag[flat])
+            if not np.isfinite(cur) or cur <= 0.0 or cur <= threshold:
+                continue
+
+            other_mask = np.ones(num_groups, dtype=bool)
+            other_mask[g] = False
+            other_vals = block_diag[other_mask]
+            other_pos = other_vals[np.isfinite(other_vals) & (other_vals > 0)]
+            if other_pos.size < min_groups_for_median:
+                continue
+            target = float(np.median(other_pos))
+            if target <= 0.0:
+                continue
+
+            e_lo = float(bins_arr[g]) if g < len(bins_arr) - 1 else float("nan")
+            e_hi = float(bins_arr[g + 1]) if g < len(bins_arr) - 1 else float("nan")
+
+            flagged_indices.append(flat)
+            targets.append(target)
+            detection_log.append({
+                "index": flat,
+                "zaid": int(zaid),
+                "mt": int(mt),
+                "group": g,
+                "energy_lo": e_lo,
+                "energy_hi": e_hi,
+                "current_variance": cur,
+                "target_variance": target,
+                "median_variance": median_var,
+                "ratio_to_median": cur / median_var,
+                "n_groups_used": int(other_pos.size),
+            })
+
+    if verbose or logger is not None:
+        ctx = f" [{label}]" if label else ""
+        sep = "-" * 60
+        if flagged_indices:
+            _log_message(f"\n[COVARIANCE] [VARIANCE-OUTLIER DETECTION]{ctx}\n{sep}", logger, verbose)
+            _log_message(
+                f"  Flagged {len(flagged_indices)} bin(s) with σ² > "
+                f"{outlier_factor:g} × per-MT median (space={space}):",
+                logger, verbose,
+            )
+            for d in detection_log:
+                _log_message(
+                    f"    MT={d['mt']}, G={d['group']} "
+                    f"[{d['energy_lo']:.2e},{d['energy_hi']:.2e}] MeV: "
+                    f"σ²={d['current_variance']:.3e}, "
+                    f"median={d['median_variance']:.3e}, "
+                    f"ratio={d['ratio_to_median']:.2e}, "
+                    f"target={d['target_variance']:.3e}",
+                    logger, verbose,
+                )
+            _log_message(sep, logger, verbose)
+
+    return flagged_indices, targets, detection_log
+
+
 def nearest_psd_higham(
     A: np.ndarray,
     *,
@@ -805,9 +1025,12 @@ def nearest_psd_higham(
     # ------------------------------------------------------------------
     if not preserve_diagonal:
         w, V = _robust_eigh(A_sym, label="Higham clip", verbose=verbose, logger=logger)
-        w_clipped = np.maximum(w, eigval_floor)
-        X = (V * w_clipped[None, :]) @ V.T
-        X = (X + X.T) / 2.0
+        # `verbose=False` on the projection itself: this branch logs its own
+        # summary below, and the eigendecomposition above has already logged
+        # whatever it had to say.
+        X, _clip_info = clip_projection(
+            A_sym, floor=eigval_floor, eigvals=w, eigvecs=V, verbose=False,
+        )
         eigvals_after = _robust_eigvalsh(X, label="Higham clip result", verbose=verbose, logger=logger)
         frob_dist = float(np.linalg.norm(X - A_sym, "fro"))
         frob_orig = float(np.linalg.norm(A_sym, "fro"))
@@ -850,8 +1073,13 @@ def nearest_psd_higham(
         if _robust_eigh.used_svd:
             n_svd_iterations += 1
             svd_fallback_logged = True
-        w_clipped = np.maximum(w, eigval_floor)
-        X_psd = (V * w_clipped[None, :]) @ V.T
+        # No fold-up to symmetry here, deliberately: Dykstra's correction is
+        # taken on the raw projection, and `_robust_eigh` is not called again
+        # because this loop counts its SVD fallbacks itself.
+        X_psd, _clip_info = clip_projection(
+            R, floor=eigval_floor, symmetrise=False,
+            eigvals=w, eigvecs=V, verbose=False,
+        )
 
         # Dykstra correction
         D_S = X_psd - R
@@ -934,6 +1162,125 @@ def nearest_psd_higham(
         )
 
     return Y, info
+
+
+def clip_and_rescale(
+    M: np.ndarray,
+    *,
+    eigval_floor: float = 0.0,
+    verbose: bool = False,
+    logger=None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Clip negative eigenvalues, then put the stated diagonal back.
+
+    The gap this closes. ``clip`` rebuilds ``V·clip(Λ,0)·Vᵀ``, which preserves
+    the eigenvectors — the reason it is the right projection for these matrices,
+    since the near-null direction carries a sum rule — but **not the diagonal**.
+    Every clipped negative eigenvalue adds variance, spread over the components
+    in proportion to its eigenvector, so a component the evaluation gives almost
+    no variance comes out of the projection with some. Downstream that is not
+    cosmetic: PFNS divides each drawn delta by its group probability, and the
+    lowest groups of a fission spectrum hold ~1e-17 of the total, so a
+    negligible absolute gain becomes a large perturbation ratio. The standing
+    workaround is a 5σ clamp in ``generate_pfns_samples``.
+
+    Higham is the third option and it is not the answer either, though the
+    reason first written here was wrong. "Did not finish four 122×122 bands in
+    two minutes" was contention on a loaded box: re-measured quiet, one band
+    converges in ~1900 iterations and ~13 s. Three numbers rule it out instead.
+
+    * It preserves the diagonal *in absolute norm* — the post-loop eigenvalue
+      clip below runs without restoring it, leaving ``max_diagonal_change``
+      at 1.4e-12 against a largest stated variance of 7.4e-5. Negligible, and
+      the code says so. But the same 1.4e-12 is **0.55% of the smallest stated
+      variances**, and on a covariance whose diagonal spans decades that is the
+      sense that matters. ``clip_rescale`` is exact in both senses.
+    * It degrades ``C·1`` by ~40x (4.2e-6 → 1.7e-4) where ``clip`` improves it.
+    * It costs ~10⁴x ``clip``.
+
+    Middling on both axes for four orders of magnitude more time, so ``clip``
+    stays on the PFNS path. :func:`kika.cov.conditioning.predict_psd_repairs`
+    measures all three on any given matrix, which is how these numbers were got.
+
+    The fix is one line of algebra. With ``d = sqrt(diag(C₀)/diag(C_clip))``,
+    the matrix ``diag(d)·C_clip·diag(d)`` has exactly ``diag(C₀)`` on its
+    diagonal, is a **congruence transform** of a PSD matrix and therefore still
+    PSD, and costs O(n²) against Higham's iterations. It does not preserve the
+    eigenvectors exactly — nothing that changes the diagonal can — but it
+    rescales rather than rotates, so a component with zero stated variance gets
+    an identically zero row and column, which is stronger than what ``clip``
+    gives it.
+
+    **Measured, and it does not do what it was proposed for.** On the four
+    Cf-252 MF35 bands the diagonal comes back exactly (max error 1.6e-8 → 1.4e-20)
+    and the result stays PSD (λ_min ≈ -5e-20). But the **sum rule does not
+    survive it**: the row-sum residual ``max|Σ_j C_ij| / max|C|`` goes from
+    4.2e-6 to 2.2e-3, some 500x worse, on every band.
+
+    That is structural rather than a tolerance to tune. ``C·1 ≈ 0`` says the
+    all-ones vector is a near-null eigenvector, and clipping keeps it null
+    precisely because it preserves eigenvectors. The congruence gives
+    ``(D C D)·1 = D C (D 1)``, which is zero only when ``d`` is constant — so
+    restoring a non-uniform diagonal and preserving the sum rule are, for these
+    matrices, the same choice made two ways.
+
+    The 5σ clamp in ``generate_pfns_samples`` therefore **stays**: the rescale
+    roughly halves the draws that reach it (172→113, 220→121, 274→127, 277→124
+    over the four bands at 64 samples) and removes none of them. Use this where
+    the marginals matter and no sum rule does — MF33 and MF34 — and not on a
+    normalised spectrum.
+
+    Not reachable from ``psd_method="auto"``: this is a different numerical
+    answer, and the pipelines already running on ``clip`` must not change
+    underneath because a new option was added. Ask for it by name.
+
+    Returns
+    -------
+    (matrix, info)
+        ``info`` carries ``n_negative``, ``min_eigenvalue``,
+        ``max_diagonal_error_before`` and ``max_diagonal_error_after``, so a
+        caller can assert the restoration actually happened.
+    """
+    M = np.asarray(M, dtype=float)
+    original = np.diag(M).copy()
+
+    eigvals, eigvecs = _robust_eigh(
+        M, label="clip_rescale", verbose=verbose, logger=logger,
+    )
+    n_negative = int(np.sum(eigvals < 0))
+    projected, _clip_info = clip_projection(
+        M, floor=eigval_floor, eigvals=eigvals, eigvecs=eigvecs, verbose=False,
+    )
+
+    before = np.max(np.abs(np.diag(projected) - original)) if original.size else 0.0
+
+    projectedDiagonal = np.diag(projected)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scale = np.sqrt(np.where(projectedDiagonal > 0,
+                                 original / projectedDiagonal, 0.0))
+    # A non-positive projected diagonal means the component spans none of the
+    # retained subspace; zero is the only rescale that keeps the result PSD,
+    # and it states the stronger fact — that direction carries no variance.
+    scale = np.where(np.isfinite(scale) & (original > 0), scale, 0.0)
+
+    rescaled = projected * np.outer(scale, scale)
+    rescaled = (rescaled + rescaled.T) * 0.5
+
+    after = np.max(np.abs(np.diag(rescaled) - original)) if original.size else 0.0
+    if verbose:
+        _log_message(
+            f"[COV] [CLIP_RESCALE] clipped {n_negative} negative eigenvalues "
+            f"(min={float(eigvals.min()):.3e}); max diagonal error "
+            f"{before:.3e} → {after:.3e}",
+            logger, verbose,
+        )
+
+    return rescaled, {
+        "n_negative": n_negative,
+        "min_eigenvalue": float(eigvals.min()) if eigvals.size else 0.0,
+        "max_diagonal_error_before": float(before),
+        "max_diagonal_error_after": float(after),
+    }
 
 
 def cholesky_decomposition(
@@ -1224,6 +1571,9 @@ def eigen_decomposition(
     if psd_method == "higham":
         M, _info = nearest_psd_higham(M, preserve_diagonal=True, verbose=verbose, logger=logger)
         eigvals = eigvecs = None  # M changed — force recompute
+    elif psd_method == "clip_rescale":
+        M, _info = clip_and_rescale(M, verbose=verbose, logger=logger)
+        eigvals = eigvecs = None  # the rescale rotates as well as scales
 
     if eigvals is None:
         eigvals, eigvecs = _robust_eigh(M, label="eigen decomposition", verbose=verbose, logger=logger)
@@ -1303,19 +1653,22 @@ def svd_decomposition(
 
     if psd_method == "higham":
         M, _info = nearest_psd_higham(M, preserve_diagonal=True, verbose=verbose, logger=logger)
+    elif psd_method == "clip_rescale":
+        M, _info = clip_and_rescale(M, verbose=verbose, logger=logger)
     elif psd_method == "clip":
         if eigvals_auto is None:
             eigvals_auto, eigvecs_auto = _robust_eigh(M, label="SVD clip", verbose=verbose, logger=logger)
-        n_negative = int(np.sum(eigvals_auto < 0))
-
-        if n_negative > 0:
-            min_eigval = float(np.min(eigvals_auto))
-            if verbose:
-                _log_message(f"[COV] [SVD] Clipped {n_negative} negative eigenvalues before SVD (min={min_eigval:.3e})", logger, verbose)
-            eigvals_clipped = np.clip(eigvals_auto, 0.0, None)
-            M = eigvecs_auto @ np.diag(eigvals_clipped) @ eigvecs_auto.T
-        elif verbose:
-            _log_message("[COV] [SVD] No negative eigenvalues - applying SVD directly", logger, verbose)
+        # `passthrough_when_clean`: an already-PSD matrix is handed to the SVD
+        # untouched rather than rebuilt from its own eigendecomposition, which
+        # is what makes this path a true no-op there. `kika.cov.conditioning.
+        # apply_plan` reproduces exactly this, so a matrix conditioned ahead of
+        # the draw and then drawn with psd_method="none" is bit-identical to
+        # the same matrix drawn with psd_method="clip".
+        M, _clip_info = clip_projection(
+            M, floor=0.0, symmetrise=False, passthrough_when_clean=True,
+            eigvals=eigvals_auto, eigvecs=eigvecs_auto,
+            verbose=verbose, logger=logger, label="SVD",
+        )
 
     U, S, Vt = np.linalg.svd(M, full_matrices=full_matrices)
 

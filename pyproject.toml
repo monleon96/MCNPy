@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "kika-nd"
-version = "0.2.0"
+version = "0.3.0"
 description = "A comprehensive Python toolkit for nuclear data analysis, including MCNP input/output processing, sensitivity analysis, covariance handling, ACE file parsing, and ENDF data manipulation."
 authors = ["Juan Antonio Monleon de la Lluvia <juanmonleon96@gmail.com>"]
 license = "BSD-3-Clause"
@@ -64,3 +64,15 @@ sphinx-rtd-theme = "^3.0.2"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+# Tests are co-located per package: kika/<pkg>/tests/ and scripts/tests/.
+# There is no root tests/ dir; kika/tests/ holds repo-wide invariants only.
+testpaths = ["kika", "scripts"]
+markers = [
+    "tape: needs a real ENDF/ACE tape from the shared data tree ($KIKA_TAPES)",
+    "njoy: spawns the NJOY executable",
+    "gnds: needs a GNDS fixture or reader",
+    "slow: takes more than a few seconds",
+    "perf: a wall-clock measurement; needs a quiet machine and RUN_PERF_GATE=1",
+]

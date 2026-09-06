@@ -1,0 +1,13 @@
+{
+  "provenance": {
+    "implementation": "CALINS",
+    "version": "1.0.0b0.dev0+723dfdb.20260703",
+    "commit": "5813474",
+    "generated": "2026-08-02",
+    "note": "Fixed synthetic two-reaction case; CALINS is not a test dependency."
+  },
+  "variance_a": 0.0613,
+  "variance_b": 0.06982,
+  "cross_covariance": 0.04117,
+  "ck": 0.6293043119289942
+}

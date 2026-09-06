@@ -407,6 +407,7 @@ class ComparisonBuilder:
         self._main_display: Literal['pointwise', 'average', 'both'] = 'both'
         # "ref: <label>" annotation on the diff and diff-only panels.
         self._show_reference_label: bool = True
+        self._reference_label_fontsize: float = 11
 
     # ---- fluent API -------------------------------------------------------
 
@@ -574,9 +575,17 @@ class ComparisonBuilder:
         self._main_display = main_display
         return self
 
-    def set_reference_label(self, show: bool = True) -> 'ComparisonBuilder':
-        """Toggle the 'ref: <label>' annotation on the diff panel."""
+    def set_reference_label(
+        self, show: bool = True, fontsize: Optional[float] = None
+    ) -> 'ComparisonBuilder':
+        """Toggle the 'ref: <label>' annotation on the diff panel.
+
+        ``fontsize`` scales the annotation; pass the legend fontsize so the
+        label tracks it. ``None`` keeps the current value.
+        """
         self._show_reference_label = show
+        if fontsize is not None:
+            self._reference_label_fontsize = fontsize
         return self
 
     # ---- interpolation inference ------------------------------------------
@@ -622,7 +631,15 @@ class ComparisonBuilder:
         y_step = np.concatenate([xs, xs[-1:]])
         line_color = color or data.color
         series_label = data.label or ''
-        avg_label = f'{series_label} (avg)' if series_label else None
+        # In 'average' mode the pointwise trace's legend entry is
+        # suppressed (see _pointwise_mask_for_main), so the step trace
+        # represents the whole series and reuses the original label
+        # without an "(avg)" suffix. In 'both' mode the pointwise still
+        # appears in the legend, so the suffix distinguishes the two.
+        if self._main_display == 'average':
+            avg_label = series_label or None
+        else:
+            avg_label = f'{series_label} (avg)' if series_label else None
         ax.plot(
             edges, y_step,
             drawstyle='steps-post',
@@ -644,19 +661,37 @@ class ComparisonBuilder:
         step's leading and trailing bin values so the pointwise line
         visually meets the step trace at the boundaries instead of
         dropping out into a NaN gap.
+
+        The returned copy also has ``label = None`` so the pointwise
+        trace is excluded from the legend — the averaged step trace
+        added by :meth:`_draw_main_overlay` carries the series label
+        instead. Without this the legend lists both lines and
+        ``'average'`` looks indistinguishable from ``'both'``.
         """
         if self._main_display != 'average':
             return None
         overlay = self._overlay_from(data)
         if overlay is None:
             return None
+
+        import copy as _copy
+        masked = _copy.copy(data)
+        masked.metadata = dict(data.metadata)
+        masked.metadata.pop('group_average_overlay', None)
+        masked.label = None
+
         lo, hi = float(overlay['bounds_used'][0]), float(overlay['bounds_used'][1])
         xs = np.asarray(overlay.get('xs', []), dtype=float)
         x = np.asarray(data.x, dtype=float)
         y = np.asarray(data.y, dtype=float)
         in_range = (x >= lo) & (x <= hi)
         if not np.any(in_range):
-            return None
+            # No points to mask, but we still return the copy so the
+            # label suppression takes effect (avoids a duplicate legend
+            # entry when the step trace draws with the series label).
+            masked.x = x
+            masked.y = y
+            return masked
         idx = np.where(in_range)[0]
         first_in, last_in = int(idx[0]), int(idx[-1])
         new_y = y.copy()
@@ -667,15 +702,8 @@ class ComparisonBuilder:
         if last_in > first_in and xs.size > 0 and np.isfinite(xs[-1]):
             new_y[last_in] = float(xs[-1])
 
-        import copy as _copy
-        masked = _copy.copy(data)
         masked.x = x
         masked.y = new_y
-        # Shallow-copy metadata so callers don't accidentally mutate the
-        # original; strip the overlay entry so this clone isn't picked
-        # up for a second overlay draw pass.
-        masked.metadata = dict(data.metadata)
-        masked.metadata.pop('group_average_overlay', None)
         return masked
 
     @staticmethod
@@ -873,7 +901,9 @@ class ComparisonBuilder:
                         (edges, diff_values, diff_color, cmp_data.linewidth or 1.5)
                     )
 
-            builder.add_data(diff_data, color=diff_color)
+            builder.add_data(
+                diff_data, color=diff_color, linewidth=cmp_data.linewidth or 1.5
+            )
 
         # Add scatter overlays to diff-only panel
         for ovl_data, ovl_styling in self._scatter_overlays:
@@ -904,7 +934,11 @@ class ComparisonBuilder:
             y_label=self._resolve_diff_y_label(),
         )
         builder.set_scales(log_x=self._use_log_x, log_y=self._diff_log_y)
-        builder.set_limits(x_lim=self._x_lim, y_lim=self._diff_y_lim)
+        # In diff-only view the diff curve is the only plot, so its Y axis is
+        # driven by the main figure-settings Y limits (self._y_lim). Fall back
+        # to the comparison panel's diff Y limits only when those are unset.
+        diff_only_y_lim = self._y_lim if self._y_lim is not None else self._diff_y_lim
+        builder.set_limits(x_lim=self._x_lim, y_lim=diff_only_y_lim)
         builder.set_legend(loc=self._legend_loc, ncol=self._legend_ncol)
         builder.set_grid(
             grid=self._grid,
@@ -933,7 +967,7 @@ class ComparisonBuilder:
             ax.text(
                 0.02, 0.97, f'ref: {ref_label}',
                 transform=ax.transAxes,
-                fontsize=11, va='top', ha='left',
+                fontsize=self._reference_label_fontsize, va='top', ha='left',
                 fontstyle='italic', alpha=0.7,
             )
 
@@ -1108,7 +1142,7 @@ class ComparisonBuilder:
             # Use the comparison series' own color if specified; fall back to palette
             color_idx = (i + 1) % len(colors)
             diff_color = cmp_data.color if cmp_data.color else colors[color_idx]
-            diff_styling = {'color': diff_color}
+            diff_styling = {'color': diff_color, 'linewidth': cmp_data.linewidth or 1.5}
             diff_data = result.difference
             # In dual-panel mode: labels are suppressed by default (colors match main panel)
             # but a per-series diff_label in metadata overrides this
@@ -1197,7 +1231,7 @@ class ComparisonBuilder:
             ax_diff.text(
                 0.02, 0.97, f'ref: {ref_label}',
                 transform=ax_diff.transAxes,
-                fontsize=11, va='top', ha='left',
+                fontsize=self._reference_label_fontsize, va='top', ha='left',
                 fontstyle='italic', alpha=0.7,
             )
 

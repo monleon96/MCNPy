@@ -44,7 +44,11 @@ class Header:
     zaid: Optional[int] = None  # ZA identifier (atomic number)
     extension: Optional[str] = None  # File extension (e.g., ".02c")
     atomic_weight_ratio: Optional[float] = None  # Atomic weight ratio
-    temperature: Optional[float] = None  # Temperature in K
+    # kT in MeV, NOT kelvin -- the class docstring above has always said MeV and
+    # this comment said K. Fe-56 at room temperature reads 2.53e-08 here, which
+    # is 293.6 K once divided by Boltzmann's constant, as CrossSection.from_ace
+    # and kika.ace.model_adapter both do.
+    temperature: Optional[float] = None
     date: Optional[str] = None  # Date of the evaluation
     comment: Optional[str] = None  # Description or comment
     matid: Optional[int] = None  # Material identifier

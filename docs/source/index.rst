@@ -19,6 +19,7 @@ Quick Links
 
 * :doc:`about/overview`
 * :doc:`user_guide/quickstart` 
+* :doc:`user_guide/reading_files`
 * :doc:`user_guide/tutorials/index`
 * :doc:`api_reference/index`
 * :doc:`license`
@@ -37,6 +38,8 @@ Quick Links
    :hidden:
 
    user_guide/quickstart
+   user_guide/reading_files
+   user_guide/sampling_pipelines
    user_guide/tutorials/index
 
 .. toctree::

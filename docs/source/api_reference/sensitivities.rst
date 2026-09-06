@@ -34,3 +34,29 @@ kika.sensitivities.sdf
    :members:
    :undoc-members:
    :show-inheritance:
+
+
+kika.sensitivities.profile
+--------------------------
+
+``SensitivityProfile`` and ``SensitivityReaction`` are the validated,
+format-neutral inputs used by UQ calculations. Their energy unit is explicit
+and reaction uncertainties are absolute one-sigma standard deviations.
+
+.. automodule:: kika.sensitivities.profile
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+kika.sensitivities.condensation
+-------------------------------
+
+Sensitivity condensation is explicit and format-neutral. Exact condensation
+requires every target boundary to be present in the source grid; non-nested
+projection is deliberately rejected. The returned report records the boundary
+mapping, uncertainty assumption and integral-conservation diagnostic.
+
+.. automodule:: kika.sensitivities.condensation
+   :members:
+   :undoc-members:
+   :show-inheritance:

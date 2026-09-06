@@ -6,17 +6,70 @@ Two representations:
   LNU=2  tabulated    TAB1 record of (E, nu) pairs
 """
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
+
+import numpy as np
+from numpy.typing import ArrayLike
 
 from ..mt import MT
 from ...utils import (
+    format_endf_send_record,
     format_endf_data_line,
     format_tab1,
     format_data_values,
+    interpolate_1d_endf,
     ENDF_FORMAT_FLOAT,
     ENDF_FORMAT_INT,
     ENDF_FORMAT_INT_ZERO,
 )
+
+
+def evaluate_nubar(
+    lnu: int,
+    coefficients: List[float],
+    energies: List[float],
+    nubar_values: List[float],
+    interpolation: List[Tuple[int, int]],
+    energy,
+    out_of_range: str = "hold",
+):
+    """nu-bar at one or more incident energies, under the section's own law.
+
+    MT452, MT455 and MT456 carry the same two representations over identical
+    field names, so they share this rather than each interpolating for itself.
+    It lives beside MT452 because that is the total and the other two are its
+    components; there is no other module for it, and adding one would put a
+    brand-new import in the packaging graph for eleven lines of arithmetic.
+
+    ``out_of_range`` defaults to ``'hold'`` and not to MF3's ``'zero'``: a
+    cross section really is zero below threshold, but nu-bar below the first
+    tabulated energy is the thermal value, and returning zero there would say a
+    fission releases no neutrons.
+
+    Parameters
+    ----------
+    lnu : int
+        1 for the polynomial form, 2 for the tabulated one.
+    energy : float or array-like
+        Query energy / energies in eV.
+
+    Returns
+    -------
+    float or np.ndarray
+        Neutrons per fission. Dimensionless.
+    """
+    if lnu == 1:
+        e = np.asarray(energy, dtype=float)
+        out = np.zeros_like(e)
+        for n, c in enumerate(coefficients):
+            out = out + float(c) * e ** n
+        return float(out) if np.isscalar(energy) or out.ndim == 0 else out
+    if lnu == 2:
+        return interpolate_1d_endf(
+            energies, nubar_values, interpolation, energy,
+            out_of_range=out_of_range,
+        )
+    raise ValueError(f"unknown nu-bar representation LNU={lnu}")
 
 
 @dataclass
@@ -83,6 +136,20 @@ class MF1MT452(MT):
     def interpolation(self) -> List[Tuple[int, int]]:
         return self._interpolation
 
+    # --- methods ---
+
+    def get_nubar(
+        self,
+        energy: Union[float, ArrayLike],
+        out_of_range: str = "hold",
+    ) -> Union[float, np.ndarray]:
+        """Total nu-bar at one or more incident energies. See
+        :func:`evaluate_nubar`."""
+        return evaluate_nubar(
+            self._lnu, self._coefficients, self._energies, self._nubar,
+            self._interpolation, energy, out_of_range=out_of_range,
+        )
+
     # --- serialization ---
 
     def __str__(self) -> str:
@@ -131,11 +198,7 @@ class MF1MT452(MT):
             lines.extend(tab1_lines)
 
         # SEND
-        send = format_endf_data_line(
-            [0, 0, 0, 0, 0, 0],
-            mat, mf, 0, 99999,
-            formats=[ENDF_FORMAT_INT] * 6,
-        )
+        send = format_endf_send_record(mat, mf)
         lines.append(send)
 
         return "\n".join(lines)

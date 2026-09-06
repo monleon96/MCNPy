@@ -1,0 +1,99 @@
+name: test
+
+# The fast lane only. Everything marked `tape` or `njoy` needs the ASNR shared
+# data tree or a local NJOY build, neither of which exists on a GitHub runner;
+# those run on the workstation with `pytest --deep`. See conftest.py.
+
+# `develop` is where the work actually lands, so it has to be a push trigger.
+# With `[main]` alone the gate only ran on pull requests and a direct push to
+# develop was untested.
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install the project and its test dependencies
+        run: poetry install --with dev
+
+      - name: Run the fast lane
+        # KIKA_TAPES points nowhere on purpose: the marker filter should
+        # already exclude every test that needs it, and if one slips through
+        # unmarked it must skip loudly rather than pick up a stray file.
+        #
+        # `slow` and `perf` are named here because passing any -m at all turns
+        # off conftest.py's automatic hold-back (see pytest_collection_modifyitems
+        # -- it defers to a caller who expressed an opinion). Without them this
+        # step ran a strictly *larger* set than a bare `pytest` does on the
+        # workstation, while being called "the fast lane". That is how
+        # scripts/tests/test_pipeline_golden.py came to run here: it is the
+        # thesis pipeline's golden, it compares a Legendre covariance at
+        # rtol=1e-10, and on a runner 8 of its 256 elements differ by 6.2e-10 --
+        # the same last-ULP libm spread that moved the reconstruction goldens.
+        #
+        # Loosening *that* tolerance was the wrong lever. It is the one test
+        # that would notice a change to the fitting, the uncertainty resolution
+        # or the Monte-Carlo sampling, and its tightness is the whole point on
+        # the machine where the numbers are reproducible. So it keeps 1e-10 and
+        # stops being asserted somewhere its premise does not hold.
+        env:
+          KIKA_TAPES: /nonexistent
+        run: >-
+          poetry run pytest -q
+          -m "not tape and not njoy and not slow and not perf"
+
+  wheel:
+    # Guards the `exclude` list in pyproject.toml. Test fixtures — including
+    # the 2 MB micro-tape — must stay out of the distribution, and every
+    # module that `import kika` needs must stay in it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Build the wheel
+        run: poetry build
+
+      - name: Install it into a clean environment and import it
+        run: |
+          python -m venv /tmp/wheel-check
+          /tmp/wheel-check/bin/pip install --quiet dist/*.whl
+          /tmp/wheel-check/bin/python -c "import kika; print(kika.__version__)"
+
+      - name: No test files or fixtures in the distribution
+        run: |
+          set -o pipefail
+          leaked=$(python -m zipfile -l dist/*.whl \
+            | grep -E "tests/|test_.*\.py|\.endf$|\.ipynb$" || true)
+          if [ -n "$leaked" ]; then
+            echo "these should not ship:"
+            echo "$leaked"
+            exit 1
+          fi

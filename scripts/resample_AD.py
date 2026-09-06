@@ -12,6 +12,8 @@ from scipy.stats import norm
 from scipy.linalg import cho_factor, cho_solve
 import matplotlib.pyplot as plt
 
+from kika.utils.energy_folding import tof_energy_resolution
+
 # Import from kika.exfor (new module)
 try:
     from kika.exfor.transforms import (
@@ -200,9 +202,15 @@ def compute_angular_band_discrepancy(
     # Per-experiment diagnostics for capped bands
     exp_diag = {}
 
+    # Track which bands had a band-derived τ (vs default / inherited). Used by
+    # the inheritance pass below and by apply_tau_prior_floor to filter the
+    # donor pool to genuinely band-derived values.
+    band_derived = {'F': False, 'M': False, 'B': False}
+    band_npts = {bn: int(np.sum(m)) for bn, m in bands.items()}
+
     # First pass: estimate scale factor for bands with enough points
     for band_name, mask in bands.items():
-        n_band = np.sum(mask)
+        n_band = band_npts[band_name]
 
         if n_band < min_points_per_band:
             continue
@@ -231,6 +239,7 @@ def compute_angular_band_discrepancy(
         s_b = min(raw_val, max_band_scale)
 
         tau_values[f'tau_{band_name}'] = s_b
+        band_derived[band_name] = True
 
         # Per-experiment diagnostics when band is capped
         if experiment_ids is not None and raw_val > max_band_scale:
@@ -254,12 +263,28 @@ def compute_angular_band_discrepancy(
 
     tau_values['sys_aware'] = bool(sys_aware)
 
-    # Second pass: for bands with too few points, use mid-band scale
-    s_mid = tau_values['tau_M']
-    for band_name, mask in bands.items():
-        n_band = np.sum(mask)
-        if n_band < min_points_per_band and n_band > 0:
-            tau_values[f'tau_{band_name}'] = s_mid
+    # Surface the per-band derivation flags so downstream consumers (notably
+    # apply_tau_prior_floor) can distinguish band-derived τ from inherited.
+    for bn in ('F', 'M', 'B'):
+        tau_values[f'band_derived_{bn}'] = bool(band_derived[bn])
+        tau_values[f'n_pts_{bn}'] = int(band_npts[bn])
+
+    # Second pass: for bands with too few points, inherit τ from the
+    # *most-supported* band-derived band (donor with the largest n_pts among
+    # those that cleared min_points_per_band). Falling back to mid is wrong
+    # for this dataset because mid is frequently the under-supported band
+    # itself; picking the largest band-derived donor avoids that bias and
+    # falls back to 1.0 (no inflation) only when no band is well-supported.
+    derived_bands = [bn for bn, ok in band_derived.items() if ok]
+    if derived_bands:
+        donor = max(derived_bands, key=lambda bn: band_npts[bn])
+        s_donor = tau_values[f'tau_{donor}']
+        tau_values['donor_band'] = donor
+        for band_name in bands:
+            if not band_derived[band_name] and band_npts[band_name] > 0:
+                tau_values[f'tau_{band_name}'] = s_donor
+    else:
+        tau_values['donor_band'] = None
 
     # Apply multiplicative scaling
     for band_name, mask in bands.items():
@@ -393,7 +418,11 @@ def apply_tau_prior_floor(
     bands = ['tau_F', 'tau_M', 'tau_B']
     baselines: Dict[str, float] = {b: 0.0 for b in bands}
 
-    # Step 1: Collect tau values from well-supported bins (high N_eff)
+    # Step 1: Collect tau values from well-supported bins (high N_eff), but
+    # only when the band itself was *band-derived* (i.e. had enough points
+    # in that band to estimate τ from its own residuals). Inherited values
+    # — propagated from another band by compute_angular_band_discrepancy —
+    # would otherwise contaminate the donor pool toward the donor band.
     well_estimated: Dict[str, List[float]] = {b: [] for b in bands}
     for r in nominal_results:
         if not r.has_data or r.interpolated:
@@ -401,6 +430,10 @@ def apply_tau_prior_floor(
         r_neff = getattr(r.kernel_diagnostics, 'n_eff', 0.0) if hasattr(r, 'kernel_diagnostics') else 0.0
         if r_neff >= n_eff_threshold:
             for b in bands:
+                bn = b.split('_', 1)[1]  # 'tau_F' -> 'F'
+                if not r.tau_info.get(f'band_derived_{bn}', True):
+                    # Skip bands inherited from another band of this bin.
+                    continue
                 val = r.tau_info.get(b, 0.0)
                 if val > 1.0:  # exclude neutral (no-inflation) values
                     well_estimated[b].append(val)
@@ -411,15 +444,28 @@ def apply_tau_prior_floor(
         if len(vals) >= 3:
             baselines[b] = float(np.percentile(vals, percentile))
 
-    # Step 3: Apply floor to low-support bins (low N_eff)
+    # Step 3: Apply floor. A band is floored when EITHER (a) the bin is
+    # under-supported overall (N_eff < threshold) OR (b) the band itself
+    # was not band-derived in this bin. (b) catches well-supported bins
+    # whose forward/backward bands inherited τ from another band — the
+    # floor pulls them up to the per-band baseline rather than leaving
+    # them at the inherited value.
     for r in nominal_results:
         if not r.has_data or r.interpolated:
             continue
         r_neff = getattr(r.kernel_diagnostics, 'n_eff', 0.0) if hasattr(r, 'kernel_diagnostics') else 0.0
-        if r_neff < n_eff_threshold:
-            updated = dict(r.tau_info)
-            for b in bands:
-                updated[b] = max(updated.get(b, 1.0), baselines[b])
+        bin_under = r_neff < n_eff_threshold
+        updated = dict(r.tau_info)
+        any_change = False
+        for b in bands:
+            bn = b.split('_', 1)[1]
+            band_derived_b = updated.get(f'band_derived_{bn}', True)
+            if bin_under or not band_derived_b:
+                new_val = max(updated.get(b, 1.0), baselines[b])
+                if new_val != updated.get(b, 1.0):
+                    updated[b] = new_val
+                    any_change = True
+        if any_change:
             r.tau_info = updated
 
     return baselines
@@ -549,6 +595,8 @@ def compute_between_experiment_coeffs(
     ridge_lambda: float = 1e-6,
     min_mu_coverage: float = 1.0,
     max_cond: float = 1e4,
+    freeze_c0: bool = True,
+    min_experiments: int = 2,
 ) -> Optional[Dict]:
     """Compute per-experiment Legendre coefficients and their weighted scatter.
 
@@ -585,6 +633,26 @@ def compute_between_experiment_coeffs(
         (default 1e4).  Experiments whose design matrix exceeds this are
         excluded because the fitted coefficients would be numerically
         unreliable.
+    freeze_c0 : bool
+        ``True`` (default, historical) freezes every per-experiment fit to the
+        pooled ``fixed_c0``.  ``False`` lets each experiment carry its own c0.
+
+        ⚠ WHICH ONE YOU WANT DEPENDS ON WHAT THE SCATTER IS FOR, and the
+        historical default is wrong for MF34.  ``a_l = c_l / c_0``, so freezing
+        c0 to the pooled value pushes each experiment's NORMALISATION offset
+        straight into its ``a_l``: a measurement that is uniformly 5 % high
+        comes out with every a_l 5 % high and is counted as a SHAPE
+        disagreement.  MF34 declares shape; normalisation belongs to MF33.
+        With ``freeze_c0=False`` a pure normalisation offset cancels exactly and
+        the scatter is shape only.  Kept defaulting to True so existing callers
+        are byte-identical.
+    min_experiments : int
+        Minimum qualifying experiments before a result is returned (default 2,
+        historical).  Pass 1 to get the census — ``per_experiment`` and
+        ``n_experiments`` — for bins where a single experiment qualifies.  Those
+        are exactly the bins where the joint fit can see NO disagreement at all,
+        so a floor has to reach them, and it cannot if the estimator refuses to
+        report them.  ``scatter`` is ``None`` when fewer than 2 qualify.
 
     Returns
     -------
@@ -658,7 +726,7 @@ def compute_between_experiment_coeffs(
         try:
             coeffs, _chi2, _dof, _k = _weighted_ridge_fit(
                 mu, y, sigma, degree,
-                fixed_c0=fixed_c0,
+                fixed_c0=(fixed_c0 if freeze_c0 else None),
                 ridge_lambda=ridge_lambda,
             )
             a_l = endf_normalize_legendre_coeffs(coeffs)  # returns a_1..a_L
@@ -667,13 +735,24 @@ def compute_between_experiment_coeffs(
             skipped.append((entry_val, "fit failed"))
             continue
 
-    if len(per_experiment) < 2:
+    if len(per_experiment) < max(1, min_experiments):
         return None
 
     # All experiments were fitted at the same pooled order
     L_common = degree
     if L_common < 1:
         return None
+
+    if len(per_experiment) < 2:
+        # Census only: one qualifying experiment means there is nothing to take
+        # a scatter of.  The caller still needs to know THAT, and who it was.
+        return {
+            'scatter': None,
+            'L_common': L_common,
+            'n_experiments': len(per_experiment),
+            'per_experiment': per_experiment,
+            'skipped_experiments': skipped,
+        }
 
     # Compute weighted scatter for each order l=1..L_common
     scatter = np.zeros(L_common)
@@ -762,28 +841,25 @@ def compute_energy_resolution_tof(
     E_mev: float,
     delta_t_ns: float = 5.0,
     flight_path_m: float = 27.037,
+    delta_t_is_fwhm: bool = True,
 ) -> float:
     """
     Compute energy resolution σE from TOF parameters.
 
-    For neutrons measured by time-of-flight:
-      E = m_n * L² / (2 * t²)
-      δE/E = 2 * δt/t
-      t = L / v = L * sqrt(m_n / (2E))
-
-    Therefore:
-      σE = E * 2 * δt / t
-         = E * 2 * δt * v / L
-         = E * 2 * δt * sqrt(2E/m_n) / L
+    Thin adapter over :func:`kika.utils.energy_folding.tof_energy_resolution`,
+    which is the single definition of the formula.
 
     Parameters
     ----------
     E_mev : float
         Neutron energy in MeV
     delta_t_ns : float
-        Time resolution in nanoseconds (default: 10 ns)
+        Timing spread in nanoseconds; see ``delta_t_is_fwhm``.
     flight_path_m : float
         Flight path length in meters (default: 27.037 m)
+    delta_t_is_fwhm : bool, default True
+        Whether ``delta_t_ns`` is a FWHM (usual experimental convention) or
+        already a sigma.  The two differ by a factor 2.355 in the result.
 
     Returns
     -------
@@ -793,24 +869,12 @@ def compute_energy_resolution_tof(
     if E_mev <= 0:
         return 0.0
 
-    # Physical constants
-    m_n_kg = 1.674927e-27       # Neutron mass in kg
-    MeV_to_J = 1.602176634e-13  # MeV to Joules
-
-    E_J = E_mev * MeV_to_J      # Energy in Joules
-    delta_t_s = delta_t_ns * 1e-9  # Time resolution in seconds
-
-    # Velocity: v = sqrt(2E/m)
-    v = np.sqrt(2 * E_J / m_n_kg)  # m/s
-
-    # Time of flight: t = L/v
-    t = flight_path_m / v  # seconds
-
-    # Energy resolution: σE/E = 2 * δt/t
-    sigma_E_rel = 2 * delta_t_s / t
-    sigma_E_mev = E_mev * sigma_E_rel
-
-    return sigma_E_mev
+    return tof_energy_resolution(
+        E_mev,
+        flight_path_m=flight_path_m,
+        delta_t_ns=delta_t_ns,
+        delta_t_is_fwhm=delta_t_is_fwhm,
+    )
 
 
 def compute_energy_kernel_weights(
@@ -1100,6 +1164,364 @@ def _weighted_ridge_fit(
     return coeffs, chi2, dof, eff_params
 
 
+def _weighted_ridge_fit_gls(
+    mu: np.ndarray,
+    y: np.ndarray,
+    sigma_stat: np.ndarray,
+    sigma_sys_indep_per_exp: np.ndarray,
+    exp_index: np.ndarray,
+    degree: int,
+    *,
+    sigma_sys_dep_per_row: Optional[np.ndarray] = None,
+    ridge_lambda: float = 0.0,
+    ridge_power: int = 4,
+    df_method: Literal["naive", "hat"] = "hat",
+    external_weights: Optional[np.ndarray] = None,
+    fixed_c0: Optional[float] = None,
+    fixed_coeffs: Optional[Dict[int, float]] = None,
+    compute_dof: bool = True,
+) -> Tuple[np.ndarray, float, float, float]:
+    """
+    Block-correlated GLS Legendre ridge fit with per-experiment systematic
+    correlation modelled as **two** rank-1 modes per experiment. Same return
+    contract as ``_weighted_ridge_fit``.
+
+    Data covariance model
+    ---------------------
+        Σ̃_ii  = σ²_stat,i / g_i                                            (diagonal)
+        Σ̃_ij  = [σ²_sys_indep,e + σ_sys_dep,i·σ_sys_dep,j] · y_i y_j
+                     / √(g_i g_j)                                          (i, j in same experiment e)
+        Σ̃_ij  = 0                                                         (different experiments)
+
+    Two correlated rank-1 modes per experiment:
+      • **u_e** (normalisation): per-experiment scalar σ_sys_indep,e times y_i.
+        Same amplitude across the experiment, modelling a flux/efficiency
+        normalisation that shifts the whole curve up or down together.
+      • **v_e** (shape): per-row σ_sys_dep_i times y_i. Amplitude varies with
+        energy/angle, modelling a piecewise-energy calibration error like
+        Cierjacks's ERR-T whose magnitude is energy-dependent but whose draw
+        is shared across all points of the experiment.
+
+    Both modes are marked ``correlated: true`` in the manifest (see
+    ``uncertainty_manifest.py``); putting σ_sys_dep on the diagonal — as
+    earlier versions of this function did — would silently treat a correlated
+    shape error as uncorrelated noise and inflate the effective degrees of
+    freedom.
+
+    Algorithm
+    ---------
+    Let U = [u_e, v_e]_e be N×2n_exp. Σ̃ = D + UUᵀ. Woodbury gives
+        Σ̃⁻¹ = D⁻¹ − D⁻¹ U M⁻¹ Uᵀ D⁻¹,   M = I_{2n_exp} + Uᵀ D⁻¹ U
+    which is block-diagonal with 2×2 blocks per experiment (because each
+    experiment's two columns share the same disjoint support). Each 2×2
+    inverse is closed form, so the cost stays O(n·k + n_exp·k).
+
+    Reduces to ``_weighted_ridge_fit(σ = σ_stat)`` exactly when BOTH
+    ``sigma_sys_indep_per_exp`` and ``sigma_sys_dep_per_row`` are zero.
+
+    Parameters
+    ----------
+    mu, y : np.ndarray
+        Cosines and cross-section values.
+    sigma_stat : np.ndarray
+        Per-row statistical uncertainty (absolute units, b/sr). σ_stat ONLY —
+        do not pre-add σ_sys in quadrature.
+    sigma_sys_indep_per_exp : np.ndarray, shape (n_exp,)
+        Per-experiment normalisation σ (relative fraction, e.g. 0.08 = 8%).
+    exp_index : np.ndarray, shape (n,) of int
+        Block id 0..n_exp−1 telling which experiment each row belongs to.
+    sigma_sys_dep_per_row : np.ndarray, optional
+        Per-row correlated shape σ (relative fraction). Becomes the second
+        rank-1 column v_e per experiment. If None or all zero, GLS collapses
+        to the single-mode rank-1 form.
+    external_weights : np.ndarray, optional
+        Kernel weights g_i (e.g. Gaussian TOF kernel).
+    fixed_c0, fixed_coeffs, ridge_lambda, ridge_power, df_method, compute_dof :
+        Same semantics as ``_weighted_ridge_fit``.
+
+    Returns
+    -------
+    (coeffs, chi2, dof, eff_params) : same contract as ``_weighted_ridge_fit``.
+
+    Notes
+    -----
+    Edge cases:
+    - σ_sys_indep_per_exp[e] = 0 AND σ_sys_dep on exp e all-zero: experiment e
+      contributes only to D (no rank-1 absorption).
+    - Single-point experiment: each rank-1 mode marginalises its own
+      normalisation — the lone point's absolute level becomes unconstrained.
+    """
+    if degree < 0:
+        raise ValueError("degree must be >= 0")
+    if np.any(~np.isfinite(mu)) or np.any(~np.isfinite(y)) or np.any(~np.isfinite(sigma_stat)):
+        raise ValueError("mu, y, sigma_stat must be finite.")
+    if np.any(sigma_stat <= 0):
+        raise ValueError("All sigma_stat must be > 0.")
+
+    n = mu.size
+    n_exp = int(np.asarray(sigma_sys_indep_per_exp).size)
+
+    # Kernel weights (default 1)
+    if external_weights is not None:
+        g = np.asarray(external_weights, dtype=float)
+    else:
+        g = np.ones(n, dtype=float)
+
+    # Per-row correlated shape sys (default 0). Now a *rank-1* column per
+    # experiment, NOT a diagonal contribution — see docstring.
+    if sigma_sys_dep_per_row is not None:
+        sigma_sys_dep = np.asarray(sigma_sys_dep_per_row, dtype=float)
+    else:
+        sigma_sys_dep = np.zeros(n, dtype=float)
+
+    # Diagonal of Σ̃: D̃_ii = σ²_stat,i / g_i (σ_dep is in V, not D).
+    var_diag = sigma_stat ** 2
+    var_diag = np.maximum(var_diag, 1e-30)
+    inv_D = g / var_diag  # 1D length n
+
+    # Fixed coefficients — mirror _weighted_ridge_fit's logic exactly
+    fixed_values: Dict[int, float] = {}
+    if fixed_coeffs is not None:
+        fixed_values.update(fixed_coeffs)
+    if fixed_c0 is not None:
+        fixed_values[0] = fixed_c0
+
+    A_full = legvander(mu, degree)
+    all_indices = list(range(degree + 1))
+
+    if fixed_values:
+        free_indices = [l for l in all_indices if l not in fixed_values]
+        fixed_indices = sorted(fixed_values.keys())
+
+        if not free_indices:
+            coeffs = np.array([fixed_values.get(l, 0.0) for l in all_indices])
+            yhat = A_full @ coeffs
+            r = y - yhat
+            chi2_diag_only = float(np.sum((r ** 2) * inv_D))
+            chi2_corr = 0.0
+            for e in range(n_exp):
+                s_e = float(sigma_sys_indep_per_exp[e])
+                idx = np.where(exp_index == e)[0]
+                if idx.size == 0:
+                    continue
+                vd = var_diag[idx]
+                d_e = sigma_sys_dep[idx]
+                has_indep = s_e > 0.0
+                has_dep = bool(np.any(d_e > 0.0))
+                if not (has_indep or has_dep):
+                    continue
+                sqg = np.sqrt(np.maximum(g[idx], 1e-30))
+                # 2×2 M_e and its determinant; Woodbury reduces correctly to
+                # rank-1 when only one mode is active (off-diagonal & one
+                # diagonal entry are zero, det = (1 + s_uu) or (1 + s_vv)).
+                s_uu = (s_e ** 2) * float(np.sum((y[idx] ** 2) / vd)) if has_indep else 0.0
+                s_vv = float(np.sum(((d_e * y[idx]) ** 2) / vd)) if has_dep else 0.0
+                s_uv = (
+                    s_e * float(np.sum(d_e * (y[idx] ** 2) / vd))
+                    if (has_indep and has_dep) else 0.0
+                )
+                M_uu = 1.0 + s_uu
+                M_vv = 1.0 + s_vv
+                det = M_uu * M_vv - s_uv ** 2
+                if det <= 0.0:
+                    continue
+                # rᵀ D⁻¹ u_e and rᵀ D⁻¹ v_e
+                u_r = (
+                    s_e * float(np.sum(y[idx] * r[idx] * sqg / vd))
+                    if has_indep else 0.0
+                )
+                v_r = (
+                    float(np.sum(d_e * y[idx] * r[idx] * sqg / vd))
+                    if has_dep else 0.0
+                )
+                chi2_corr += (
+                    M_vv * u_r ** 2 - 2.0 * s_uv * u_r * v_r + M_uu * v_r ** 2
+                ) / det
+            chi2 = chi2_diag_only - chi2_corr
+            return coeffs, chi2, float(max(1, n)), 0.0
+
+        fixed_vals = np.array([fixed_values[l] for l in fixed_indices])
+        y_adj = y - A_full[:, fixed_indices] @ fixed_vals
+        A = A_full[:, free_indices]
+        n_free = len(free_indices)
+
+        if ridge_lambda > 0.0:
+            pen = np.array([float(l ** ridge_power) if l > 0 else 0.0
+                            for l in free_indices])
+            R = np.diag(pen)
+        else:
+            R = np.zeros((n_free, n_free), dtype=float)
+    else:
+        free_indices = all_indices
+        fixed_indices = []
+        y_adj = y
+        A = A_full
+        n_free = degree + 1
+
+        if ridge_lambda > 0.0:
+            pen = np.zeros(degree + 1, dtype=float)
+            for l in range(1, degree + 1):
+                pen[l] = float(l ** ridge_power)
+            R = np.diag(pen)
+        else:
+            R = np.zeros((degree + 1, degree + 1), dtype=float)
+
+    # Diagonal Gram and rhs (no Woodbury correction yet):
+    #   X^T D̃⁻¹ X = Σ_i inv_D_i · X[i,:] X[i,:]^T
+    #   X^T D̃⁻¹ y = Σ_i inv_D_i · X[i,:] · y_adj_i
+    A_iD = A * inv_D[:, None]
+    G_diag = A.T @ A_iD            # (n_free, n_free)
+    rhs_diag = A_iD.T @ y_adj      # (n_free,)
+
+    # Woodbury per-experiment correction. Each experiment contributes two
+    # rank-1 columns to U (u_e: normalisation; v_e: shape, per-row amplitude),
+    # so the per-experiment block of M = I + UᵀD⁻¹U is 2×2 (and disjoint across
+    # experiments because the column supports don't overlap). Cost still
+    # O(n_exp · n_e · n_free) up to a small constant.
+    G_corr = np.zeros_like(G_diag)
+    rhs_corr = np.zeros(n_free, dtype=float)
+    # Cache per-experiment 2×2 (M_uu, M_vv, M_uv, det) for the χ² recomputation
+    # below; tuple of NaN signals "no rank-1 contribution from this experiment".
+    M_e_cache: list = [None] * n_exp
+    for e in range(n_exp):
+        s_e = float(sigma_sys_indep_per_exp[e])
+        idx = np.where(exp_index == e)[0]
+        if idx.size == 0:
+            continue
+        vd = var_diag[idx]
+        d_e = sigma_sys_dep[idx]
+        has_indep = s_e > 0.0
+        has_dep = bool(np.any(d_e > 0.0))
+        if not (has_indep or has_dep):
+            continue
+        sqg = np.sqrt(np.maximum(g[idx], 1e-30))
+        # 2×2 M_e components
+        s_uu = (s_e ** 2) * float(np.sum((y[idx] ** 2) / vd)) if has_indep else 0.0
+        s_vv = float(np.sum(((d_e * y[idx]) ** 2) / vd)) if has_dep else 0.0
+        s_uv = (
+            s_e * float(np.sum(d_e * (y[idx] ** 2) / vd))
+            if (has_indep and has_dep) else 0.0
+        )
+        M_uu = 1.0 + s_uu
+        M_vv = 1.0 + s_vv
+        det = M_uu * M_vv - s_uv ** 2
+        if det <= 0.0:
+            continue
+        M_e_cache[e] = (M_uu, M_vv, s_uv, det)
+        # z_u[j] = Xᵀ D̃⁻¹ u_e_{:,j} = s_e · Σ A[i,j] · y_i · √g_i / var_i
+        # z_v[j] = Xᵀ D̃⁻¹ v_e_{:,j} = Σ A[i,j] · d_i · y_i · √g_i / var_i
+        if has_indep:
+            z_u = s_e * (A[idx, :].T @ ((sqg * y[idx]) / vd))
+        else:
+            z_u = np.zeros(n_free, dtype=float)
+        if has_dep:
+            z_v = A[idx, :].T @ ((sqg * d_e * y[idx]) / vd)
+        else:
+            z_v = np.zeros(n_free, dtype=float)
+        # u_e^T D̃⁻¹ y_adj , v_e^T D̃⁻¹ y_adj
+        Uy = (
+            s_e * float(np.sum(y[idx] * y_adj[idx] * sqg / vd))
+            if has_indep else 0.0
+        )
+        Vy = (
+            float(np.sum(d_e * y[idx] * y_adj[idx] * sqg / vd))
+            if has_dep else 0.0
+        )
+        # Rank-2 Woodbury: G_corr += [z_u, z_v] M_e⁻¹ [z_u; z_v]ᵀ
+        # rhs_corr  += [z_u, z_v] M_e⁻¹ [Uy; Vy]
+        inv_det = 1.0 / det
+        G_corr += inv_det * (
+            M_vv * np.outer(z_u, z_u)
+            - s_uv * (np.outer(z_u, z_v) + np.outer(z_v, z_u))
+            + M_uu * np.outer(z_v, z_v)
+        )
+        rhs_corr += inv_det * (
+            (M_vv * Uy - s_uv * Vy) * z_u
+            + (M_uu * Vy - s_uv * Uy) * z_v
+        )
+
+    # Normal equations: (X^T Σ̃⁻¹ X + λ R) β̂ = X^T Σ̃⁻¹ y
+    G_full = G_diag - G_corr
+    rhs_full = rhs_diag - rhs_corr
+    P = G_full + ridge_lambda * R
+
+    try:
+        coeffs_partial = np.linalg.solve(P, rhs_full)
+    except np.linalg.LinAlgError:
+        coeffs_partial, _, rank, _ = np.linalg.lstsq(P, rhs_full, rcond=None)
+        import warnings
+        warnings.warn(
+            f"GLS normal-equations matrix is rank-deficient (rank={rank}/{P.shape[0]}) "
+            f"for degree={degree} with {len(fixed_values)} fixed coefficients. "
+            f"Using least-squares solution.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    if fixed_values:
+        coeffs = np.zeros(degree + 1, dtype=float)
+        for l in fixed_indices:
+            coeffs[l] = fixed_values[l]
+        for i, l in enumerate(free_indices):
+            coeffs[l] = coeffs_partial[i]
+    else:
+        coeffs = coeffs_partial
+
+    # χ²_GLS = rᵀ Σ̃⁻¹ r (rank-2 closed-form Woodbury reduction):
+    #   χ²_diag = Σ_i r²_i · inv_D_i        (kernel-weighted diagonal piece)
+    #   χ²_corr = Σ_e [Ur, Vr] M_e⁻¹ [Ur; Vr]   (two-mode rank-1 absorption)
+    #   χ²     = χ²_diag − χ²_corr
+    yhat_full = A_full @ coeffs
+    r = y - yhat_full
+    chi2_diag = float(np.sum((r ** 2) * inv_D))
+    chi2_corr = 0.0
+    for e in range(n_exp):
+        cache = M_e_cache[e]
+        if cache is None:
+            continue
+        M_uu, M_vv, s_uv, det = cache
+        idx = np.where(exp_index == e)[0]
+        if idx.size == 0:
+            continue
+        vd = var_diag[idx]
+        d_e = sigma_sys_dep[idx]
+        s_e = float(sigma_sys_indep_per_exp[e])
+        sqg = np.sqrt(np.maximum(g[idx], 1e-30))
+        Ur = (
+            s_e * float(np.sum(y[idx] * r[idx] * sqg / vd))
+            if s_e > 0.0 else 0.0
+        )
+        Vr = (
+            float(np.sum(d_e * y[idx] * r[idx] * sqg / vd))
+            if np.any(d_e > 0.0) else 0.0
+        )
+        chi2_corr += (
+            M_vv * Ur ** 2 - 2.0 * s_uv * Ur * Vr + M_uu * Vr ** 2
+        ) / det
+    chi2 = chi2_diag - chi2_corr
+    # Numerical floor: χ² should be non-negative (the Woodbury subtraction can
+    # push slightly below zero from rounding when the rank-1 absorption is
+    # near-perfect). Clamp at zero to keep AICc finite.
+    if chi2 < 0.0:
+        chi2 = 0.0
+
+    # Effective parameters via GLS hat-trace.
+    # H_GLS = X (P)⁻¹ Xᵀ Σ̃⁻¹  →  trace(H_GLS) = trace(P⁻¹ G_full)
+    # (G_full = X^T Σ̃⁻¹ X). Reduces to the diagonal hat-trace when corr=0.
+    if df_method == "naive" or ridge_lambda <= 0.0 or not compute_dof:
+        eff_params = float(n_free)
+        dof = float(max(1, n - n_free))
+    else:
+        try:
+            P_inv = np.linalg.inv(P)
+        except np.linalg.LinAlgError:
+            P_inv = np.linalg.pinv(P)
+        eff_params = float(np.trace(P_inv @ G_full))
+        dof = float(max(1e-12, n - eff_params))
+
+    return coeffs, chi2, dof, eff_params
+
+
 def _batch_mc_ridge_solve(
     mu: np.ndarray,
     Y_perturbed: np.ndarray,
@@ -1225,15 +1647,28 @@ def _criterion_score(
     chi2: float,
     n: int,
     k: float,
-    criterion: Literal["aicc", "bic"]
+    criterion: Literal["aicc", "bic", "aic"]
 ) -> float:
     """
-    Model selection based on chi2. This is an approximate AICc/BIC style score.
-    Lower is better.
+    Model selection score (lower is better). Three options:
+
+    - ``"aic"``  → ``χ² + 2k``                        (Akaike Information Criterion)
+    - ``"aicc"`` → ``χ² + 2k + 2k(k+1)/(n−k−1)``     (AIC w/ small-sample correction)
+    - ``"bic"``  → ``χ² + k·ln(max(1, n))``           (Bayesian Information Criterion)
+
+    AICc reduces to AIC as n → ∞; for small n its correction term blows up
+    fast and over-penalises higher orders (penalty ≈ 30 at n=8, k=5). AIC
+    is the right choice when small-sample bins persist as L=1 picks despite
+    χ² clearly preferring higher L. BIC is more conservative than AIC for
+    n ≥ 8 and more permissive than AICc for n ≤ ~12; useful as a third
+    reference point but neither minimax-optimal nor consistent for our
+    setting.
     """
     if criterion == "bic":
         return chi2 + k * np.log(max(1, n))
-    # AICc
+    if criterion == "aic":
+        return chi2 + 2.0 * k
+    # AICc (default)
     aic = chi2 + 2.0 * k
     # AICc correction (requires n > k + 1)
     if n > (k + 1.0):
@@ -1251,7 +1686,7 @@ def sample_legendre_coefficients(
     # order control
     degree: Optional[int] = None,
     max_degree: int = 20,
-    select_degree: Optional[Literal["aicc", "bic"]] = None,
+    select_degree: Optional[Literal["aicc", "bic", "aic"]] = None,
     # ridge
     ridge_lambda: float = 0.0,
     ridge_power: int = 4,
@@ -1279,7 +1714,7 @@ def sample_legendre_coefficients(
     fixed_c0_value: Optional[float] = None,
     # correlated normalization uncertainty (Improvement 1.3)
     sigma_norm: float = 0.0,
-    sigma_norm_elastic: float = 0.0,
+    sigma_norm_common_mode: float = 0.0,
     norm_group_cols: Tuple[str, ...] = ("entry",),
     norm_dist: Literal["lognormal", "normal"] = "lognormal",
     # freeze higher-order coefficients during MC sampling
@@ -1292,6 +1727,34 @@ def sample_legendre_coefficients(
     # consistent. No-op unless ``select_degree`` is set and
     # ``use_band_discrepancy`` is True.
     rerun_aicc_post_tau: bool = False,
+    # Block-correlated GLS kernel for the IC model-selection scan, the
+    # initial nominal fit, and the post-τ rescan. Reduces to diagonal WLS
+    # when σ_sys_indep = 0. freeze_c0 refit and MC sampler always stay
+    # diagonal; the τ-IRLS refit follows ``tau_refit_use_gls``.
+    use_gls_kernel: bool = False,
+    # Solver for the coefficient refit *inside* the τ-IRLS loop. The default
+    # (False) keeps the historical diagonal WLS refit, which folds σ_sys into
+    # the fit weights as if it were uncorrelated. That is inconsistent with
+    # the scan and the post-τ rescan, which both use the block-correlated GLS
+    # kernel when ``use_gls_kernel`` is on — so with the default the shipped
+    # coeffs0 and the AICc scores that selected its degree come from different
+    # noise models. Set True to run the τ refit under the same GLS kernel.
+    #
+    # ⚠ The GLS branch takes σ_eff (= τ·σ_stat) and carries σ_sys as rank-1
+    #   structure. It must NOT be handed ``sigma_refit`` (σ_sys already folded
+    #   into the diagonal) or σ_sys is counted twice.
+    #
+    # No-op unless ``use_gls_kernel`` is True and GLS inputs were supplied.
+    tau_refit_use_gls: bool = False,
+    # Phase-2 elastic magnitude channel. When True, record the closed-form
+    # fixed-shape c0 scale of every (perturbed) sample against the nominal
+    # bin curve into ``info["c0_samples"]`` — a read-only side channel that
+    # leaves ``coef_df`` and the shape fit untouched (default off → the info
+    # dict is unchanged). ``c0_scale_ref_coeffs`` is the shape to project onto
+    # (the pipeline nominal bin coeffs); when None the fit's own ``coeffs0``
+    # is used.
+    record_c0_scale: bool = False,
+    c0_scale_ref_coeffs: Optional[np.ndarray] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Fit Legendre coefficients c_l for y(mu) = sum c_l P_l(mu) and return samples.
@@ -1313,7 +1776,8 @@ def sample_legendre_coefficients(
     max_degree : int
         Maximum Legendre order to consider
     select_degree : str, optional
-        Criterion for order selection ("aicc" or "bic")
+        Criterion for order selection: "aicc" (default), "aic", or "bic".
+        See ``_criterion_score`` for the formulas.
     ridge_lambda : float
         Ridge regularization parameter
     external_weights : np.ndarray, optional
@@ -1396,18 +1860,112 @@ def sample_legendre_coefficients(
     if n < 2:
         raise ValueError("Need at least 2 points to fit anything meaningful.")
 
-    # AICc sample size: with non-uniform external (kernel) weights, the raw
-    # point count overstates information content. Use the WLS effective sample
-    # size n_eff = (Σ w)^2 / Σ w^2 with w = g/σ^2. When external_weights is
-    # None this branch is skipped and AICc keeps the raw n (no behavior change).
-    if external_weights is not None:
-        _w_neff = external_weights / (sigma_for_fit ** 2)
-        _sum_w = float(np.sum(_w_neff))
-        _sum_w2 = float(np.sum(_w_neff ** 2))
-        n_eff_aicc = (_sum_w ** 2) / max(_sum_w2, 1e-30)
-        n_aicc = max(n_eff_aicc, 1.0)
-    else:
-        n_aicc = float(n)
+    # Block-correlated GLS inputs (used only when use_gls_kernel is True).
+    # Built once and reused across the AICc scan, the initial nominal fit,
+    # and the post-τ AICc rescan. Group key matches ``norm_group_cols`` so
+    # the GLS partition is consistent with how the MC sampler draws per-
+    # experiment normalisation factors downstream.
+    gls_indep_per_exp: Optional[np.ndarray] = None
+    gls_exp_index: Optional[np.ndarray] = None
+    gls_dep_per_row: Optional[np.ndarray] = None
+    if use_gls_kernel:
+        group_cols_avail = [c for c in norm_group_cols if c in work.columns]
+        if group_cols_avail:
+            # Build a single string key per row by joining the group columns.
+            # np.unique over object arrays doesn't support axis=0, so collapse
+            # to a 1D string index.
+            cols_str = [work[c].astype(str).to_numpy() for c in group_cols_avail]
+            keys_1d = np.array(['\x00'.join(parts) for parts in zip(*cols_str)])
+            _u_keys, gls_exp_index = np.unique(keys_1d, return_inverse=True)
+            n_exp_local = len(_u_keys)
+            # Honest manifest split — both modes are correlated within an
+            # experiment (manifest ``correlated: true``), so we pass each to
+            # ``_weighted_ridge_fit_gls`` as a separate rank-1 column:
+            #   * gls_indep_per_exp[e] = scalar σ_sys_indep_relative for
+            #     experiment e (energy-independent normalisation, e.g. flux).
+            #   * gls_dep_per_row[i]  = per-row σ_sys_dep_relative, which
+            #     enters as v_e = σ_dep_i · y_i — a rank-1 SHAPE mode whose
+            #     amplitude varies with energy/angle but whose draw is shared
+            #     across rows of one experiment (e.g. Cierjacks's piecewise
+            #     ERR-T).
+            # Putting σ_dep on the diagonal would treat a correlated shape
+            # error as independent noise — that was the bug Fix 1a addresses.
+            gls_indep_per_exp = np.zeros(n_exp_local, dtype=float)
+            if 'sigma_sys_indep_rel' in work.columns:
+                indep_arr = work['sigma_sys_indep_rel'].to_numpy(dtype=float)
+            elif 'sigma_sys_indep_relative' in work.columns:
+                indep_arr = work['sigma_sys_indep_relative'].to_numpy(dtype=float)
+            else:
+                indep_arr = None
+            if indep_arr is not None:
+                for e in range(n_exp_local):
+                    mask = (gls_exp_index == e)
+                    vals = indep_arr[mask]
+                    vals = vals[np.isfinite(vals)]
+                    if vals.size > 0:
+                        # σ_indep is scalar per experiment, so all rows of e
+                        # share one value; take the first (mean handles
+                        # rounding noise without changing the value).
+                        gls_indep_per_exp[e] = float(np.mean(vals))
+
+            if 'sigma_sys_dep_rel' in work.columns:
+                gls_dep_per_row = work['sigma_sys_dep_rel'].to_numpy(dtype=float)
+            elif 'sigma_sys_dep_relative' in work.columns:
+                gls_dep_per_row = work['sigma_sys_dep_relative'].to_numpy(dtype=float)
+            else:
+                gls_dep_per_row = None
+            if gls_dep_per_row is not None:
+                gls_dep_per_row = np.where(
+                    np.isfinite(gls_dep_per_row) & (gls_dep_per_row > 0),
+                    gls_dep_per_row, 0.0,
+                )
+
+            # Single-experiment bin fallback: GLS exists to absorb *inter-*
+            # experiment normalisation disagreement. With only one experiment
+            # there is no such disagreement — applying GLS just marginalises
+            # that one experiment's normalisation, which makes c_0 structurally
+            # unidentifiable, shrinks the GLS-fit c_0 toward zero, and biases
+            # AICc to pick L=1 (or L=0 if not excluded) with a visually broken
+            # nominal level. Detected and observed empirically on 91/152
+            # single-Kinney bins in the 1.5–2.5 MeV range. Fall back to
+            # diagonal WLS over σ_total = sqrt(σ²_stat + σ²_sys) for these
+            # bins — that keeps c_0 anchored and lets the AICc scan compare
+            # honest shape χ² across degrees.
+            if gls_indep_per_exp is not None and gls_indep_per_exp.size <= 1:
+                gls_indep_per_exp = None
+                gls_exp_index = None
+                gls_dep_per_row = None
+
+    # When GLS marginalises every active experiment's normalisation (i.e. no
+    # "anchor experiment" with σ_sys_indep = 0), the c_0 direction is
+    # structurally unidentifiable: per-experiment scale factors absorb any
+    # constant offset, so χ²(L=0) collapses to ~0 regardless of the data.
+    # AICc would then trivially pick L=0 even on highly anisotropic bins
+    # (observed: 152/154 single-Kinney bins picked L=0 in the first GLS run).
+    # Exclude L=0 from the AICc scan in that case so the scan compares only
+    # shape models that the data can actually constrain. The chosen L still
+    # has c_0 in its parameter list — c_0 just gets fitted as a nuisance
+    # direction with no χ² penalty, exactly how the marginalisation intends.
+    gls_no_anchor = (
+        use_gls_kernel
+        and gls_indep_per_exp is not None
+        and gls_indep_per_exp.size > 0
+        and bool(np.all(gls_indep_per_exp > 0))
+    )
+
+    # AICc sample size: use the RAW point count, not the Kish ESS. The Kish
+    # ESS — (Σw)^2/Σw^2 with w = kw/σ_for_fit² — collapses to ~k+1 whenever
+    # one point has a much smaller σ than the others (e.g. a low-cross-section
+    # point near the angular minimum, which gets w ≈ 10^4× the typical row).
+    # Combined with `_criterion_score`'s `+1e6` hard penalty for n ≤ k+1,
+    # this STRUCTURALLY BANS every degree above ~1 even when the χ² at L=0 is
+    # catastrophic — observed: 0.847 MeV bin, χ²(L=0)=144 vs χ²(L=2)=8, but
+    # n_eff_aicc=3.0 banned L≥2 and L=0 won by default. AICc's complexity
+    # penalty is about "how many parameters can I afford given my MEASUREMENT
+    # COUNT" (≈ raw n), not "how concentrated is my fit's information"
+    # (Kish ESS). The chi² already absorbs the weighting; the parsimony term
+    # should not double-count it.
+    n_aicc = float(n)
 
     # Choose degree based on number of UNIQUE mu values, not total points.
     # The Legendre Vandermonde matrix has rank = n_unique_mu, so we need at least
@@ -1424,17 +1982,32 @@ def sample_legendre_coefficients(
         if select_degree is None:
             degree_use = max_feasible
         else:
-            # Scan degrees 0..max_feasible and pick best score
+            # Scan degrees [d_min..max_feasible] and pick best score. Skip
+            # L=0 when GLS has no anchor experiment (c_0 unidentifiable —
+            # see ``gls_no_anchor`` definition above). When max_feasible=0
+            # we still allow L=0 as the only option — that's a degenerate
+            # bin and the choice is forced anyway.
+            d_min = 1 if (gls_no_anchor and max_feasible >= 1) else 0
             best = None
             best_res = None
-            for d in range(0, max_feasible + 1):
-                coeffs_d, chi2_d, dof_d, k_d = _weighted_ridge_fit(
-                    mu, y, sigma_for_fit, d,
-                    ridge_lambda=ridge_lambda,
-                    ridge_power=ridge_power,
-                    df_method=df_method,
-                    external_weights=external_weights,
-                )
+            for d in range(d_min, max_feasible + 1):
+                if use_gls_kernel and gls_indep_per_exp is not None:
+                    coeffs_d, chi2_d, dof_d, k_d = _weighted_ridge_fit_gls(
+                        mu, y, sigma, gls_indep_per_exp, gls_exp_index, d,
+                        sigma_sys_dep_per_row=gls_dep_per_row,
+                        ridge_lambda=ridge_lambda,
+                        ridge_power=ridge_power,
+                        df_method=df_method,
+                        external_weights=external_weights,
+                    )
+                else:
+                    coeffs_d, chi2_d, dof_d, k_d = _weighted_ridge_fit(
+                        mu, y, sigma_for_fit, d,
+                        ridge_lambda=ridge_lambda,
+                        ridge_power=ridge_power,
+                        df_method=df_method,
+                        external_weights=external_weights,
+                    )
                 score = _criterion_score(chi2_d, n=n_aicc, k=k_d, criterion=select_degree)
 
                 # Store info for all viable degrees (for model averaging)
@@ -1464,13 +2037,23 @@ def sample_legendre_coefficients(
 
     # Nominal fit (if not already computed by selection step)
     if not (degree is None and select_degree is not None):
-        coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
-            mu, y, sigma_for_fit, degree_use,
-            ridge_lambda=ridge_lambda,
-            ridge_power=ridge_power,
-            df_method=df_method,
-            external_weights=external_weights,
-        )
+        if use_gls_kernel and gls_indep_per_exp is not None:
+            coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit_gls(
+                mu, y, sigma, gls_indep_per_exp, gls_exp_index, degree_use,
+                sigma_sys_dep_per_row=gls_dep_per_row,
+                ridge_lambda=ridge_lambda,
+                ridge_power=ridge_power,
+                df_method=df_method,
+                external_weights=external_weights,
+            )
+        else:
+            coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
+                mu, y, sigma_for_fit, degree_use,
+                ridge_lambda=ridge_lambda,
+                ridge_power=ridge_power,
+                df_method=df_method,
+                external_weights=external_weights,
+            )
 
     chi2_red = float(chi2_0 / max(1e-12, dof_0))
 
@@ -1530,13 +2113,27 @@ def sample_legendre_coefficients(
                 np.sqrt(sigma_eff ** 2 + sigma_sys ** 2)
                 if sigma_sys is not None else sigma_eff
             )
-            coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
-                mu, y, sigma_refit, degree_use,
-                ridge_lambda=ridge_lambda,
-                ridge_power=ridge_power,
-                df_method=df_method,
-                external_weights=external_weights,
-            )
+            if (tau_refit_use_gls and use_gls_kernel
+                    and gls_indep_per_exp is not None):
+                # σ_eff (τ-inflated stat) on D; σ_sys stays rank-1 in U/V.
+                # Deliberately NOT sigma_refit — see tau_refit_use_gls above.
+                coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit_gls(
+                    mu, y, sigma_eff, gls_indep_per_exp, gls_exp_index,
+                    degree_use,
+                    sigma_sys_dep_per_row=gls_dep_per_row,
+                    ridge_lambda=ridge_lambda,
+                    ridge_power=ridge_power,
+                    df_method=df_method,
+                    external_weights=external_weights,
+                )
+            else:
+                coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
+                    mu, y, sigma_refit, degree_use,
+                    ridge_lambda=ridge_lambda,
+                    ridge_power=ridge_power,
+                    df_method=df_method,
+                    external_weights=external_weights,
+                )
             # Convergence: compare *raw* targets between consecutive iterations
             # (damping smooths the trajectory but we still want to see whether
             # the underlying estimator has settled).
@@ -1590,14 +2187,26 @@ def sample_legendre_coefficients(
             new_all: Dict[int, Dict[str, Any]] = {}
             new_best: Optional[float] = None
             new_best_res: Optional[Tuple[int, np.ndarray, float, float, float]] = None
-            for d in range(0, max_feasible + 1):
-                coeffs_d, chi2_d, dof_d, k_d = _weighted_ridge_fit(
-                    mu, y, sigma_for_fit_post_tau, d,
-                    ridge_lambda=ridge_lambda,
-                    ridge_power=ridge_power,
-                    df_method=df_method,
-                    external_weights=external_weights,
-                )
+            d_min_post = 1 if (gls_no_anchor and max_feasible >= 1) else 0
+            for d in range(d_min_post, max_feasible + 1):
+                if use_gls_kernel and gls_indep_per_exp is not None:
+                    # τ-inflated stat goes on D; per-exp normalisation stays in U.
+                    coeffs_d, chi2_d, dof_d, k_d = _weighted_ridge_fit_gls(
+                        mu, y, sigma_eff, gls_indep_per_exp, gls_exp_index, d,
+                        sigma_sys_dep_per_row=gls_dep_per_row,
+                        ridge_lambda=ridge_lambda,
+                        ridge_power=ridge_power,
+                        df_method=df_method,
+                        external_weights=external_weights,
+                    )
+                else:
+                    coeffs_d, chi2_d, dof_d, k_d = _weighted_ridge_fit(
+                        mu, y, sigma_for_fit_post_tau, d,
+                        ridge_lambda=ridge_lambda,
+                        ridge_power=ridge_power,
+                        df_method=df_method,
+                        external_weights=external_weights,
+                    )
                 score = _criterion_score(
                     chi2_d, n=n_aicc, k=k_d, criterion=select_degree,
                 )
@@ -1648,13 +2257,26 @@ def sample_legendre_coefficients(
                         np.sqrt(sigma_eff ** 2 + sigma_sys ** 2)
                         if sigma_sys is not None else sigma_eff
                     )
-                    coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
-                        mu, y, sigma_refit, degree_use,
-                        ridge_lambda=ridge_lambda,
-                        ridge_power=ridge_power,
-                        df_method=df_method,
-                        external_weights=external_weights,
-                    )
+                    if (tau_refit_use_gls and use_gls_kernel
+                            and gls_indep_per_exp is not None):
+                        # Same contract as the first τ-IRLS loop above.
+                        coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit_gls(
+                            mu, y, sigma_eff, gls_indep_per_exp,
+                            gls_exp_index, degree_use,
+                            sigma_sys_dep_per_row=gls_dep_per_row,
+                            ridge_lambda=ridge_lambda,
+                            ridge_power=ridge_power,
+                            df_method=df_method,
+                            external_weights=external_weights,
+                        )
+                    else:
+                        coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
+                            mu, y, sigma_refit, degree_use,
+                            ridge_lambda=ridge_lambda,
+                            ridge_power=ridge_power,
+                            df_method=df_method,
+                            external_weights=external_weights,
+                        )
                     tau_target_curr = {
                         b: float(tau_info.get(f'raw_{b[-1]}', tau_info[b]))
                         for b in ('tau_F', 'tau_M', 'tau_B')
@@ -1715,10 +2337,18 @@ def sample_legendre_coefficients(
             for l in range(max_sample_order + 1, degree_use + 1)
         }
 
-    # Build group mapping for correlated normalization (Improvement 1.3)
+    # Build group mapping for correlated normalization (Improvement 1.3).
+    # Groups are needed whenever the global sigma_norm is active OR the
+    # manifest supplies per-experiment sigma_sys_relative values; gating on
+    # sigma_norm alone would silently drop all manifest-driven normalization
+    # perturbations when sigma_norm=0.
+    _has_manifest_sys = (
+        'sigma_sys_relative' in work.columns
+        and bool(np.any(work['sigma_sys_relative'].to_numpy(dtype=float) > 0.0))
+    )
     group_indices: Dict[Tuple, List[int]] = {}
     group_keys: List[Tuple] = []
-    if sigma_norm > 0.0:
+    if sigma_norm > 0.0 or _has_manifest_sys:
         # Check if required columns exist
         available_cols = [col for col in norm_group_cols if col in work.columns]
         if available_cols:
@@ -1730,32 +2360,39 @@ def sample_legendre_coefficients(
             group_keys = list(group_indices.keys())
 
     # Sampling fits
+    # Perturbed data + σ captured for the optional fixed-shape c0 recording
+    # (Phase-2 magnitude channel); stays None on the default path.
+    c0_record_Y = None
+    c0_record_sigma = None
     if n_samples <= 1 and not stochastic:
         coef_mat = coeffs0[np.newaxis, :]
+        if record_c0_scale:
+            c0_record_Y = y[np.newaxis, :]
+            c0_record_sigma = sigma_for_fit
     else:
         n_draws = max(1, int(n_samples))
 
         # Generate all perturbed y vectors at once
         Y_perturbed = np.tile(y, (n_draws, 1))  # (n_draws, n)
 
-        # Global elastic-XS factor: one draw per sample, applied to all points
+        # Global common-mode normalization factor: one draw per sample, applied to all points
         # (models the shared monitor / reference XS uncertainty).
-        if sigma_norm_elastic > 0.0:
+        if sigma_norm_common_mode > 0.0:
             if norm_dist == "lognormal":
-                N_elastic = rng.lognormal(
-                    mean=-0.5 * sigma_norm_elastic ** 2,
-                    sigma=sigma_norm_elastic,
+                N_common_mode = rng.lognormal(
+                    mean=-0.5 * sigma_norm_common_mode ** 2,
+                    sigma=sigma_norm_common_mode,
                     size=n_draws,
                 )
             else:
-                N_elastic = 1.0 + rng.normal(0.0, sigma_norm_elastic, size=n_draws)
-            Y_perturbed *= N_elastic[:, np.newaxis]
+                N_common_mode = 1.0 + rng.normal(0.0, sigma_norm_common_mode, size=n_draws)
+            Y_perturbed *= N_common_mode[:, np.newaxis]
 
         # Apply correlated normalization uncertainty per experiment (Improvement 1.3).
         # Each group's sigma is taken from the manifest-derived
         # 'sigma_sys_relative' column on the data, falling back to the global
         # sigma_norm when the column is absent or zero.
-        if sigma_norm > 0.0 and group_keys:
+        if group_keys:
             has_sys_col = 'sigma_sys_relative' in work.columns
             for key in group_keys:
                 indices = group_indices[key]
@@ -1767,6 +2404,8 @@ def sample_legendre_coefficients(
                 # variable name to avoid shadowing the per-point ``sigma_eff``
                 # array that is used for additive noise + fit weights below.
                 ex_norm_sigma = ex_sigma_sys if ex_sigma_sys > 0 else sigma_norm
+                if ex_norm_sigma <= 0.0:
+                    continue
                 if norm_dist == "lognormal":
                     N_g = rng.lognormal(
                         mean=-0.5 * ex_norm_sigma ** 2,
@@ -1801,7 +2440,26 @@ def sample_legendre_coefficients(
             fixed_c0=c0_fix,
             fixed_coeffs=fixed_high,
         )
+        if record_c0_scale:
+            c0_record_Y = Y_perturbed
+            c0_record_sigma = sigma_for_mc_fit
     coef_df = pd.DataFrame(coef_mat, columns=[f"c{l}" for l in range(degree_use + 1)])
+
+    # Optional fixed-shape c0 (elastic magnitude) recording. Projects each
+    # perturbed sample onto the frozen nominal shape using the same weights the
+    # fit used; read-only, so ``coef_df`` above is untouched.
+    c0_samples = None
+    if record_c0_scale and c0_record_Y is not None:
+        ref_coeffs = (
+            coeffs0 if c0_scale_ref_coeffs is None
+            else np.asarray(c0_scale_ref_coeffs, dtype=float)
+        )
+        _, c0_samples = fixed_shape_c0_scale(
+            c0_record_Y, mu, ref_coeffs,
+            external_weights=external_weights,
+            sigma_for_fit=c0_record_sigma,
+        )
+        c0_samples = np.atleast_1d(c0_samples)
 
     info = dict(
         n_points=n,
@@ -1824,7 +2482,7 @@ def sample_legendre_coefficients(
         freeze_c0=freeze_c0,
         fixed_c0_value=c0_fix,
         sigma_norm=sigma_norm,
-        n_experiments_for_norm=len(group_keys) if sigma_norm > 0.0 else 0,
+        n_experiments_for_norm=len(group_keys),
         max_sample_order=max_sample_order,
         n_frozen_high=len(fixed_high) if fixed_high else 0,
         # Phase B audit follow-up: keep the pre-τ AICc snapshot (when the
@@ -1834,6 +2492,10 @@ def sample_legendre_coefficients(
         all_degrees_info_pre_tau=all_degrees_info_pre_tau,
         post_tau_winner_changed=post_tau_winner_changed,
     )
+    # Magnitude side channel: only present when explicitly requested so the
+    # default info dict is byte-for-byte what every existing caller sees.
+    if record_c0_scale:
+        info["c0_samples"] = c0_samples
     return coef_df, info
 
 
@@ -1876,139 +2538,152 @@ def evaluate_legendre_series(mu: np.ndarray, c: np.ndarray) -> np.ndarray:
     return legval(mu, c)
 
 
-def load_exfor_for_fitting(
-    exfor_directory: str,
-    energy_mev: float,
-    tolerance: float = 0.015,
-    m_proj_u: float = 1.008665,
-    m_targ_u: float = 55.93494,
-) -> pd.DataFrame:
-    """
-    Load EXFOR experimental data for a specific energy and format for Legendre fitting.
+def fixed_shape_c0_scale(
+    Y: np.ndarray,
+    mu: np.ndarray,
+    nominal_coeffs: np.ndarray,
+    external_weights: Optional[np.ndarray] = None,
+    sigma_for_fit: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Closed-form "fit c0 with the shape frozen" magnitude scale.
 
-    This function loads EXFOR data at the specified energy (within tolerance),
-    transforms LAB frame data to CM frame if needed, and returns a DataFrame
-    compatible with sample_legendre_coefficients().
+    The elastic magnitude channel (MF3 MT2 / MF33 MT2) of the EXFOR pipeline.
+    With the angular *shape* held at the nominal bin curve
+    ``y_nom(mu) = sum_l c_l^nom P_l(mu)``, the only free parameter of a
+    perturbed dataset ``Y`` is a single multiplicative scale ``s``.  The
+    weighted-least-squares estimate of that scale is the closed form::
+
+        s = sum(w * Y * y_nom) / sum(w * y_nom**2)          c0 = s * c0_nom
+
+    with the *same* fit weights the shape refit uses, ``w = external_weights /
+    sigma_for_fit**2`` (``external_weights`` = the kernel/ESS weights ``g``;
+    ``sigma_for_fit`` = the per-point σ the WLS observes, i.e. τ-inflated σ_stat
+    optionally combined in quadrature with σ_sys).  ``c0_nom = nominal_coeffs[0]``
+    and ``sigma_el = 4*pi*c0``.
+
+    Because this only *reads* the perturbed data ``Y`` and never re-solves the
+    shape fit, recording it alongside the frozen-c0 MF34 refits leaves MF4 and
+    MF34 bit-identical.
 
     Parameters
     ----------
-    exfor_directory : str
-        Path to directory containing EXFOR JSON files
-    energy_mev : float
-        Target energy in MeV
-    tolerance : float, optional
-        Energy matching tolerance in MeV (default: 0.015)
-    m_proj_u : float, optional
-        Projectile mass in atomic mass units (default: 1.008665 for neutron)
-    m_targ_u : float, optional
-        Target mass in atomic mass units (default: 55.93494 for Fe-56)
+    Y : np.ndarray
+        Perturbed data values (barns/sr), either 1-D ``(n_points,)`` for a
+        single sample or 2-D ``(n_draws, n_points)`` for a batch of samples.
+    mu : np.ndarray
+        ``cos(theta)`` of each point, shape ``(n_points,)``.
+    nominal_coeffs : np.ndarray
+        Nominal Legendre coefficients ``[c0, c1, ...]`` defining the frozen
+        shape; ``nominal_coeffs[0]`` is ``c0_nom``.
+    external_weights : np.ndarray, optional
+        Per-point kernel/ESS weights ``g`` (shape ``(n_points,)``).  Defaults to
+        ones (unweighted) when omitted.
+    sigma_for_fit : np.ndarray, optional
+        Per-point σ the WLS uses (shape ``(n_points,)``).  Defaults to ones
+        (plain kernel-weighted) when omitted; points with non-finite or
+        non-positive σ are dropped.
 
     Returns
     -------
-    pd.DataFrame
-        Combined DataFrame with columns:
-        - 'theta_deg': scattering angle in degrees
-        - 'value': differential cross section dσ/dΩ in barns/sr
-        - 'unc': uncertainty (error_stat) in barns/sr
-        - 'mu': cos(theta) in CM frame
-        - 'frame': reference frame ('CM' or 'LAB')
-        - 'entry': EXFOR entry number
-        - 'subentry': EXFOR subentry number
-        - 'author': first author name
-        - 'year': publication year
-        - 'reaction': reaction string (e.g., '26-FE-56(N,EL)26-FE-56' or '26-FE-0(N,EL)26-FE-0' for natural)
-
-    Notes
-    -----
-    - All LAB frame data is automatically converted to CM frame
-    - Only statistical uncertainties (error_stat) are included
-    - Multiple EXFOR experiments at matching energies are concatenated
-    - Returns empty DataFrame if no matching data found
+    (s, c0) : Tuple[np.ndarray, np.ndarray]
+        The scale ``s`` and magnitude ``c0 = s * c0_nom``.  Both are 0-D arrays
+        for 1-D ``Y`` and shape ``(n_draws,)`` for 2-D ``Y``.
     """
-    if not _EXFOR_AVAILABLE:
-        raise ImportError(
-            "EXFOR utilities not available. Ensure angular_distribution_utils.py "
-            "and uncertainty_analysis_utils.py are in ../EXFOR/"
+    Y = np.asarray(Y, dtype=float)
+    mu = np.asarray(mu, dtype=float)
+    nominal_coeffs = np.asarray(nominal_coeffs, dtype=float)
+
+    y_nom = legval(mu, nominal_coeffs)
+
+    g = (
+        np.ones_like(mu)
+        if external_weights is None
+        else np.asarray(external_weights, dtype=float)
+    )
+    if sigma_for_fit is None:
+        w = g
+    else:
+        sigma = np.asarray(sigma_for_fit, dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            inv_var = np.where(np.isfinite(sigma) & (sigma > 0), 1.0 / sigma ** 2, 0.0)
+        w = g * inv_var
+
+    denom = float(np.sum(w * y_nom ** 2))
+    if not np.isfinite(denom) or denom <= 0.0:
+        raise ValueError(
+            "fixed_shape_c0_scale: sum(w * y_nom**2) is non-positive; the "
+            "nominal curve is zero over all weighted points."
         )
 
-    exfor_data = load_exfor_data_within_tolerance(
-        exfor_directory, energy_mev, tolerance
+    # numer = sum_j w_j Y_j y_nom_j  — matmul broadcasts over the batch axis
+    # of a 2-D Y and reduces a 1-D Y to a scalar.
+    numer = Y @ (w * y_nom)
+    s = np.asarray(numer / denom)
+    c0 = s * float(nominal_coeffs[0])
+    return s, c0
+
+
+def combine_c0_covariance(
+    c0_pass1: np.ndarray,
+    c0_pass2: np.ndarray,
+    c0_nominal: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Congruence-combine the two-pass fixed-shape c0 samples into an MF33 block.
+
+    Mirrors the Legendre-vector combine used for MF34
+    (``cov = corr_pass1 * outer(std_pass2, std_pass2)``): cross-bin correlations
+    come from the Pass-1 shared-draw samples, marginal variances from the
+    Pass-2 independent-per-bin samples.  The result is the elastic **magnitude**
+    covariance — one square block over energy bins.
+
+    Parameters
+    ----------
+    c0_pass1 : np.ndarray
+        Pass-1 c0 samples, shape ``(n_samples_1, n_bins)`` (shared draws →
+        correlations).  Missing entries may be NaN; correlations use the
+        pairwise-complete observations.
+    c0_pass2 : np.ndarray
+        Pass-2 c0 samples, shape ``(n_samples_2, n_bins)`` (independent per-bin
+        draws → variances).  NaNs are ignored per column.
+    c0_nominal : np.ndarray
+        Nominal magnitude ``c0_nom`` per bin, shape ``(n_bins,)``.
+
+    Returns
+    -------
+    (rel_cov, cov_abs) : Tuple[np.ndarray, np.ndarray]
+        ``rel_cov`` is the **relative** covariance
+        ``Cov(c0_i, c0_j) / (c0_nom_i * c0_nom_j)`` (the MF33 writer input);
+        ``cov_abs`` is the absolute covariance in c0 units.  Both are
+        ``(n_bins, n_bins)`` symmetric.  Bins with a non-positive nominal get a
+        zero relative row/column.
+    """
+    c0_pass1 = np.asarray(c0_pass1, dtype=float)
+    c0_pass2 = np.asarray(c0_pass2, dtype=float)
+    c0_nominal = np.asarray(c0_nominal, dtype=float)
+    n_bins = c0_nominal.size
+
+    # Pass-1 correlations (pairwise-complete over shared-draw samples).
+    p1 = np.ma.masked_invalid(c0_pass1)
+    corr = np.ma.corrcoef(p1, rowvar=False)
+    corr = np.ma.filled(np.ma.asarray(corr), 0.0)
+    corr = np.atleast_2d(corr)
+    corr = np.clip(corr, -1.0, 1.0)
+    np.fill_diagonal(corr, 1.0)
+
+    # Pass-2 marginal std per bin.
+    std = np.nanstd(c0_pass2, axis=0, ddof=1)
+    std = np.nan_to_num(std, nan=0.0, posinf=0.0, neginf=0.0)
+
+    cov_abs = corr * np.outer(std, std)
+    np.fill_diagonal(cov_abs, std ** 2)
+    cov_abs = 0.5 * (cov_abs + cov_abs.T)
+
+    denom = np.outer(c0_nominal, c0_nominal)
+    rel_cov = np.divide(
+        cov_abs, denom, out=np.zeros((n_bins, n_bins)), where=denom > 0.0,
     )
-
-    if exfor_data is None or len(exfor_data) == 0:
-        print(f"No EXFOR data found for E={energy_mev:.3f} MeV ± {tolerance:.3f} MeV")
-        return pd.DataFrame(columns=[
-            'theta_deg', 'value', 'unc', 'mu', 'frame', 'entry', 'subentry', 'author', 'year', 'reaction'
-        ])
-
-    all_frames = []
-    for df, meta in exfor_data:
-        # Extract metadata
-        entry = meta.get('entry', 'unknown')
-        subentry = meta.get('subentry', 'unknown')
-        matched_energy = meta.get('matched_energy', energy_mev)
-        frame = meta.get('angle_frame', 'CM').upper()
-        reaction = meta.get('reaction', '')
-
-        # Extract author and year
-        citation = meta.get('citation', {})
-        authors = citation.get('authors', [])
-        author = authors[0] if authors else 'unknown'
-        year = citation.get('year', 'unknown')
-
-        # Extract columns
-        angles_deg = df['angle'].to_numpy(dtype=float)
-        dsig = df['dsig'].to_numpy(dtype=float)
-        error_stat = df['error_stat'].to_numpy(dtype=float)
-
-        # Transform to CM frame if needed
-        if frame == 'LAB':
-            mu_lab = np.cos(np.deg2rad(angles_deg))
-            mu_cm, dsig_cm, error_cm = transform_lab_to_cm(
-                mu_lab, dsig, error_stat, m_proj_u, m_targ_u
-            )
-
-            angles_cm_deg = np.rad2deg(np.arccos(mu_cm))
-
-            # Create transformed dataframe
-            transformed_df = pd.DataFrame({
-                'theta_deg': angles_cm_deg,
-                'value': dsig_cm,
-                'unc': error_cm,
-                'mu': mu_cm,
-                'frame': 'CM',
-                'entry': entry,
-                'subentry': subentry,
-                'author': author,
-                'year': year,
-                'reaction': reaction,
-            })
-        else:
-            # Already in CM frame
-            mu_cm = np.cos(np.deg2rad(angles_deg))
-
-            transformed_df = pd.DataFrame({
-                'theta_deg': angles_deg,
-                'value': dsig,
-                'unc': error_stat,
-                'mu': mu_cm,
-                'frame': frame,
-                'entry': entry,
-                'subentry': subentry,
-                'author': author,
-                'year': year,
-                'reaction': reaction,
-            })
-
-        all_frames.append(transformed_df)
-
-    # Concatenate all experiments
-    result = pd.concat(all_frames, ignore_index=True)
-
-    print(f"Loaded {len(exfor_data)} EXFOR experiment(s) with {len(result)} data points")
-    print(f"Energy match: {energy_mev:.3f} MeV (tolerance: ±{tolerance:.3f} MeV)")
-
-    return result
+    rel_cov = 0.5 * (rel_cov + rel_cov.T)
+    return rel_cov, cov_abs
 
 
 def plot_sampled_angular_distributions(
@@ -2032,8 +2707,7 @@ def plot_sampled_angular_distributions(
         DataFrame with Legendre coefficients (columns c0, c1, c2, ...)
         from sample_legendre_coefficients()
     exfor_df : pd.DataFrame, optional
-        EXFOR data from load_exfor_for_fitting() with columns
-        theta_deg, value, unc, mu
+        EXFOR data with columns theta_deg, value, unc, mu
     n_plot : int, optional
         Number of sample curves to plot (default: 10)
     analysis_energy : float, optional

@@ -48,8 +48,9 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int,
     :type pert_metadata: list of tuple, optional
     :returns: Object containing computed sensitivity coefficients
     :rtype: SensitivityData
-    :raises ValueError: If ZAID metadata is missing and no pert_metadata is provided,
-        or if pert_metadata contains multiple ZAIDs (use compute_total_sensitivity instead).
+    :raises ValueError: If no zaid is given and none can be resolved from
+        pert_metadata or PERT-card metadata, or if pert_metadata contains
+        multiple ZAIDs (use compute_total_sensitivity instead).
     """
     input_data = read_mcnp(inputfile, pert_metadata=pert_metadata)
     mctal = read_mctal(mctalfile)
@@ -82,11 +83,13 @@ def compute_sensitivity(inputfile: str, mctalfile: str, tally: int,
         )
 
     if not input_data.perturbation.has_zaid_info:
-        raise ValueError(
-            "No ZAID metadata found in PERT cards. "
-            "Provide pert_metadata=[(start, end, zaid, material), ...] "
-            "or add 'c kika:pert_zaid=ZAID pert_mat=MAT' comments to the input file."
-        )
+        # No per-card ZAID metadata (no pert_metadata argument and no
+        # 'c kika:pert_zaid=' comments in the input file). A single ZAID was
+        # provided explicitly, so treat this as a single-nuclide input and
+        # assign that ZAID to every PERT card. Multi-nuclide inputs must supply
+        # per-card metadata (or use compute_total_sensitivity()).
+        for p in input_data.perturbation.pert.values():
+            p.zaid = zaid
 
     # Guard: if no material specified and multiple materials exist, raise error
     if material is None:
@@ -781,6 +784,7 @@ def create_sdf_data(
     # Determine r0 and e0 values (unperturbed tally result and its error)
     r0 = None
     e0 = None
+    response_values_supplied = response_values is not None
     
     if response_values is not None:
         # Use provided response values
@@ -804,6 +808,11 @@ def create_sdf_data(
                             )
                     break  # Only need to check one reaction per sensitivity data object
     
+    # Native MCNP tally errors are relative; manual response_values follow the
+    # SDFData contract and are already absolute.
+    if e0 is not None:
+        e0 = abs(e0) if response_values_supplied else abs(r0) * abs(e0)
+
     # Create a new SDFData object
     sdf_data = SDFData(
         title=title,
@@ -844,15 +853,16 @@ def create_sdf_data(
                 continue
             
             # Create SDFReactionData object
-            reaction_data = SDFReactionData(
+            reaction_data = SDFReactionData.from_relative_errors(
                 zaid=sd.zaid,
                 mt=mt,
                 sensitivity=coef_data.values,
-                error=coef_data.errors
+                relative_error=coef_data.errors,
             )
             
             # Add to SDF data
             sdf_data.data.append(reaction_data)
+    sdf_data._validate()
     
     return sdf_data
 
@@ -868,8 +878,8 @@ def create_sdf_from_serpent(
 ) -> SDFData:
     """Create a SDFData object from SERPENT sensitivity results.
     
-    Note: SERPENT provides relative errors (σ/μ) which are preserved as relative errors
-    to maintain consistency with nuclear data uncertainty propagation methods.
+    Note: SERPENT provides relative errors, which are converted once to absolute
+    standard deviations when constructing SDFReactionData.
     
     :param serpent_file: SERPENT sensitivity file object(s). Can be a single file or list of files.
     :type serpent_file: Union[SensitivityFile, List[SensitivityFile]]
@@ -887,8 +897,8 @@ def create_sdf_from_serpent(
     :type mt_filter: Union[int, List[int]], optional
     :param response_values: Tuple of (r0, e0) reference response values. If None, uses (1.0, 0.01).
                            r0 is the unperturbed tally result (reference response value),
-                           e0 is the relative error of the unperturbed tally result (e.g., 0.01 for 1%).
-                           Note: e0 is stored as relative error for consistency with nuclear data uncertainties.
+                           e0 is the absolute standard deviation of the response.
+                           The default 0.01 is therefore an absolute one-sigma uncertainty.
     :type response_values: Tuple[float, float], optional
     :returns: SDFData object containing the SERPENT sensitivity data
     :rtype: SDFData
@@ -921,12 +931,9 @@ def create_sdf_from_serpent(
     
     # Set default response values
     if response_values is None:
-        response_values = (1.0, 0.01)  # Default: r0=1.0, e0=1% relative error
+        response_values = (1.0, 0.01)
     
-    r0, e0_relative = response_values
-    
-    # Store relative error directly in SDF data for consistency with nuclear data uncertainties
-    # Both statistical and nuclear data uncertainties should be handled as relative values
+    r0, e0_absolute = response_values
     
     # Convert energy edges to perturbation energies (SDF format expects MeV)
     pert_energies = first_energies.tolist()
@@ -949,7 +956,7 @@ def create_sdf_from_serpent(
         energy=energy_str,
         pert_energies=pert_energies,
         r0=r0,
-        e0=e0_relative,  # Store relative error for consistency
+        e0=abs(e0_absolute),
         data=[]
     )
     
@@ -982,6 +989,7 @@ def create_sdf_from_serpent(
         sdf_data.data.extend(file_data)
     
     print(f"Combined SDF contains {len(sdf_data.data)} sensitivity profiles from {len(serpent_files)} files")
+    sdf_data._validate()
     
     return sdf_data
 
@@ -1069,22 +1077,18 @@ def _process_single_serpent_file(
                         
                         # Extract 1D arrays (remove any singleton dimensions)
                         sens_values = np.squeeze(values).tolist()
-                        rel_errors_raw = np.squeeze(rel_errors).tolist()
-                        
-                        # Convert relative errors to absolute errors to be consistent with MCNP approach
-                        # SERPENT provides relative errors (σ/μ), but SDF format expects absolute errors (σ)
-                        sens_errors = [abs(sens_val * rel_err) for sens_val, rel_err in zip(sens_values, rel_errors_raw)]
-                        
+                        sens_errors = np.squeeze(rel_errors).tolist()
+
                         # Skip if all sensitivity coefficients are zero
                         if all(abs(v) < 1e-15 for v in sens_values):
                             continue
-                        
-                        # Create SDFReactionData
-                        reaction_data = SDFReactionData(
+
+                        # Convert SERPENT relative errors at the SDF boundary.
+                        reaction_data = SDFReactionData.from_relative_errors(
                             zaid=zaid,
                             mt=mt,
                             sensitivity=sens_values,
-                            error=sens_errors
+                            relative_error=sens_errors,
                         )
                         
                         reaction_data_list.append(reaction_data)
@@ -1112,22 +1116,19 @@ def _process_single_serpent_file(
                             all_values.append(np.squeeze(values))
                             all_errors.append(np.squeeze(rel_errors))
                         
-                        # Average the values and relative errors (properly handling relative error averaging)
+                        # Average values and combine the native relative errors before conversion
                         avg_values = np.mean(all_values, axis=0).tolist()
                         avg_rel_errors = np.sqrt(np.mean(np.array(all_errors)**2, axis=0)).tolist()
-                        
-                        # Convert relative errors to absolute errors
-                        avg_abs_errors = [abs(sens_val * rel_err) for sens_val, rel_err in zip(avg_values, avg_rel_errors)]
-                        
+
                         # Skip if all sensitivity coefficients are zero
                         if all(abs(v) < 1e-15 for v in avg_values):
                             continue
-                        
-                        reaction_data = SDFReactionData(
+
+                        reaction_data = SDFReactionData.from_relative_errors(
                             zaid=zaid,
                             mt=mt,
                             sensitivity=avg_values,
-                            error=avg_abs_errors
+                            relative_error=avg_rel_errors,
                         )
                         
                         reaction_data_list.append(reaction_data)

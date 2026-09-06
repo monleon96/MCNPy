@@ -27,14 +27,6 @@ kika.cov.covmat
    :undoc-members:
    :show-inheritance:
 
-kika.cov.heatmap
------------------
-
-.. automodule:: kika.cov.heatmap
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 kika.cov.decomposition
 -----------------------
 

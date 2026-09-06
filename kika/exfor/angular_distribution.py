@@ -822,9 +822,7 @@ class ExforAngularDistribution(ExforEntry):
         if L is None or sigma_t is None:
             return None
 
-        # Neutron mass in MeV/c^2
-        m_n = 939.565  # MeV/c^2
-        c = 0.299792458  # speed of light in m/ns
+        from kika._constants import NEUTRON_MASS_MEV as m_n, SPEED_OF_LIGHT_M_NS as c
 
         # Convert energy to velocity (non-relativistic)
         v_over_c = np.sqrt(2 * energy_mev / m_n)

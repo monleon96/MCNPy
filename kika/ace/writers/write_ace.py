@@ -27,13 +27,19 @@ def write_ace(ace: Ace, filepath: str = None, overwrite: bool = False) -> str:
     if os.path.exists(filepath) and not overwrite:
         raise FileExistsError(f"File {filepath} already exists and overwrite is False")
     
-    # Convert raw values to XssEntry objects if needed
-    if not hasattr(ace.xss_data[0], 'index'):
-        ace.xss_data = [XssEntry(index=i, value=val) for i, val in enumerate(ace.xss_data)]
-    
-    xss_length = len(ace.xss_data)
-    indices = [entry.index for entry in ace.xss_data]
-    
+    # Work on a local view: wrap only what is not already an XssEntry, and never
+    # assign back to ace.xss_data. read_xss seeds index 0 with a bare 0 as the
+    # FORTRAN 1-based placeholder, so something has to cover it before the index
+    # checks below — but wrapping the whole list, as this used to, re-wrapped
+    # every real entry into XssEntry(value=XssEntry(...)) on the caller's object.
+    entries = [
+        entry if isinstance(entry, XssEntry) else XssEntry(index=i, value=entry)
+        for i, entry in enumerate(ace.xss_data)
+    ]
+
+    xss_length = len(entries)
+    indices = [entry.index for entry in entries]
+
     # Validate indices
     if any(idx is None for idx in indices):
         raise ValueError("Found XSS entry with no index")
@@ -44,22 +50,16 @@ def write_ace(ace: Ace, filepath: str = None, overwrite: bool = False) -> str:
         raise ValueError(f"Missing XSS indices: {sorted(missing)}")
     
     # If the data is not already sorted, sort it by index
-    if any(ace.xss_data[i].index > ace.xss_data[i+1].index for i in range(xss_length - 1)):
-        sorted_xss = sorted(ace.xss_data, key=lambda entry: entry.index)
+    if any(entries[i].index > entries[i+1].index for i in range(xss_length - 1)):
+        sorted_xss = sorted(entries, key=lambda entry: entry.index)
     else:
-        sorted_xss = ace.xss_data
-    
+        sorted_xss = entries
+
     # Skip the 0th element if there are multiple entries
     start_idx = 1 if len(sorted_xss) > 1 else 0
 
-    # Helper to unwrap nested XssEntry objects
-    def unwrap_value(val):
-        while isinstance(val, XssEntry):
-            val = val.value
-        return val
-
     # Extract the numeric values and convert to a NumPy array for fast processing
-    values_list = [unwrap_value(entry.value) for entry in sorted_xss[start_idx:]]
+    values_list = [entry.value for entry in sorted_xss[start_idx:]]
     values = np.array(values_list, dtype=float)  # using float for uniformity
 
     # Determine the formatting string: use integer formatting if all values are integers
