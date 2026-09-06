@@ -18,9 +18,13 @@ Record layout:
     LNU=2: TAB1 [0, 0, 0, 0, NR, NP / interp / E, nu_d]
 """
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
+
+import numpy as np
+from numpy.typing import ArrayLike
 
 from ..mt import MT
+from .mf1mt452 import evaluate_nubar
 from ...utils import (
     format_endf_send_record,
     format_endf_data_line,
@@ -119,6 +123,20 @@ class MF1MT455(MT):
     @property
     def interpolation(self) -> List[Tuple[int, int]]:
         return self._interpolation
+
+    # --- methods ---
+
+    def get_nubar(
+        self,
+        energy: Union[float, ArrayLike],
+        out_of_range: str = "hold",
+    ) -> Union[float, np.ndarray]:
+        """Delayed nu-bar at one or more incident energies. See
+        :func:`~kika.endf.classes.mf1.mf1mt452.evaluate_nubar`."""
+        return evaluate_nubar(
+            self._lnu, self._coefficients, self._energies, self._nubar,
+            self._interpolation, energy, out_of_range=out_of_range,
+        )
 
     # --- serialization ---
 
