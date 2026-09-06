@@ -171,6 +171,59 @@ def load_mf31_covariance(
     )
 
 
+def _nubar_sections(mf1_file) -> Dict[int, object]:
+    """``{MT: MF1 nu-bar section}`` -- what the appliers rewrite.
+
+    Not the same thing as :func:`_nubar_central_values`, which shims those
+    sections into ``(energies, cross_sections)`` for the absolute-to-relative
+    conversion. Both directions of that distinction have been got wrong once.
+    """
+    if mf1_file is None or not getattr(mf1_file, "sections", None):
+        return {}
+    return {mt: mf1_file.sections[mt]
+            for mt in _NUBAR_MTS if mt in mf1_file.sections}
+
+
+def build_mf31_blocks(
+    endf_obj,
+    mt_list: Optional[Sequence[int]] = None,
+    *,
+    energy_unit: str = "eV",
+    isotope=None,
+    union: str = "global",
+    logger=None,
+):
+    """:func:`build_mf31_covariance`'s signature, the model as its source.
+
+    The nu-bar central values MF31's absolute blocks are divided by come from
+    MF1, so this resolves them the way :func:`build_mf31_covariance` does and
+    hands them on. That resolution is the only reason this wrapper exists rather
+    than callers reaching :func:`~kika.sampling.mf33_sampling.loadCrossSectionBlocks`
+    directly -- §31.1 makes MF31's formats "directly analogous to those of File
+    33", and the assembly is literally the same function with ``mf=31``.
+
+    Returns ``(blocks, index, nubar_sections, unionGrid, mtsPresent)``, where
+    ``nubar_sections`` is the ``{MT: MF1 section}`` the appliers rewrite --
+    **not** the central-value shim, which is internal to the conversion.
+    """
+    from kika.sampling.mf33_sampling import loadCrossSectionBlocks
+
+    if energy_unit != "eV":
+        raise ValueError(
+            f"the model source states energy in eV; energy_unit={energy_unit!r} "
+            f"would have to be converted and nothing here knows to"
+        )
+
+    mf1_file = endf_obj.get_file(1)
+    central = _nubar_central_values(mf1_file)
+
+    blocks, index, unionGrid, mtsPresent = loadCrossSectionBlocks(
+        endf_obj, mt_list, central, mf=31, isotope=isotope, union=union,
+        logger=logger,
+    )
+    return blocks, index, _nubar_sections(mf1_file), unionGrid, mtsPresent
+
+
 def build_mf31_covariance(
     endf_obj,
     mt_list: Optional[Sequence[int]] = None,
@@ -282,13 +335,7 @@ def build_mf31_covariance(
                 is_relative=True,
             )
 
-    nubar_sections = {
-        mt: mf1_file.sections[mt]
-        for mt in _NUBAR_MTS
-        if mf1_file is not None and getattr(mf1_file, "sections", None)
-        and mt in mf1_file.sections
-    }
-    return unified, nubar_sections, list(union_grid), mts_present
+    return (unified, _nubar_sections(mf1_file), list(union_grid), mts_present)
 
 
 # ---------------------------------------------------------------------------

@@ -16,13 +16,30 @@ is temporary.
   the model about three NJOY formats to gain nothing the ACE path can use,
   since for ACE the covariance is a separate input file and what matters is
   that the carrier is shared, not where it came from.
-* **For MF33 the two assemblies are not the same covariance.** Measured on the
-  full Fe-56 tape (JEFF-4.0, MT 1/2/4/5/16/102/103): the carrier refines all
-  seven components onto one 730-bin global union grid, dimension 5110;
-  ``cross_section_covariance_blocks`` keeps each on its native grid — 630, 630,
-  124, 124, 124, 631, 124 — and pads to the widest, dimension 4417. Choosing
-  between them is an evaluation decision about what is being sampled, so the
-  MF33 source migration waits for it and the draw does not.
+* ~~**For MF33 the two assemblies are not the same covariance.**~~ **Superseded
+  2026-08-13, and this paragraph outlived it by a fortnight.** What it measured
+  is right — the carrier refines all seven components of the full Fe-56 tape
+  onto one 730-bin global union (dimension 5110) where a *per-component* union
+  keeps each on its native grid (630, 630, 124, 124, 124, 631, 124) and pads to
+  the widest (4417) — and what it concluded from it is not. ``assemble_joint``
+  took a per-component union because MF34 needs one; asked for a global union it
+  reproduces the carrier **bit for bit**, all 26 112 100 cells, on a pooled grid
+  identical to ``_build_union_grid``'s. So ``union='global'`` is the default and
+  the MF33 source migration was never blocked on the choice: the global-vs-
+  per-component question is the *improvement*, with its own before/after.
+  ``gnds_endf_conflicts.md`` §10.1. The source migration landed as
+  :func:`kika.sampling.mf33_sampling.loadCrossSectionBlocks`; what still reaches
+  this module is the **call sites**, and why is the next paragraph.
+
+* **``apply_legacy_autofix`` takes a carrier, and it is in the middle of both
+  live call sites.** ``pendf_perturbation`` and ``nubar_perturbation`` call it
+  between assembling the covariance and drawing, and it reaches
+  ``CrossSectionCovariance.fix_covariance`` — so a call site cannot be moved off
+  the carrier until autofix is retired or ported, which the sampling roadmap
+  makes its own change, in kika-app first (``autofix='soft'`` is every kika-app
+  default; ``None`` is every kika one, and then this function is a no-op). Found
+  when the M1 source landed, and it is why the source can be equivalent and the
+  call sites still be here.
 
 **The NaN fill is left as the carrier states it.** An unstated cross block
 comes back ``np.nan`` and stays that way until :func:`~kika.sampling.core.draw_samples`

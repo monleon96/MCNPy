@@ -183,6 +183,267 @@ def load_mf33_covariance(
     return unified, mf3_sections, list(union_grid), mts_present
 
 
+# ---------------------------------------------------------------------------
+# The model-side source (M1)
+# ---------------------------------------------------------------------------
+
+def relativiseAbsoluteSections(suite, binCentral, unionGrid, *, mf: int = 33,
+                               logger=None):
+    """Restate every absolute MF33/MF31 section of *suite* as a relative one.
+
+    **Why this is not part of the assembly.** ``cross_section_covariance_blocks``
+    lifts each section onto the union grid and puts it in its place; what it
+    does not do — and should not — is divide by a central value, because the
+    central value is not in the covariance file. MF3 lives on the PENDF and the
+    nu-bar on MF1, so the conversion needs an input the covariance suite does
+    not have and can only be done here, by the caller that read both.
+
+    **The order matters and is the carrier's.** ``load_mf33_covariance``
+    projects the block onto the union grid *first* and divides *afterwards*, by
+    a σ̄ binned on that same union. Dividing on the native grid and projecting
+    the result is a different matrix — projection is a sum over sub-bins and
+    division is not linear in the divisor — so this function lifts first too,
+    through ``model_blocks._lift_matrix``, which is bit-identical to
+    ``_project_matrix`` on the grids these files use (asserted in
+    ``test_the_model_source_reproduces_the_carrier.py``).
+
+    ``binCentral`` maps MT → the bin-averaged central values on *unionGrid*, as
+    :func:`_bin_average_xs` produces them. A section whose row or column MT has
+    no central value **is dropped, with a warning**, which is what
+    ``load_mf33_covariance`` does with the same case: a relative covariance is
+    undefined where there is no cross section to be relative to.
+
+    Returns a new list of sections; *suite* is not modified.
+    """
+    from kika.sampling.model_blocks import _endf_mt, _is_endf_mf, _lift_matrix
+    from kika._covariance_forms import require_single_matrix
+
+    union = np.asarray(unionGrid, dtype=float)
+    kept = []
+    for section in getattr(suite, "covarianceSections", suite):
+        rowData = section.rowData
+        if not _is_endf_mf(rowData, mf):
+            kept.append(section)
+            continue
+        colData = section.columnData if section.columnData is not None else rowData
+        form = require_single_matrix(
+            getattr(section, "form", None),
+            f"MF{mf} covariance section {getattr(section, 'label', '?')!r}",
+        )
+        if form.isRelative:
+            kept.append(section)
+            continue
+
+        mtRow, mtCol = _endf_mt(rowData), _endf_mt(colData)
+        if mtRow not in binCentral or mtCol not in binCentral:
+            if logger is not None:
+                logger.warning(
+                    f"[MF{mf}] Cannot convert absolute block ({mtRow}<->{mtCol}) "
+                    f"to relative -- no central values; skipping block."
+                )
+            continue
+
+        rowGrid = np.asarray(form.rowGrid, dtype=float)
+        colGrid = (rowGrid if form.columnGrid is None
+                   else np.asarray(form.columnGrid, dtype=float))
+        lifted = (_lift_matrix(rowGrid, union)
+                  @ np.asarray(form.matrix, dtype=float)
+                  @ _lift_matrix(colGrid, union).T)
+        relative = _absolute_to_relative(
+            lifted, binCentral[mtRow], binCentral[mtCol])
+
+        kept.append(dataclasses.replace(
+            section,
+            form=dataclasses.replace(form, matrix=relative, isRelative=True,
+                             rowGrid=union.copy(), columnGrid=union.copy()),
+        ))
+    return kept
+
+
+def loadCrossSectionBlocks(endfObj, mtList, centralSections, *, mf: int = 33,
+                           isotope=None, union: str = "global", logger=None):
+    """The MF33 (or MF31) joint covariance, assembled **from the model**.
+
+    The model-side replacement for :func:`load_mf33_covariance` and
+    :func:`kika.sampling.mf31_sampling.build_mf31_covariance` as a *source*: it
+    returns the same joint matrix in the same layout, as the ``(key, matrix)``
+    blocks and the index that :func:`kika.sampling.multigroup_draw.draw_relative_factors`
+    takes, without a :class:`~kika.cov.cross_section_covariance.CrossSectionCovariance`
+    ever being built.
+
+    ``union="global"`` is the shipped layout and the default, so this moves no
+    number — ``docs/library/gnds_endf_conflicts.md`` §10.1 measured it
+    bit-identical on the full Fe-56 tape, 5110 x 5110. ``"per-component"`` is
+    the improvement and keeps its own before/after.
+
+    ``centralSections`` maps MT → a section carrying ``energies`` and
+    ``cross_sections``: PENDF MF3 for MF33, MF1 nu-bar for MF31. It is used for
+    two things and only two — the absolute→relative conversion above, and
+    nothing else — so passing ``{}`` is legitimate for a file whose sections are
+    all relative, and produces a warning for one whose sections are not.
+
+    Returns ``(blocks, index, unionGrid, mtsPresent)``.
+    """
+    from kika.endf.model_adapter import decodeCovarianceSuite
+    from kika.sampling.model_blocks import (_cross_section_entries,
+                                            _union_grids,
+                                            cross_section_covariance_blocks,
+                                            cross_section_covariance_index)
+
+    mfFile = endfObj.get_file(mf)
+    if mfFile is None or not getattr(mfFile, "sections", None):
+        raise RuntimeError(f"this ENDF object has no MF{mf} sections")
+
+    if mtList is None:
+        requested = sorted(int(mt) for mt in mfFile.sections)
+    else:
+        requested = sorted({int(mt) for mt in mtList})
+    mtsPresent = [mt for mt in requested if mt in mfFile.sections]
+    missing = sorted(set(requested) - set(mtsPresent))
+    if missing and logger is not None:
+        logger.warning(
+            f"[MF{mf}] MTs {missing}: not in MF{mf}; no perturbation applied "
+            f"for these."
+        )
+    if not mtsPresent:
+        raise RuntimeError(f"None of MTs {requested} are present in MF{mf}")
+
+    suite, report = decodeCovarianceSuite(endfObj)
+    if logger is not None and not report.isClean:
+        logger.info(f"[MF{mf}] covariance decode: {report.summary()}")
+
+    # The union grid, before any conversion: the conversion has to divide by a
+    # central value binned on the grid the blocks will end up on, so the grid
+    # is settled first. Taken from the entries rather than rebuilt, so it is
+    # `assemble_joint`'s own and not a second implementation of it.
+    entries = _cross_section_entries(suite, mf=mf, mt=mtsPresent)
+    if not entries:
+        raise RuntimeError(
+            f"MF{mf} decoded to no covariance entries for MTs {mtsPresent}; the "
+            f"sections are present on the tape but did not reach the model"
+        )
+    unions = _union_grids(entries, union=union)
+
+    absolute = _absoluteSections(suite, mf)
+    if absolute and union != "global":
+        # Under `per-component` each key has its own bins, so there is no single
+        # grid to state a converted block on -- and stating it on one key's grid
+        # while the assembly expects another is wrong everywhere and visible
+        # nowhere. The improvement has to decide what a converted absolute block
+        # means before it can be taken, so this refuses rather than guesses.
+        raise NotImplementedError(
+            f"MF{mf} has {len(absolute)} absolute block(s) {absolute} and "
+            f"union={union!r}: the absolute-to-relative conversion divides by a "
+            f"central value binned on the grid the block ends up on, and "
+            f"per-component gives each component a different one. Use "
+            f"union='global' (the shipped layout), or decide what a converted "
+            f"block means per component first"
+        )
+
+    # One grid in `global` mode by construction -- every key gets the same
+    # union -- which is what makes a single `binCentral` well defined.
+    unionGrid = [float(e) for e in unions[sorted(unions)[0]]]
+
+    binCentral = {}
+    for mt in mtsPresent:
+        section = (centralSections or {}).get(mt)
+        if section is not None:
+            binCentral[mt] = _bin_average_xs(
+                np.asarray(section.energies, dtype=float),
+                np.asarray(section.cross_sections, dtype=float),
+                unionGrid,
+            )
+
+    sections = relativiseAbsoluteSections(
+        suite, binCentral, unionGrid, mf=mf, logger=logger)
+
+    # Both derived from the same converted sections, and through the shipped
+    # entry points rather than a second implementation of them: an index built
+    # on one bin structure describing a block built on another is wrong
+    # everywhere without being wrong anywhere visible.
+    blocks = cross_section_covariance_blocks(
+        sections, isotope=isotope, mt=mtsPresent, union=union, mf=mf)
+    if not blocks:
+        raise RuntimeError(
+            f"MF{mf}: every block was dropped by the absolute-to-relative "
+            f"conversion, so there is nothing to sample"
+        )
+    index = cross_section_covariance_index(
+        sections, isotope=isotope, mt=mtsPresent, union=union, mf=mf)
+    return blocks, index, unionGrid, mtsPresent
+
+
+def _absoluteSections(suite, mf: int):
+    """The ``(row MT, column MT)`` of every MF33/MF31 section stated absolute."""
+    from kika._covariance_forms import require_single_matrix
+    from kika.sampling.model_blocks import _endf_mt, _is_endf_mf
+
+    found = []
+    for section in getattr(suite, "covarianceSections", suite):
+        if not _is_endf_mf(section.rowData, mf):
+            continue
+        try:
+            form = require_single_matrix(getattr(section, "form", None), "")
+        except Exception:
+            continue
+        if not form.isRelative:
+            col = (section.columnData if section.columnData is not None
+                   else section.rowData)
+            found.append((_endf_mt(section.rowData), _endf_mt(col)))
+    return found
+
+
+def load_mf33_blocks(
+    endf_path: str,
+    pendf_path: Optional[str],
+    mt_list: Sequence[int],
+    *,
+    energy_unit: str = "eV",
+    isotope=None,
+    union: str = "global",
+    logger=None,
+):
+    """:func:`load_mf33_covariance`'s signature, the model as its source.
+
+    Reads the tape once, reads the PENDF for its MF3 -- which the caller needs
+    anyway to apply the factors, and which is also what the absolute-to-relative
+    conversion divides by -- and returns
+    ``(blocks, index, mf3_sections, unionGrid, mtsPresent)``.
+
+    ``energy_unit`` is accepted and must be ``'eV'``: the model states its grids
+    in eV and does not carry a second unit to convert from, where
+    ``MF33MT.to_xs_covmat`` does. Anything else is refused rather than ignored.
+    """
+    if energy_unit != "eV":
+        raise ValueError(
+            f"the model source states energy in eV; energy_unit={energy_unit!r} "
+            f"would have to be converted and nothing here knows to"
+        )
+
+    endf_obj = parse_endf_file(str(endf_path))
+    mf3_sections: Dict[int, MF3MT] = {}
+    if pendf_path is not None:
+        mf3_sections = read_pendf_mf3_sections(pendf_path)
+
+    blocks, index, unionGrid, mtsPresent = loadCrossSectionBlocks(
+        endf_obj, mt_list, mf3_sections, mf=33, isotope=isotope,
+        union=union, logger=logger,
+    )
+    return blocks, index, mf3_sections, unionGrid, mtsPresent
+
+
+def extractParamBlocks(index) -> Dict[int, slice]:
+    """MT → slice into the flat factors vector, from a model-side index.
+
+    The model-side twin of :func:`extract_mt_param_blocks`, which reads the same
+    thing off the carrier. Both exist for as long as both sources do.
+    """
+    (meta,) = index.values()
+    stride = int(meta["stride"])
+    return {int(mt): slice(i * stride, (i + 1) * stride)
+            for i, (_za, mt) in enumerate(meta["pairs"])}
+
+
 def extract_mt_param_blocks(
     cov: CrossSectionCovariance,
 ) -> Dict[int, slice]:
