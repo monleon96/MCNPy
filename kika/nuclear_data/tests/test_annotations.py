@@ -21,6 +21,24 @@ declared under ``TYPE_CHECKING``.** Neither is what the defect looked like. So
 this test rebuilds the namespace a type checker would see — module globals plus
 the ``TYPE_CHECKING`` imports, executed here in the test where reaching into
 the format packages is allowed — and resolves against that.
+
+**Whose namespace, though.** An inherited annotation belongs to the class that
+*declared* it, and is written in the vocabulary of that class's module.
+``Component`` declares ``forms: Dict[str, Any]`` and imports ``Any``;
+``CrossSection`` and ``Distribution`` inherit the field and their own modules
+import neither. ``typing.get_type_hints`` normally handles that — it walks the
+MRO and resolves each base in its own module's globals — but the moment it is
+handed an explicit ``globalns`` it uses that one namespace for *every* base, so
+the base's own imports stop counting and the subclass is asked for a name it
+never needed. That is not a defect in the code: nothing evaluates these
+annotations at run time, and ``from __future__ import annotations`` keeps them
+strings.
+
+So the resolution here walks the MRO itself and gives each class the namespace
+of the module that declared it. The alternative — importing ``Any`` into two
+modules that do not use it — would fix the symptom by making the subclass
+namespace accidentally contain what the base needed, and would leave the next
+inherited annotation to fail the same way.
 """
 from __future__ import annotations
 
@@ -79,6 +97,59 @@ def _checker_namespace(module) -> dict:
     return namespace
 
 
+_NAMESPACES: dict = {}
+
+
+def _namespace_for(module) -> dict:
+    """:func:`_checker_namespace`, computed once per module.
+
+    The MRO walk below asks for the same handful of modules repeatedly, and
+    building one namespace re-parses the module's source.
+    """
+    key = module.__name__
+    if key not in _NAMESPACES:
+        _NAMESPACES[key] = _checker_namespace(module)
+    return _NAMESPACES[key]
+
+
+def _class_hints(cls) -> dict:
+    """Resolve *cls*'s annotations, each in the namespace that declared it.
+
+    ``typing.get_type_hints(cls, globalns=ns)`` applies *ns* to every class in
+    the MRO, which is wrong for an inherited annotation: it is written in its
+    own module's vocabulary. This walks the MRO in reverse — base first, so a
+    subclass that re-declares a field wins, which is what ``get_type_hints``
+    does too — and resolves each class against the module that declared it.
+
+    Raises ``NameError`` naming the class that actually owns the bad annotation,
+    rather than the subclass that merely inherited it.
+    """
+    hints: dict = {}
+    for base in reversed(cls.__mro__):
+        own = base.__dict__.get("__annotations__") or {}
+        if not own:
+            continue
+        module = importlib.import_module(base.__module__)
+        namespace = (
+            _namespace_for(module) if base.__module__.startswith(_PREFIX)
+            else vars(module)
+        )
+        for name, annotation in own.items():
+            # `base.__dict__["__annotations__"]` and not `get_type_hints(base)`:
+            # that walks the MRO again and would apply this one namespace to
+            # every base of *this* base, which is the very thing being fixed.
+            if not isinstance(annotation, str):
+                hints[name] = annotation
+                continue
+            try:
+                hints[name] = eval(annotation, dict(namespace))  # noqa: S307
+            except NameError as exc:
+                raise NameError(
+                    f"{base.__module__}.{base.__qualname__}.{name}: {exc}"
+                ) from exc
+    return hints
+
+
 def _annotated_callables():
     """(label, module, object) for every public class, function and method."""
     for module in _public_modules():
@@ -105,9 +176,12 @@ assert _CASES, "no annotated callables found in kika.nuclear_data"
 )
 def test_annotations_name_something_the_module_has(label, module, obj):
     try:
-        typing.get_type_hints(
-            obj, globalns=_checker_namespace(module), include_extras=True
-        )
+        if inspect.isclass(obj):
+            _class_hints(obj)
+        else:
+            typing.get_type_hints(
+                obj, globalns=_namespace_for(module), include_extras=True
+            )
     except NameError as exc:
         pytest.fail(
             f"{label} is annotated with a name that is neither imported nor "
@@ -116,15 +190,19 @@ def test_annotations_name_something_the_module_has(label, module, obj):
 
 
 def test_dataclass_fields_resolve():
-    """Field annotations too — ``dataclasses.fields()`` alone never checks them."""
+    """Field annotations too — ``dataclasses.fields()`` alone never checks them.
+
+    ``dataclasses.fields()`` reports the *merged* set, inherited fields
+    included, which is exactly where the merged ``__annotations__`` loses track
+    of who declared what. Hence :func:`_class_hints`.
+    """
     for module in _public_modules():
-        namespace = _checker_namespace(module)
         for cls_name, cls in vars(module).items():
             if not (inspect.isclass(cls) and dataclasses.is_dataclass(cls)):
                 continue
             if cls.__module__ != module.__name__:
                 continue
-            hints = typing.get_type_hints(cls, globalns=namespace)
+            hints = _class_hints(cls)
             missing = {f.name for f in dataclasses.fields(cls)} - set(hints)
             assert not missing, (
                 f"{module.__name__}.{cls_name} has fields with unresolvable "
