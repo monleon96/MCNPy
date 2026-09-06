@@ -1625,10 +1625,482 @@ class LegendreCovariance:
 
         return new
 
+    # ------------------------------------------------------------------
+    # MF33 <-> MF34 magnitude (a_0) coupling
+    # ------------------------------------------------------------------
+
+    def magnitude_cross_summary(
+        self,
+        isotope: int,
+        mt: int,
+        *,
+        atol: float = 1e-12,
+    ) -> Dict[str, Any]:
+        """Describe the a_0 (L=0) blocks this carrier holds for one section.
+
+        ENDF-6 Sec. 34.1 lets a file express the covariance between the cross
+        section magnitude and the Legendre coefficients through the a_0
+        coefficient, even though a_0 = 1 in the ENDF system, and Sec. 34.2
+        reserves LTT=3 for a section where L or L1 = 0 appears anywhere.
+        Sec. 34.3 then says the (0, 0) magnitude self-block belongs to MF33
+        and must not be repeated here, so a conforming file writes it null.
+
+        That null is exactly what makes the L=0 row unplottable on its own:
+        :attr:`correlation_matrix` divides by ``sqrt(C_00)``, so every entry of
+        the L=0 row and column becomes NaN -- including the (0, L1) cross terms
+        that do carry data.  :meth:`attach_magnitude_covariance` repairs it by
+        supplying the missing self-block from MF33.
+
+        A file may also declare LTT=3 and then write the cross blocks as
+        numerical zero -- ENDF/B-VIII.1 does this for U-235 and U-238, where
+        VIII.0 carried real terms.  ``cross_is_null`` separates the two, so a
+        caller can say "this file states no cross terms" instead of drawing an
+        empty block and leaving the reader to guess whether it is a bug.
+
+        Parameters
+        ----------
+        isotope, mt : int
+            The section to describe.
+        atol : float, default 1e-12
+            Below this the blocks count as null.  Sits above the ~1e-19
+            round-off VIII.1 leaves behind and far below the ~1e-3 of a real
+            term.
+
+        Returns
+        -------
+        dict
+            ``present`` -- any (0, L1), (L, 0) or (0, 0) block exists.
+            ``self_present`` -- the (0, 0) block exists.
+            ``self_is_null`` -- (0, 0) is zero, i.e. MF33 still owes it.
+            ``cross_orders`` -- sorted L with a cross block against a_0.
+            ``cross_max_abs`` -- largest absolute cross-term value.
+            ``cross_is_null`` -- every cross block is zero to within *atol*.
+        """
+        cross_orders: Set[int] = set()
+        cross_max = 0.0
+        self_present = False
+        self_max = 0.0
+
+        for i, matrix in enumerate(self.matrices):
+            if self.isotope_rows[i] != isotope or self.isotope_cols[i] != isotope:
+                continue
+            if self.reaction_rows[i] != mt or self.reaction_cols[i] != mt:
+                continue
+            l_r, l_c = int(self.l_rows[i]), int(self.l_cols[i])
+            if l_r != 0 and l_c != 0:
+                continue
+            block = np.asarray(matrix, dtype=float)
+            worst = float(np.abs(block).max()) if block.size else 0.0
+            if l_r == 0 and l_c == 0:
+                self_present = True
+                self_max = max(self_max, worst)
+            else:
+                cross_orders.add(l_c if l_r == 0 else l_r)
+                cross_max = max(cross_max, worst)
+
+        return {
+            "present": bool(cross_orders) or self_present,
+            "self_present": self_present,
+            "self_is_null": self_present and self_max <= atol,
+            "cross_orders": sorted(cross_orders),
+            "cross_max_abs": cross_max,
+            "cross_is_null": cross_max <= atol,
+        }
+
+    def attach_magnitude_covariance(
+        self,
+        xs_covariance,
+        *,
+        isotope: int,
+        mt: int,
+        magnitude_mt: Optional[int] = None,
+        atol: float = 1e-12,
+    ) -> "LegendreCovariance":
+        """Fill the null (0, 0) block from MF33, so the L=0 row can be read.
+
+        Returns a **copy**; the receiver is left alone because
+        :meth:`MF34MT.to_ang_covmat` caches the object it hands out, and a
+        mutation here would leak into every later caller of that section.
+
+        The MF33 self-covariance is inserted **on its own energy grid**, not
+        projected onto the MF34 one.  :meth:`compute_union_energy_grids` merges
+        every grid that mentions the ``(isotope, mt, 0)`` triplet, so the L=0
+        axis becomes ``union(MF33 grid, a_0 grid)`` -- a common refinement of
+        both, and the only grid on which the piecewise-constant lift of *both*
+        legs is exact.  The two are genuinely interleaved in practice: for
+        U-238 ENDF/B-VIII.0, 35 of the 76 MF33/MT2 edges are absent from the
+        MF34 grid and 37 of its 78 are absent from MF33's, so projecting either
+        onto the other would coarsen one leg.
+
+        Parameters
+        ----------
+        xs_covariance : CrossSectionCovariance
+            Typically ``endf.mf[33].mt[mt].to_xs_covmat()``.  Must carry a
+            relative self-block for ``(isotope, magnitude_mt)``.
+        isotope, mt : int
+            The MF34 section whose (0, 0) block is being filled.
+        magnitude_mt : int, optional
+            MT to read from MF33.  Defaults to *mt* -- the magnitude that pairs
+            with MT2's a_l is MT2's own cross section, and likewise for MT51.
+            Override only to couple a section to a different reaction.
+        atol : float, default 1e-12
+            Tolerance for the "existing (0, 0) block is null" check.
+
+        Raises
+        ------
+        ValueError
+            If the section has no a_0 blocks; if its (0, 0) block is *not* null
+            (the file already states the magnitude self-covariance, and adding
+            MF33's would double count the magnitude variance); if MF33 has no
+            self-block for the reaction; or if that block is absolute while the
+            a_0 family is relative.
+        """
+        magnitude_mt = mt if magnitude_mt is None else int(magnitude_mt)
+
+        summary = self.magnitude_cross_summary(isotope, mt, atol=atol)
+        if not summary["present"]:
+            raise ValueError(
+                f"MF34 section (isotope {isotope}, MT {mt}) carries no L=0 "
+                f"blocks, so there is no magnitude leg for MF33 to complete. "
+                f"Only a section written with LTT=3 states one."
+            )
+        if summary["self_present"] and not summary["self_is_null"]:
+            raise ValueError(
+                f"MF34 section (isotope {isotope}, MT {mt}) already states a "
+                f"non-null (0, 0) block. ENDF-6 Sec. 34.3 puts the magnitude "
+                f"self-covariance in MF33; taking it from both files would "
+                f"double count the magnitude variance."
+            )
+
+        src_matrix = None
+        src_grid = None
+        src_relative = True
+        xs_matrices = list(getattr(xs_covariance, "matrices", []))
+        for i, matrix in enumerate(xs_matrices):
+            if xs_covariance.isotope_rows[i] != isotope or xs_covariance.isotope_cols[i] != isotope:
+                continue
+            if xs_covariance.reaction_rows[i] != magnitude_mt or xs_covariance.reaction_cols[i] != magnitude_mt:
+                continue
+            src_matrix = np.asarray(matrix, dtype=float)
+            src_grid = np.asarray(xs_covariance.energy_grids[i], dtype=float)
+            if xs_covariance.is_relative:
+                src_relative = bool(xs_covariance.is_relative[i])
+            break
+
+        if src_matrix is None:
+            available = sorted({
+                int(m) for m, iso in zip(
+                    getattr(xs_covariance, "reaction_rows", []),
+                    getattr(xs_covariance, "isotope_rows", []),
+                ) if iso == isotope
+            })
+            raise ValueError(
+                f"MF33 carries no self-covariance for isotope {isotope}, MT "
+                f"{magnitude_mt}. Available MTs for that isotope: {available}"
+            )
+
+        # The a_0 family is relative -- ENDF-6 Sec. 34.3 writes
+        # Cov(sigma, a_l) divided by sigma*a_l -- so an absolute magnitude
+        # block would put the two legs of every correlation in different units
+        # and silently rescale the cross terms.
+        a0_relative = True
+        a0_frame = "LAB"
+        for i in range(len(self.matrices)):
+            if (self.isotope_rows[i] == isotope and self.reaction_rows[i] == mt
+                    and (int(self.l_rows[i]) == 0 or int(self.l_cols[i]) == 0)):
+                if self.is_relative:
+                    a0_relative = bool(self.is_relative[i])
+                if self.frame:
+                    a0_frame = self.frame[i]
+                break
+        if a0_relative and not src_relative:
+            raise ValueError(
+                f"MF33 self-covariance for isotope {isotope}, MT "
+                f"{magnitude_mt} is absolute while the MF34 a_0 blocks are "
+                f"relative. Convert one leg before attaching them."
+            )
+
+        out = self.copy()
+
+        # Drop the null placeholder rather than adding beside it: two blocks
+        # tagged (0, 0) would both be lifted and summed by covariance_matrix.
+        n_before = len(out.matrices)
+        keep = [
+            i for i in range(n_before)
+            if not (out.isotope_rows[i] == isotope and out.isotope_cols[i] == isotope
+                    and out.reaction_rows[i] == mt and out.reaction_cols[i] == mt
+                    and int(out.l_rows[i]) == 0 and int(out.l_cols[i]) == 0)
+        ]
+        if len(keep) != n_before:
+            for name in ("isotope_rows", "reaction_rows", "l_rows",
+                         "isotope_cols", "reaction_cols", "l_cols",
+                         "energy_grids", "matrices", "is_relative", "frame"):
+                seq = getattr(out, name, None)
+                if seq is not None and len(seq) == n_before:
+                    setattr(out, name, [seq[i] for i in keep])
+
+        out.add_matrix(
+            isotope, mt, 0,
+            isotope, mt, 0,
+            src_matrix,
+            list(src_grid),
+            is_relative=src_relative,
+            frame=a0_frame,
+        )
+
+        # Both the union grids and any assembled matrix are derived, and the
+        # L=0 axis just changed shape underneath them.
+        out._union_grids = None
+        out._psd_covariance_cache = None
+        out.metadata = dict(out.metadata)
+        out.metadata["magnitude_block_source"] = {
+            "mf": 33,
+            "isotope": isotope,
+            "mt": magnitude_mt,
+            "ne": int(src_grid.size),
+        }
+        return out
+
+    # ------------------------------------------------------------------
+    # MF33 <-> MF34 magnitude (a_0) coupling
+    # ------------------------------------------------------------------
+
+    def magnitude_cross_summary(
+        self,
+        isotope: int,
+        mt: int,
+        *,
+        atol: float = 1e-12,
+    ) -> Dict[str, Any]:
+        """Describe the a_0 (L=0) blocks this carrier holds for one section.
+
+        ENDF-6 Sec. 34.1 lets a file express the covariance between the cross
+        section magnitude and the Legendre coefficients through the a_0
+        coefficient, even though a_0 = 1 in the ENDF system, and Sec. 34.2
+        reserves LTT=3 for a section where L or L1 = 0 appears anywhere.
+        Sec. 34.3 then says the (0, 0) magnitude self-block belongs to MF33
+        and must not be repeated here, so a conforming file writes it null.
+
+        That null is exactly what makes the L=0 row unplottable on its own:
+        :attr:`correlation_matrix` divides by ``sqrt(C_00)``, so every entry of
+        the L=0 row and column becomes NaN, including the (0, L1) cross terms
+        that do carry data.  :meth:`attach_magnitude_covariance` repairs it by
+        supplying the missing self-block from MF33.
+
+        A file may also declare LTT=3 and then write the cross blocks as
+        numerical zero -- ENDF/B-VIII.1 does this for U-235 and U-238, where
+        VIII.0 carried real terms.  ``cross_is_null`` separates the two so a
+        caller can say "this file has no cross terms" instead of drawing an
+        empty block.
+
+        Parameters
+        ----------
+        isotope, mt : int
+            The section to describe.
+        atol : float, default 1e-12
+            Below this the blocks count as null.  Chosen above the ~1e-19
+            round-off that VIII.1 leaves behind and far below the ~1e-3 of a
+            real term.
+
+        Returns
+        -------
+        dict
+            ``present`` -- any (0, L1) or (L, 0) block exists.
+            ``self_present`` -- the (0, 0) block exists.
+            ``self_is_null`` -- (0, 0) is zero, i.e. MF33 still owes it.
+            ``cross_orders`` -- sorted L1 with a (0, L1) block, 0 excluded.
+            ``cross_max_abs`` -- largest absolute cross-term value.
+            ``cross_is_null`` -- every cross block is zero to within *atol*.
+        """
+        cross_orders: Set[int] = set()
+        cross_max = 0.0
+        self_present = False
+        self_max = 0.0
+
+        for i, matrix in enumerate(self.matrices):
+            if self.isotope_rows[i] != isotope or self.isotope_cols[i] != isotope:
+                continue
+            if self.reaction_rows[i] != mt or self.reaction_cols[i] != mt:
+                continue
+            l_r, l_c = int(self.l_rows[i]), int(self.l_cols[i])
+            if l_r != 0 and l_c != 0:
+                continue
+            block = np.asarray(matrix, dtype=float)
+            worst = float(np.abs(block).max()) if block.size else 0.0
+            if l_r == 0 and l_c == 0:
+                self_present = True
+                self_max = max(self_max, worst)
+            else:
+                cross_orders.add(l_c if l_r == 0 else l_r)
+                cross_max = max(cross_max, worst)
+
+        return {
+            "present": bool(cross_orders) or self_present,
+            "self_present": self_present,
+            "self_is_null": self_present and self_max <= atol,
+            "cross_orders": sorted(cross_orders),
+            "cross_max_abs": cross_max,
+            "cross_is_null": cross_max <= atol,
+        }
+
+    def attach_magnitude_covariance(
+        self,
+        xs_covariance,
+        *,
+        isotope: int,
+        mt: int,
+        magnitude_mt: Optional[int] = None,
+        atol: float = 1e-12,
+    ) -> "LegendreCovariance":
+        """Fill the null (0, 0) block from MF33, so the L=0 row can be read.
+
+        Returns a **copy**; the receiver is left alone because
+        :meth:`MF34MT.to_ang_covmat` caches the object it hands out and a
+        mutation here would leak into every later caller.
+
+        The MF33 self-covariance is inserted **on its own energy grid**, not
+        projected onto the MF34 one.  :meth:`compute_union_energy_grids` merges
+        every grid that mentions the (isotope, mt, 0) triplet, so the L=0 axis
+        becomes ``union(MF33 grid, a_0 grid)`` -- a common refinement of both,
+        which is the only grid on which the piecewise-constant lift of *both*
+        legs is exact.  The two are genuinely interleaved in practice: for
+        U-238 ENDF/B-VIII.0, 35 of the 76 MF33/MT2 edges are absent from the
+        MF34 grid and 37 of its 78 are absent from MF33's, so projecting either
+        onto the other would coarsen it.
+
+        Parameters
+        ----------
+        xs_covariance : CrossSectionCovariance
+            Typically ``endf.mf[33].mt[mt].to_xs_covmat()``.  Must carry a
+            relative self-block for ``(isotope, magnitude_mt)``.
+        isotope, mt : int
+            The MF34 section whose (0, 0) block is being filled.
+        magnitude_mt : int, optional
+            MT to read from MF33.  Defaults to *mt* -- the magnitude that
+            pairs with MT2's a_l is MT2's own cross section, and likewise for
+            MT51.  Override only to couple a section to a different reaction.
+        atol : float, default 1e-12
+            Tolerance for the "existing (0, 0) block is null" check.
+
+        Raises
+        ------
+        ValueError
+            If the section has no a_0 blocks, if its (0, 0) block is *not*
+            null (the file already states the magnitude self-covariance, and
+            adding MF33's would double count the magnitude variance), if MF33
+            has no self-block for the reaction, or if that block is absolute
+            while the a_0 family is relative.
+        """
+        magnitude_mt = mt if magnitude_mt is None else int(magnitude_mt)
+
+        summary = self.magnitude_cross_summary(isotope, mt, atol=atol)
+        if not summary["present"]:
+            raise ValueError(
+                f"MF34 section (isotope {isotope}, MT {mt}) carries no L=0 "
+                f"blocks, so there is no magnitude leg to attach MF33 to. "
+                f"Only a file written with LTT=3 states one."
+            )
+        if summary["self_present"] and not summary["self_is_null"]:
+            raise ValueError(
+                f"MF34 section (isotope {isotope}, MT {mt}) already states a "
+                f"non-null (0, 0) block (max |value| = "
+                f"{summary['cross_max_abs']:.3e}). ENDF-6 Sec. 34.3 puts the "
+                f"magnitude self-covariance in MF33; taking it from both would "
+                f"double count the magnitude variance."
+            )
+
+        src_matrix = None
+        src_grid = None
+        for i, matrix in enumerate(getattr(xs_covariance, "matrices", [])):
+            if xs_covariance.isotope_rows[i] != isotope or xs_covariance.isotope_cols[i] != isotope:
+                continue
+            if xs_covariance.reaction_rows[i] != magnitude_mt or xs_covariance.reaction_cols[i] != magnitude_mt:
+                continue
+            src_matrix = np.asarray(matrix, dtype=float)
+            src_grid = np.asarray(xs_covariance.energy_grids[i], dtype=float)
+            src_relative = bool(xs_covariance.is_relative[i]) if xs_covariance.is_relative else True
+            break
+
+        if src_matrix is None:
+            available = sorted({
+                int(m) for iso, m in zip(
+                    getattr(xs_covariance, "reaction_rows", []),
+                    getattr(xs_covariance, "reaction_rows", []),
+                )
+            })
+            raise ValueError(
+                f"MF33 carries no self-covariance for isotope {isotope}, MT "
+                f"{magnitude_mt}. Available MTs: {available}"
+            )
+
+        # The a_0 family is relative (ENDF-6 Sec. 34.3 writes Cov(sigma, a_l)
+        # divided by sigma*a_l), so an absolute magnitude block would put the
+        # two legs of the correlation in different units and silently rescale
+        # every cross term.
+        a0_relative = True
+        for i in range(len(self.matrices)):
+            if (self.isotope_rows[i] == isotope and self.reaction_rows[i] == mt
+                    and (int(self.l_rows[i]) == 0 or int(self.l_cols[i]) == 0)):
+                a0_relative = bool(self.is_relative[i]) if self.is_relative else True
+                break
+        if a0_relative and not src_relative:
+            raise ValueError(
+                f"MF33 self-covariance for isotope {isotope}, MT "
+                f"{magnitude_mt} is absolute while the MF34 a_0 blocks are "
+                f"relative. Convert one leg before attaching them."
+            )
+
+        out = self.copy()
+
+        # Drop the null placeholder rather than adding beside it: two blocks
+        # tagged (0, 0) would both be lifted and summed by covariance_matrix.
+        keep = [
+            i for i in range(len(out.matrices))
+            if not (out.isotope_rows[i] == isotope and out.isotope_cols[i] == isotope
+                    and out.reaction_rows[i] == mt and out.reaction_cols[i] == mt
+                    and int(out.l_rows[i]) == 0 and int(out.l_cols[i]) == 0)
+        ]
+        if len(keep) != len(out.matrices):
+            for name in ("isotope_rows", "reaction_rows", "l_rows",
+                         "isotope_cols", "reaction_cols", "l_cols",
+                         "energy_grids", "matrices", "is_relative", "frame"):
+                seq = getattr(out, name, None)
+                if seq is not None and len(seq) == len(self.matrices):
+                    setattr(out, name, [seq[i] for i in keep])
+
+        frame = "LAB"
+        for i in range(len(self.matrices)):
+            if (self.isotope_rows[i] == isotope and self.reaction_rows[i] == mt
+                    and int(self.l_rows[i]) == 0):
+                frame = self.frame[i] if self.frame else "LAB"
+                break
+
+        out.add_matrix(
+            isotope, mt, 0,
+            isotope, mt, 0,
+            src_matrix,
+            list(src_grid),
+            is_relative=src_relative,
+            frame=frame,
+        )
+
+        # The union grids and the assembled matrix are both derived, and the
+        # L=0 axis just changed shape.
+        out._union_grids = None
+        out._psd_covariance_cache = None
+        out.metadata = dict(out.metadata)
+        out.metadata["magnitude_block_source"] = {
+            "mf": 33,
+            "isotope": isotope,
+            "mt": magnitude_mt,
+            "ne": int(src_grid.size),
+        }
+        return out
+
     def get_uncertainties_for_legendre_coefficient(
-        self, 
-        isotope: int, 
-        mt: int, 
+        self,
+        isotope: int,
+        mt: int,
         l_coefficient: Union[int, List[int]],
     ) -> Union[Optional[Dict[str, np.ndarray]], Dict[int, Optional[Dict[str, np.ndarray]]]]:
         """

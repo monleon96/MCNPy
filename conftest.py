@@ -132,6 +132,14 @@ _TAPES: Dict[str, Sequence[str]] = {
     "th232": ("jeff40-endf/90-Th-232g.txt", "90-Th-232g.txt"),
     "pu241": ("jeff40-endf/94-Pu-241g.txt", "94-Pu-241g.txt"),
     "u238": ("jeff40-endf/92-U-238g.txt", "U238_jeff4.0_n.endf"),
+    # MF34 with a live a_0 (magnitude x shape) block. It is one evaluation on
+    # this machine, and finding that out took a sweep of all 1211 tapes:
+    # JEFF-4.0 ships no MF34 for U-235 and LTT=1 for U-238, so it states no a_0
+    # at all, and ENDF/B-VIII.1 kept LTT=3 for U-235/U-238 but zeroed the
+    # values to ~1e-19. VIII.0 is where the terms still carry physics
+    # (MT2 (0,1) reaches 1.3e-2), which makes it the only gate for
+    # ``attach_magnitude_covariance``.
+    "u238_b80": ("endfb80/n-092_U_238.endf", "n-092_U_238.endf"),
     # MF32, the resonance-parameter covariances. No Fe-56 evaluation in any
     # library carries one, so this work is gated on other nuclides entirely,
     # chosen to cover one sub-format each — see ``docs/library/mf32-notes.md`` in
@@ -471,6 +479,7 @@ u235_tape = _tape_fixture("u235")
 th232_tape = _tape_fixture("th232")
 pu241_tape = _tape_fixture("pu241")
 u238_tape = _tape_fixture("u238")
+u238_b80_tape = _tape_fixture("u238_b80")
 u235_b81_tape = _tape_fixture("u235_b81")
 cf252_b81_tape = _tape_fixture("cf252_b81")
 pu239_b81_tape = _tape_fixture("pu239_b81")
