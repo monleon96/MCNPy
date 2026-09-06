@@ -40,6 +40,14 @@ from pathlib import Path
 
 from ..read_endf import read_endf
 from .cache import clear_cache, get_cache, get_cache_info
+from .catalog import (
+    Catalog,
+    CatalogEntry,
+    LibraryInfo,
+    NuclideInfo,
+    get_catalog,
+    refresh_catalog,
+)
 from .constants import list_available_libraries
 from .exceptions import (
     CacheError,
@@ -157,6 +165,57 @@ def download_endf(
     # Write to destination
     save_path.write_bytes(content)
     return save_path
+
+
+def cached_entry_path(entry: CatalogEntry) -> Path | None:
+    """Where the cache keeps *entry*, or None if it has not been fetched."""
+    return get_cache().get(entry.cache_key, entry.library, entry.sublib)
+
+
+def download_entry(
+    entry: CatalogEntry,
+    save_to: str | Path | None = None,
+    force_download: bool = False,
+    timeout: float = 60.0,
+) -> Path:
+    """Fetch one catalogue entry into the cache and return the cached path.
+
+    This is the catalogue-first counterpart of :func:`download_endf`: it takes
+    the exact file the IAEA lists (any library, any sub-library, thermal
+    scattering included) and does not need a MAT table to find it. The cached
+    file is the deliverable — an app can point at it directly and never copy
+    the bytes — and ``save_to`` additionally writes a copy where asked.
+
+    Examples
+    --------
+    >>> from kika.endf.remote import get_catalog, download_entry
+    >>> entry = get_catalog().find("jeff4.0", "Fe56")
+    >>> path = download_entry(entry)
+    """
+    client = IAEAClient(timeout=timeout)
+    client.download_entry(entry, use_cache=True, force_download=force_download)
+    cached = client.cached_path(entry)
+    if cached is None:  # pragma: no cover - the put above makes this unreachable
+        raise CacheError(f"{entry.filename} did not land in the cache")
+    if save_to is not None:
+        save_path = Path(save_to)
+        if save_path.is_dir() or str(save_to).endswith(("/", "\\")):
+            save_path.mkdir(parents=True, exist_ok=True)
+            save_path = save_path / entry_filename(entry)
+        else:
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(cached, save_path)
+    return cached
+
+
+def entry_filename(entry: CatalogEntry) -> str:
+    """A descriptive filename for a catalogue entry, e.g. ``Fe56_jeff4.0_n.endf``."""
+    if entry.z is not None and entry.a is not None:
+        state = "m" if entry.isomer else ""
+        stem = f"{entry.symbol}{entry.a}{state}"
+    else:
+        stem = Path(entry.filename).stem
+    return f"{stem}_{entry.library}_{entry.sublib}.endf"
 
 
 def fetch_endf(
@@ -299,6 +358,16 @@ __all__ = [
     # Main functions
     "fetch_endf",
     "download_endf",
+    "download_entry",
+    "cached_entry_path",
+    "entry_filename",
+    # Catalogue
+    "get_catalog",
+    "refresh_catalog",
+    "Catalog",
+    "CatalogEntry",
+    "LibraryInfo",
+    "NuclideInfo",
     # Utility functions
     "list_available_libraries",
     "get_cache_info",

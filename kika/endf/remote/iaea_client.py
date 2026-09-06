@@ -3,6 +3,7 @@
 import io
 import re
 import zipfile
+from typing import TYPE_CHECKING
 
 import httpx
 
@@ -21,6 +22,9 @@ from .constants import (
     list_available_libraries,
     normalize_library_name,
 )
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .catalog import CatalogEntry
 from .exceptions import (
     IsotopeNotFoundError,
     LibraryNotFoundError,
@@ -284,12 +288,49 @@ class IAEAClient:
             if cached_path:
                 return cached_path.read_bytes()
 
-        # Build URL and download
-        try:
-            url = build_iaea_url(z, a, symbol, canonical_lib, particle, isomer)
-        except ValueError as e:
-            raise IsotopeNotFoundError(str(isotope), library) from e
+        # The catalogue knows the file's real name; the constructed URL is the
+        # fallback for a library the snapshot has not seen.
+        entry = _catalog_entry(canonical_lib, isotope, particle)
+        if entry is not None:
+            url = entry.url
+            is_archive = entry.is_archive
+        else:
+            try:
+                url = build_iaea_url(z, a, symbol, canonical_lib, particle, isomer)
+            except ValueError as e:
+                raise IsotopeNotFoundError(str(isotope), library) from e
+            is_archive = True
 
+        content = self._fetch(url, is_archive, isotope=str(isotope), library=library)
+
+        # Cache the result
+        if use_cache:
+            self.cache.put(zaid, canonical_lib, content, particle)
+
+        return content
+
+    def download_entry(
+        self,
+        entry: "CatalogEntry",
+        use_cache: bool = True,
+        force_download: bool = False,
+    ) -> bytes:
+        """Download one catalogue entry, whatever it names (a nuclide, a TSL
+        material), through the same cache as :meth:`download`."""
+        if use_cache and not force_download:
+            cached_path = self.cache.get(entry.cache_key, entry.library, entry.sublib)
+            if cached_path:
+                return cached_path.read_bytes()
+        content = self._fetch(entry.url, entry.is_archive, isotope=entry.label, library=entry.library)
+        if use_cache:
+            self.cache.put(entry.cache_key, entry.library, content, entry.sublib)
+        return content
+
+    def cached_path(self, entry: "CatalogEntry"):
+        """Where :meth:`download_entry` keeps *entry*, if it has been fetched."""
+        return self.cache.get(entry.cache_key, entry.library, entry.sublib)
+
+    def _fetch(self, url: str, is_archive: bool, *, isotope: str, library: str) -> bytes:
         try:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; rv:91.0) Gecko/20100101 Firefox/91.0",
@@ -302,22 +343,17 @@ class IAEAClient:
             raise NetworkError(f"Request timed out after {self.timeout}s", url)
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
-                raise IsotopeNotFoundError(str(isotope), library) from e
+                raise IsotopeNotFoundError(isotope, library) from e
             raise NetworkError(f"HTTP error {e.response.status_code}: {e}", url) from e
         except httpx.RequestError as e:
             raise NetworkError(f"Request failed: {e}", url) from e
 
-        # Extract ENDF file from ZIP
+        if not is_archive:
+            return response.content
         try:
-            content = self._extract_endf_from_zip(response.content)
+            return self._extract_endf_from_zip(response.content)
         except Exception as e:
             raise NetworkError(f"Failed to extract ENDF from ZIP: {e}", url) from e
-
-        # Cache the result
-        if use_cache:
-            self.cache.put(zaid, canonical_lib, content, particle)
-
-        return content
 
     def _extract_endf_from_zip(self, zip_content: bytes) -> bytes:
         """Extract the ENDF file from a ZIP archive."""
@@ -331,6 +367,17 @@ class IAEAClient:
                 if not name.endswith((".zip", ".gz", ".tar")):
                     return zf.read(name)
             raise ValueError("No ENDF file found in ZIP archive")
+
+
+def _catalog_entry(library: str, isotope, sublib: str):
+    """The catalogue's row for this file, or None when the catalogue cannot be
+    read or does not list it."""
+    try:
+        from .catalog import get_catalog
+
+        return get_catalog().find(library, isotope, sublib)
+    except (FileNotFoundError, ValueError, OSError):
+        return None
 
 
 # Module-level client instance

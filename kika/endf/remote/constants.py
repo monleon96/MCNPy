@@ -1,6 +1,7 @@
 """Constants for IAEA ENDF download functionality."""
 
 import os
+import re
 from pathlib import Path
 
 # IAEA Nuclear Data Service base URL
@@ -113,56 +114,102 @@ LIBRARY_ALIASES = {
 }
 
 
+# Sub-library directories on the IAEA server and what they hold. The order is
+# the one the app shows them in; anything not listed is shown by its raw name.
+SUBLIB_NAMES = {
+    "n": "Neutron",
+    "p": "Proton",
+    "d": "Deuteron",
+    "t": "Triton",
+    "he3": "Helium-3",
+    "he4": "Alpha",
+    "g": "Photonuclear",
+    "e": "Electro-atomic",
+    "photo": "Photo-atomic",
+    "ard": "Atomic relaxation",
+    "decay": "Decay data",
+    "nfpy": "Neutron fission yields",
+    "sfpy": "Spontaneous fission yields",
+    "dfpy": "Deuteron fission yields",
+    "pfpy": "Proton fission yields",
+    "tfpy": "Triton fission yields",
+    "he3fp": "Helium-3 fission yields",
+    "he4fp": "Alpha fission yields",
+    "std": "Standards",
+    "tsl": "Thermal scattering",
+    "n-v2": "Neutron (v2)",
+}
+
+
+def library_display_name(directory: str) -> str:
+    """Human name for a library directory: ``ENDF-B-VIII.1`` reads as
+    ``ENDF/B-VIII.1``; every other directory name already is the name."""
+    if directory.upper().startswith("ENDF-B-"):
+        return "ENDF/B-" + directory[len("ENDF-B-"):]
+    if directory.upper().startswith("ENDF-HE-"):
+        return "ENDF/HE-" + directory[len("ENDF-HE-"):]
+    return directory
+
+
+def library_family(directory: str) -> str:
+    """The evaluation project a directory belongs to (``JEFF``, ``TENDL``...),
+    used to group libraries in a list."""
+    match = re.match(r"([A-Za-z]+(?:-[A-Za-z]+)?)", directory)
+    family = (match.group(1) if match else directory).upper()
+    # "ENDF-B", "ENDF-HE" -> ENDF/B; "JENDL-PD", "JENDL-AD" -> JENDL; "IRDFF-II" -> IRDFF
+    head = family.split("-")[0]
+    if head == "ENDF":
+        return "ENDF/B"
+    if head in {"JEF", "JEFF"}:
+        return "JEFF"
+    return head
+
+
 def normalize_library_name(library: str) -> str:
     """
     Normalize a library name to its canonical form.
 
-    Parameters
-    ----------
-    library : str
-        Library name in any supported format
-
-    Returns
-    -------
-    str
-        Canonical library name (e.g., "endfb8.1")
+    Accepts the historical short ids (``endfb8.1``), their aliases
+    (``ENDF/B-VIII.1``) and, for every other library in the IAEA catalogue,
+    the directory name in any case (``FENDL-3.2`` -> ``fendl-3.2``).
 
     Raises
     ------
     KeyError
         If the library name is not recognized
     """
-    # Convert to lowercase for case-insensitive matching
     lib_lower = library.lower().strip()
 
-    # Check if it's already canonical
     if lib_lower in LIBRARY_PATHS:
         return lib_lower
-
-    # Check aliases
     if lib_lower in LIBRARY_ALIASES:
         return LIBRARY_ALIASES[lib_lower]
 
-    # Not found
+    # Anything else must be a library the catalogue knows about
+    try:
+        from .catalog import get_catalog
+
+        resolved = get_catalog().resolve_library(lib_lower)
+    except (FileNotFoundError, ValueError, OSError):
+        resolved = None
+    if resolved is not None:
+        return resolved
     raise KeyError(lib_lower)
 
 
 def get_library_path(library: str) -> str:
     """
-    Get the IAEA path for a library.
-
-    Parameters
-    ----------
-    library : str
-        Library name in any supported format
-
-    Returns
-    -------
-    str
-        IAEA path (e.g., "ENDF-B-VIII.1")
+    Get the IAEA directory for a library (e.g. ``ENDF-B-VIII.1``).
     """
     canonical = normalize_library_name(library)
-    return LIBRARY_PATHS[canonical]
+    if canonical in LIBRARY_PATHS:
+        return LIBRARY_PATHS[canonical]
+    from .catalog import get_catalog
+
+    info = get_catalog().library(canonical)
+    if info is None:
+        raise KeyError(canonical)
+    return info.directory
 
 
 def get_library_filename_style(library: str) -> str:
