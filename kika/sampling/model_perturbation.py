@@ -589,6 +589,31 @@ def _describeRequestForPeople(request) -> str:
     return "; ".join(bits) if bits else str(request)
 
 
+def _missingReactions(request, entries) -> Dict[int, List[int]]:
+    """``{mf: [mt, ...]}`` -- reactions the request named that no entry covers.
+
+    Only explicit ``mt`` selections can be missing: ``mt=None`` means "every
+    reaction this file states", which cannot name one that is not there.
+    """
+    from kika.sampling.joint_blocks import _asSelections
+
+    present: Dict[int, set] = {}
+    for rowKey, colKey, *_rest in entries:
+        present.setdefault(rowKey.mf, set()).add(int(rowKey.mt))
+        present.setdefault(colKey.mf, set()).add(int(colKey.mt))
+
+    missing: Dict[int, List[int]] = {}
+    for selection in _asSelections(request):
+        if selection.mt is None:
+            continue
+        wanted = (selection.mt if isinstance(selection.mt, (list, tuple, set))
+                  else [selection.mt])
+        absent = sorted({int(mt) for mt in wanted} - present.get(selection.mf, set()))
+        if absent:
+            missing[selection.mf] = absent
+    return missing
+
+
 def _splitBySemantics(blocks, index):
     """``(factorBlocks, deltaBlocks)`` -- what multiplies, and what is added.
 
@@ -627,6 +652,63 @@ def _splitBySemantics(blocks, index):
     return factorBlocks, deltaBlocks
 
 
+#: The two spaces a relative block can be drawn in. Stated here so a caller
+#: that gets it wrong is told what the choices are.
+SPACES = ("log", "linear")
+
+
+def resolveSpaces(blocks, index, space):
+    """``{blockKey: space}`` -- which space each block is drawn in.
+
+    *space* is either one name for the whole run (as it has always been) or a
+    mapping that says it per quantity, keyed by MF number or by the model's own
+    vocabulary::
+
+        space="log"
+        space={33: "log", 34: "linear"}
+        space={"crossSection": "log", "angularDistribution": "linear"}
+
+    **Why per quantity is a real distinction and not a preference.** A relative
+    covariance of a cross section is a covariance of a positive magnitude, and
+    a log draw is what keeps a drawn factor positive: a cross section scaled by
+    a negative number is not an evaluation. A Legendre coefficient is not a
+    magnitude -- it is signed, and an evaluation that states a_1 near zero
+    states an uncertainty that straddles zero -- so a log draw of it cannot
+    represent what the file says, and a linear draw can.
+
+    A block that carries components of two quantities is drawn once, so it gets
+    one space: the mapping's entry for the *first* MF in the block that names
+    one, and the run's default otherwise. That case only arises under
+    ``grouping="stated"`` with a file that declares a cross term, which is
+    exactly the case where drawing the two halves separately would be wrong.
+    """
+    from kika.sampling.joint_blocks import MF_OF_QUANTITY
+
+    if isinstance(space, str):
+        if space not in SPACES:
+            raise ValueError(f"space must be one of {SPACES}, got {space!r}")
+        return {key: space for key, _matrix in blocks}
+
+    byMf: Dict[int, str] = {}
+    for name, value in dict(space).items():
+        mf = MF_OF_QUANTITY.get(name) if isinstance(name, str) else int(name)
+        if mf is None:
+            raise ValueError(
+                f"space key {name!r} is neither an MF number nor one of "
+                f"{sorted(MF_OF_QUANTITY)}")
+        if value not in SPACES:
+            raise ValueError(
+                f"space for MF{mf} must be one of {SPACES}, got {value!r}")
+        byMf[mf] = value
+
+    resolved: Dict[Hashable, str] = {}
+    for key, _matrix in blocks:
+        named = [byMf[component.mf] for component in index[key]["components"]
+                 if component.mf in byMf]
+        resolved[key] = named[0] if named else "log"
+    return resolved
+
+
 def _drawEverything(blocks, index, nSamples, *, seed, space, decompositionMethod,
                     samplingMethod, psdMethod, nullTol, logger):
     """Draw every block, each under the convention its covariance states.
@@ -651,19 +733,35 @@ def _drawEverything(blocks, index, nSamples, *, seed, space, decompositionMethod
     samples: Dict[Hashable, np.ndarray] = {}
     diagnostics: Dict[Hashable, Dict[str, Any]] = {}
 
-    if factorBlocks:
+    # The relative blocks may not all want the same space, so they are drawn in
+    # runs of one space each. The ladder is continued across those runs exactly
+    # as it is continued into the delta draw below: block *i* of the whole
+    # sequence keeps the seed it would have had from one call, so asking for a
+    # per-quantity space does not move a block that was already drawn in the
+    # space it ends up with.
+    spaces = resolveSpaces(factorBlocks, index, space)
+    drawnCount = 0
+    for wanted in SPACES:
+        group = [(key, matrix) for key, matrix in factorBlocks
+                 if spaces[key] == wanted]
+        if not group:
+            continue
         drawn, info = draw_samples(
-            factorBlocks, nSamples, space=space, returns="factors",
+            group, nSamples, space=wanted, returns="factors",
             decomposition_method=decompositionMethod,
-            sampling_method=samplingMethod, seed=seed, psd_method=psdMethod,
+            sampling_method=samplingMethod,
+            seed=seed + drawnCount * BLOCK_SEED_STRIDE, psd_method=psdMethod,
             null_tol=nullTol, verbose=False, logger=logger)
+        for key in drawn:
+            info[key]["space"] = wanted
         samples.update(drawn)
         diagnostics.update(info)
+        drawnCount += len(group)
 
     if deltaBlocks:
         from kika.sampling.mf35_sampling import SAMPLING_SPACE
 
-        offset = len(factorBlocks) * BLOCK_SEED_STRIDE
+        offset = drawnCount * BLOCK_SEED_STRIDE
         drawn, info = draw_samples(
             deltaBlocks, nSamples, space=SAMPLING_SPACE, returns="deltas",
             decomposition_method=decompositionMethod,
@@ -675,7 +773,54 @@ def _drawEverything(blocks, index, nSamples, *, seed, space, decompositionMethod
     return samples, diagnostics
 
 
-def _readSource(source, log):
+def _readCovarianceFrom(path, expectedZaid, log):
+    """The covariance suite of a *second* tape, to perturb the first with.
+
+    Normally an evaluation states its own covariance and this does not happen.
+    It exists for the case where the covariance a user has for a nuclide lives
+    in a different file from the evaluation they want to perturb -- an MF33 or
+    MF34 tape produced separately, or an evaluation whose covariance was
+    published apart from it.
+
+    **It is not the recommended way and the run says so.** The two files are
+    two statements about the same nuclide made by possibly different people at
+    possibly different times, and nothing in either says they belong together;
+    the grids are reconciled because the applier works off the covariance's own
+    bin edges, but whether the uncertainty *describes* this evaluation is a
+    judgement no code can make. What can be checked is checked: a covariance
+    for another nuclide is refused outright.
+    """
+    from kika.endf import read_endf
+    from kika.endf.model_adapter import decodeCovarianceSuite
+
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError(f"covariance file not found: {path}")
+
+    with log.timed("read", "read the covariance from a separate file",
+                   subject=path.name) as info:
+        covObj = read_endf(str(path))
+        covariances, covReport = decodeCovarianceSuite(covObj)
+        info["covarianceDecode"] = covReport.summary()
+
+    theirs = getattr(covObj, "zaid", None)
+    if theirs is not None and expectedZaid is not None and int(theirs) != int(expectedZaid):
+        raise ValueError(
+            f"{path.name} states covariance for ZAID {theirs}, and the "
+            f"evaluation being perturbed is ZAID {expectedZaid}. Perturbing "
+            f"one nuclide with another nuclide's uncertainty is not something "
+            f"this will do quietly")
+
+    log.warning(
+        f"covariance taken from {path.name} and not from the evaluation "
+        f"itself. Nothing in either file states that they belong together, so "
+        f"the uncertainty applied here is the one you asserted, not one the "
+        f"evaluation declares",
+        subject=path.name)
+    return covariances, covReport
+
+
+def _readSource(source, log, covarianceSource=None):
     """*source* as ``(suite, covariances, endfObj, path, format, report)``.
 
     An ENDF tape is parsed once and decoded twice -- the model and the
@@ -683,6 +828,10 @@ def _readSource(source, log):
     patches it. A GNDS file goes through :func:`kika.read`, which follows the
     ``externalFile`` link to the covariance sibling; there is no tape to patch,
     so ``endf-delta`` is refused for it with the reason.
+
+    *covarianceSource* replaces the covariance half of that with a second
+    tape's, leaving the model to come from *source*. See
+    :func:`_readCovarianceFrom` for why it is not the recommended path.
     """
     from kika.endf.model_adapter import decodeCovarianceSuite, decodeReactionSuite
 
@@ -694,6 +843,9 @@ def _readSource(source, log):
             suite, suiteReport = decodeReactionSuite(endfObj)
             info["covarianceDecode"] = covReport.summary()
             info["suiteDecode"] = suiteReport.summary()
+        if covarianceSource is not None:
+            covariances, covReport = _readCovarianceFrom(
+                covarianceSource, getattr(endfObj, "zaid", None), log)
         return suite, covariances, endfObj, None, "endf", (covReport, suiteReport)
 
     from kika._read import sniff_format
@@ -708,6 +860,12 @@ def _readSource(source, log):
             covariances = getattr(suite, "covarianceSuite", None)
             info["decode"] = suite.report.summary()
             info["format"] = "gnds"
+        if covarianceSource is not None:
+            # A GNDS source carries no ZAID to compare against, so the check
+            # that the two files are about the same nuclide cannot run here.
+            covariances, _covReport = _readCovarianceFrom(
+                covarianceSource, None, log)
+            return suite, covariances, None, path, "gnds", (suite.report, suite.report)
         if covariances is None or not getattr(covariances, "covarianceSections", None):
             raise ValueError(
                 f"{path.name} brought no covarianceSuite: a GNDS evaluation "
@@ -731,6 +889,9 @@ def _readSource(source, log):
         info["covarianceDecode"] = covReport.summary()
         info["suiteDecode"] = suiteReport.summary()
         info["format"] = "endf"
+    if covarianceSource is not None:
+        covariances, covReport = _readCovarianceFrom(
+            covarianceSource, getattr(endfObj, "zaid", None), log)
     return suite, covariances, endfObj, path, "endf", (covReport, suiteReport)
 
 
@@ -814,6 +975,14 @@ def _checkRealisation(pset: PerturbationSet, log, sample: int) -> None:
     log-space draw guarantees it and a linear one does not -- and every block
     must be finite. The sum rule and the spectrum normalisation are checked
     where they are applied; their notes reach the log through ``notes``.
+
+    This applies to MF34 as much as to MF33, and that is deliberate even though
+    a Legendre coefficient is signed and may legitimately change sign. A
+    *factor* at or below zero is not a coefficient changing sign: it is the
+    draw scaling it the wrong way, which is what a relative covariance stated
+    on that coefficient does not describe. Drawing angular distributions
+    linearly (which is the right space for a signed quantity) makes this
+    warning more likely, not less useful.
     """
     from kika.sampling.perturbation_set import SEMANTICS
 
@@ -1010,6 +1179,8 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
                      writeSets: bool = False,
                      ace: Optional[AceOptions] = None,
                      nWorkers: int = 1,
+                     covarianceSource=None,
+                     onMissing: str = "raise",
                      runLog=None, logger=None) -> RunResult:
     """Draw *nSamples* realisations of *request* and write each one out.
 
@@ -1028,12 +1199,26 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
         lowest. By quantity, naming reactions by MT or by label:
         ``{"crossSection": None, "angularDistribution": {"reaction": "MT2",
         "order": [1, 2, 3]}}``.
-    nSamples, seed, space, decompositionMethod, samplingMethod
-        Passed to :func:`~kika.sampling.core.draw_samples`. ``space="log"`` is
-        the cross-section default and keeps factors positive. **It does not
-        reach MF35**: a band's covariance is absolute and its rows sum to zero,
-        so those blocks are drawn linearly as deltas whatever this says --
-        see :func:`_splitBySemantics`.
+    nSamples, seed, decompositionMethod, samplingMethod
+        Passed to :func:`~kika.sampling.core.draw_samples`.
+    space
+        ``"log"`` (the default, and what every shipped pipeline draws with) or
+        ``"linear"``, for the whole run; or a **mapping stating it per
+        quantity**, keyed by MF number or by the model's vocabulary::
+
+            space={33: "log", 34: "linear"}
+            space={"crossSection": "log", "angularDistribution": "linear"}
+
+        The distinction is physical and not a preference. A cross section is a
+        positive magnitude, so a log draw is what keeps its factor positive. A
+        Legendre coefficient is signed, so an evaluation that states one near
+        zero states an uncertainty straddling zero, which a log draw cannot
+        represent and a linear one can. See :func:`resolveSpaces` for what a
+        block carrying two quantities gets.
+
+        **It does not reach MF35** either way: a band's covariance is absolute
+        and its rows sum to zero, so those blocks are drawn linearly as deltas
+        whatever this says -- see :func:`_splitBySemantics`.
     conditioningPlan
         ``None`` (default): inspect the assembled blocks and apply the
         pre-flight's recommendation, which repairs definiteness and nothing
@@ -1088,6 +1273,28 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
         worth a process. On a cluster node, pass the CPUs the job was given
         (``int(os.environ["SLURM_CPUS_PER_TASK"])``); with ``"ace"`` among the
         formats one NJOY run per worker is what fills them.
+    onMissing
+        What to do when the request names a quantity this evaluation does not
+        state. ``"raise"`` (the default) refuses, which is right for a request
+        written against a known file: asking for something that is not there is
+        a mistake, and perturbing fewer components than were asked for is how
+        an ensemble comes to disagree with its own metadata.
+
+        ``"skip"`` drops those selections and perturbs the rest. It is for a
+        request written against **many** files -- "cross sections and angular
+        distributions", over a directory where only some evaluations state
+        MF34. It is never quiet: every dropped selection is a warning in the
+        log, a line in :attr:`RunResult.notes` and an entry in
+        ``run_metadata.json``. A request where *nothing* matches still raises,
+        because that is a run with no perturbation in it.
+    covarianceSource
+        A second ENDF tape to take the covariance from, leaving the model to
+        come from *source*. ``None`` (the default) is the normal case: an
+        evaluation states its own covariance. Use this only when the
+        uncertainty you have lives in a different file from the evaluation you
+        want to perturb, and read :func:`_readCovarianceFrom` first: the run
+        records a warning, because nothing in either file says the two belong
+        together. A covariance for a different nuclide is refused.
     runLog, logger
         A :class:`~kika.sampling.run_log.RunLog` to record into, or none to
         make one; a ``logging.Logger`` to forward every event to as a line.
@@ -1116,6 +1323,12 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
     nWorkers = int(nWorkers)
     if nWorkers < 1:
         raise ValueError(f"nWorkers must be at least 1, got {nWorkers}")
+    # Checked before the tape is read: a misspelled space is a typo in a
+    # keyword, and finding out after a 30-second parse helps nobody.
+    resolveSpaces((), {}, space)
+    if onMissing not in ("raise", "skip"):
+        raise ValueError(
+            f"onMissing must be 'raise' or 'skip', got {onMissing!r}")
 
     log = runLog if runLog is not None else RunLog(logger=logger, label=labelPrefix)
     log.event("started", f"perturbFromModel: {nSamples} sample(s), seed {seed}",
@@ -1124,11 +1337,13 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
               samplingMethod=samplingMethod, psdMethod=psdMethod,
               dryRun=dryRun, formats=list(formats), nWorkers=nWorkers,
               source=str(source) if isinstance(source, (str, Path)) else "<parsed>",
+              covarianceSource=(str(covarianceSource)
+                                if covarianceSource is not None else None),
               outputDir=str(outputDir) if outputDir is not None else None,
               ace=ace.to_dict() if ace is not None else None)
 
     suite, covariances, endfObj, sourcePath, sourceFormat, reports = \
-        _readSource(source, log)
+        _readSource(source, log, covarianceSource)
     covReport, suiteReport = reports
 
     if (sourceFormat == "gnds" and "endf-delta" in formats
@@ -1160,10 +1375,31 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
 
     original = request
     request = normaliseRequest(request, suite)
+    from kika.sampling.joint_blocks import QUANTITY_OF_MF
+
+    skipped: List[str] = []
+    if onMissing == "skip":
+        from kika.sampling.joint_blocks import pruneRequest
+
+        kept, dropped = pruneRequest(covariances, request)
+        if not kept:
+            raise ValueError(
+                f"none of the requested quantities is stated by this "
+                f"evaluation, so there is nothing to perturb. Asked for: "
+                f"{_describeRequestForPeople(request)}")
+        for selection, reason in dropped:
+            note = (f"{QUANTITY_OF_MF.get(selection.mf, f'MF{selection.mf}')} "
+                    f"was asked for and is not stated by this evaluation, so it "
+                    f"was not perturbed ({reason})")
+            skipped.append(note)
+            log.warning(note, subject=f"MF{selection.mf}")
+        if dropped:
+            request = {selection.mf: selection for selection in kept}
     log.event("request", _describeRequestForPeople(request),
               request={str(k): _jsonableRequest(v) for k, v in request.items()}
               if isinstance(request, Mapping) else str(request),
-              asGiven=_jsonableRequest(original))
+              asGiven=_jsonableRequest(original), onMissing=onMissing,
+              skipped=list(skipped))
 
     with log.timed("assembled", "assembled the covariance blocks") as info:
         entries = collectEntries(covariances, request)
@@ -1173,6 +1409,23 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
         description = describeRequest(entries, grouping=grouping)
         info["groups"] = len(blocks)
         info["description"] = description
+
+    # A request may name reactions this evaluation does not state. Naming some
+    # that exist and some that do not is the case that used to pass in silence:
+    # `collectEntries` only refuses when a selection matches *nothing*, so a
+    # request for MT2 and MT16 against a file with only MT2 perturbed one of
+    # them and said so nowhere. What was asked for and not found is recorded
+    # here, whatever `onMissing` says, because a partial match is not a failure
+    # and is still something the ensemble's own metadata has to carry.
+    for mf, absent in _missingReactions(request, entries).items():
+        note = (f"{QUANTITY_OF_MF.get(mf, f'MF{mf}')}: MT"
+                f"{', MT'.join(str(mt) for mt in absent)} "
+                f"{'was' if len(absent) == 1 else 'were'} asked for and "
+                f"{'is' if len(absent) == 1 else 'are'} not stated by this "
+                f"evaluation, so {'it' if len(absent) == 1 else 'they'} "
+                f"{'was' if len(absent) == 1 else 'were'} not perturbed")
+        skipped.append(note)
+        log.warning(note, subject=f"MF{mf}", reactions=list(absent))
     labels = {block_key_text(key): _blockLabel(key, meta)
               for key, meta in index.items()}
     for key, meta in index.items():
@@ -1212,7 +1465,10 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
                        conditioningMode=conditioningMode,
                        report=report, log=log, dryRun=dryRun,
                        request=request, sourceFormat=sourceFormat,
-                       aceOptions=ace if "ace" in formats else None)
+                       aceOptions=ace if "ace" in formats else None,
+                       # A skipped quantity is true of every sample and stated
+                       # by no output file, which is exactly what notes are for.
+                       notes=list(skipped))
 
     stem = sourcePath.stem if sourcePath is not None else "perturbed"
     if stem.endswith(".gnds"):

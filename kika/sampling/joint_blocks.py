@@ -64,7 +64,7 @@ __all__ = ["ComponentKey", "Selection", "QUANTITY_OF_MF", "MF_OF_QUANTITY",
            "SUPPORTED_MF", "PER_SECTION_MF", "GROUPINGS", "collectEntries",
            "samplingGroups", "requestIndex", "assembleRequest",
            "describeRequest", "componentDomains", "normaliseRequest",
-           "rowFamilies"]
+           "rowFamilies", "pruneRequest"]
 
 
 #: What each covariance file is a covariance *of*, in the model's vocabulary
@@ -317,6 +317,43 @@ def normaliseRequest(request, suite=None):
             )
         out[mf] = selection
     return out
+
+
+def pruneRequest(suite, request):
+    """``(kept, dropped)`` -- the selections this suite can actually serve.
+
+    :func:`collectEntries` **raises** when a selection matches nothing, and that
+    is right for a request written against a known file: asking for MT16 of a
+    file that has no MT16 is a mistake, and returning fewer components than were
+    asked for is how an ensemble comes to be perturbed in fewer places than its
+    own metadata claims.
+
+    It is the wrong answer for a request written against *many* files. "Perturb
+    the cross sections and the angular distributions" is a reasonable thing to
+    say about a directory of evaluations of which some state MF34 and some do
+    not, and a caller that means it needs the request applied to what each file
+    holds.
+
+    So the choice is made by the caller and not here, and it is never quiet:
+    this returns what was dropped, with the reason, so the run can record it.
+    ``dropped`` is a list of ``(Selection, reason)``.
+
+    Returns the request in its selection-list spelling; an empty ``kept`` is a
+    real answer and the caller decides whether it is an error.
+    """
+    kept: List[Selection] = []
+    dropped: List[Tuple[Selection, str]] = []
+    for selection in _asSelections(request):
+        try:
+            found = collectEntries(suite, [selection])
+        except Exception as exc:
+            dropped.append((selection, str(exc)))
+            continue
+        if found:
+            kept.append(selection)
+        else:  # pragma: no cover - collectEntries raises instead
+            dropped.append((selection, "matched nothing"))
+    return kept, dropped
 
 
 def rowFamilies(index) -> Dict[Hashable, List[str]]:
