@@ -44,3 +44,7 @@ nul
 dir
 # CLAUDE.md is a private symlink into kika-workspace (not distributed with the library)
 CLAUDE.md
+
+# AGENTS.md is the same private stub as CLAUDE.md, for the agents that read
+# that name instead. Both point into kika-workspace and neither is distributed.
+AGENTS.md
