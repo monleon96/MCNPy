@@ -261,3 +261,67 @@ def test_the_realisation_is_removed_from_the_suite_after_it_is_written(run):
     assert set(first.components()) == set(second.components())
     for sample in run.samples:
         assert set(sample["applied"]) == set(sample["set"].components())
+
+
+# ----------------------------------------------------------------------
+# What the run says about what it did not do
+# ----------------------------------------------------------------------
+
+def test_a_run_that_leaves_a_sum_stale_says_so():
+    """MT1 perturbed beside its partials makes a total that is not their sum.
+
+    ENDF states MT1 and MT4 as ordinary sections, so a request for "every MT the
+    file states" routinely names a sum and its partials, and each is scaled by
+    its own block. Re-deriving is decision 3 of the roadmap and moves numbers, so
+    the run records the fact rather than repairing it quietly or leaving it out.
+
+    Built by hand rather than run, because the committed tape that carries a
+    summed MT (``micro_fe56_structural.endf``: MT1 goes to ``sums`` because its
+    partials MT2 and MT102 are given beside it) has no MF33 to draw from. What is
+    under test is the note, and the note reads the suite.
+    """
+    from kika.endf.model_adapter import decodeReactionSuite
+    from kika.sampling.joint_blocks import ComponentKey
+    from kika.sampling.model_perturbation import _redundancyNote
+    from kika.sampling.perturbation_set import PerturbationSet
+
+    suite, _report = decodeReactionSuite(
+        read_endf(str(DATA / "micro_fe56_structural.endf")))
+    assert 1 in {int(r.ENDF_MT) for r in suite.sums.reactions}, (
+        "this fixture is meant to carry MT1 as a sum; it no longer does")
+
+    edges = np.array([1.0e-5, 1.0e6, 2.0e7])
+    components = [ComponentKey(26056, 33, mt) for mt in (1, 2)]
+    pset = PerturbationSet(
+        label="realization-0000",
+        factors={component: np.array([1.1, 0.9]) for component in components},
+        binEdges={component: edges for component in components})
+
+    note = _redundancyNote(suite, pset)
+    assert note is not None
+    assert "not the sum of its parts" in note
+    assert "decision 3" in note
+
+    # And a realisation that touches only the partials has nothing to say.
+    partialsOnly = PerturbationSet(
+        label="realization-0000",
+        factors={components[1]: np.array([1.1, 0.9])},
+        binEdges={components[1]: edges})
+    assert _redundancyNote(suite, partialsOnly) is None
+
+
+def test_a_reaction_whose_partials_the_file_omits_is_not_a_sum():
+    """MT4 with no MT51-91 beside it is a reaction, and the note must not fire.
+
+    ``f982268`` derives sum-hood rather than reading it off a list: ENDF-6 does
+    not mark a summed MT, and MT103 is a sum in an evaluation that writes
+    MT600-649 and a reaction in one that does not. ``micro_fe56_mf33.endf`` is
+    the second case for MT4, and a note there would be noise -- which is how a
+    run's warnings stop being read.
+    """
+    from kika.sampling.model_perturbation import perturbFromModel
+
+    run = perturbFromModel(str(DATA / "micro_fe56_mf33.endf"), {33: None}, 1,
+                           seed=5)
+    assert run.samples[0]["set"].reactions() == (4, 16)
+    assert run.notes == []

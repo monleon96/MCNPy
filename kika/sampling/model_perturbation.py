@@ -79,6 +79,10 @@ class RunResult:
     grouping: str = "mf"
     description: str = ""
     diagnostics: Dict[Hashable, Dict[str, Any]] = field(default_factory=dict)
+    #: Things true of every sample that no output file states. Read them: a run
+    #: that perturbs a summed cross section and its partials writes a tape whose
+    #: total is not the sum of its parts, and only this says so.
+    notes: List[str] = field(default_factory=list)
 
     @property
     def nSamples(self) -> int:
@@ -88,6 +92,50 @@ class RunResult:
         """Every file one emitter wrote, in sample order."""
         return [sample["files"][emitter] for sample in self.samples
                 if emitter in sample["files"]]
+
+
+def _redundancyNote(suite, pset) -> Optional[str]:
+    """Whether this realisation perturbs a summed cross section and its parts.
+
+    **This does not repair anything, and saying so is the point.** ENDF states
+    MT1 and MT4 as ordinary sections, so a request for "every MT the file states"
+    routinely names a sum *and* its partials, and each is perturbed from its own
+    covariance block. The tape that comes out therefore has MT1 that is no longer
+    the sum of what it sums -- which is what ``apply_factors_to_pendf_mf3`` half
+    solves for the PENDF case, by expanding a composite over its partials and
+    excluding the partials that are perturbed in their own right.
+
+    Re-deriving here is decision 3 of the roadmap (Juan, 2026-08-29: the sum is
+    re-derived when the partials are perturbed) and it **moves numbers**, so it
+    is not something to slip into a pipeline unannounced. What it needs first is
+    for the applier to know which MT sums which, and the ENDF-decoded model does
+    not carry that: ``f982268`` puts a summed MT in ``suite.sums``, but §25's
+    ``<summands/>`` comes out empty because ENDF says nowhere what MT1 is made
+    of, and ``kika._constants.MT_COMPOSITES`` only approximates it.
+
+    So the run records the fact instead of quietly leaving it out of the file.
+    """
+    reactions = getattr(getattr(suite, "sums", None), "reactions", None)
+    if not reactions:
+        return None
+    # `Sums.reactions` is a plain list of `Reaction`s -- the ENDF adapter fills
+    # it that way because ENDF says nowhere what MT1 sums, so there is no
+    # `CrossSectionSum` to build. Asking it for `byENDF_MT` raised
+    # AttributeError, which an over-broad `except` then swallowed: the note
+    # could never fire and the run said nothing. Read the list.
+    summedMTs = {int(reaction.ENDF_MT) for reaction in reactions
+                 if getattr(reaction, "ENDF_MT", None) is not None}
+    summed = [mt for mt in pset.reactions() if mt in summedMTs]
+    if not summed or len(pset.reactions()) < 2:
+        return None
+    return (
+        f"MT{summed} is a summed cross section and this realisation also "
+        f"perturbs {[mt for mt in pset.reactions() if mt not in summed]}: each "
+        f"is scaled by its own factor block, so the sum is NOT re-derived and "
+        f"the tape states a total that is not the sum of its parts. Re-deriving "
+        f"is decision 3 of docs/library/perturbation_model_roadmap.md and moves "
+        f"numbers; it is not done here"
+    )
 
 
 def _readTape(source):
@@ -313,6 +361,11 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
                 files["perturbation-set"] = pset.write(
                     sampleDir / "perturbation.json")
 
+        note = _redundancyNote(suite, pset)
+        if note is not None and note not in result.notes:
+            result.notes.append(note)
+            if logger is not None:
+                logger.warning(note)
         result.samples.append({"label": label, "set": pset, "files": files,
                                "applied": applied})
         _forget(suite, pset, displaced)
@@ -385,6 +438,7 @@ def _writeRunMetadata(result: RunResult, outputDir: Path, covReport, suiteReport
              "components": [list(component) for component in meta["components"]]}
             for key, meta in result.index.items()
         ],
+        "notes": list(result.notes),
         "covarianceDecode": covReport.summary() if covReport is not None else "",
         "suiteDecode": suiteReport.summary() if suiteReport is not None else "",
     }
