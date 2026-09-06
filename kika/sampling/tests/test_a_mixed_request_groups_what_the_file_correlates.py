@@ -285,3 +285,151 @@ def test_the_key_says_which_quantity_a_row_belongs_to():
     assert ComponentKey(26056, 33, 2) < ComponentKey(26056, 34, 2, 1), (
         "cross sections sort ahead of distributions, so a mixed matrix has a "
         "stable row order")
+
+
+# ----------------------------------------------------------------------
+# The multiplicity: assembled and drawn, and stopping exactly where it should
+# ----------------------------------------------------------------------
+
+NUBAR = str(DATA / "micro_u235_nubar.endf")
+
+
+def test_a_multiplicity_request_assembles_and_draws_like_any_other():
+    """MF31's components are reactions on an energy grid, same as MF33's.
+
+    Worth a test of its own because the *applier* for a multiplicity does not
+    exist yet, and that could easily be mistaken for the whole path being
+    absent. It is not: the covariance assembles, the draw is a draw, and the
+    envelope cuts it. Only the last step -- putting the realisation on a model
+    node -- is missing, and it is missing on a decision rather than on work.
+    """
+    from kika.sampling.core import draw_samples
+    from kika.sampling.perturbation_set import PerturbationSet
+
+    suite = _suite(NUBAR)
+    entries = collectEntries(suite, {31: None})
+    blocks, index = assembleRequest(entries)
+
+    (_key, matrix), = blocks
+    (meta,) = index.values()
+    assert meta["quantities"] == ["multiplicity"]
+    assert sorted(component.mt for component in meta["components"]) == [452, 455, 456]
+    assert meta["union"] == "global", (
+        "MF31 is laid out like MF33: §31.1 makes its formats directly analogous")
+    assert matrix.shape == (meta["dimension"],) * 2
+
+    samples, _diagnostics = draw_samples(blocks, 2, returns="factors",
+                                         space="log", seed=1, psd_method="none",
+                                         null_tol=None, verbose=False)
+    pset = PerturbationSet.fromDraw({key: samples[key][0] for key in samples},
+                                    index, label="realization-0000")
+    assert pset.reactions() == (452, 455, 456)
+    assert all(np.all(pset.factors[component] > 0.0)
+               for component in pset.components())
+
+
+def test_a_multiplicity_stops_at_the_applier_and_says_why():
+    """The boundary is pinned so it cannot move by accident.
+
+    ``Multiplicity`` is not a ``Component`` -- §17.3's census found one form in
+    the whole library -- so a nu-bar has no labelled place to put a realisation
+    beside its evaluation. Whether it gets one, or a realisation replaces the
+    form on a copied node, is a model decision (M5 in
+    ``docs/library/perturbation_model_roadmap.md``, D29 in ``library-gaps.md``)
+    and not an applier's to take. When it is taken, this test is what has to
+    change.
+    """
+    from kika.endf import read_endf
+    from kika.endf.model_adapter import decodeReactionSuite
+    from kika.sampling.perturbation_set import PerturbationSet
+
+    reactions, _report = decodeReactionSuite(read_endf(NUBAR))
+    component = ComponentKey(92235, 31, 452)
+    pset = PerturbationSet(label="realization-0000",
+                           factors={component: np.array([1.1])},
+                           binEdges={component: np.array([1.0e-5, 2.0e7])})
+    with pytest.raises(NotImplementedError, match="model decision"):
+        pset.applyToSuite(reactions)
+
+
+def test_a_full_nubar_family_is_refused_until_the_sum_rule_is_ported():
+    """ENDF-6 requires nu_452 = nu_455 + nu_456, and half a port would break it.
+
+    ``perturb_nubar_family`` states the convention this project runs -- perturb
+    the components, derive the redundant member, discard its own factor block --
+    and the model side has the applier but not the derivation. Perturbing the
+    components without it writes a tape stating two different totals, so it is
+    refused. Measured on this tape before the refusal existed: MT455 and MT456
+    moved and MT452 stayed at 2.5178 at 1 MeV against a prompt of 2.4967.
+    """
+    from kika.endf import read_endf
+    from kika.endf.model_adapter import decodeReactionSuite
+    from kika.endf.model_adapter.multiplicity import nubarNode
+    from kika.sampling.perturbation_set import PerturbationSet
+
+    reactions, _report = decodeReactionSuite(read_endf(NUBAR))
+    components = [ComponentKey(92235, 31, mt) for mt in (455, 456)]
+    pset = PerturbationSet(
+        label="realization-0000",
+        factors={component: np.array([1.1]) for component in components},
+        binEdges={component: np.array([1.0e-5, 2.0e7]) for component in components},
+    )
+    with pytest.raises(NotImplementedError, match="two different totals"):
+        pset.applyToSuite(reactions, multiplicityResolver=nubarNode, displaced={})
+
+
+def test_a_family_that_cannot_be_derived_is_perturbed_member_by_member():
+    """The case the shipped applier also perturbs directly, and the same way.
+
+    ``perturb_nubar_family``'s ``can_derive`` is false when the tape does not
+    carry every contributor, and there it perturbs each present member on its
+    own. So does this. The resolver is stubbed to report that shape rather than
+    a second fixture being cut, because what is under test is the rule and the
+    rule reads the family off the resolver.
+    """
+    from kika.endf import read_endf
+    from kika.endf.model_adapter import decodeReactionSuite
+    from kika.endf.model_adapter.multiplicity import nubarNode
+    from kika.sampling.perturbation_set import PerturbationSet
+
+    reactions, _report = decodeReactionSuite(read_endf(NUBAR))
+
+    def onlyTheTotal(suite, mt):
+        return nubarNode(suite, mt) if mt == 452 else None
+
+    component = ComponentKey(92235, 31, 452)
+    edges = np.array([1.0e-5, 1.0e6, 2.0e7])
+    pset = PerturbationSet(label="realization-0000",
+                           factors={component: np.array([1.5, 0.5])},
+                           binEdges={component: edges})
+
+    node = nubarNode(reactions, 452)
+    before = node.form
+    displaced = {}
+    diagnostics = pset.applyToSuite(reactions, multiplicityResolver=onlyTheTotal,
+                                    displaced=displaced)
+
+    assert set(diagnostics) == {component}
+    assert diagnostics[component]["max_factor"] == pytest.approx(1.5)
+    assert node.form is not before, "the realisation did not replace the form"
+    assert node.form.label == "realization-0000"
+    assert displaced[component] is before, (
+        "the evaluated form has to come back out, or nothing can put it back")
+
+    # And putting it back is all it takes -- the replacement is transient.
+    node.form = displaced[component]
+    assert nubarNode(reactions, 452).form is before
+
+
+def test_a_multiplicity_needs_somewhere_to_put_what_it_displaced():
+    from kika.endf import read_endf
+    from kika.endf.model_adapter import decodeReactionSuite
+    from kika.endf.model_adapter.multiplicity import nubarNode
+    from kika.sampling.perturbation_set import PerturbationSet
+
+    reactions, _report = decodeReactionSuite(read_endf(NUBAR))
+    component = ComponentKey(92235, 31, 452)
+    pset = PerturbationSet(label="r", factors={component: np.array([1.1])},
+                           binEdges={component: np.array([1.0e-5, 2.0e7])})
+    with pytest.raises(ValueError, match="displaced"):
+        pset.applyToSuite(reactions, multiplicityResolver=nubarNode)

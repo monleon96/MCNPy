@@ -326,7 +326,9 @@ class PerturbationSet:
             resolved[reaction] = components[0]
         return resolved
 
-    def applyToSuite(self, suite) -> Dict[ComponentKey, Dict[str, Any]]:
+    def applyToSuite(self, suite, *, multiplicityResolver=None,
+                     displaced: Optional[Dict[ComponentKey, Any]] = None
+                     ) -> Dict[ComponentKey, Dict[str, Any]]:
         """Put a perturbed form under :attr:`label` on every node this set covers.
 
         The evaluated form is left where it is and the realisation goes beside
@@ -344,10 +346,25 @@ class PerturbationSet:
         * ``angularDistribution`` -- MF34's L>=1, all orders of one reaction in
           one call, because a Legendre vector is perturbed once and not once per
           order.
-        * ``multiplicity`` -- MF31, which has no labelled path yet. Raised
-          rather than skipped, because a nu-bar silently left unperturbed inside
-          a realisation that claims to carry it is exactly the failure this
-          class exists to prevent.
+        * ``multiplicity`` -- MF31. It **replaces** the form rather than sitting
+          beside it, and that asymmetry is an open model decision rather than an
+          oversight; see :meth:`_applyMultiplicity`. It needs
+          *multiplicityResolver*, and without one it raises rather than skipping:
+          a nu-bar silently left unperturbed inside a realisation that claims to
+          carry it is exactly the failure this class exists to prevent.
+
+        Parameters
+        ----------
+        multiplicityResolver
+            ``callable(suite, mt) -> Multiplicity``, for MF31 only. The model
+            does not know which node an ENDF MT names -- that is the adapter's
+            question, and ``kika.endf.model_adapter.multiplicity.nubarNode`` is
+            its answer, the same one the MF1 encoders use. Passing it in rather
+            than importing it is what keeps the sampling layer off the adapter.
+        displaced
+            A dict the applier fills with ``component -> the form it replaced``,
+            so a caller can put the evaluation back. Required for MF31, because
+            without it the replacement cannot be undone.
         """
         from kika.nuclear_data.model import EVAL_LABEL
 
@@ -355,16 +372,8 @@ class PerturbationSet:
 
         multiplicities = [c for c in self.components() if c.mf == 31]
         if multiplicities:
-            raise NotImplementedError(
-                f"{[c.describe() for c in multiplicities]}: a multiplicity has "
-                f"no labelled form to put a realisation under -- "
-                f"`Multiplicity` is not a `Component` (one form in the whole "
-                f"library, §17.3), so either it becomes one or a nu-bar "
-                f"realisation replaces the form on a copied node. That is a "
-                f"model decision, recorded as M5 in "
-                f"docs/library/perturbation_model_roadmap.md and D29 in "
-                f"library-gaps.md, and it is not an applier's to take"
-            )
+            diagnostics.update(self._applyMultiplicity(
+                suite, multiplicities, multiplicityResolver, displaced))
 
         # `reactionByENDF_MT` raises for an MT the suite does not have, and
         # that is what should happen: a request named the reaction, so its
@@ -394,6 +403,127 @@ class PerturbationSet:
                     **info["per_order"].get(order, {}),
                 }
         return diagnostics
+
+    def _applyMultiplicity(self, suite, components, resolver, displaced):
+        """Put a nu-bar realisation on the node an MT names, and say what it cost.
+
+        **The three MTs are three different nodes, measured rather than assumed**
+        (``micro_u235_nubar.endf``, 2026-09-06): MT456, the prompt nu-bar, is the
+        fission product's own ``multiplicity`` -- a ``Regions1d`` of 95 points --
+        while MT452 and MT455 are ``multiplicitySum`` nodes under ``suite.sums``,
+        "total fission neutron multiplicity" and "delayed fission neutron
+        multiplicity", because §18.4 puts delayed neutrons on precursor families
+        and the aggregate is a sum over them. All three carry a real
+        ``Regions1d``, so the *arithmetic* is :func:`applyFactors` unchanged.
+
+        **What is not unchanged is where the realisation goes.** A
+        ``Multiplicity`` is not a ``Component`` -- §17.3's census found one form
+        in 230 562 nodes -- so there is no labelled slot beside the evaluation
+        and the realisation has to take the form's place. Two consequences, and
+        neither is hidden:
+
+        * the evaluated form is handed back through *displaced* and has to be put
+          back, which is what
+          :func:`kika.sampling.model_perturbation._forget` does once a sample is
+          written;
+        * a GNDS file written from a suite in this state carries the nu-bar
+          realisation *instead of* the evaluation, where the cross section and the
+          distribution carry both. That is the asymmetry making ``Multiplicity`` a
+          ``Component`` would remove, and it is what M5 exists to decide -- taken
+          by nobody here.
+
+        Perturbing MT452 **and** one of its parts is refused: the total is the sum
+        of prompt and delayed (§21.3), so scaling both the sum and a summand
+        states two different totals and the file would carry whichever was
+        encoded last.
+        """
+        if resolver is None:
+            raise NotImplementedError(
+                f"{[c.describe() for c in components]}: a multiplicity has no "
+                f"labelled form to put a realisation under -- `Multiplicity` is "
+                f"not a `Component` (one form in the whole library, §17.3), so a "
+                f"realisation has to replace it. Pass multiplicityResolver "
+                f"(kika.endf.model_adapter.multiplicity.nubarNode) and a "
+                f"displaced dict to say that is what you want. Whether the model "
+                f"should grow a labelled slot instead is a model decision, M5 in "
+                f"docs/library/perturbation_model_roadmap.md and D29 in "
+                f"library-gaps.md, and it is not an applier's to take"
+            )
+        if displaced is None:
+            raise ValueError(
+                "perturbing a multiplicity replaces the evaluated form, so a "
+                "`displaced` dict is required: without it the evaluation cannot "
+                "be put back and the suite silently stops carrying it"
+            )
+
+        self._refuseIfTheSumRuleWouldBreak(suite, components, resolver)
+
+        diagnostics = {}
+        for component in components:
+            node = resolver(suite, component.mt)
+            if node is None or getattr(node, "form", None) is None:
+                raise ValueError(
+                    f"{component.describe()}: this suite carries no such nu-bar, "
+                    f"so there is nothing to perturb"
+                )
+            perturbed, info = self.apply(node.form, component)
+            displaced[component] = node.form
+            node.form = self._labelled(perturbed)
+            diagnostics[component] = info
+        return diagnostics
+
+
+    @staticmethod
+    def _refuseIfTheSumRuleWouldBreak(suite, components, resolver) -> None:
+        """ENDF-6 requires nu_452 = nu_455 + nu_456; this will not write a tape
+        where it does not hold.
+
+        The rule is not this module's to invent and it is not inventing one:
+        :func:`kika.sampling.mf31_sampling.perturb_nubar_family` already states
+        the convention this project runs -- perturb the components, **derive**
+        the redundant member, and discard its own factor block -- along with
+        ``sum_rule_residual`` to measure what the derivation repairs in the input
+        file. That derivation has not been ported to the model yet: it is a
+        union-grid recomposition with four coverage patterns and a choice of
+        which member is derived, and it needs its own gate against the function
+        above.
+
+        So the split is the same one that function makes. Where the family is
+        **derivable** -- the tape carries all three -- a perturbation that does
+        not re-derive the total would write a tape stating two different totals,
+        and this refuses. Where it is not derivable, direct perturbation of each
+        present member is exactly what that function does too, and it is allowed.
+
+        Measured on ``micro_u235_nubar.endf`` (2026-09-06): the tape carries all
+        three, so it is the refusing case, and perturbing MT455 and MT456 through
+        this path did leave MT452 at its baseline -- 2.5178 at 1 MeV against a
+        prompt that moved to 2.4967. That is the tape this refusal exists for.
+        """
+        present = set()
+        for mt in (452, 455, 456):
+            try:
+                node = resolver(suite, mt)
+            except (KeyError, ValueError):
+                node = None
+            if node is not None and getattr(node, "form", None) is not None:
+                present.add(mt)
+
+        if not ({452} <= present and {455, 456} <= present):
+            return
+
+        asked = sorted({component.mt for component in components})
+        raise NotImplementedError(
+            f"this tape carries the whole nu-bar family {sorted(present)}, so "
+            f"ENDF-6 requires nu_452 = nu_455 + nu_456, and perturbing "
+            f"MT{asked} without re-deriving the redundant member would write a "
+            f"tape stating two different totals. The convention this project "
+            f"runs is mf31_sampling.perturb_nubar_family -- perturb the "
+            f"components, derive the total, discard the total's own factor block "
+            f"-- and it has not been ported to the model yet (M5 in "
+            f"docs/library/perturbation_model_roadmap.md). A tape whose family is "
+            f"not derivable is perturbed member by member, here as there"
+        )
+
 
     def _applyAngular(self, angular, orders: Mapping[int, ComponentKey]):
         from kika.nuclear_data.model.perturbation import applyLegendreFactors

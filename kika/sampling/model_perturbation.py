@@ -126,8 +126,14 @@ def _emitEndfDelta(suite, endfObj, sourcePath, pset, outPath, report) -> Path:
     between two samples show exactly the perturbation and nothing else.
     """
     from kika.endf.model_adapter import encodeMF3MT, encodeMF4MT
+    from kika.endf.model_adapter.multiplicity import (encodeMF1MT452,
+                                                      encodeMF1MT455,
+                                                      encodeMF1MT456)
     from kika.endf.writers.endf_writer import ENDFWriter
     from kika.nuclear_data.model import EVAL_LABEL
+
+    _MF1_ENCODERS = {452: encodeMF1MT452, 455: encodeMF1MT455,
+                     456: encodeMF1MT456}
 
     if sourcePath is None:
         raise ValueError(
@@ -148,20 +154,26 @@ def _emitEndfDelta(suite, endfObj, sourcePath, pset, outPath, report) -> Path:
             raise ValueError(
                 f"the realisation perturbs MF{mf} and the tape has no MF{mf}")
         for mt in mts:
-            reaction = suite.reactionByENDF_MT(mt)
             if mf == 3:
-                encoded, _report = encodeMF3MT(reaction, label=pset.label,
-                                               report=report)
+                encoded, _report = encodeMF3MT(suite.reactionByENDF_MT(mt),
+                                               label=pset.label, report=report)
             elif mf == 4:
+                reaction = suite.reactionByENDF_MT(mt)
                 product, _angular = PerturbationSet._angularOf(reaction, mt)
                 form = product.distribution.get(pset.label) or \
                     product.distribution[EVAL_LABEL]
                 encoded, _report = encodeMF4MT(form, product.provenance, mt,
                                                report)
+            elif mf == 1:
+                # The MF1 encoders take the *suite* and find the node with
+                # `nubarNode`, the same lookup the applier perturbed through, so
+                # what they write is what was perturbed. That is why a nu-bar
+                # realisation has to replace the form rather than sit beside it:
+                # there is no label for these encoders to be told about.
+                encoded, _report = _MF1_ENCODERS[mt](suite, None, report)
             else:
                 raise NotImplementedError(
-                    f"no delta encoder for MF{mf} yet; the multiplicity path is "
-                    f"M5 in docs/library/perturbation_model_roadmap.md")
+                    f"no delta encoder for MF{mf}")
             mfFile.sections[mt] = encoded
         writer = ENDFWriter(str(current))
         if not writer.replace_mf_section(mfFile, str(outPath)):
@@ -233,6 +245,7 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
     from kika.cov.conditioning import apply_plan
     from kika.endf.model_adapter import (decodeCovarianceSuite,
                                          decodeReactionSuite)
+    from kika.endf.model_adapter.multiplicity import nubarNode
     from kika.nuclear_data.model.conversion import ConversionReport
     from kika.sampling.core import draw_samples
 
@@ -274,7 +287,9 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
             {key: samples[key][number] for key in samples}, index, label=label,
             provenance={"seed": seed, "sample": number, "space": space,
                         "grouping": grouping, "source": str(sourcePath or "")})
-        applied = pset.applyToSuite(suite)
+        displaced: Dict[Any, Any] = {}
+        applied = pset.applyToSuite(suite, multiplicityResolver=nubarNode,
+                                    displaced=displaced)
 
         files: Dict[str, Path] = {}
         report = ConversionReport()
@@ -300,7 +315,7 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
 
         result.samples.append({"label": label, "set": pset, "files": files,
                                "applied": applied})
-        _forget(suite, pset)
+        _forget(suite, pset, displaced)
 
     if outputDir is not None:
         _writeRunMetadata(result, outputDir, covReport, suiteReport,
@@ -308,17 +323,31 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
     return result
 
 
-def _forget(suite, pset: PerturbationSet) -> None:
-    """Drop a realisation's forms once it has been written.
+def _forget(suite, pset: PerturbationSet, displaced=None) -> None:
+    """Drop a realisation's forms once it has been written, and put back what it took.
 
-    The labelled form is what replaces the per-sample ``deepcopy``; leaving it
-    in place would put the whole ensemble in memory one form at a time, which is
-    the cost the copy was rejected for. Removing it is not a cleanup detail --
-    it is the other half of that decision.
+    The labelled form is what replaces the per-sample ``deepcopy``; leaving it in
+    place would put the whole ensemble in memory one form at a time, which is the
+    cost the copy was rejected for. Removing it is not a cleanup detail -- it is
+    the other half of that decision.
+
+    *displaced* is the second half of a different one. A nu-bar realisation has
+    no labelled slot to sit in, so it **replaces** the evaluated form; this puts
+    the evaluation back, and it is what makes the replacement transient rather
+    than a suite that quietly stops carrying its own evaluation after sample 0.
     """
     from kika.nuclear_data.model import EVAL_LABEL
 
+    for component, form in (displaced or {}).items():
+        from kika.endf.model_adapter.multiplicity import nubarNode
+
+        node = nubarNode(suite, component.mt)
+        if node is not None:
+            node.form = form
+
     for mt in pset.reactions():
+        if mt in (452, 455, 456):
+            continue
         reaction = suite.findReactionByENDF_MT(mt)
         if reaction is None:
             continue
