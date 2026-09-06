@@ -708,24 +708,30 @@ class _SuiteWriter:
         if multiplicity is None:
             self.report.lost(f"{where}: no multiplicity, so <multiplicity> is empty")
             return
-        form = multiplicity.form
-        if form is None:
+        forms = list(multiplicity.items())
+        if not forms:
             self.report.lost(
                 f"{where}: the multiplicity held no form kika could read, so "
                 f"<multiplicity> is empty rather than filled with a 1"
             )
             return
-        if isinstance(form, Reference):
-            _set(ET.SubElement(element, "reference"), label=form.label,
-                 href=form.href)
-            return
-        if isinstance(form, Branching1d):
-            _set(ET.SubElement(element, "branching1d"), label=form.label)
-            return
-        if isinstance(form, UnspecifiedMultiplicity):
-            _set(ET.SubElement(element, "unspecified"), label=form.label)
-            return
-        _function(element, form, self.report, where)
+        # Every form with its own label, the way `distribution` and
+        # `crossSection` are written. §17.3's choice is maxOccurs="unbounded",
+        # so a realisation sits beside the evaluation here exactly as it does
+        # there -- which is the point of `Multiplicity` becoming a `Component`:
+        # writing only `multiplicity.form` would have written a nu-bar
+        # realisation *instead of* the evaluation it was drawn from.
+        for label, form in forms:
+            label = label or getattr(form, "label", None)
+            if isinstance(form, Reference):
+                _set(ET.SubElement(element, "reference"), label=label,
+                     href=form.href)
+            elif isinstance(form, Branching1d):
+                _set(ET.SubElement(element, "branching1d"), label=label)
+            elif isinstance(form, UnspecifiedMultiplicity):
+                _set(ET.SubElement(element, "unspecified"), label=label)
+            else:
+                _function(element, form, self.report, where)
 
     @writes("distributionForm", "angularTwoBody", "unspecified", "branching3d")
     def distribution(self, parent: ET.Element, distribution, where: str) -> None:

@@ -191,7 +191,11 @@ def _touchedFiles(pset: PerturbationSet, alsoChanged=()) -> Dict[int, List[int]]
     silently stale.
     """
     touched: Dict[int, set] = {}
+    seen = set()
     for component in list(pset.components()) + list(alsoChanged):
+        if component in seen:
+            continue
+        seen.add(component)
         if component.mf == 33 or (component.mf == 34 and component.index == 0):
             touched.setdefault(3, set()).add(component.mt)
         elif component.mf == 34:
@@ -250,11 +254,15 @@ def _emitEndfDelta(suite, endfObj, sourcePath, pset, outPath, report,
                                                report)
             elif mf == 1:
                 # The MF1 encoders take the *suite* and find the node with
-                # `nubarNode`, the same lookup the applier perturbed through, so
-                # what they write is what was perturbed. That is why a nu-bar
-                # realisation has to replace the form rather than sit beside it:
-                # there is no label for these encoders to be told about.
-                encoded, _report = _MF1_ENCODERS[mt](suite, None, report)
+                # `nubarNode` -- the same lookup the applier perturbed through,
+                # so what they write is what was perturbed -- and `label=` picks
+                # the realisation's form from the container, falling back to
+                # `eval` for a member this draw did not touch. Before
+                # `Multiplicity` was a `Component` there was no label to pass and
+                # the realisation had to displace the evaluated form; passing it
+                # is what replaces that.
+                encoded, _report = _MF1_ENCODERS[mt](suite, None, report,
+                                                     label=pset.label)
             else:
                 raise NotImplementedError(
                     f"no delta encoder for MF{mf}")
@@ -371,9 +379,7 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
             {key: samples[key][number] for key in samples}, index, label=label,
             provenance={"seed": seed, "sample": number, "space": space,
                         "grouping": grouping, "source": str(sourcePath or "")})
-        displaced: Dict[Any, Any] = {}
-        applied = pset.applyToSuite(suite, multiplicityResolver=nubarNode,
-                                    displaced=displaced)
+        applied = pset.applyToSuite(suite, multiplicityResolver=nubarNode)
 
         files: Dict[str, Path] = {}
         report = ConversionReport()
@@ -385,7 +391,7 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
                     files[fmt] = _emitEndfDelta(
                         suite, endfObj, sourcePath, pset,
                         sampleDir / f"{stem}_{number:04d}.endf", report,
-                        alsoChanged=tuple(displaced))
+                        alsoChanged=tuple(applied))
                 elif fmt == "endf-tape":
                     files[fmt] = _emitWholeFile(
                         suite, pset, sampleDir / f"{stem}_{number:04d}.tape.endf",
@@ -405,7 +411,7 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
                     logger.warning(note)
         result.samples.append({"label": label, "set": pset, "files": files,
                                "applied": applied})
-        _forget(suite, pset, displaced)
+        _forget(suite, pset, applied)
 
     if outputDir is not None:
         _writeRunMetadata(result, outputDir, covReport, suiteReport,
@@ -413,30 +419,33 @@ def perturbFromModel(source, request, nSamples: int = 1, *, seed: int = 0,
     return result
 
 
-def _forget(suite, pset: PerturbationSet, displaced=None) -> None:
-    """Drop a realisation's forms once it has been written, and put back what it took.
+def _forget(suite, pset: PerturbationSet, applied=()) -> None:
+    """Drop a realisation's forms once it has been written.
 
     The labelled form is what replaces the per-sample ``deepcopy``; leaving it in
     place would put the whole ensemble in memory one form at a time, which is the
     cost the copy was rejected for. Removing it is not a cleanup detail -- it is
     the other half of that decision.
 
-    *displaced* is the second half of a different one. A nu-bar realisation has
-    no labelled slot to sit in, so it **replaces** the evaluated form; this puts
-    the evaluation back, and it is what makes the replacement transient rather
-    than a suite that quietly stops carrying its own evaluation after sample 0.
+    *applied* is what the applier reported, which is a superset of what the
+    request named: the nu-bar the sum rule **derives** is rewritten without ever
+    having been asked for, so forgetting only the requested components would
+    leave it on the suite and every later sample would derive its total from the
+    previous sample's parts.
     """
     from kika.nuclear_data.model import EVAL_LABEL
 
-    for component, form in (displaced or {}).items():
-        from kika.endf.model_adapter.multiplicity import nubarNode
+    from kika.endf.model_adapter.multiplicity import NUBAR_MT, nubarNode
 
+    for component in applied:
+        if component.mf != 31:
+            continue
         node = nubarNode(suite, component.mt)
         if node is not None:
-            node.form = form
+            node.forms.pop(pset.label, None)
 
     for mt in pset.reactions():
-        if mt in (452, 455, 456):
+        if mt in NUBAR_MT:
             continue
         reaction = suite.findReactionByENDF_MT(mt)
         if reaction is None:

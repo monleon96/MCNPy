@@ -65,7 +65,7 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Tuple
 
-from kika.nuclear_data.model import (Background, Branching1d,
+from kika.nuclear_data.model import (EVAL_LABEL, Background, Branching1d,
                                      ConversionReport, CrossSection,
                                      CrossSectionSum,
                                      ExternalFile, ExternalFiles,
@@ -608,24 +608,32 @@ class _SuiteReader:
         is what asks the question they are the answer to.
         """
         here = f"{path}/multiplicity"
-        forms = [c for c in element if c.tag not in IGNORED]
-        chosen = self.pickOneForm(forms, here, "multiplicity")
-        if chosen is None:
-            return Multiplicity()
-
-        label = chosen.attrib.get("label", "")
-        if chosen.tag == "reference":
-            # The same class §16.1.1's `reference` uses; XLinkType and it are
-            # the same shape. The href is an xPath into this same document and
-            # is kept as the string it is — resolving it is not this reader's
-            # job, and §16.1.1 does not resolve its own either.
-            return Multiplicity(form=Reference(
-                href=chosen.attrib.get("href", ""), label=label))
-        if chosen.tag == "branching1d":
-            return Multiplicity(form=Branching1d(label=label))
-        if chosen.tag == "unspecified":
-            return Multiplicity(form=UnspecifiedMultiplicity(label=label))
-        return Multiplicity(form=self.form(chosen, here, "multiplicity"))
+        multiplicity = Multiplicity()
+        # **Every form, keyed by label**, the way `readCrossSection` does it.
+        # It read one and reported the rest until 2026-09-06, because the model
+        # held one; now `Multiplicity` is a `Component` and the writer emits all
+        # of them, so reading one would make the round trip lossy in exactly the
+        # case the change was made for -- a document carrying a nu-bar
+        # realisation beside its evaluation would come back with one of the two.
+        for child in element:
+            if child.tag in IGNORED:
+                continue
+            label = child.attrib.get("label", "")
+            if child.tag == "reference":
+                # The same class §16.1.1's `reference` uses; XLinkType and it are
+                # the same shape. The href is an xPath into this same document and
+                # is kept as the string it is — resolving it is not this reader's
+                # job, and §16.1.1 does not resolve its own either.
+                form = Reference(href=child.attrib.get("href", ""), label=label)
+            elif child.tag == "branching1d":
+                form = Branching1d(label=label)
+            elif child.tag == "unspecified":
+                form = UnspecifiedMultiplicity(label=label)
+            else:
+                form = self.form(child, here, "multiplicity")
+            if form is not None:
+                multiplicity[label or EVAL_LABEL] = form
+        return multiplicity
 
     # -- sums --------------------------------------------------------------
 

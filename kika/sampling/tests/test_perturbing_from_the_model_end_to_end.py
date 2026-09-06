@@ -428,3 +428,118 @@ def test_the_evaluation_is_back_on_the_suite_after_each_sample(nubarRun):
     assert realised[0] != realised[1]
     for value in realised:
         assert abs(value - baselineNu) / baselineNu < 0.10
+
+
+def test_a_gnds_nubar_realisation_sits_beside_its_evaluation(tmp_path):
+    """What ``Multiplicity`` becoming a ``Component`` bought, stated as a file.
+
+    Before it, a nu-bar realisation had to **replace** the evaluated form, so a
+    GNDS document written from that suite carried the perturbed nu-bar instead of
+    the one it was drawn from -- while the same document's cross sections carried
+    both. §9.3's ``realization`` style says "this is a draw from that
+    evaluation", and it cannot say that about a form that displaced the
+    evaluation.
+    """
+    import re
+
+    run = perturbFromModel(NUBAR_TAPE, {31: [455, 456]}, 1, seed=4,
+                           outputDir=tmp_path, formats=("gnds",))
+    text = Path(run.paths("gnds")[0]).read_text(encoding="utf-8")
+
+    blocks = re.findall(r"<multiplicity>(.*?)</multiplicity>", text, re.S)
+    assert len(blocks) >= 3, "the three family members should all be written"
+    withBoth = [b for b in blocks
+                if 'label="eval"' in b and 'label="realization-0000"' in b]
+    assert len(withBoth) == 3, (
+        f"{len(withBoth)} of {len(blocks)} multiplicities carry both forms; the "
+        f"evaluation and the realisation have to be in the file together")
+
+
+def test_the_whole_tape_emitter_writes_the_perturbed_nubar(tmp_path):
+    """``label=`` reaches MF1 now, so the tape carries the realisation.
+
+    The chain is the one M0 built for MF3, extended: ``kika.write(..., label=)``
+    -> ``_mf1Sections`` -> ``encodeMF1MT452/455/456(..., label=)``. Without it
+    the whole-tape emitter would write the *evaluated* nu-bar into a file whose
+    cross sections were perturbed -- a tape that is neither the evaluation nor
+    the realisation.
+    """
+    run = perturbFromModel(NUBAR_TAPE, {31: [455, 456]}, 1, seed=4,
+                           outputDir=tmp_path, formats=("endf-tape",))
+    written = read_endf(str(run.paths("endf-tape")[0]))
+    original = read_endf(NUBAR_TAPE)
+
+    for mt in (452, 455, 456):
+        before = original.get_file(1).sections[mt]
+        after = written.get_file(1).sections[mt]
+        probe = 1.0e6
+        baseline = np.interp(probe, np.asarray(before.energies, dtype=float),
+                             np.asarray(before.nubar_values, dtype=float))
+        realised = np.interp(probe, np.asarray(after.energies, dtype=float),
+                             np.asarray(after.nubar_values, dtype=float))
+        assert realised != baseline, f"MT{mt} came out unperturbed"
+
+
+def test_a_member_the_draw_did_not_touch_falls_back_to_the_evaluation(tmp_path):
+    """A partially perturbed family still writes a whole tape, and says so.
+
+    The rule ``encodeMF3MT`` set: writing only the perturbed members would leave
+    holes, refusing would leave the file unwritable, so a member with no form
+    under the realisation's label is written from ``eval`` and the report states
+    which. Here the family rule perturbs all three anyway -- what is checked is
+    that the machinery is the same one, by asking for a tape under a label
+    nothing carries.
+    """
+    from kika import write as kikaWrite
+    from kika.endf import read_endf as _read
+    from kika.endf.model_adapter import decodeReactionSuite
+
+    suite, _report = decodeReactionSuite(_read(NUBAR_TAPE))
+    out = tmp_path / "unlabelled.endf"
+    report = kikaWrite(suite, str(out), format="endf", label="realization-0999")
+
+    text = "\n".join(str(w) for w in getattr(report, "warnings", []) or [])
+    assert "nu-bar written with the 'realization-0999' form" in text
+    assert "fell back" in text
+    written = _read(str(out))
+    original = _read(NUBAR_TAPE)
+    assert (list(written.get_file(1).sections[452].nubar_values)
+            == list(original.get_file(1).sections[452].nubar_values)), (
+        "nothing carried that label, so the evaluated nu-bar is what should "
+        "have been written")
+
+
+def test_a_gnds_nubar_realisation_comes_back_when_the_file_is_read(tmp_path):
+    """Writing both forms is only half of it; the reader had to learn them too.
+
+    ``readMultiplicity`` picked one form and reported the rest -- correct while
+    the model held one, and lossy in exactly the case ``Multiplicity`` became a
+    ``Component`` for. A document carrying a realisation beside its evaluation
+    would have come back with one of the two, and which one depended on
+    ``pickOneForm``.
+    """
+    import kika
+
+    run = perturbFromModel(NUBAR_TAPE, {31: [455, 456]}, 1, seed=4,
+                           outputDir=tmp_path, formats=("gnds",))
+    suite = kika.read(str(run.paths("gnds")[0]))
+    if isinstance(suite, tuple):
+        suite = suite[0]
+
+    from kika.nuclear_data.model import EVAL_LABEL
+
+    # Navigated GNDS-side rather than through `nubarNode`: that helper gates on
+    # the ENDF provenance -- deliberately, so an MF6 yield is never mistaken for
+    # a nu-bar -- and a suite read from GNDS has none. So the prompt nu-bar on
+    # the fission product is found the way a GNDS reader finds it.
+    nodes = [entry.multiplicity for entry in suite.sums.multiplicitySums]
+    for reaction in suite.reactions:
+        for product in (getattr(reaction.outputChannel, "products", None) or ()):
+            if product.multiplicity is not None and len(product.multiplicity) > 1:
+                nodes.append(product.multiplicity)
+
+    assert len(nodes) >= 3, f"only {len(nodes)} multiplicities came back"
+    for node in nodes:
+        assert sorted(node.keys()) == [EVAL_LABEL, "realization-0000"], (
+            f"a multiplicity came back with {sorted(node.keys())}")
+        assert node.form is node[EVAL_LABEL]

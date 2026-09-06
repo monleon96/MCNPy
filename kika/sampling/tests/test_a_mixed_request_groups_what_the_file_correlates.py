@@ -328,16 +328,15 @@ def test_a_multiplicity_request_assembles_and_draws_like_any_other():
                for component in pset.components())
 
 
-def test_a_multiplicity_stops_at_the_applier_and_says_why():
-    """The boundary is pinned so it cannot move by accident.
+def test_a_multiplicity_needs_a_resolver_and_says_why():
+    """Which model node an ENDF MT names is the adapter's question, not the model's.
 
-    ``Multiplicity`` is not a ``Component`` -- §17.3's census found one form in
-    the whole library -- so a nu-bar has no labelled place to put a realisation
-    beside its evaluation. Whether it gets one, or a realisation replaces the
-    form on a copied node, is a model decision (M5 in
-    ``docs/library/perturbation_model_roadmap.md``, D29 in ``library-gaps.md``)
-    and not an applier's to take. When it is taken, this test is what has to
-    change.
+    MT456 is the fission product's own multiplicity and MT452/455 are
+    ``multiplicitySum`` nodes; nothing in the sampling layer knows that, and
+    importing the adapter to find out is what the layering ratchet exists to
+    stop. So the caller hands in ``nubarNode`` -- the same lookup the MF1
+    encoders use, which is what makes "what was perturbed" and "what gets
+    written" the same node.
     """
     from kika.endf import read_endf
     from kika.endf.model_adapter import decodeReactionSuite
@@ -348,7 +347,7 @@ def test_a_multiplicity_stops_at_the_applier_and_says_why():
     pset = PerturbationSet(label="realization-0000",
                            factors={component: np.array([1.1])},
                            binEdges={component: np.array([1.0e-5, 2.0e7])})
-    with pytest.raises(NotImplementedError, match="model decision"):
+    with pytest.raises(ValueError, match="needs a resolver"):
         pset.applyToSuite(reactions)
 
 
@@ -382,26 +381,32 @@ def test_a_full_nubar_family_comes_out_satisfying_the_sum_rule():
                  for n, component in enumerate(components)},
         binEdges={component: edges for component in components},
     )
-    displaced = {}
-    diagnostics = pset.applyToSuite(reactions, multiplicityResolver=nubarNode,
-                                    displaced=displaced)
+    diagnostics = pset.applyToSuite(reactions, multiplicityResolver=nubarNode)
 
     total = ComponentKey(92235, 31, 452)
     assert set(diagnostics) == set(components) | {total}, (
         "the derived member is part of this realisation even though the request "
         "did not name it -- it was rewritten, so it has to be reported and "
         "emitted")
-    assert total in displaced, (
-        "the total was not rebuilt, so the tape would state a total that is not "
-        "the sum of the parts this realisation just moved")
     assert diagnostics[total]["derived_from_sum_rule"] is True
     assert diagnostics[total]["contributors"] == [455, 456]
     # Rebuilding repairs the input file's own residual, which moves the central
     # value by something nobody asked for. The size of it is on record.
     assert 0.0 < diagnostics[total]["baseline_residual"]["max_bin_rel"] < 1e-4
 
+    # Beside the evaluation, not instead of it -- the whole reason
+    # `Multiplicity` is a `Component`.
+    from kika.nuclear_data.model import EVAL_LABEL
+
+    for mt in (452, 455, 456):
+        node = nubarNode(reactions, mt)
+        assert sorted(node.keys()) == [EVAL_LABEL, "realization-0000"]
+        assert node.form is node[EVAL_LABEL], (
+            "`.form` still means the evaluated form, so every reader that asks "
+            "for 'the' nu-bar keeps getting the one it always got")
+
     def table(mt):
-        xs, ys, _pairs = nubarNode(reactions, mt).form.toEndfRegions()
+        xs, ys, _pairs = nubarNode(reactions, mt)["realization-0000"].toEndfRegions()
         return np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)
 
     e452, v452 = table(452)
@@ -528,31 +533,10 @@ def test_a_family_that_cannot_be_derived_is_perturbed_member_by_member():
 
     node = nubarNode(reactions, 452)
     before = node.form
-    displaced = {}
-    diagnostics = pset.applyToSuite(reactions, multiplicityResolver=onlyTheTotal,
-                                    displaced=displaced)
+    diagnostics = pset.applyToSuite(reactions, multiplicityResolver=onlyTheTotal)
 
     assert set(diagnostics) == {component}
     assert diagnostics[component]["max_factor"] == pytest.approx(1.5)
-    assert node.form is not before, "the realisation did not replace the form"
-    assert node.form.label == "realization-0000"
-    assert displaced[component] is before, (
-        "the evaluated form has to come back out, or nothing can put it back")
-
-    # And putting it back is all it takes -- the replacement is transient.
-    node.form = displaced[component]
-    assert nubarNode(reactions, 452).form is before
-
-
-def test_a_multiplicity_needs_somewhere_to_put_what_it_displaced():
-    from kika.endf import read_endf
-    from kika.endf.model_adapter import decodeReactionSuite
-    from kika.endf.model_adapter.multiplicity import nubarNode
-    from kika.sampling.perturbation_set import PerturbationSet
-
-    reactions, _report = decodeReactionSuite(read_endf(NUBAR))
-    component = ComponentKey(92235, 31, 452)
-    pset = PerturbationSet(label="r", factors={component: np.array([1.1])},
-                           binEdges={component: np.array([1.0e-5, 2.0e7])})
-    with pytest.raises(ValueError, match="displaced"):
-        pset.applyToSuite(reactions, multiplicityResolver=nubarNode)
+    assert node.form is before, "the evaluated form must not have been displaced"
+    assert node["realization-0000"] is not before
+    assert node["realization-0000"].label == "realization-0000"

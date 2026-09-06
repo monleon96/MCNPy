@@ -326,8 +326,7 @@ class PerturbationSet:
             resolved[reaction] = components[0]
         return resolved
 
-    def applyToSuite(self, suite, *, multiplicityResolver=None,
-                     displaced: Optional[Dict[ComponentKey, Any]] = None
+    def applyToSuite(self, suite, *, multiplicityResolver=None
                      ) -> Dict[ComponentKey, Dict[str, Any]]:
         """Put a perturbed form under :attr:`label` on every node this set covers.
 
@@ -346,9 +345,9 @@ class PerturbationSet:
         * ``angularDistribution`` -- MF34's L>=1, all orders of one reaction in
           one call, because a Legendre vector is perturbed once and not once per
           order.
-        * ``multiplicity`` -- MF31. It **replaces** the form rather than sitting
-          beside it, and that asymmetry is an open model decision rather than an
-          oversight; see :meth:`_applyMultiplicity`. It needs
+        * ``multiplicity`` -- MF31, beside the evaluation like the other two
+          since ``Multiplicity`` became a
+          :class:`~kika.nuclear_data.model.component.Component`. It needs
           *multiplicityResolver*, and without one it raises rather than skipping:
           a nu-bar silently left unperturbed inside a realisation that claims to
           carry it is exactly the failure this class exists to prevent.
@@ -361,10 +360,6 @@ class PerturbationSet:
             question, and ``kika.endf.model_adapter.multiplicity.nubarNode`` is
             its answer, the same one the MF1 encoders use. Passing it in rather
             than importing it is what keeps the sampling layer off the adapter.
-        displaced
-            A dict the applier fills with ``component -> the form it replaced``,
-            so a caller can put the evaluation back. Required for MF31, because
-            without it the replacement cannot be undone.
         """
         from kika.nuclear_data.model import EVAL_LABEL
 
@@ -373,7 +368,7 @@ class PerturbationSet:
         multiplicities = [c for c in self.components() if c.mf == 31]
         if multiplicities:
             diagnostics.update(self._applyMultiplicity(
-                suite, multiplicities, multiplicityResolver, displaced))
+                suite, multiplicities, multiplicityResolver))
 
         # `reactionByENDF_MT` raises for an MT the suite does not have, and
         # that is what should happen: a request named the reaction, so its
@@ -404,7 +399,7 @@ class PerturbationSet:
                 }
         return diagnostics
 
-    def _applyMultiplicity(self, suite, components, resolver, displaced):
+    def _applyMultiplicity(self, suite, components, resolver):
         """Put a nu-bar realisation on the node an MT names, and say what it cost.
 
         **The three MTs are three different nodes, measured rather than assumed**
@@ -416,21 +411,14 @@ class PerturbationSet:
         and the aggregate is a sum over them. All three carry a real
         ``Regions1d``, so the *arithmetic* is :func:`applyFactors` unchanged.
 
-        **What is not unchanged is where the realisation goes.** A
-        ``Multiplicity`` is not a ``Component`` -- §17.3's census found one form
-        in 230 562 nodes -- so there is no labelled slot beside the evaluation
-        and the realisation has to take the form's place. Two consequences, and
-        neither is hidden:
-
-        * the evaluated form is handed back through *displaced* and has to be put
-          back, which is what
-          :func:`kika.sampling.model_perturbation._forget` does once a sample is
-          written;
-        * a GNDS file written from a suite in this state carries the nu-bar
-          realisation *instead of* the evaluation, where the cross section and the
-          distribution carry both. That is the asymmetry making ``Multiplicity`` a
-          ``Component`` would remove, and it is what M5 exists to decide -- taken
-          by nobody here.
+        **And where the realisation goes is no longer special.** It is
+        ``multiplicity[label] = form``, beside the evaluated one, exactly as for
+        a cross section or a distribution: ``Multiplicity`` became a
+        :class:`~kika.nuclear_data.model.component.Component` on 2026-09-06 for
+        this. What it replaced was a realisation that *displaced* the evaluated
+        form and had to be put back afterwards -- which worked, and produced a
+        GNDS document carrying the perturbed nu-bar instead of the evaluation it
+        was drawn from, while the same document's cross sections carried both.
 
         **The sum rule is enforced, not checked.** ENDF-6 requires
         nu_452 = nu_455 + nu_456, so the family is not perturbed member by
@@ -451,22 +439,13 @@ class PerturbationSet:
         number on that.
         """
         if resolver is None:
-            raise NotImplementedError(
-                f"{[c.describe() for c in components]}: a multiplicity has no "
-                f"labelled form to put a realisation under -- `Multiplicity` is "
-                f"not a `Component` (one form in the whole library, §17.3), so a "
-                f"realisation has to replace it. Pass multiplicityResolver "
-                f"(kika.endf.model_adapter.multiplicity.nubarNode) and a "
-                f"displaced dict to say that is what you want. Whether the model "
-                f"should grow a labelled slot instead is a model decision, M5 in "
-                f"docs/library/perturbation_model_roadmap.md and D29 in "
-                f"library-gaps.md, and it is not an applier's to take"
-            )
-        if displaced is None:
             raise ValueError(
-                "perturbing a multiplicity replaces the evaluated form, so a "
-                "`displaced` dict is required: without it the evaluation cannot "
-                "be put back and the suite silently stops carrying it"
+                f"{[c.describe() for c in components]}: which model node an ENDF "
+                f"MT names is the adapter's question, not the model's, so a "
+                f"multiplicity needs a resolver. Pass "
+                f"kika.endf.model_adapter.multiplicity.nubarNode -- the same "
+                f"lookup the MF1 encoders use, so what is perturbed is what gets "
+                f"written"
             )
 
         from kika.sampling.mf31_sampling import perturbNubarFamilyOnModel
@@ -504,8 +483,7 @@ class PerturbationSet:
             # key of its own rather than being dropped for not having been asked
             # for.
             component = byMT.get(mt) or ComponentKey(za, 31, mt)
-            displaced[component] = forms[mt]
-            nodes[mt].form = self._labelled(form)
+            nodes[mt][self.label] = self._labelled(form)
             diagnostics[component] = info.get(mt, {})
         return diagnostics
 

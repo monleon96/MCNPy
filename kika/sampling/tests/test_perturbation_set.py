@@ -456,12 +456,17 @@ def test_two_claims_on_one_cross_section_are_refused():
         pset.applyToSuite(suite)
 
 
-def test_a_multiplicity_says_why_it_cannot_be_applied_yet():
-    """Skipping it silently is the failure this class exists to prevent."""
+def test_a_multiplicity_without_a_resolver_is_refused_not_skipped():
+    """Skipping it silently is the failure this class exists to prevent.
+
+    It refuses for a narrower reason than it used to: not "a nu-bar has nowhere
+    to go" -- ``Multiplicity`` is a ``Component`` now and it has -- but "which
+    node an ENDF MT names is not something the sampling layer may look up".
+    """
     suite = _structuralSuite()
     nubar = ComponentKey(92235, 31, 452)
     pset = PerturbationSet(label="realization-0014",
                            factors={nubar: np.array([1.1])},
                            binEdges={nubar: np.array([1.0, 9.0])})
-    with pytest.raises(NotImplementedError, match="Multiplicity"):
+    with pytest.raises(ValueError, match="needs a resolver"):
         pset.applyToSuite(suite)

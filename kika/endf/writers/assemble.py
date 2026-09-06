@@ -95,11 +95,25 @@ def _mat(suite, mat: Optional[int]) -> int:
     return int(recorded)
 
 
-def _mf1Sections(suite, mat, report):
-    """MF1: the 451 header first, then whichever nu-bars the suite carries."""
+def _mf1Sections(suite, mat, report, label=None):
+    """MF1: the 451 header first, then whichever nu-bars the suite carries.
+
+    *label* selects which §9.1 form of each nu-bar is written, with the same
+    fall-back and the same report line MF3 has: a realisation that perturbed the
+    prompt nu-bar and not the delayed one still writes a whole tape, and the
+    report says which members carried the label and which fell back. That is
+    what a ``multiplicity`` becoming a
+    :class:`~kika.nuclear_data.model.component.Component` bought -- before it,
+    a realisation had to *replace* the evaluated form and there was no label for
+    this function to be told about.
+    """
+    from kika.nuclear_data.model import EVAL_LABEL
+
     from ..model_adapter import (encodeMF1MT451, encodeMF1MT452,
                                  encodeMF1MT455, encodeMF1MT456)
     from ..model_adapter.multiplicity import nubarNode
+
+    label = EVAL_LABEL if label is None else label
 
     sections = []
     header, report = encodeMF1MT451(suite, mat, report)
@@ -109,12 +123,23 @@ def _mf1Sections(suite, mat, report):
     # `nubarNode` rather than a try/except around each encoder: the encoders
     # raise on absence, and absence is the common case (nothing but a fissile
     # material has any of these).
+    written, fellBack = [], []
     for mt, encode in ((452, encodeMF1MT452), (455, encodeMF1MT455),
                        (456, encodeMF1MT456)):
-        if nubarNode(suite, mt) is None:
+        node = nubarNode(suite, mt)
+        if node is None:
             continue
-        section, report = encode(suite, mat, report)
+        formLabel = label if label in node else EVAL_LABEL
+        (written if formLabel == label else fellBack).append(mt)
+        section, report = encode(suite, mat, report, label=formLabel)
         sections.append((1, mt, section))
+
+    if label != EVAL_LABEL and (written or fellBack):
+        report.warn(
+            f"nu-bar written with the {label!r} form where there is one: "
+            f"MT {written or 'none'} carry it, MT {fellBack or 'none'} fell back "
+            f"to {EVAL_LABEL!r} because they have no {label!r} form"
+        )
     return sections, report
 
 
@@ -407,7 +432,7 @@ def encodeTapeSections(suite, mat: Optional[int] = None, report=None, *,
     sections: List[Tuple[int, int, object]] = []
     for build in (_mf1Sections, _mf2Sections, _mf3And4And5Sections,
                   _mf6Sections, _covarianceSections):
-        if build is _mf3And4And5Sections:
+        if build in (_mf1Sections, _mf3And4And5Sections):
             built, report = build(suite, mat, report, label)
         else:
             built, report = build(suite, mat, report)

@@ -15,8 +15,9 @@ reconstructed MT102 inherits is a physics question held for P6.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
+from .component import EVAL_LABEL, Component
 from .functions import Function1d
 from .quantities import PhysicalQuantity
 
@@ -109,8 +110,8 @@ class Q:
         return self.value is not None
 
 
-@dataclass
-class Multiplicity:
+@dataclass(init=False, repr=False)
+class Multiplicity(Component):
     """§17.3. How many of a product come out.
 
     **§17.3 is an ``xs:choice``, so this holds one form and not a field per
@@ -119,17 +120,33 @@ class Multiplicity:
     cannot — a constant *and* a branching, say. One field says what the schema
     says: exactly one of them, or none because the node was empty.
 
-    The choice is ``maxOccurs="unbounded"``, so a dict keyed by style label
-    would be defensible the way :class:`~kika.nuclear_data.model.\
-cross_section_forms.CrossSection` and
-    :class:`~kika.nuclear_data.model.distributions.Distribution` are dicts. It
-    is not one, and the reason is measured rather than argued: across the 558
-    distributed neutron evaluations **all 230 562 ``<multiplicity>`` nodes carry
-    exactly one form and all 230 562 are labelled ``eval``**, while
-    ``crossSection`` really does carry a second ``recon`` form. The dict pays
-    for itself there and for nothing here. If a library ever ships a
-    second-labelled multiplicity, ``form`` becomes ``forms['eval']`` and nothing
-    else moves.
+    **It is a :class:`~kika.nuclear_data.model.component.Component`, and it
+    became one on 2026-09-06 because the premise that said it should not
+    stopped holding.** That premise was a census and it still stands as a
+    census: across the 558 distributed neutron evaluations all 230 562
+    ``<multiplicity>`` nodes carry exactly one form and all are labelled
+    ``eval``. What changed is that the question is no longer "what do
+    distributed libraries contain" but "what does kika write": a perturbation
+    run puts a realisation of the nu-bar beside its evaluation, under a
+    ``realization-0007`` label, exactly as it does for ``crossSection`` and
+    ``distribution``. The old docstring named the trigger and the consequence --
+    *"if a library ever ships a second-labelled multiplicity, ``form`` becomes
+    ``forms['eval']`` and nothing else moves"* -- and that is what happened,
+    with kika as the library.
+
+    The alternative, kept for one afternoon and then dropped, was for the
+    realisation to **replace** the form and be put back afterwards. It works and
+    it is worse in a way that shows up in the file rather than in the code: a
+    GNDS document written from a suite in that state carries the perturbed
+    nu-bar *instead of* the evaluated one, while its cross sections and
+    distributions carry both. §9.3's ``realization`` style exists to say "this
+    is a draw from that evaluation", and it cannot say it about a form that has
+    displaced the evaluation it was drawn from.
+
+    **``form`` still works and still means the evaluated form.** It is a property
+    over ``forms`` now, so every reader that asks a multiplicity for "the" form
+    keeps getting the one it always got, and only code that means a *specific*
+    label has to say so.
 
     **The form is an object and not a number, and that is what makes the round
     trip faithful.** ``xData_constant1d`` (``gnds.xsd:2099``) makes
@@ -143,11 +160,6 @@ cross_section_forms.CrossSection` and
     own domain.
     """
 
-    #: One member of §17.3's choice, or ``None`` for an empty node. The
-    #: functionals (``constant1d``, ``XYs1d``, ``regions1d``, ``polynomial1d``)
-    #: are :class:`Function1d` subclasses and answer :attr:`isEvaluable`; the
-    #: rest carry no numbers by design.
-    form: Optional[object] = None
     #: Not a GNDS node. ENDF states a multiplicity in a section of its own
     #: (MF1/452, /455, /456) with its own ZA/AWR/MAT header and its own LNU,
     #: and none of the four has a GNDS counterpart -- the same argument
@@ -155,6 +167,60 @@ cross_section_forms.CrossSection` and
     #: than on the node the multiplicity hangs from, because that node is a
     #: `product` for the prompt nu-bar and a `multiplicitySum` for the total.
     provenance: Optional[object] = None
+
+    gndsNodeName: ClassVar[str] = "multiplicity"
+
+    def __init__(self, form: Optional[object] = None,
+                 forms: Optional[Dict[str, Any]] = None,
+                 provenance: Optional[object] = None) -> None:
+        """``Multiplicity(form=X)`` still builds the one-form node it always did.
+
+        The form is filed under its **own** label when it carries one -- §17.3
+        puts the label on the form and not on the node -- and under ``eval``
+        when it does not, which is what every decoder produced before this was a
+        mapping.
+        """
+        self.forms = dict(forms or {})
+        if form is not None:
+            self.forms[getattr(form, "label", None) or EVAL_LABEL] = form
+        self.provenance = provenance
+
+    @property
+    def form(self) -> Optional[object]:
+        """The evaluated form -- "the" multiplicity, for a reader that wants one.
+
+        Falls back to the single form when there is exactly one and it is not
+        labelled ``eval``: a GNDS document may label its only multiplicity
+        anything, and before this class was a mapping such a node still answered
+        ``.form``. Returns ``None`` for an empty node, as it always did.
+
+        With several forms and none labelled ``eval`` there is no defensible
+        answer, and it raises rather than picking one: that state can only be
+        reached by putting a realisation on a node whose evaluation was never
+        read, and guessing there writes an arbitrary draw into a file as if it
+        were the evaluation.
+        """
+        if EVAL_LABEL in self.forms:
+            return self.forms[EVAL_LABEL]
+        if len(self.forms) == 1:
+            return next(iter(self.forms.values()))
+        if not self.forms:
+            return None
+        raise KeyError(
+            f"this multiplicity carries {sorted(self.forms)} and none of them "
+            f"is {EVAL_LABEL!r}, so 'the' form is not a question with one "
+            f"answer; ask for the label you mean"
+        )
+
+    @form.setter
+    def form(self, value: Optional[object]) -> None:
+        """Replace the evaluated form. Kept so that code that built a node by
+        assignment keeps working; a *realisation* is ``multiplicity[label] = x``
+        and does not come through here."""
+        if value is None:
+            self.forms.pop(EVAL_LABEL, None)
+            return
+        self.forms[getattr(value, "label", None) or EVAL_LABEL] = value
 
     @property
     def label(self) -> Optional[str]:

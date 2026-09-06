@@ -53,6 +53,25 @@ def test_nothing_hand_rolls_a_second_form_mapping():
     )
 
 
+def _extendsAProperty(stmt) -> bool:
+    """Is this second definition a ``@name.setter`` / ``.getter`` / ``.deleter``?
+
+    A property accessor redefines the name **on purpose and out loud** -- the
+    decorator names the property it is extending -- so it is not the failure
+    this test is about, which is a second definition that shadows the first
+    silently. ``Multiplicity.form`` is the first one in the model: a read
+    property over ``forms`` plus a setter that keeps ``multiplicity.form = x``
+    working for the code that built nodes that way.
+    """
+    for decorator in stmt.decorator_list:
+        if (isinstance(decorator, ast.Attribute)
+                and decorator.attr in ("setter", "getter", "deleter")
+                and isinstance(decorator.value, ast.Name)
+                and decorator.value.id == stmt.name):
+            return True
+    return False
+
+
 def test_no_class_in_the_model_defines_a_method_twice():
     """``CrossSection`` had **two** ``__repr__``, and the second won.
 
@@ -70,7 +89,7 @@ def test_no_class_in_the_model_defines_a_method_twice():
             seen = set()
             for stmt in node.body:
                 if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    if stmt.name in seen:
+                    if stmt.name in seen and not _extendsAProperty(stmt):
                         offenders.append(f"{path.name}:{node.name}.{stmt.name}")
                     seen.add(stmt.name)
     assert not offenders, (
@@ -119,13 +138,42 @@ def test_only_the_cross_section_can_be_evaluated_at_a_point():
     assert not hasattr(model.Distribution, "evaluate")
 
 
-def test_multiplicity_is_deliberately_not_a_component():
-    """§17.3 *could* be a mapping. The census says it is not one in practice.
+def test_multiplicity_is_a_component_and_form_still_means_the_evaluated_one():
+    """§17.3 is a mapping since 2026-09-06, and the reason it was not is intact.
 
-    All 230 562 ``<multiplicity>`` nodes in ENDF/B-VIII.1-GNDS carry exactly one
-    form, all labelled ``eval``. Recorded as a test so that "finish the
-    refactor" is a decision someone has to overturn rather than one they can
-    make by tidying.
+    The census that kept it a single form still says what it said -- all 230 562
+    ``<multiplicity>`` nodes in ENDF/B-VIII.1-GNDS carry one form, labelled
+    ``eval`` -- and it stopped being the right question. It describes what
+    distributed libraries contain; a perturbation run writes a realisation of
+    the nu-bar beside its evaluation, so kika is now the library that ships the
+    second label. The old docstring named that trigger in advance.
+
+    What has to hold for the change to be free is that ``.form`` still answers
+    what it always answered, so no reader had to move. That is what this pins,
+    together with the case that has no honest answer.
     """
-    assert not issubclass(model.Multiplicity, Component)
-    assert "form" in {f.name for f in __import__("dataclasses").fields(model.Multiplicity)}
+    assert issubclass(model.Multiplicity, Component)
+
+    empty = model.Multiplicity()
+    assert empty.form is None and len(empty) == 0
+
+    evaluated = object()
+    one = model.Multiplicity(form=evaluated)
+    assert one.form is evaluated
+    assert list(one.keys()) == [EVAL_LABEL], (
+        "a form with no label of its own is filed under 'eval', which is what "
+        "every decoder produced before this was a mapping")
+
+    one["realization-0007"] = object()
+    assert one.form is evaluated, (
+        "a realisation must not displace the evaluation; that is the whole "
+        "point of the container")
+
+    onlyOther = model.Multiplicity(forms={"recon": evaluated})
+    assert onlyOther.form is evaluated, (
+        "a single form under another label is still 'the' form -- a GNDS "
+        "document may label its only multiplicity anything")
+
+    ambiguous = model.Multiplicity(forms={"recon": object(), "other": object()})
+    with pytest.raises(KeyError, match="not a question with one answer"):
+        ambiguous.form

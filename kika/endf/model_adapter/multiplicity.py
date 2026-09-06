@@ -416,9 +416,9 @@ def nubarNode(suite, mt: int):
     return None
 
 
-def _tab1FromMultiplicity(multiplicity, mt: int):
+def _tab1FromMultiplicity(multiplicity, mt: int, label: str = EVAL_LABEL):
     """``(interpolation, energies, values)`` out of a tabulated multiplicity."""
-    function = multiplicity.form
+    function = _formUnder(multiplicity, label)
     if isinstance(function, Regions1d):
         xs, ys, pairs = function.toEndfRegions()
         return [(int(nbt), int(code)) for nbt, code in pairs], list(xs), list(ys)
@@ -429,13 +429,28 @@ def _tab1FromMultiplicity(multiplicity, mt: int):
     )
 
 
-def _fillNubarSection(section, multiplicity, mt: int, mat, report=None):
+def _formUnder(multiplicity, label: str):
+    """The form *label* names, falling back to the evaluated one.
+
+    The rule ``encodeMF3MT`` sets, and for the same reason: an ensemble
+    perturbs the reactions it has covariance for, so a suite carrying a
+    realisation of the prompt nu-bar and nothing under that label for the
+    delayed one still has to write a complete tape. Writing only the perturbed
+    members would leave the file with holes; refusing would leave it unwritable.
+    """
+    form = multiplicity.get(label)
+    return multiplicity.form if form is None else form
+
+
+def _fillNubarSection(section, multiplicity, mt: int, mat, report=None,
+                      label: str = EVAL_LABEL):
     """Populate an ``MF1MT452``/``455``/``456`` from the model. Shared by all three."""
     provenance = multiplicity.provenance
     header = (getattr(provenance, "headerFields", None)) or {}
+    form = _formUnder(multiplicity, label)
     lnu = int(header.get("lnu") or 0)
     if not lnu:
-        lnu = 1 if isinstance(multiplicity.form, Polynomial1d) else 2
+        lnu = 1 if isinstance(form, Polynomial1d) else 2
 
     section._za = float(provenance.za) if provenance and provenance.za else None
     section._awr = float(provenance.awr) if provenance and provenance.awr else None
@@ -443,11 +458,12 @@ def _fillNubarSection(section, multiplicity, mt: int, mat, report=None):
     section._lnu = lnu
 
     if lnu == 1:
-        coefficients = list(np.asarray(multiplicity.form.coefficients, dtype=float))
+        coefficients = list(np.asarray(form.coefficients, dtype=float))
         section._nc = len(coefficients)
         section._coefficients = coefficients
     else:
-        interpolation, energies, values = _tab1FromMultiplicity(multiplicity, mt)
+        interpolation, energies, values = _tab1FromMultiplicity(multiplicity, mt,
+                                                                label)
         # The file's own (NBT, INT) pairs when they were kept: the same argument
         # `encodeMF3MT` makes -- a round trip must not depend on the
         # reconstruction from regions1d staying byte-for-byte faithful -- and
@@ -473,7 +489,7 @@ def _fillNubarSection(section, multiplicity, mt: int, mat, report=None):
     return section
 
 
-def _encodeOne(cls, suite, mt: int, mat, report):
+def _encodeOne(cls, suite, mt: int, mat, report, label: str = EVAL_LABEL):
     report = report if report is not None else ConversionReport()
     multiplicity = nubarNode(suite, mt)
     if multiplicity is None:
@@ -482,28 +498,31 @@ def _encodeOne(cls, suite, mt: int, mat, report):
             f"be written from it"
         )
     section = cls()
-    _fillNubarSection(section, multiplicity, mt, mat, report)
+    _fillNubarSection(section, multiplicity, mt, mat, report, label=label)
     return section, report
 
 
 def encodeMF1MT452(suite, mat: Optional[int] = None,
-                   report: Optional[ConversionReport] = None):
+                   report: Optional[ConversionReport] = None, *,
+                   label: str = EVAL_LABEL):
     """A ``ReactionSuite`` → its ``MF1MT452`` (total nu-bar)."""
     from kika.endf.classes.mf1.mf1mt452 import MF1MT452
 
-    return _encodeOne(MF1MT452, suite, 452, mat, report)
+    return _encodeOne(MF1MT452, suite, 452, mat, report, label)
 
 
 def encodeMF1MT456(suite, mat: Optional[int] = None,
-                   report: Optional[ConversionReport] = None):
+                   report: Optional[ConversionReport] = None, *,
+                   label: str = EVAL_LABEL):
     """A ``ReactionSuite`` → its ``MF1MT456`` (prompt nu-bar)."""
     from kika.endf.classes.mf1.mf1mt456 import MF1MT456
 
-    return _encodeOne(MF1MT456, suite, 456, mat, report)
+    return _encodeOne(MF1MT456, suite, 456, mat, report, label)
 
 
 def encodeMF1MT455(suite, mat: Optional[int] = None,
-                   report: Optional[ConversionReport] = None):
+                   report: Optional[ConversionReport] = None, *,
+                   label: str = EVAL_LABEL):
     """A ``ReactionSuite`` → its ``MF1MT455`` (delayed nu-bar and decay rates).
 
     The rates come back off the §18.4 ``delayedNeutron`` nodes, so a caller who
@@ -521,7 +540,7 @@ def encodeMF1MT455(suite, mat: Optional[int] = None,
         )
 
     section = MF1MT455()
-    _fillNubarSection(section, multiplicity, 455, mat, report)
+    _fillNubarSection(section, multiplicity, 455, mat, report, label=label)
 
     header = getattr(multiplicity.provenance, "headerFields", None) or {}
     ldg = int(header.get("ldg") or 0)
