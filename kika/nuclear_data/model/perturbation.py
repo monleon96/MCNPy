@@ -55,7 +55,8 @@ from numpy.typing import ArrayLike
 from .functions.regions1d import Regions1d
 from .functions.xys1d import XYs1d
 
-__all__ = ["applyFactors", "refineAtBinEdges"]
+__all__ = ["applyFactors", "refineAtBinEdges", "applyLegendreFactors",
+           "MAGNITUDE_ORDER"]
 
 #: How close two abscissae must be to count as the repeated pair that ENDF-6
 #: uses for a step. The same value the format applier uses, and it is an
@@ -283,3 +284,326 @@ def applyFactors(function1d: Function1dT, factors: ArrayLike,
         "n_inserted": int(sum(r.xs.size for r in regions)) - int(before),
     }
     return _rebuild(refined, scaled), diagnostics
+
+
+# ======================================================================
+# Angular distributions: the same arithmetic, one axis further out
+# ======================================================================
+
+#: Legendre order 0 is the *magnitude*, and it is not applied here. In ENDF MF4
+#: ``a_0`` is identically 1 -- the size of the cross section lives in MF3 -- so
+#: an MF34 covariance that states an L=0 component is stating the uncertainty of
+#: sigma(E), on MF34's own grid. Scaling the model's ``coefficients[0]`` by it
+#: would put the magnitude into the *shape*, which is a normalisation error and
+#: not a perturbation of anything the file describes.
+#:
+#: ``endf_perturbation._apply_factors_to_mf4_legendre`` reaches the same
+#: conclusion and routes those factors to an optional ``mf3_magnitude_sink``,
+#: dormant since it was written. Here the routing is the caller's, because the
+#: caller is the only one holding both nodes -- see
+#: ``kika.sampling.perturbation_set.PerturbationSet.applyToSuite``.
+MAGNITUDE_ORDER = 0
+
+
+def _isLegendreRegion(node) -> bool:
+    from .functions.simple import Legendre
+
+    inner = getattr(node, "function1ds", None)
+    return bool(inner) and all(isinstance(f, Legendre) for f in inner)
+
+
+def _legendreRegions(angular):
+    """The ``XYs2d`` children of *angular* whose inner functions are Legendre.
+
+    A mixed (LTT=3) distribution is a ``Regions2d`` of a Legendre region and a
+    tabulated one, and MF34 says nothing about the tabulated half -- there are
+    no ``a_l`` there to perturb. Returns ``(container, position, xys2d)``
+    triples so a caller can put a rebuilt region back where it came from;
+    ``container`` is ``None`` when *angular* is itself the region.
+    """
+    from .functions.higher import Regions2d, XYs2d
+
+    found = []
+    if isinstance(angular, XYs2d):
+        if _isLegendreRegion(angular):
+            found.append((None, 0, angular))
+        return found
+    if isinstance(angular, Regions2d):
+        for position, child in enumerate(angular.function2ds):
+            if isinstance(child, XYs2d) and _isLegendreRegion(child):
+                found.append((angular, position, child))
+            elif isinstance(child, Regions2d):
+                found.extend(_legendreRegions(child))
+    return found
+
+
+def _interpolateCoefficients(energy: float, xs: np.ndarray, vectors,
+                             interpolation) -> np.ndarray:
+    """The Legendre vector at *energy*, under the outer axis's own rule.
+
+    Vectors of different lengths are padded with zeros to the longer, which is
+    what an absent ``a_l`` means: the evaluation writes the orders it needs at
+    each energy and the rest are zero. ``_interpolate_legendre_coefficients``
+    does the same, and this is the one place the two have to agree numerically.
+    """
+    from .enums import Interpolation
+
+    if energy <= xs[0]:
+        return np.array(vectors[0], dtype=float, copy=True)
+    if energy >= xs[-1]:
+        return np.array(vectors[-1], dtype=float, copy=True)
+
+    upper = int(np.searchsorted(xs, energy, side="left"))
+    lower = max(upper - 1, 0)
+    e1, e2 = float(xs[lower]), float(xs[upper])
+    c1 = np.asarray(vectors[lower], dtype=float)
+    c2 = np.asarray(vectors[upper], dtype=float)
+    width = max(c1.size, c2.size)
+    c1 = np.pad(c1, (0, width - c1.size))
+    c2 = np.pad(c2, (0, width - c2.size))
+
+    if abs(e2 - e1) < 1e-15:
+        return c1.copy()
+
+    interpolation = Interpolation(interpolation)
+    if interpolation is Interpolation.flat:
+        return c1.copy()
+    if interpolation is not Interpolation.linlin:
+        raise NotImplementedError(
+            f"the incident-energy axis of this distribution interpolates "
+            f"{interpolation.value!r}; inserting a point at a covariance bin "
+            f"edge needs the coefficient vector there, and only lin-lin and "
+            f"flat have an answer this module will give. MF4 is lin-lin on "
+            f"every tape to hand, so this is a case to look at rather than one "
+            f"to default"
+        )
+    t = (energy - e1) / (e2 - e1)
+    return c1 + t * (c2 - c1)
+
+
+def _refineLegendreRegion(region, edges: ArrayLike):
+    """Insert the repeated incident energies the factor blocks need.
+
+    The two-dimensional counterpart of :func:`refineAtBinEdges`, with the same
+    three cases per edge -- two or more copies already there, exactly one, or
+    none -- except that what gets duplicated is a whole Legendre vector rather
+    than a single ordinate.
+    """
+    from .functions.higher import XYs2d
+    from .functions.simple import Legendre
+
+    inner = list(region.function1ds)
+    xs = np.array([float(f.outerDomainValue) for f in inner], dtype=float)
+    interior = _interiorEdges(edges, float(xs[0]), float(xs[-1]))
+    if not interior:
+        return region, 0
+
+    inserted = 0
+    for edge in reversed(interior):
+        xs = np.array([float(f.outerDomainValue) for f in inner], dtype=float)
+        matches = np.flatnonzero(np.abs(xs - edge) <= ABSCISSA_ATOL)
+        if matches.size >= 2:
+            continue
+        if matches.size == 1:
+            at = int(matches[0])
+            twin = inner[at]
+            inner.insert(at + 1, Legendre(
+                coefficients=np.array(twin.coefficients, dtype=float, copy=True),
+                axes=twin.axes, outerDomainValue=twin.outerDomainValue,
+                index=twin.index))
+            inserted += 1
+        else:
+            at = int(np.searchsorted(xs, edge, side="right"))
+            values = _interpolateCoefficients(
+                edge, xs, [f.coefficients for f in inner], region.interpolation)
+            template = inner[min(at, len(inner) - 1)]
+            inner[at:at] = [
+                Legendre(coefficients=np.array(values, dtype=float, copy=True),
+                         axes=template.axes, outerDomainValue=float(edge),
+                         index=template.index)
+                for _ in range(2)]
+            inserted += 2
+
+    return XYs2d(function1ds=inner, interpolation=region.interpolation,
+                 interpolationQualifier=region.interpolationQualifier,
+                 axes=region.axes, label=region.label,
+                 outerDomainValue=region.outerDomainValue,
+                 index=region.index), inserted
+
+
+#: What happens at the outer boundary of a factor block's coverage, where the
+#: perturbation stops and the evaluation continues unperturbed.
+#:
+#: ``"step"``
+#:     A repeated incident energy there, so the last bin's factor holds to the
+#:     edge and the untouched evaluation resumes on the far side. This is what
+#:     the block says -- the factor is that value up to the edge and 1 beyond --
+#:     and it is the convention MF3's applier already uses: ``mf33_sampling``
+#:     inserts at *every* bin edge inside the table's span, its own outermost
+#:     included, and the byte gate of ``applyFactors`` holds it there.
+#:
+#: ``"ramp"``
+#:     No point inserted, so lin-lin runs from the last perturbed energy to the
+#:     first unperturbed one and the discontinuity is smeared across that one
+#:     interval. **This is what ``_apply_factors_to_mf4_legendre`` does** --
+#:     it collects boundaries per order as ``grid[1:-1]``, dropping each grid's
+#:     own ends -- and so it is what every MF34 ensemble of this project was
+#:     drawn through.
+#:
+#: The default is the faithful one and the other is the escape hatch that lets
+#: a gate prove equivalence with the shipped path, the same arrangement
+#: ``draw_samples``' ``null_tol=None`` has. On the Fe-56 fixture the whole
+#: difference is one inserted energy at 20 MeV out of 49: the two agree
+#: everywhere the perturbation is actually stated, and disagree only about how
+#: it ends.
+COVERAGE_EDGES = ("step", "ramp")
+
+
+def applyLegendreFactors(angular, factors, binEdges, *, coverageEdges="step"):
+    """Scale the Legendre coefficients of an angular distribution, order by order.
+
+    Parameters
+    ----------
+    angular
+        The ``XYs2d`` or ``Regions2d`` of :class:`Legendre` forms that an
+        :class:`~kika.nuclear_data.model.distributions.AngularTwoBody` carries.
+        Not mutated.
+    factors
+        ``Legendre order -> one factor per bin``. Order 0 is refused; see
+        :data:`MAGNITUDE_ORDER`.
+    binEdges
+        ``Legendre order -> the incident-energy boundaries those factors are
+        stated on``. MF34's orders routinely differ in grid, which is why this
+        is per order rather than one grid for all of them.
+    coverageEdges
+        What to do where a factor block's coverage ends; see
+        :data:`COVERAGE_EDGES`. The default states the step the block implies;
+        ``"ramp"`` reproduces the shipped MF4 applier and is there for gates.
+
+    Returns
+    -------
+    (perturbed, diagnostics)
+        A node of the same kind, and ``per_order`` (min and max factor and how
+        many coefficients were scaled, per order), ``n_inserted``, and
+        ``orders_absent`` -- the requested orders the distribution carries at no
+        energy. That last is a real case, not a defensive check: a file may
+        state a covariance for an order the evaluation itself stops short of,
+        and a caller should be told rather than have it silently dropped.
+
+    **What this reproduces, and where it deliberately does not.** The arithmetic
+    is ``_apply_factors_to_mf4_legendre``'s: the union of every order's interior
+    bin edges becomes a repeated incident energy carrying the baseline vector,
+    the copy below the edge takes the factor of the bin that ends there and the
+    copy above the factor of the bin that starts there, and every other energy
+    takes the factor of the bin containing it. What it does not reproduce is
+    that function's split into an interior pass and a boundary pass: here it is
+    one rule, stated on the refined energy list, which is the same rule
+    :func:`applyFactors` states for a cross section. The two-pass version has an
+    exposure this one does not -- an energy the evaluation already wrote twice
+    gets a third and a fourth copy there, where here it is left alone, which is
+    the case :func:`refineAtBinEdges` documents for MF3.
+
+    A perturbed distribution is **not renormalised and its positivity is not
+    enforced**. The sum ``sum_l (2l+1)/2 a_l P_l(mu)`` can go negative for a
+    large enough factor, and the projection that repairs it lives in
+    :mod:`kika.sampling.mf4_positivity` -- a property of the *sample*, decided
+    by the sampler, and not something an applier may do unasked.
+    """
+    from .functions.higher import Regions2d, XYs2d
+    from .functions.simple import Legendre
+
+    orders = sorted(int(order) for order in factors)
+    if MAGNITUDE_ORDER in orders:
+        raise ValueError(
+            f"Legendre order {MAGNITUDE_ORDER} is the cross-section magnitude, "
+            f"not a shape coefficient: in MF4 a_0 is identically 1. Its factors "
+            f"belong on the crossSection node of the same reaction and routing "
+            f"them there is the caller's job -- applying them here would put the "
+            f"magnitude into the shape"
+        )
+    if set(orders) != {int(order) for order in binEdges}:
+        raise ValueError(
+            f"order(s) {sorted(set(orders) ^ {int(o) for o in binEdges})} have "
+            f"factors without a grid or a grid without factors; a block and its "
+            f"bins are one object"
+        )
+    for order in orders:
+        nFactors = len(np.asarray(factors[order]))
+        nBins = len(np.asarray(binEdges[order])) - 1
+        if nFactors != nBins:
+            raise ValueError(f"L={order}: {nFactors} factor(s) on {nBins} bin(s)")
+
+    regions = _legendreRegions(angular)
+    if not regions:
+        raise ValueError(
+            "this distribution carries no Legendre coefficients, so an MF34 "
+            "perturbation has nothing to act on. A tabulated (LTT=2) angular "
+            "distribution is perturbed as a table, which is a different applier"
+        )
+
+    if coverageEdges not in COVERAGE_EDGES:
+        raise ValueError(
+            f"coverageEdges must be one of {COVERAGE_EDGES}, got "
+            f"{coverageEdges!r}")
+    grids = [np.asarray(binEdges[order], dtype=float) for order in orders]
+    if coverageEdges == "ramp":
+        grids = [grid[1:-1] for grid in grids if grid.size > 2]
+    allEdges = (np.unique(np.concatenate(grids)) if grids
+                else np.zeros(0, dtype=float))
+
+    perOrder = {order: {"min_factor": 1.0, "max_factor": 1.0, "n_scaled": 0}
+                for order in orders}
+    inserted = 0
+    rebuilt = {}
+    for container, position, region in regions:
+        refined, added = _refineLegendreRegion(region, allEdges)
+        inserted += added
+
+        xs = np.array([float(f.outerDomainValue) for f in refined.function1ds],
+                      dtype=float)
+        coefficients = [np.array(f.coefficients, dtype=float, copy=True)
+                        for f in refined.function1ds]
+        for order in orders:
+            perPoint = _flatFactors(xs, np.asarray(factors[order], dtype=float),
+                                    np.asarray(binEdges[order], dtype=float))
+            touched = 0
+            for at, vector in enumerate(coefficients):
+                if order >= vector.size:
+                    continue
+                vector[order] *= perPoint[at]
+                touched += 1
+            if touched:
+                stats = perOrder[order]
+                stats["min_factor"] = min(stats["min_factor"], float(perPoint.min()))
+                stats["max_factor"] = max(stats["max_factor"], float(perPoint.max()))
+                stats["n_scaled"] += touched
+
+        scaled = [Legendre(coefficients=vector, axes=f.axes,
+                           outerDomainValue=f.outerDomainValue, index=f.index)
+                  for f, vector in zip(refined.function1ds, coefficients)]
+        rebuilt[(id(container), position)] = XYs2d(
+            function1ds=scaled, interpolation=refined.interpolation,
+            interpolationQualifier=refined.interpolationQualifier,
+            axes=refined.axes, label=refined.label,
+            outerDomainValue=refined.outerDomainValue, index=refined.index)
+
+    def rebuild(node):
+        if isinstance(node, Regions2d):
+            children = []
+            for position, child in enumerate(node.function2ds):
+                replacement = rebuilt.get((id(node), position))
+                children.append(replacement if replacement is not None
+                                else rebuild(child))
+            return Regions2d(function2ds=children, axes=node.axes,
+                             label=node.label,
+                             outerDomainValue=node.outerDomainValue,
+                             index=node.index)
+        return rebuilt.get((id(None), 0), node)
+
+    diagnostics = {
+        "per_order": perOrder,
+        "n_inserted": inserted,
+        "orders_absent": [order for order in orders
+                          if perOrder[order]["n_scaled"] == 0],
+    }
+    return rebuild(angular), diagnostics
